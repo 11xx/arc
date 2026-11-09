@@ -565,7 +565,7 @@ pub fn retain_signature_only(
     let mut provisional = std::collections::BTreeSet::new();
     let mut canonical = std::collections::BTreeSet::new();
     if let Some(store) = store {
-        for state in store.readable_states()?.values() {
+        for state in store.readable_states_shared()?.values() {
             for row in &state.provisional_integrations {
                 if let Payload::ChangeProvisionallyIntegrated {
                     provisional_commit, ..

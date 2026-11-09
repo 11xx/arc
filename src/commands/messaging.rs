@@ -627,8 +627,11 @@ pub fn messages(
         .transpose()?;
 
     let states = match change_filter.as_deref() {
-        Some(change_id) => BTreeMap::from([(change_id.to_owned(), store.state(change_id)?)]),
-        None => store.readable_states()?,
+        Some(change_id) => std::sync::Arc::new(BTreeMap::from([(
+            change_id.to_owned(),
+            store.state(change_id)?,
+        )])),
+        None => store.readable_states_shared()?,
     };
     let mut views: Vec<MessageView> = Vec::new();
     for state in states.values() {
@@ -711,7 +714,7 @@ fn collect_inbox_with_reports(
     crate::inbox::Inbox,
     BTreeMap<String, crate::status::StatusReport>,
 )> {
-    let states = store.readable_states()?;
+    let states = store.readable_states_shared()?;
     let mut reports = BTreeMap::new();
     let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
@@ -1158,7 +1161,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     };
     let filed = crate::journal::filed_report(ctx, None, 14);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
-    let states = store.readable_states()?;
+    let states = store.readable_states_shared()?;
     let provisional_integrations: Vec<_> = states
         .values()
         .flat_map(|state| crate::provisional::unresolved_at(state, chrono::Utc::now()))

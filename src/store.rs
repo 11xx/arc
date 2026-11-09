@@ -170,6 +170,29 @@ pub struct Store {
     pub read_only: bool,
 }
 
+/// A change's state as a process holds it: inside its ledger's readable
+/// states, or by itself.
+enum HeldState {
+    InMap(Arc<BTreeMap<String, crate::state::ChangeState>>, String),
+    Alone(Arc<crate::state::ChangeState>),
+}
+
+impl AsRef<crate::state::ChangeState> for HeldState {
+    fn as_ref(&self) -> &crate::state::ChangeState {
+        match self {
+            Self::InMap(states, change_id) => &states[change_id],
+            Self::Alone(state) => state,
+        }
+    }
+}
+
+/// A ledger's readable change states, and the warning naming each change
+/// that could not be read.
+pub(crate) type ReadableStates = (
+    Arc<BTreeMap<String, crate::state::ChangeState>>,
+    Arc<Vec<String>>,
+);
+
 /// One read of the ledger. Import batches, repository events, rewrites and the
 /// privilege scope are each loaded or derived at most once, the first time the
 /// read needs them, and shared by every change it reads. A read of N changes
@@ -180,9 +203,10 @@ pub struct Store {
 pub struct LedgerRead<'a> {
     store: &'a Store,
     batches: Vec<ImportBatch>,
-    scope: std::cell::OnceCell<Arc<PrivilegeScope>>,
-    rewrites: std::cell::OnceCell<crate::rewrite::RewriteMap>,
-    repository_events: std::cell::OnceCell<Arc<Vec<Event>>>,
+    scope: std::sync::OnceLock<Arc<PrivilegeScope>>,
+    rewrites: std::sync::OnceLock<crate::rewrite::RewriteMap>,
+    repository_events: std::sync::OnceLock<Arc<Vec<Event>>>,
+    landings: std::sync::OnceLock<crate::landing::Landings>,
 }
 
 impl LedgerRead<'_> {
@@ -194,12 +218,16 @@ impl LedgerRead<'_> {
         self.store.load_events_in(change_id, &self.batches)
     }
 
+    /// `events`, shared rather than copied.
+    fn held_events(&self, change_id: &str) -> Result<Arc<Vec<Event>>> {
+        self.store.change_events(change_id, &self.batches)
+    }
+
     /// A change's events with those its completed landings derive for it, in
     /// ID order: what a reader of integration events reads.
     pub fn events_with_landings(&self, change_id: &str) -> Result<Vec<Event>> {
         let events = self.events(change_id)?;
-        let derived = crate::landing::Landings::from_events(self.repository_events()?)
-            .derived_events(change_id);
+        let derived = self.landings()?.derived_events(change_id);
         Ok(crate::landing::with_derived(&events, derived))
     }
 
@@ -210,6 +238,15 @@ impl LedgerRead<'_> {
         let loaded = crate::rewrite::RewriteMap::from_events(self.repository_events()?.iter())
             .context("cannot read the recorded history rewrites; `arc doctor` reports which")?;
         Ok(self.rewrites.get_or_init(|| loaded))
+    }
+
+    /// The landings the repository events record, gathered once per read.
+    fn landings(&self) -> Result<&crate::landing::Landings> {
+        if let Some(held) = self.landings.get() {
+            return Ok(held);
+        }
+        let gathered = crate::landing::Landings::from_events(self.repository_events()?);
+        Ok(self.landings.get_or_init(|| gathered))
     }
 
     fn repository_events(&self) -> Result<&[Event]> {
@@ -244,22 +281,87 @@ impl LedgerRead<'_> {
         events: &[Event],
         rewrites: &crate::rewrite::RewriteMap,
     ) -> Result<crate::state::ChangeState> {
-        self.store.project_state_with_repository(
+        self.store.project_state_with_landings(
             self.scope()?,
             events,
             rewrites,
             self.repository_events()?,
+            self.landings()?,
         )
     }
 
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
-        self.store.shared_state(change_id, || {
-            let events = self.events(change_id)?;
-            self.store
-                .hold_writers(change_id, || SessionWriter::of(&events));
-            self.rewrites()?;
-            self.project(&events)
+        self.store
+            .shared_state(change_id, || self.reduce(change_id))
+    }
+
+    /// Each change's state for a whole-ledger read, which holds the result
+    /// itself: a state the process already holds is copied from it, and the
+    /// rest are reduced without a second, per-change copy.
+    fn states_held_once(&self, change_ids: &[String]) -> Vec<Result<crate::state::ChangeState>> {
+        self.states_with(change_ids, |change_id| {
+            if let Some(held) = self.store.held_state(change_id) {
+                crate::perf::cache("change_states", true);
+                return Ok(held.as_ref().clone());
+            }
+            crate::perf::cache("change_states", false);
+            self.reduce(change_id)
         })
+    }
+
+    /// One change's state reduced from its events, shared with nobody.
+    fn reduce(&self, change_id: &str) -> Result<crate::state::ChangeState> {
+        let events = self.held_events(change_id)?;
+        self.store
+            .hold_writers(change_id, || SessionWriter::of(&events));
+        self.rewrites()?;
+        self.project(&events)
+    }
+
+    /// What `state` answers for each change, in the order given. A ledger
+    /// with enough changes to share is read on several threads, after the
+    /// inputs every change shares are loaded once.
+    fn states_with(
+        &self,
+        change_ids: &[String],
+        state: impl Fn(&str) -> Result<crate::state::ChangeState> + Sync,
+    ) -> Vec<Result<crate::state::ChangeState>> {
+        const CHANGES_PER_THREAD: usize = 64;
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |count| count.get())
+            .min(change_ids.len() / CHANGES_PER_THREAD);
+        if workers <= 1 {
+            return change_ids.iter().map(|id| state(id)).collect();
+        }
+        // A scope that cannot be derived fails each change that asks, as it
+        // does read one at a time.
+        let _ = self.scope();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let states: Vec<std::sync::Mutex<Option<Result<crate::state::ChangeState>>>> =
+            change_ids.iter().map(|_| Default::default()).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(change_id) = change_ids.get(at) else {
+                        break;
+                    };
+                    let state = state(change_id);
+                    *states[at]
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+                });
+            }
+        });
+        states
+            .into_iter()
+            .map(|state| {
+                state
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .expect("every change is read")
+            })
+            .collect()
     }
 
     /// The session behind each of a change's events, in event order. While
@@ -269,7 +371,7 @@ impl LedgerRead<'_> {
         if let Some(held) = self.store.held_writers(change_id) {
             return Ok(held);
         }
-        let writers = SessionWriter::of(&self.events(change_id)?);
+        let writers = SessionWriter::of(&self.held_events(change_id)?);
         self.store.hold_writers(change_id, || writers.clone());
         Ok(writers)
     }
@@ -385,7 +487,11 @@ mod shared {
     static DISK_READS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
 
     fn read_from_disk(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-        let namespace = crate::perf::namespace_of(path);
+        let namespace = if crate::perf::tracing() {
+            crate::perf::namespace_of(path)
+        } else {
+            ""
+        };
         crate::perf::ledger(namespace, "opens", 1);
         let _phase = crate::perf::phase("read");
         if std::env::var_os(super::READ_COUNTS_VAR).is_some() {
@@ -456,19 +562,23 @@ mod shared {
         /// The repository events typed, from the files and the import batches.
         pub repository_events: Option<Arc<Vec<crate::model::Event>>>,
         pub change_files: HashMap<String, (RawEvents, bool)>,
+        /// Each change's typed events, read and typed once.
+        pub change_events: HashMap<String, Arc<Vec<crate::model::Event>>>,
         pub import_batches: Option<Vec<ImportBatch>>,
         pub scope: Option<Arc<PrivilegeScope>>,
         /// Each change's state, reduced once whichever reader asked first.
-        pub change_states: HashMap<String, crate::state::ChangeState>,
+        pub change_states: HashMap<String, Arc<crate::state::ChangeState>>,
         /// The readable states, and the warning naming each unreadable one.
-        pub states: Option<(BTreeMap<String, crate::state::ChangeState>, Vec<String>)>,
+        pub states: Option<super::ReadableStates>,
         pub replica_events: Option<Vec<crate::replica::ReplicaEvent>>,
         /// Each change's event writers, taken from the read that typed its events.
         pub change_writers: HashMap<String, Vec<super::SessionWriter>>,
     }
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
-    static MEMOS: OnceLock<Mutex<HashMap<PathBuf, Memo>>> = OnceLock::new();
+    /// Each ledger's memo behind its own lock, so readers of different
+    /// ledgers never wait on each other.
+    static MEMOS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<Memo>>>>> = OnceLock::new();
 
     pub fn enable() {
         ENABLED.store(true, Ordering::Relaxed);
@@ -494,12 +604,24 @@ mod shared {
         }
     }
 
+    /// Run `use_memo` on `root`'s memo while holding only that memo's lock.
+    /// It should copy no more than a pointer: everyone reading the ledger
+    /// waits for it.
     pub(super) fn with<T>(root: &std::path::Path, use_memo: impl FnOnce(&mut Memo) -> T) -> T {
-        let memos = MEMOS.get_or_init(Default::default);
-        let mut memos = memos
+        let memo = {
+            let mut memos = MEMOS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match memos.get(root) {
+                Some(memo) => Arc::clone(memo),
+                None => Arc::clone(memos.entry(root.to_path_buf()).or_default()),
+            }
+        };
+        let mut memo = memo
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        use_memo(memos.entry(root.to_path_buf()).or_default())
+        use_memo(&mut memo)
     }
 }
 
@@ -2324,9 +2446,27 @@ impl Store {
         rewrites: &crate::rewrite::RewriteMap,
         repository_events: &[Event],
     ) -> Result<crate::state::ChangeState> {
+        self.project_state_with_landings(
+            scope,
+            events,
+            rewrites,
+            repository_events,
+            &crate::landing::Landings::from_events(repository_events),
+        )
+    }
+
+    /// `project_state_with_repository` with the landings of
+    /// `repository_events` already gathered.
+    fn project_state_with_landings(
+        &self,
+        scope: &Arc<PrivilegeScope>,
+        events: &[Event],
+        rewrites: &crate::rewrite::RewriteMap,
+        repository_events: &[Event],
+        landings: &crate::landing::Landings,
+    ) -> Result<crate::state::ChangeState> {
         let reduce = crate::perf::phase("reduce");
         crate::perf::count("changes_reduced", 1);
-        let landings = crate::landing::Landings::from_events(repository_events);
         let change_id = events.first().map(|event| event.change_id.clone());
         let derived = change_id
             .as_deref()
@@ -2388,19 +2528,35 @@ impl Store {
         if !self.shares_reads() {
             return reduce();
         }
-        if let Some(held) = shared::with(&self.root, |memo| {
-            memo.change_states.get(change_id).cloned()
-        }) {
+        if let Some(held) = self.held_state(change_id) {
             crate::perf::cache("change_states", true);
-            return Ok(held);
+            return Ok(held.as_ref().clone());
         }
         crate::perf::cache("change_states", false);
-        let state = reduce()?;
+        let state = Arc::new(reduce()?);
         shared::with(&self.root, |memo| {
             memo.change_states
-                .insert(change_id.to_string(), state.clone())
+                .insert(change_id.to_string(), Arc::clone(&state))
         });
-        Ok(state)
+        Ok(Arc::unwrap_or_clone(state))
+    }
+
+    /// A change's state as the process already holds it: from the ledger's
+    /// readable states once read, else from an earlier read of the change.
+    fn held_state(&self, change_id: &str) -> Option<HeldState> {
+        if !self.shares_reads() {
+            return None;
+        }
+        shared::with(&self.root, |memo| {
+            if let Some((states, _)) = &memo.states {
+                if states.contains_key(change_id) {
+                    return Some(HeldState::InMap(Arc::clone(states), change_id.to_string()));
+                }
+            }
+            memo.change_states
+                .get(change_id)
+                .map(|state| HeldState::Alone(Arc::clone(state)))
+        })
     }
 
     /// The writers held for a change while this handle shares reads.
@@ -2504,6 +2660,7 @@ impl Store {
             scope: Default::default(),
             rewrites: Default::default(),
             repository_events: Default::default(),
+            landings: Default::default(),
         })
     }
 
@@ -2514,9 +2671,23 @@ impl Store {
     /// The scope is derived once for the whole view, so the cost of an
     /// aggregate read does not multiply by the number of changes.
     pub fn readable_states(&self) -> Result<BTreeMap<String, crate::state::ChangeState>> {
-        let (states, warnings) =
-            self.shared_or("states", |memo| &mut memo.states, || self.read_states())?;
-        for warning in &warnings {
+        Ok(self.readable_states_shared()?.as_ref().clone())
+    }
+
+    /// `readable_states`, shared with every other reader in the process
+    /// rather than copied.
+    pub fn readable_states_shared(
+        &self,
+    ) -> Result<Arc<BTreeMap<String, crate::state::ChangeState>>> {
+        let (states, warnings) = self.shared_or(
+            "states",
+            |memo| &mut memo.states,
+            || {
+                let (states, warnings) = self.read_states()?;
+                Ok((Arc::new(states), Arc::new(warnings)))
+            },
+        )?;
+        for warning in warnings.iter() {
             eprintln!("{warning}");
         }
         Ok(states)
@@ -2528,8 +2699,10 @@ impl Store {
         read.rewrites()?;
         let mut states = BTreeMap::new();
         let mut warnings = Vec::new();
-        for change_id in read.change_ids()? {
-            match read.state(&change_id) {
+        let change_ids = read.change_ids()?;
+        let read_states = read.states_held_once(&change_ids);
+        for (change_id, state) in change_ids.into_iter().zip(read_states) {
+            match state {
                 Ok(state) => {
                     states.insert(change_id, state);
                 }
@@ -2551,7 +2724,7 @@ impl Store {
 
     /// All events of one change in ID order, preserving imported identities.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
-        typed_events(self.raw_events(change_id)?)
+        self.load_events_in(change_id, &self.import_batches()?)
     }
 
     /// A change's events with those its completed landings derive for it,
@@ -2565,7 +2738,88 @@ impl Store {
 
     /// `load_events` over import batches the caller already holds.
     pub fn load_events_in(&self, change_id: &str, batches: &[ImportBatch]) -> Result<Vec<Event>> {
-        typed_events(self.raw_events_in(change_id, batches)?)
+        Ok(self.change_events(change_id, batches)?.as_ref().clone())
+    }
+
+    /// One change's typed events in ID order, as `typed_events` makes them
+    /// from `raw_events_in`, typed once per process while it shares reads.
+    fn change_events(&self, change_id: &str, batches: &[ImportBatch]) -> Result<Arc<Vec<Event>>> {
+        if self.shares_reads() {
+            if let Some(held) = shared::with(&self.root, |memo| {
+                memo.change_events.get(change_id).cloned()
+            }) {
+                crate::perf::cache("change_events", true);
+                return Ok(held);
+            }
+            crate::perf::cache("change_events", false);
+        }
+        let events = Arc::new(match self.typed_event_files(change_id, batches) {
+            Some(events) => events,
+            None => typed_events(self.raw_events_in(change_id, batches)?)?,
+        });
+        if self.shares_reads() {
+            shared::with(&self.root, |memo| {
+                memo.change_events
+                    .insert(change_id.to_string(), Arc::clone(&events))
+            });
+        }
+        Ok(events)
+    }
+
+    /// A change's typed events parsed straight from its event files, without
+    /// the JSON tree a raw read builds. `None` when the change has imported
+    /// events, or any file fails to read, parse or belong to the change: the
+    /// raw read then answers, with its errors.
+    fn typed_event_files(&self, change_id: &str, batches: &[ImportBatch]) -> Option<Vec<Event>> {
+        if batches.iter().any(|batch| batch.change_id == change_id)
+            || ids::validate_id_component(change_id).is_err()
+        {
+            return None;
+        }
+        let _phase = crate::perf::phase("enumerate");
+        let entries = fs::read_dir(self.events_dir(change_id)).ok()?;
+        crate::perf::ledger("change", "enumerations", 1);
+        let mut events = Vec::new();
+        for entry in entries {
+            crate::perf::ledger("change", "entries", 1);
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(event_id) = name.to_str()?.strip_suffix(".json") else {
+                continue;
+            };
+            ids::validate_id_component(event_id).ok()?;
+            let bytes = shared::file(&entry.path()).ok()?;
+            let event: Event = {
+                let _phase = crate::perf::phase("decode");
+                crate::perf::ledger("change", "decoded", 1);
+                serde_json::from_slice(&bytes).ok()?
+            };
+            if event.change_id != change_id {
+                return None;
+            }
+            events.push((event_id.to_string(), event));
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        crate::perf::ledger("change", "typed", events.len() as u64);
+        if let Some((id, _)) = events
+            .iter()
+            .find(|(_, event)| matches!(event.payload, Payload::ChangeOpened { .. }))
+        {
+            OPENING_IDS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert((self.root.clone(), change_id.to_string()), id.clone());
+        }
+        Some(
+            events
+                .into_iter()
+                .map(|(_, event)| event)
+                .filter(|event| !matches!(event.payload, Payload::Unknown))
+                .collect(),
+        )
     }
 
     /// Raw JSON events of one change. Export deliberately bypasses the

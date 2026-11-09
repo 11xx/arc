@@ -999,7 +999,7 @@ fn reviewer_ctx(ctx: &Ctx, subject: String) -> Result<Ctx> {
     represented.on_behalf_of = Some(subject);
     represented.model = None;
     represented.model_source = None;
-    represented.model_attribution = std::rc::Rc::new(std::cell::OnceCell::new());
+    represented.model_attribution = std::sync::Arc::new(std::sync::OnceLock::new());
     represented.ensure_fresh_identity()?;
     Ok(represented)
 }

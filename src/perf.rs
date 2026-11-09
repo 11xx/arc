@@ -93,6 +93,12 @@ fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// Whether this process records a trace, for a caller whose label for a
+/// counter costs something to compute.
+pub(crate) fn tracing() -> bool {
+    enabled()
+}
+
 fn with(record: impl FnOnce(&mut Trace)) {
     if !enabled() {
         return;

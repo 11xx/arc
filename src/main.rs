@@ -6409,7 +6409,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         (None, Some(model)) => (Some(model), Some(model::ModelSource::Env)),
         _ => (None, None),
     };
-    let model_attribution = std::rc::Rc::new(std::cell::OnceCell::new());
+    let model_attribution = std::sync::Arc::new(std::sync::OnceLock::new());
     // `arc env` detects for itself whatever the configuration says. Anywhere
     // else a configuration that cannot be loaded leaves detection off, and
     // says why on stderr.
@@ -6474,7 +6474,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         actor,
         actor_source,
         operator,
-        fallback_announced: std::cell::Cell::new(false),
+        fallback_announced: std::sync::atomic::AtomicBool::new(false),
         harness,
         session,
         session_link: cli.session_link.filter(|value| !value.trim().is_empty()),

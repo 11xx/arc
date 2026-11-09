@@ -160,6 +160,9 @@ pub struct RewriteMap {
     /// with every successor one of them named. They resolve nothing; they
     /// tell a reference a withdrawal stranded from one no map supported.
     withdrawn_steps: BTreeMap<String, BTreeSet<String>>,
+    /// The distinct lengths of the keys of `steps`, shortest first: the only
+    /// lengths at which a key can be a prefix of a queried revision.
+    key_lengths: std::sync::OnceLock<Vec<usize>>,
 }
 
 impl RewriteMap {
@@ -271,6 +274,7 @@ impl RewriteMap {
             signature_only,
             role_additions,
             withdrawn_steps,
+            key_lengths: Default::default(),
         })
     }
 
@@ -486,6 +490,9 @@ impl RewriteMap {
     /// One hop: the recorded revision `revision` names, exactly where it names
     /// one and by abbreviation in either direction otherwise.
     fn step(&self, revision: &str) -> Result<Step> {
+        if self.steps.is_empty() {
+            return Ok(Step::Unmapped);
+        }
         let revision = canonical_revision(revision);
         let revision = revision.as_str();
         if let Some(fate) = self.steps.get(revision) {
@@ -514,9 +521,16 @@ impl RewriteMap {
             .map(|(old, _)| old)
             .take_while(|old| old.starts_with(revision))
             .collect();
+        let key_lengths = self.key_lengths.get_or_init(|| {
+            let lengths: BTreeSet<usize> = self.steps.keys().map(String::len).collect();
+            lengths.into_iter().collect()
+        });
         candidates.extend(
-            (1..revision.len())
-                .filter_map(|length| self.steps.get_key_value(&revision[..length]))
+            key_lengths
+                .iter()
+                .take_while(|length| **length < revision.len())
+                .filter(|length| **length > 0)
+                .filter_map(|length| self.steps.get_key_value(&revision[..*length]))
                 .map(|(old, _)| old),
         );
         let candidates: Vec<&String> = candidates.into_iter().collect();

@@ -269,7 +269,7 @@ pub struct Ctx {
     pub operator: Option<String>,
     /// Set once the fallback warning has been printed, so one command says it
     /// once however many events it appends.
-    pub fallback_announced: std::cell::Cell<bool>,
+    pub fallback_announced: std::sync::atomic::AtomicBool,
     pub harness: Option<String>,
     pub session: Option<String>,
     /// Private session link stored in events, never in Git-published text.
@@ -279,7 +279,7 @@ pub struct Ctx {
     pub model: Option<String>,
     pub model_source: Option<ModelSource>,
     /// Attribution shared by every event and checkout view of this invocation.
-    pub model_attribution: std::rc::Rc<std::cell::OnceCell<ModelAttribution>>,
+    pub model_attribution: std::sync::Arc<std::sync::OnceLock<ModelAttribution>>,
     /// Subject a lead runs delegated ceremony for (`--on-behalf-of`). The
     /// effective author of any event is `on_behalf_of.unwrap_or(actor)`.
     pub on_behalf_of: Option<String>,
@@ -556,7 +556,10 @@ impl Ctx {
             actor: self.actor.clone(),
             actor_source: self.actor_source,
             operator: self.operator.clone(),
-            fallback_announced: self.fallback_announced.clone(),
+            fallback_announced: std::sync::atomic::AtomicBool::new(
+                self.fallback_announced
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
             harness: self.harness.clone(),
             session: self.session.clone(),
             session_link: self.session_link.clone(),
@@ -662,7 +665,9 @@ impl Ctx {
     fn announce_assumed_identity(&self) {
         if self.actor_source.declared()
             || self.on_behalf_of.is_some()
-            || self.fallback_announced.replace(true)
+            || self
+                .fallback_announced
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             return;
         }
@@ -899,7 +904,7 @@ impl Ctx {
     }
 
     pub(crate) fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
-        self.report_with_states(state, &store.readable_states()?)
+        self.report_with_states(state, &*store.readable_states_shared()?)
     }
 
     pub(crate) fn report_for_integration(
@@ -984,7 +989,7 @@ impl Ctx {
         let mut selected = state.clone();
         selected.set_review_context(declarations.review_context.clone());
         let state = &selected;
-        let states = store.readable_states()?;
+        let states = store.readable_states_shared()?;
         let mut report = status::build_at_with_shape(
             state,
             &self.cwd,
@@ -1069,7 +1074,7 @@ impl Ctx {
     ) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
         let declarations = crate::declarations::for_change(&self.cwd, state)?;
-        let states = store.readable_states()?;
+        let states = store.readable_states_shared()?;
         let mut report = status::build_as_of(
             state,
             &declarations.gates,

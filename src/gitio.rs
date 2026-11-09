@@ -54,9 +54,33 @@ pub fn processes() -> usize {
     PROCESSES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The Git program, found on `PATH` once per process. Spawning a bare `git`
+/// searches `PATH` again for every command, one failed exec per directory
+/// before Git's. A `PATH` whose first Git is not absolute keeps the bare
+/// name, which resolves as it always would.
+fn git_program() -> &'static std::ffi::OsStr {
+    static PROGRAM: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+    PROGRAM.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::var_os("PATH")
+            .and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|directory| directory.join("git"))
+                    .find(|candidate| {
+                        std::fs::metadata(candidate).is_ok_and(|metadata| {
+                            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                        })
+                    })
+            })
+            .filter(|program| program.is_absolute())
+            .map(PathBuf::into_os_string)
+            .unwrap_or_else(|| "git".into())
+    })
+}
+
 pub fn git_command() -> Command {
     PROCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut command = Command::new("git");
+    let mut command = Command::new(git_program());
     command.env("GIT_NO_LAZY_FETCH", "1");
     command.env("GIT_EDITOR", "true");
     command.env("GIT_SEQUENCE_EDITOR", "true");
@@ -2968,6 +2992,7 @@ pub fn commit_tree_unsigned(
 }
 
 /// An object as `cat-file --batch` answers a name.
+#[derive(Clone)]
 enum Object {
     Found {
         id: String,
@@ -3034,8 +3059,19 @@ impl ObjectReader {
     }
 }
 
+/// Each checkout's reader behind its own lock: a query waits only for
+/// queries to the same checkout, and the map is held just long enough to find
+/// the reader. An empty slot is a reader not yet spawned, or one that failed.
+type ObjectReaderSlot = std::sync::Arc<std::sync::Mutex<Option<ObjectReader>>>;
 static OBJECT_READERS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, ObjectReader>>,
+    std::sync::Mutex<std::collections::HashMap<PathBuf, ObjectReaderSlot>>,
+> = std::sync::OnceLock::new();
+
+/// Every answer the readers gave, by checkout and name: a process that
+/// shares its reads holds the repository still, so a name answers the same
+/// each time it is asked.
+static OBJECT_ANSWERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::collections::HashMap<String, Object>>>,
 > = std::sync::OnceLock::new();
 
 /// While the process shares its reads, the object `name` names, read through
@@ -3046,19 +3082,45 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
     if !crate::store::shares_reads() || name.contains(['\n', '\r']) {
         return None;
     }
-    let mut readers = OBJECT_READERS
-        .get_or_init(Default::default)
+    let answers = OBJECT_ANSWERS.get_or_init(Default::default);
+    if let Some(answer) = answers
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let reader = match readers.entry(cwd.to_path_buf()) {
-        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::hash_map::Entry::Vacant(entry) => entry.insert(ObjectReader::spawn(cwd)?),
-    };
-    let answer = reader.read(name);
-    if answer.is_none() {
-        readers.remove(cwd);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(cwd)
+        .and_then(|held| held.get(name))
+    {
+        return Some(answer.clone());
     }
-    answer
+    let slot = {
+        let mut readers = OBJECT_READERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match readers.get(cwd) {
+            Some(slot) => std::sync::Arc::clone(slot),
+            None => std::sync::Arc::clone(readers.entry(cwd.to_path_buf()).or_default()),
+        }
+    };
+    let answer = {
+        let mut reader = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reader.is_none() {
+            *reader = Some(ObjectReader::spawn(cwd)?);
+        }
+        let answer = reader.as_mut()?.read(name);
+        if answer.is_none() {
+            *reader = None;
+        }
+        answer?
+    };
+    answers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(cwd.to_path_buf())
+        .or_default()
+        .insert(name.to_string(), answer.clone());
+    Some(answer)
 }
 
 /// The paths `git diff --name-only <base>...<head>` lists for each range,
@@ -3119,6 +3181,10 @@ pub fn changed_paths_of(
         match git_piped(cwd, &args, input.as_bytes()) {
             Ok(output) => {
                 let text = String::from_utf8_lossy(&output);
+                let headers: std::collections::HashSet<String> = batched
+                    .iter()
+                    .map(|(_, base, head)| format!("{base} {head}"))
+                    .collect();
                 let mut lines = text.lines().peekable();
                 for (range, base, head) in &batched {
                     let header = format!("{base} {head}");
@@ -3126,9 +3192,7 @@ pub fn changed_paths_of(
                         break;
                     }
                     let mut paths = Vec::new();
-                    while let Some(line) = lines
-                        .next_if(|line| batched.iter().all(|(_, b, h)| *line != format!("{b} {h}")))
-                    {
+                    while let Some(line) = lines.next_if(|line| !headers.contains(*line)) {
                         let line = line.trim();
                         if !line.is_empty() {
                             paths.push(line.to_string());

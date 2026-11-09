@@ -6633,14 +6633,10 @@ pub(crate) fn filed_report_in(
     let pinned = pins::pinned_files(&events);
     let changes = match Store::resolve_root(project) {
         Ok(root) => Store::open_at(&root)?
-            .map(|store| {
-                store
-                    .readable_states()
-                    .map(|states| states.into_values().collect::<Vec<_>>())
-            })
+            .map(|store| store.readable_states_shared())
             .transpose()?
             .unwrap_or_default(),
-        Err(_) => Vec::new(),
+        Err(_) => Default::default(),
     };
     let now = Utc::now();
     let mut groups: std::collections::BTreeMap<(Option<String>, Option<String>), FiledSession> =
@@ -6680,7 +6676,7 @@ pub(crate) fn filed_report_in(
             .max()
             .unwrap_or(now);
         let age = now.signed_duration_since(activity).num_days().max(0);
-        let mut promotions: Vec<String> = inventory_promotions(&changes, file)
+        let mut promotions: Vec<String> = inventory_promotions(changes.values(), file)
             .into_iter()
             .map(|promotion| promotion.change_id)
             .collect();
@@ -14012,7 +14008,10 @@ pub(crate) fn last_promotion_closed(store: &Store, filename: &str) -> Result<boo
             .all(|promotion| promotion.status == "closed"))
 }
 
-fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<InventoryPromotion> {
+fn inventory_promotions<'a>(
+    changes: impl IntoIterator<Item = &'a ChangeState>,
+    filename: &str,
+) -> Vec<InventoryPromotion> {
     let mut promotions = Vec::new();
     for change in changes {
         if change.journal_ref.as_deref() == Some(filename) {

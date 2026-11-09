@@ -440,7 +440,7 @@ pub fn list_entries(ctx: &Ctx) -> Result<Vec<ForkEntry>> {
     let promoted = match read_only_store(cwd)? {
         Some(store) => {
             let mut promoted: BTreeMap<String, Vec<String>> = BTreeMap::new();
-            for state in store.readable_states()?.values() {
+            for state in store.readable_states_shared()?.values() {
                 if let Some(fork) = &state.from_fork {
                     promoted
                         .entry(fork.slug.clone())

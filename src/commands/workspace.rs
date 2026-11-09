@@ -20,7 +20,16 @@ fn normalized_cutoff(cutoff: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Only Git's explicit non-repository answer means there is no fork namespace.
+/// A directory whose common Git directory resolves is a repository, and that
+/// answer is the one later readers of the same directory share.
 fn has_git_repository(anchor: &Path) -> Result<bool> {
+    if crate::gitio::common_dir(anchor).is_ok() {
+        return Ok(true);
+    }
+    ask_git_repository(anchor)
+}
+
+fn ask_git_repository(anchor: &Path) -> Result<bool> {
     let output = crate::gitio::git_command()
         .args(["rev-parse", "--git-common-dir"])
         .env("LC_ALL", "C")
@@ -438,7 +447,7 @@ fn nothing_found_message(registered: Result<(usize, String)>) -> String {
 fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
     let mut repos = Vec::new();
     for (repo, store) in stores {
-        let states = match store.readable_states() {
+        let states = match store.readable_states_shared() {
             Ok(states) => states,
             Err(error) => {
                 eprintln!("warning: skipping {repo}: {error:#}");
@@ -1586,8 +1595,28 @@ fn reconcile_artifact(
     }
 }
 
-/// Observe one reachable project into its backlog row. `queues`, when given,
-/// is what its ledger owes as already observed; otherwise it is read here.
+/// The project's unretired forks, or the failure that names why they could
+/// not be inventoried.
+fn fork_inventory(
+    ctx: &Ctx,
+    anchor: &Path,
+) -> std::result::Result<Vec<crate::commands::fork::ForkEntry>, ComponentFailure> {
+    let failure = |error: anyhow::Error| ComponentFailure {
+        component: "forks",
+        reason: format!("cannot inventory forks for {}: {error:#}", anchor.display()),
+    };
+    if !has_git_repository(anchor).map_err(failure)? {
+        return Ok(Vec::new());
+    }
+    let fork_ctx = ctx.with_cwd(anchor.to_path_buf());
+    Ok(crate::commands::fork::list_entries(&fork_ctx)
+        .map_err(failure)?
+        .into_iter()
+        .filter(|entry| entry.retired.is_none())
+        .collect())
+}
+
+/// Observe one reachable project into its backlog row.
 ///
 /// Components are read independently: a failed ledger read still leaves the
 /// journal facts readable, and each failure is named on the row so the empty
@@ -1596,51 +1625,63 @@ fn project_row(
     ctx: &Ctx,
     project: &crate::registry::Project,
     anchor: &Path,
-    queues: Option<Result<LedgerQueues>>,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
     show_items: bool,
 ) -> ProjectBacklog {
     let mut failures: Vec<ComponentFailure> = Vec::new();
 
-    let (queues, changes) = match &project.ledger {
-        Some(root) => {
-            let queues = match queues.unwrap_or_else(|| ledger_queues(root, Some(anchor))) {
-                Ok(queues) => queues,
-                Err(error) => {
-                    failures.push(ComponentFailure {
-                        component: "ledger",
-                        reason: format!("{error:#}"),
-                    });
-                    LedgerQueues::default()
-                }
-            };
-            let changes = match Store::open_at_for(root, anchor) {
-                Ok(Some(store)) => match observe_changes(ctx, &store, anchor) {
-                    Ok(inbox) => inbox,
+    // The journal and the fork inventory read nothing of the ledger, so they
+    // are read beside it.
+    let ((queues, changes), (open_queue, forks)) = std::thread::scope(|scope| {
+        let beside = scope.spawn(|| {
+            (
+                crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None),
+                fork_inventory(ctx, anchor),
+            )
+        });
+        let ledger = match &project.ledger {
+            Some(root) => {
+                let queues = match ledger_queues(root, Some(anchor)) {
+                    Ok(queues) => queues,
                     Err(error) => {
                         failures.push(ComponentFailure {
-                            component: "changes",
+                            component: "ledger",
+                            reason: format!("{error:#}"),
+                        });
+                        LedgerQueues::default()
+                    }
+                };
+                let changes = match Store::open_at_for(root, anchor) {
+                    Ok(Some(store)) => match observe_changes(ctx, &store, anchor) {
+                        Ok(inbox) => inbox,
+                        Err(error) => {
+                            failures.push(ComponentFailure {
+                                component: "changes",
+                                reason: format!("{error:#}"),
+                            });
+                            crate::inbox::Inbox::new(None)
+                        }
+                    },
+                    Ok(None) => crate::inbox::Inbox::new(None),
+                    Err(error) => {
+                        failures.push(ComponentFailure {
+                            component: "ledger",
                             reason: format!("{error:#}"),
                         });
                         crate::inbox::Inbox::new(None)
                     }
-                },
-                Ok(None) => crate::inbox::Inbox::new(None),
-                Err(error) => {
-                    failures.push(ComponentFailure {
-                        component: "ledger",
-                        reason: format!("{error:#}"),
-                    });
-                    crate::inbox::Inbox::new(None)
-                }
-            };
-            (queues, changes)
-        }
-        None => (LedgerQueues::default(), crate::inbox::Inbox::new(None)),
-    };
+                };
+                (queues, changes)
+            }
+            None => (LedgerQueues::default(), crate::inbox::Inbox::new(None)),
+        };
+        let beside = beside
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (ledger, beside)
+    });
 
-    let open_queue = match crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None)
-    {
+    let open_queue = match open_queue {
         Ok(queue) => queue,
         Err(error) => {
             failures.push(ComponentFailure {
@@ -1702,32 +1743,10 @@ fn project_row(
     // its ledger: a failed inventory is returned with project context,
     // an unreadable ahead count stays null rather than becoming zero,
     // and retired forks remain history.
-    let forks: Vec<crate::commands::fork::ForkEntry> = match has_git_repository(anchor) {
-        Ok(false) => Vec::new(),
-        Ok(true) => {
-            let fork_ctx = ctx.with_cwd(anchor.to_path_buf());
-            match crate::commands::fork::list_entries(&fork_ctx) {
-                Ok(entries) => entries
-                    .into_iter()
-                    .filter(|entry| entry.retired.is_none())
-                    .collect(),
-                Err(error) => {
-                    failures.push(ComponentFailure {
-                        component: "forks",
-                        reason: format!(
-                            "cannot inventory forks for {}: {error:#}",
-                            anchor.display()
-                        ),
-                    });
-                    Vec::new()
-                }
-            }
-        }
-        Err(error) => {
-            failures.push(ComponentFailure {
-                component: "forks",
-                reason: format!("cannot inventory forks for {}: {error:#}", anchor.display()),
-            });
+    let forks: Vec<crate::commands::fork::ForkEntry> = match forks {
+        Ok(forks) => forks,
+        Err(failure) => {
+            failures.push(failure);
             Vec::new()
         }
     };
@@ -1843,23 +1862,23 @@ fn collect_backlog(
     let observed_at = chrono::Utc::now();
 
     let registered = crate::registry::projects(&cfg)?;
-    let mut queues = observe_queues(
-        registered
-            .iter()
-            .filter(|project| {
-                project.retired.is_none()
-                    && project.reachable
-                    && scope.includes(project.anchor.as_deref())
-            })
-            .filter_map(|project| Some((project.ledger.clone()?, project.anchor.clone()?)))
-            .collect(),
+    let mut rows = observe_rows(
+        ctx,
+        &registered,
+        |project| {
+            project.retired.is_none()
+                && project.reachable
+                && scope.includes(project.anchor.as_deref())
+        },
+        cutoff,
+        show_items,
     );
-    for project in registered {
+    for (index, project) in registered.iter().enumerate() {
         if let Some(retirement) = &project.retired {
             if scope.includes(project.anchor.as_deref()) {
                 retired_count += 1;
                 if show_retired {
-                    retired.push(RetiredProject::of(&project, retirement));
+                    retired.push(RetiredProject::of(project, retirement));
                 }
             }
             continue;
@@ -1902,11 +1921,9 @@ fn collect_backlog(
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-        let observed = project
-            .ledger
-            .clone()
-            .and_then(|root| queues.remove(&(root, anchor.clone())));
-        let entry = project_row(ctx, &project, &anchor, observed, cutoff, show_items);
+        let entry = rows
+            .remove(&index)
+            .unwrap_or_else(|| project_row(ctx, project, &anchor, cutoff, show_items));
         for failure in &entry.failures {
             failures.push(CollectionFailure {
                 project: project.label(),
@@ -2298,7 +2315,7 @@ fn report_ledger_facts(
                     .map(crate::policy::operator_path)
                     .transpose()?;
                 let candidates = super::candidate::load_ledger(&store)?;
-                let states = store.readable_states()?;
+                let states = store.readable_states_shared()?;
                 let unreadable = store
                     .list_change_ids()?
                     .into_iter()
@@ -2338,9 +2355,12 @@ fn report_ledger_facts(
                 .collect(),
             ..Default::default()
         };
-        for (change_id, state) in states {
+        let canonical_anchor = anchor
+            .as_ref()
+            .and_then(|anchor| anchor.canonicalize().ok());
+        for (change_id, state) in states.iter() {
             ledger.provisional_integrations.extend(
-                crate::provisional::unresolved_at(&state, observed)
+                crate::provisional::unresolved_at(state, observed)
                     .into_iter()
                     .map(|row| {
                         serde_json::to_value(row).expect("serializable provisional obligation")
@@ -2356,7 +2376,9 @@ fn report_ledger_facts(
                         };
                         ledger.open_briefs.insert(change_id.clone(), keys);
                     }
-                    ledger.open.insert(change_id, (state.title.clone(), days));
+                    ledger
+                        .open
+                        .insert(change_id.clone(), (state.title.clone(), days));
                 }
                 Some(_) => {
                     // A change begun without a worktree records the main
@@ -2365,14 +2387,12 @@ fn report_ledger_facts(
                     let separate = |path: &&str| {
                         let path = Path::new(path);
                         path.exists()
-                            && anchor.as_ref().is_none_or(|anchor| {
-                                path.canonicalize().ok() != anchor.canonicalize().ok()
-                            })
+                            && (anchor.is_none() || path.canonicalize().ok() != canonical_anchor)
                     };
                     if let Some(worktree) = state.worktree.as_deref().filter(separate) {
                         ledger
                             .closed_worktrees
-                            .push((change_id, worktree.to_string()));
+                            .push((change_id.clone(), worktree.to_string()));
                     }
                 }
             }
@@ -2633,7 +2653,7 @@ fn registration_ledger(cfg: &crate::config::Config, anchor: &Path) -> Result<Led
         root: Some(root.display().to_string()),
         ..LedgerHoldings::default()
     };
-    for state in store.readable_states()?.values() {
+    for state in store.readable_states_shared()?.values() {
         if !state.is_closed() {
             holdings.open_changes.push(state.change_id.clone());
         }
@@ -2906,38 +2926,48 @@ struct LedgerQueues {
     shared_surfaces: BTreeMap<String, Vec<String>>,
 }
 
-/// What each `(ledger, checkout)` owes, read on several threads, largest
-/// ledger first. Each project's observation then runs in order and takes
-/// its ledger reads from the process's shared reads.
-fn observe_queues(
-    mut ledgers: Vec<(PathBuf, PathBuf)>,
-) -> BTreeMap<(PathBuf, PathBuf), Result<LedgerQueues>> {
-    let changes =
-        |root: &Path| std::fs::read_dir(root.join("changes")).map_or(0, |entries| entries.count());
-    ledgers.sort_by_cached_key(|(root, _)| std::cmp::Reverse(changes(root)));
+/// The row of each registered project `observe` selects, keyed by its
+/// registry position and built on several threads, largest ledger first so
+/// the longest read starts at once.
+fn observe_rows(
+    ctx: &Ctx,
+    registered: &[crate::registry::Project],
+    observe: impl Fn(&crate::registry::Project) -> bool,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    show_items: bool,
+) -> BTreeMap<usize, ProjectBacklog> {
+    let changes = |project: &crate::registry::Project| {
+        project.ledger.as_deref().map_or(0, |root| {
+            std::fs::read_dir(root.join("changes")).map_or(0, |entries| entries.count())
+        })
+    };
+    let mut selected: Vec<(usize, &crate::registry::Project, &Path)> = registered
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| observe(project))
+        .filter_map(|(index, project)| Some((index, project, project.anchor.as_deref()?)))
+        .collect();
+    selected.sort_by_cached_key(|(_, project, _)| std::cmp::Reverse(changes(project)));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let observed = std::sync::Mutex::new(BTreeMap::new());
+    let rows = std::sync::Mutex::new(BTreeMap::new());
     let workers = std::thread::available_parallelism()
         .map_or(4, |count| count.get())
-        .min(16)
-        .min(ledgers.len());
+        .min(selected.len());
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
-                while let Some((root, anchor)) =
-                    ledgers.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                while let Some((index, project, anchor)) =
+                    selected.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                 {
-                    let queues = ledger_queues(root, Some(anchor));
-                    observed
-                        .lock()
+                    let row = project_row(ctx, project, anchor, cutoff, show_items);
+                    rows.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert((root.clone(), anchor.clone()), queues);
+                        .insert(*index, row);
                 }
             });
         }
     });
-    observed
-        .into_inner()
+    rows.into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -2948,18 +2978,44 @@ fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
     if let Some(anchor) = anchor {
         store.operator_policy_path = Some(crate::policy::operator_path(anchor)?);
     }
-    let states = store.readable_states()?;
+    let states = store.readable_states_shared()?;
     let now = chrono::Utc::now();
-    let surfaces = crate::commands::messaging::DebtSurfaces::read(
-        root,
-        states.values().filter_map(|state| {
-            state
-                .debt
-                .as_ref()
-                .filter(|_| state.debt_outstanding())
-                .map(|debt| (state, debt))
-        }),
-    );
+    let reviewable: Vec<(&ChangeState, &crate::state::Patchset)> = states
+        .values()
+        .filter(|state| !state.is_closed() && crate::inbox::needs_review(state))
+        .filter_map(|state| Some((state, state.latest_patchset()?)))
+        .collect();
+    // The debts' surfaces and each reviewable change's target movement are
+    // separate Git reads, so they run side by side.
+    let (surfaces, movements) = std::thread::scope(|scope| {
+        let movements: Vec<_> = reviewable
+            .iter()
+            .map(|(state, patchset)| scope.spawn(|| target_movement(root, state, patchset)))
+            .collect();
+        let surfaces = crate::commands::messaging::DebtSurfaces::read(
+            root,
+            states.values().filter_map(|state| {
+                state
+                    .debt
+                    .as_ref()
+                    .filter(|_| state.debt_outstanding())
+                    .map(|debt| (state, debt))
+            }),
+        );
+        let movements: BTreeMap<&str, (Option<usize>, Option<Vec<String>>)> = reviewable
+            .iter()
+            .zip(movements)
+            .map(|((state, _), movement)| {
+                (
+                    state.change_id.as_str(),
+                    movement
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                )
+            })
+            .collect();
+        (surfaces, movements)
+    });
     let mut needs_review = Vec::new();
     let mut no_patchset = Vec::new();
     let mut debt_owed = Vec::new();
@@ -3000,8 +3056,10 @@ fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
             // makes a queue of empty changes read as review backlog.
             match state.latest_patchset() {
                 Some(patchset) => {
-                    let (behind_target, target_path_overlap) =
-                        target_movement(root, state, patchset);
+                    let (behind_target, target_path_overlap) = movements
+                        .get(state.change_id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| target_movement(root, state, patchset));
                     needs_review.push(ReviewOwed {
                         change_id: state.change_id.clone(),
                         recorded_by: patchset.actor.clone(),
@@ -3110,7 +3168,7 @@ pub fn restack(ctx: &Ctx, reference: &str, advise: bool) -> Result<()> {
     }
     let store = ctx.store()?;
     let (change_id, state) = ctx.load_state(&store, reference)?;
-    let states = store.readable_states()?;
+    let states = store.readable_states_shared()?;
     let dependents: Vec<&ChangeState> = states
         .values()
         .filter(|candidate| !candidate.is_closed() && candidate.blocked_by.contains(&change_id))
