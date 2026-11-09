@@ -451,7 +451,7 @@ fn a_fragment_is_the_markup_without_shell_style_or_date() {
         html.starts_with("<header class=\"page-header\" id=\"top\">"),
         "{html}"
     );
-    assert!(html.contains("<nav class=\"contents\""), "{html}");
+    assert!(html.contains("<details class=\"contents\""), "{html}");
     assert!(html.contains("<main>"), "{html}");
     for shell in [
         "<!doctype",
@@ -516,4 +516,41 @@ fn keep_private_renders_private_text_as_written() {
         &file,
     ]));
     assert_eq!(kept["pages"][0]["private_stretches"], 2);
+}
+
+/// Claim: on a narrow screen the contents list starts open when it has at
+/// most eight entries, and folded under a summary naming its length when it
+/// has more, so a long page's text comes first on a phone. Rejects a long
+/// list that starts open, or a short one that starts folded.
+#[test]
+fn a_long_contents_list_starts_folded() {
+    let repo = Repo::new();
+    let sections = |count: usize| {
+        (1..=count)
+            .map(|n| format!("## Section {n}\n\nText {n}.\n\n"))
+            .collect::<String>()
+    };
+    for (topic, count, open) in [("eight", 8, true), ("nine", 9, false)] {
+        let file = note(
+            &repo,
+            &repo.root,
+            topic,
+            &format!("# {topic}\n\n{}", sections(count)),
+        );
+        let (output, page) = render(&repo, &repo.root, &file, &[]);
+        assert!(output.status.success(), "{output:?}");
+        let html = fs::read_to_string(&page).unwrap();
+        let details = if open {
+            "<details class=\"contents\" id=\"contents\" open>"
+        } else {
+            "<details class=\"contents\" id=\"contents\">"
+        };
+        assert!(html.contains(details), "{topic}: {html}");
+        assert!(
+            html.contains(&format!(
+                "<summary><h2>Contents</h2> <span class=\"toc-count\">{count} entries</span></summary>"
+            )),
+            "{topic}: {html}"
+        );
+    }
 }

@@ -968,7 +968,8 @@ pub enum JournalCmd {
     },
     /// Render an artifact as a standalone HTML page for reading away from
     /// the terminal: its title as corrected, its body, every appended block
-    /// under its title, and a table of contents. The page has no scripts and
+    /// under its title, and a table of contents, which a narrow screen shows
+    /// folded when it has more than eight entries. The page has no scripts and
     /// sends no referrer; raw HTML shows as code, links keep only http(s),
     /// mailto and in-page anchors, and images load only over https. An
     /// artifact address in the text links to that artifact's published copy,

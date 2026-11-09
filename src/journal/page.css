@@ -89,24 +89,44 @@ h2 + h3, h3 + h4 { margin-top: .9rem; }
   vertical-align: .08em;
 }
 
-/* Contents: inline on a phone, a sticky rail on a wide screen */
+/* Contents: inline on a phone, folded there when long so the text comes
+   first; a sticky rail on a wide screen, where it always shows */
 .contents {
   max-width: 42rem;
-  margin: 1.5rem 0 0;
-  padding: .9rem 0 1rem;
+  margin: 1.5rem 0;
+  padding: 0;
   border-top: 1px solid var(--rule);
   border-bottom: 1px solid var(--rule);
   font-size: .9rem;
   line-height: 1.4;
 }
+.contents > summary {
+  display: flex;
+  align-items: baseline;
+  gap: .55rem;
+  padding: .8rem 0;
+  list-style: none;
+  cursor: pointer;
+}
+.contents > summary::-webkit-details-marker { display: none; }
+.contents > summary::before {
+  content: "+";
+  width: .7rem;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+.contents[open] > summary::before { content: "\2212"; }
 .contents h2 {
-  margin: 0 0 .5rem;
+  margin: 0;
   font-size: .72rem;
   font-weight: 600;
   letter-spacing: .09em;
   text-transform: uppercase;
   color: var(--muted);
 }
+.toc-count { color: var(--muted); font-size: .78rem; }
+.contents > summary:hover h2, .contents > summary:focus-visible h2 { color: var(--ink); }
+.contents nav { padding: 0 0 1rem; }
 .contents ol { margin: 0; padding-left: 1.9rem; }
 .contents ol ol { padding-left: 1.3rem; margin-top: .15rem; }
 .contents li { margin: .2rem 0; }
@@ -244,5 +264,9 @@ th:last-child, td:last-child { padding-right: 0; }
     font-size: .84rem;
     scrollbar-width: thin;
   }
+  .contents > summary { padding: 0 0 .5rem; cursor: default; pointer-events: none; }
+  .contents > summary::before, .toc-count { display: none; }
+  .contents:not([open])::details-content { display: block; content-visibility: visible; }
+  .contents nav { padding: 0; }
   .contents ol { padding-left: 1.7rem; }
 }

@@ -1135,12 +1135,25 @@ impl<'a> Links<'a> {
     }
 }
 
+/// A contents list of at most this many entries starts open on a narrow
+/// screen. A longer one starts folded under its summary, so the text comes
+/// first; on a wide screen the rail shows it either way.
+const CONTENTS_OPEN_UP_TO: usize = 8;
+
 fn contents(toc: &[TocEntry]) -> String {
     if toc.len() < 2 {
         return String::new();
     }
-    let mut html = String::from(
-        "<nav class=\"contents\" id=\"contents\" aria-label=\"Contents\">\n<h2>Contents</h2>\n<ol>\n",
+    let mut html = format!(
+        "<details class=\"contents\" id=\"contents\"{}>\n<summary><h2>Contents</h2> \
+         <span class=\"toc-count\">{} entries</span></summary>\n\
+         <nav aria-label=\"Contents\">\n<ol>\n",
+        if toc.len() <= CONTENTS_OPEN_UP_TO {
+            " open"
+        } else {
+            ""
+        },
+        toc.len()
     );
     let mut item_open = false;
     let mut nested = false;
@@ -1179,7 +1192,7 @@ fn contents(toc: &[TocEntry]) -> String {
     if item_open {
         html.push_str("</li>\n");
     }
-    html.push_str("</ol>\n</nav>\n");
+    html.push_str("</ol>\n</nav>\n</details>\n");
     html
 }
 
@@ -1313,9 +1326,10 @@ mod tests {
         let html = contents(&[entry(2, "a"), entry(3, "a1"), entry(3, "a2"), entry(2, "b")]);
         assert_eq!(
             html,
-            "<nav class=\"contents\" id=\"contents\" aria-label=\"Contents\">\n<h2>Contents</h2>\n<ol>\n\
+            "<details class=\"contents\" id=\"contents\" open>\n<summary><h2>Contents</h2> \
+             <span class=\"toc-count\">4 entries</span></summary>\n<nav aria-label=\"Contents\">\n<ol>\n\
              <li><a href=\"#a\">a</a>\n<ol>\n<li><a href=\"#a1\">a1</a></li>\n<li><a href=\"#a2\">a2</a></li>\n</ol>\n</li>\n\
-             <li><a href=\"#b\">b</a></li>\n</ol>\n</nav>\n"
+             <li><a href=\"#b\">b</a></li>\n</ol>\n</nav>\n</details>\n"
         );
     }
 }

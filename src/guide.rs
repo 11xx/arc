@@ -2037,7 +2037,9 @@ STANDING REFERENCES (what a project keeps coming back to)
     arc journal render <address> [--out FILE] [--strip-private|--keep-private]
                          One standalone HTML page: the corrected title, the
                          body, each appended block under its title and
-                         anchored by its ID, and a contents list. Corrections
+                         anchored by its ID, and a contents list (a rail on a
+                         wide screen; folded on a narrow one past eight
+                         entries). Corrections
                          and retractions show where they apply rather than as
                          sections. No scripts and no referrer: raw HTML shows
                          as code, links keep http(s), mailto and in-page
