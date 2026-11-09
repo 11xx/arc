@@ -15,9 +15,11 @@ fn notices(repo: &Repo) -> Vec<Value> {
 
 /// Claim: a committed ledger write appends an `arc-workspace-feed/1` notice
 /// naming the file and, for a change event, the change; a committed journal
-/// write appends one naming the journal directory; a read appends none.
+/// write appends one naming the journal directory, marked `binding` when it
+/// registered the journal and unmarked otherwise; a read appends none.
 /// Rejects a write that leaves the feed silent, a notice that cannot be traced
-/// to its ledger, and a read that writes the feed.
+/// to its ledger, a registration a follower cannot tell from other journal
+/// writes, and a read that writes the feed.
 #[test]
 fn writes_append_feed_notices_and_reads_do_not() {
     let repo = Repo::new();
@@ -42,6 +44,13 @@ fn writes_append_feed_notices_and_reads_do_not() {
         ledger.display()
     );
     assert!(change_notice["at"].as_str().is_some(), "{change_notice}");
+    // Beginning the first change registers the project's journal.
+    assert!(
+        opened
+            .iter()
+            .any(|notice| notice["source"] == "journal" && notice["binding"] == true),
+        "no binding notice after the registering begin: {opened:?}"
+    );
 
     stdout_any_status(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
     stdout(repo.arc(&repo.root).args(["status", &change]));
@@ -57,6 +66,7 @@ fn writes_append_feed_notices_and_reads_do_not() {
         .iter()
         .find(|notice| notice["source"] == "journal")
         .unwrap_or_else(|| panic!("no journal notice after a note: {noted:?}"));
+    assert!(journal_notice.get("binding").is_none(), "{journal_notice}");
     let dir = Path::new(journal_notice["dir"].as_str().unwrap());
     assert!(
         dir.join("events.jsonl").is_file(),
