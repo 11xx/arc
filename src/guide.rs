@@ -239,8 +239,10 @@ FROM A WORKSPACE ROOT (outside a project)
                        journal write, one `arc-workspace-feed/1` line. A
                        ledger notice (`source` `ledger`) names the published
                        `path` and, for a change event, its `change`; a journal
-                       notice (`source` `journal`) names the journal `dir`.
-                       Each carries `at`. Reads append nothing. A notice
+                       notice (`source` `journal`) names the journal `dir`,
+                       with `binding` true when the write changed what the
+                       registry says of it. Each carries `at`. Reads append
+                       nothing. A notice
                        follows its write: failing to append fails nothing,
                        and a follower that missed notices reads again. Past
                        1 MiB the file moves to `events.jsonl.1`, replacing it.

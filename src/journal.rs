@@ -9271,7 +9271,7 @@ fn write_binding(dir: &Path, binding: &JournalBinding) -> Result<()> {
         .with_context(|| format!("cannot open {}", path.display()))?;
     file.write_all(line.as_bytes())
         .with_context(|| format!("cannot append to {}", path.display()))?;
-    crate::feed::journal_written(dir);
+    crate::feed::binding_written(dir);
     Ok(())
 }
 

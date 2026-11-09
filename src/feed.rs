@@ -53,13 +53,25 @@ pub(crate) fn ledger_written(path: &Path) {
 
 /// A journal transaction committed in `dir`.
 pub(crate) fn journal_written(dir: &Path) {
+    append(&journal_notice(dir));
+}
+
+/// A binding was written to the journal in `dir`, which changes what the
+/// registry says of it: the notice carries `binding`.
+pub(crate) fn binding_written(dir: &Path) {
+    let mut notice = journal_notice(dir);
+    notice["binding"] = true.into();
+    append(&notice);
+}
+
+fn journal_notice(dir: &Path) -> serde_json::Value {
     let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
-    append(&serde_json::json!({
+    serde_json::json!({
         "schema": SCHEMA,
         "at": now(),
         "source": "journal",
         "dir": dir,
-    }));
+    })
 }
 
 fn now() -> String {
