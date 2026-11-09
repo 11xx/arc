@@ -1801,6 +1801,8 @@ struct CollectedBacklog {
     scope: ResolvedWorkspaceScope,
     selection: BacklogSelection,
     partial: bool,
+    /// The registry the backlog was read from.
+    registered: Vec<crate::registry::Project>,
 }
 
 /// Which registrations a backlog names beyond its observed projects.
@@ -1821,10 +1823,7 @@ fn collect_backlog(
     rank_by: RankBasis,
     include_empty: bool,
 ) -> Result<CollectedBacklog> {
-    let Listed {
-        unreachable: show_unreachable,
-        retired: show_retired,
-    } = listed;
+    let started_at = chrono::Utc::now();
     let cfg = crate::config::load()?;
     let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let cutoff = match since {
@@ -1834,6 +1833,68 @@ fn collect_backlog(
         ),
         None => None,
     };
+    let registered = crate::registry::projects(&cfg)?;
+    let mut rows = observe_rows(
+        ctx,
+        &registered,
+        |project| observed_in(&scope, project),
+        cutoff,
+        show_items,
+    );
+    Ok(assemble_backlog(
+        registered,
+        scope,
+        BacklogShape {
+            started_at,
+            cutoff,
+            listed,
+            rank_by,
+            include_empty,
+        },
+        |index, project, anchor| {
+            rows.remove(&index)
+                .unwrap_or_else(|| project_row(ctx, project, anchor, cutoff, show_items))
+        },
+    ))
+}
+
+/// Whether a backlog in `scope` observes `project`: a current registration
+/// whose anchor is reachable and in scope.
+fn observed_in(scope: &ResolvedWorkspaceScope, project: &crate::registry::Project) -> bool {
+    project.retired.is_none() && project.reachable && scope.includes(project.anchor.as_deref())
+}
+
+/// Everything about a backlog but its rows: when its observation started,
+/// the arrivals cutoff, what it lists beyond observed projects, and its order.
+#[derive(Clone, Copy)]
+struct BacklogShape {
+    started_at: chrono::DateTime<chrono::Utc>,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    listed: Listed,
+    rank_by: RankBasis,
+    include_empty: bool,
+}
+
+/// The backlog of `registered` in `scope`: the census of every registration,
+/// each observed project's row as `row_of` gives it, the ranking and the
+/// summary.
+fn assemble_backlog(
+    registered: Vec<crate::registry::Project>,
+    scope: ResolvedWorkspaceScope,
+    shape: BacklogShape,
+    mut row_of: impl FnMut(usize, &crate::registry::Project, &Path) -> ProjectBacklog,
+) -> CollectedBacklog {
+    let BacklogShape {
+        started_at,
+        cutoff,
+        listed,
+        rank_by,
+        include_empty,
+    } = shape;
+    let Listed {
+        unreachable: show_unreachable,
+        retired: show_retired,
+    } = listed;
     // The report is built from `scope` after this; the hint records where it
     // was resolved to, which is the same fact in the form a command needs.
     let selection = BacklogSelection {
@@ -1859,20 +1920,6 @@ fn collect_backlog(
     let mut empty = 0usize;
     let mut non_empty = 0usize;
     let mut failed = 0usize;
-    let observed_at = chrono::Utc::now();
-
-    let registered = crate::registry::projects(&cfg)?;
-    let mut rows = observe_rows(
-        ctx,
-        &registered,
-        |project| {
-            project.retired.is_none()
-                && project.reachable
-                && scope.includes(project.anchor.as_deref())
-        },
-        cutoff,
-        show_items,
-    );
     for (index, project) in registered.iter().enumerate() {
         if let Some(retirement) = &project.retired {
             if scope.includes(project.anchor.as_deref()) {
@@ -1921,9 +1968,7 @@ fn collect_backlog(
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-        let entry = rows
-            .remove(&index)
-            .unwrap_or_else(|| project_row(ctx, project, &anchor, cutoff, show_items));
+        let entry = row_of(index, project, &anchor);
         for failure in &entry.failures {
             failures.push(CollectionFailure {
                 project: project.label(),
@@ -1973,7 +2018,7 @@ fn collect_backlog(
         schema: "arc-workspace-backlog/19",
         scope: scope.view(),
         observation: Observation {
-            started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             finished_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             consistency: "sequential",
         },
@@ -1996,12 +2041,13 @@ fn collect_backlog(
         unreachable,
         retired,
     };
-    Ok(CollectedBacklog {
+    CollectedBacklog {
         backlog,
         scope,
         selection,
         partial,
-    })
+        registered,
+    }
 }
 
 fn workspace_backlog(
@@ -2019,6 +2065,7 @@ fn workspace_backlog(
         scope,
         selection,
         partial,
+        ..
     } = collect_backlog(ctx, since, show_items, scope, listed, rank_by, false)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&backlog)?);
@@ -2277,129 +2324,150 @@ fn workspace_backlog(
 }
 
 /// Read each reported project's ledger once for what the backlog does not
-/// carry: how long every open change has been open, and which closed changes
-/// left a worktree on disk. Failures belong to this observation even when an
-/// earlier read of the ledger succeeded.
+/// carry. Failures belong to this observation even when an earlier read of
+/// the ledger succeeded.
 fn report_ledger_facts(
-    backlog: &Backlog,
-) -> Result<(
+    collected: &CollectedBacklog,
+    mut facts_of: impl FnMut(
+        &crate::registry::Project,
+        chrono::DateTime<chrono::Utc>,
+    ) -> (Option<report::LedgerFacts>, Vec<CollectionFailure>),
+) -> (
     BTreeMap<String, report::LedgerFacts>,
     Vec<CollectionFailure>,
-)> {
-    let observed = chrono::DateTime::parse_from_rfc3339(&backlog.observation.finished_at)
-        .ok()
-        .map(|at| at.with_timezone(&chrono::Utc))
-        .unwrap_or_else(chrono::Utc::now);
-    let reported: BTreeSet<String> = backlog
+) {
+    let observed = observed_at(&collected.backlog);
+    let reported: BTreeSet<String> = collected
+        .backlog
         .projects
         .iter()
         .map(|project| project.project.clone())
         .collect();
-    let cfg = crate::config::load()?;
     let mut facts = BTreeMap::new();
     let mut failures = Vec::new();
-    for project in crate::registry::projects(&cfg)? {
-        let label = project.label();
-        if !reported.contains(&label) {
+    for project in &collected.registered {
+        if !reported.contains(&project.label()) {
             continue;
         }
-        let Some(root) = &project.ledger else {
-            continue;
-        };
-        let anchor = project.anchor.clone();
-        let states = Store::open_at(root)
-            .and_then(|store| store.context("ledger is missing"))
-            .and_then(|mut store| {
-                store.operator_policy_path = anchor
-                    .as_deref()
-                    .map(crate::policy::operator_path)
-                    .transpose()?;
-                let candidates = super::candidate::load_ledger(&store)?;
-                let states = store.readable_states_shared()?;
-                let unreadable = store
-                    .list_change_ids()?
-                    .into_iter()
-                    .filter(|id| !states.contains_key(id))
-                    .collect::<Vec<_>>();
-                let pending = super::provisional::pending_transitions(
-                    anchor.as_deref().unwrap_or(root),
-                    &store,
-                )?;
-                Ok((states, candidates, unreadable, pending))
-            });
-        let (states, candidates, unreadable, pending) = match states {
-            Ok(states) => states,
-            Err(error) => {
-                failures.push(CollectionFailure {
-                    project: label,
-                    anchor: anchor.as_ref().map(|path| path.display().to_string()),
-                    component: "report-ledger",
-                    reason: format!("{error:#}"),
-                });
-                continue;
-            }
-        };
-        if !unreadable.is_empty() {
+        let (ledger, failed) = facts_of(project, observed);
+        failures.extend(failed);
+        if let Some(ledger) = ledger {
+            facts.insert(project.label(), ledger);
+        }
+    }
+    (facts, failures)
+}
+
+/// When `backlog`'s observation finished, which every age it reports is
+/// measured against.
+fn observed_at(backlog: &Backlog) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(&backlog.observation.finished_at)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now)
+}
+
+/// One project's ledger facts as of `observed`: how long every open change
+/// has been open, and which closed changes left a worktree on disk. `None`
+/// for a project with no ledger, or one that could not be read, which the
+/// failures name.
+fn project_ledger_facts(
+    project: &crate::registry::Project,
+    observed: chrono::DateTime<chrono::Utc>,
+) -> (Option<report::LedgerFacts>, Vec<CollectionFailure>) {
+    let label = project.label();
+    let mut failures = Vec::new();
+    let Some(root) = &project.ledger else {
+        return (None, failures);
+    };
+    let anchor = project.anchor.clone();
+    let states = Store::open_at(root)
+        .and_then(|store| store.context("ledger is missing"))
+        .and_then(|mut store| {
+            store.operator_policy_path = anchor
+                .as_deref()
+                .map(crate::policy::operator_path)
+                .transpose()?;
+            let candidates = super::candidate::load_ledger(&store)?;
+            let states = store.readable_states_shared()?;
+            let unreadable = store
+                .list_change_ids()?
+                .into_iter()
+                .filter(|id| !states.contains_key(id))
+                .collect::<Vec<_>>();
+            let pending =
+                super::provisional::pending_transitions(anchor.as_deref().unwrap_or(root), &store)?;
+            Ok((states, candidates, unreadable, pending))
+        });
+    let (states, candidates, unreadable, pending) = match states {
+        Ok(states) => states,
+        Err(error) => {
             failures.push(CollectionFailure {
-                project: label.clone(),
+                project: label,
                 anchor: anchor.as_ref().map(|path| path.display().to_string()),
                 component: "report-ledger",
-                reason: format!("unreadable changes: {}", unreadable.join(", ")),
+                reason: format!("{error:#}"),
             });
+            return (None, failures);
         }
-        let mut ledger = report::LedgerFacts {
-            unjudged_siblings: unjudged_siblings(&candidates),
-            unfinished_provisional_integrations: pending
+    };
+    if !unreadable.is_empty() {
+        failures.push(CollectionFailure {
+            project: label.clone(),
+            anchor: anchor.as_ref().map(|path| path.display().to_string()),
+            component: "report-ledger",
+            reason: format!("unreadable changes: {}", unreadable.join(", ")),
+        });
+    }
+    let mut ledger = report::LedgerFacts {
+        unjudged_siblings: unjudged_siblings(&candidates),
+        unfinished_provisional_integrations: pending
+            .into_iter()
+            .map(|row| serde_json::to_value(row).expect("serializable pending transition"))
+            .collect(),
+        ..Default::default()
+    };
+    let canonical_anchor = anchor
+        .as_ref()
+        .and_then(|anchor| anchor.canonicalize().ok());
+    for (change_id, state) in states.iter() {
+        ledger.provisional_integrations.extend(
+            crate::provisional::unresolved_at(state, observed)
                 .into_iter()
-                .map(|row| serde_json::to_value(row).expect("serializable pending transition"))
-                .collect(),
-            ..Default::default()
-        };
-        let canonical_anchor = anchor
-            .as_ref()
-            .and_then(|anchor| anchor.canonicalize().ok());
-        for (change_id, state) in states.iter() {
-            ledger.provisional_integrations.extend(
-                crate::provisional::unresolved_at(state, observed)
-                    .into_iter()
-                    .map(|row| {
-                        serde_json::to_value(row).expect("serializable provisional obligation")
-                    }),
-            );
-            match &state.closure {
-                None => {
-                    let days = u64::try_from((observed - state.opened_at).num_days()).unwrap_or(0);
-                    if let Some(brief) = state.latest_brief() {
-                        let keys = report::BriefKeys {
-                            plan: brief.plan_ref.clone().zip(brief.plan_slice.clone()),
-                            digest: crate::journal_exchange::body_digest(&brief.body),
-                        };
-                        ledger.open_briefs.insert(change_id.clone(), keys);
-                    }
-                    ledger
-                        .open
-                        .insert(change_id.clone(), (state.title.clone(), days));
-                }
-                Some(_) => {
-                    // A change begun without a worktree records the main
-                    // checkout, which outlives every change by design; only
-                    // a separate checkout left behind is worth a look.
-                    let separate = |path: &&str| {
-                        let path = Path::new(path);
-                        path.exists()
-                            && (anchor.is_none() || path.canonicalize().ok() != canonical_anchor)
+                .map(|row| serde_json::to_value(row).expect("serializable provisional obligation")),
+        );
+        match &state.closure {
+            None => {
+                let days = u64::try_from((observed - state.opened_at).num_days()).unwrap_or(0);
+                if let Some(brief) = state.latest_brief() {
+                    let keys = report::BriefKeys {
+                        plan: brief.plan_ref.clone().zip(brief.plan_slice.clone()),
+                        digest: crate::journal_exchange::body_digest(&brief.body),
                     };
-                    if let Some(worktree) = state.worktree.as_deref().filter(separate) {
-                        ledger
-                            .closed_worktrees
-                            .push((change_id.clone(), worktree.to_string()));
-                    }
+                    ledger.open_briefs.insert(change_id.clone(), keys);
+                }
+                ledger
+                    .open
+                    .insert(change_id.clone(), (state.title.clone(), days));
+            }
+            Some(_) => {
+                // A change begun without a worktree records the main
+                // checkout, which outlives every change by design; only
+                // a separate checkout left behind is worth a look.
+                let separate = |path: &&str| {
+                    let path = Path::new(path);
+                    path.exists()
+                        && (anchor.is_none() || path.canonicalize().ok() != canonical_anchor)
+                };
+                if let Some(worktree) = state.worktree.as_deref().filter(separate) {
+                    ledger
+                        .closed_worktrees
+                        .push((change_id.clone(), worktree.to_string()));
                 }
             }
         }
-        facts.insert(label, ledger);
     }
-    Ok((facts, failures))
+    (Some(ledger), failures)
 }
 
 /// For each promoted candidate, the registrations answering the same brief
@@ -2440,10 +2508,8 @@ fn unjudged_siblings(ledger: &super::candidate::Ledger) -> Vec<(String, String, 
     facts
 }
 
-/// The workspace backlog classified by `workspace_report`'s rules, with
-/// deltas against a previous report when one is given. Every artifact that
-/// left the backlog since that report is looked up in its journal, hot and
-/// archived, so its reason is the recorded one.
+/// The workspace backlog classified by the report's rules, with deltas
+/// against a previous report when one is given.
 fn workspace_report(
     ctx: &Ctx,
     scope: WorkspaceScope,
@@ -2456,31 +2522,58 @@ fn workspace_report(
         retired: show_retired,
     };
     let mut collected = collect_backlog(ctx, None, true, scope, listed, RankBasis::Blocking, true)?;
-    let (ledgers, mut failures) = report_ledger_facts(&collected.backlog)?;
-    let backlog = serde_json::to_value(&collected.backlog)?;
+    let (ledgers, failures) = report_ledger_facts(&collected, project_ledger_facts);
     let previous = match previous {
-        Some(path) => {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("cannot read previous report {}", path.display()))?;
-            let value: serde_json::Value = serde_json::from_str(&raw)
-                .with_context(|| format!("previous report {} is not JSON", path.display()))?;
-            let schema = value.get("schema").and_then(serde_json::Value::as_str);
-            ensure!(
-                schema == Some(report::SCHEMA),
-                "previous report {} has schema {:?}; expected {}",
-                path.display(),
-                schema.unwrap_or("none"),
-                report::SCHEMA
-            );
-            ensure!(value.get("scope") == backlog.get("scope"),
-                "previous report {} has a different workspace scope; compare the same scope or start without --previous",
-                path.display());
-            Some(value)
-        }
+        Some(path) => Some(previous_report(path, &collected.scope.view())?),
         None => None,
     };
+    let report = build_report(ctx, &mut collected, &ledgers, failures, previous.as_ref())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        report.render();
+    }
+    Ok(if collected.partial { 16 } else { 0 })
+}
+
+/// The report at `path`, which a report of `scope` is compared against: an
+/// `arc workspace report --json` of the same schema and scope.
+fn previous_report(path: &Path, scope: &impl Serialize) -> Result<serde_json::Value> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read previous report {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("previous report {} is not JSON", path.display()))?;
+    let schema = value.get("schema").and_then(serde_json::Value::as_str);
+    ensure!(
+        schema == Some(report::SCHEMA),
+        "previous report {} has schema {:?}; expected {}",
+        path.display(),
+        schema.unwrap_or("none"),
+        report::SCHEMA
+    );
+    ensure!(
+        value.get("scope") == Some(&serde_json::to_value(scope)?),
+        "previous report {} has a different workspace scope; compare the same scope or start without --previous",
+        path.display()
+    );
+    Ok(value)
+}
+
+/// The report of `collected` and its ledger facts, compared with `previous`
+/// when one is given. Each failure enters the collection manifest and marks
+/// the collection partial; every artifact that left the backlog since
+/// `previous` is looked up in its journal, hot and archived, so its reason is
+/// the recorded one.
+fn build_report(
+    ctx: &Ctx,
+    collected: &mut CollectedBacklog,
+    ledgers: &BTreeMap<String, report::LedgerFacts>,
+    mut failures: Vec<CollectionFailure>,
+    previous: Option<&serde_json::Value>,
+) -> Result<report::Report> {
+    let backlog = serde_json::to_value(&collected.backlog)?;
     let mut fates = BTreeMap::new();
-    if let Some(previous) = &previous {
+    if let Some(previous) = previous {
         let anchors: BTreeMap<String, String> = previous
             .get("projects")
             .and_then(serde_json::Value::as_array)
@@ -2590,13 +2683,7 @@ fn workspace_report(
     backlog["observation"]["finished_at"] = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         .into();
-    let report = report::build(&backlog, previous.as_ref(), &fates, &ledgers);
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        report.render();
-    }
-    Ok(if collected.partial { 16 } else { 0 })
+    Ok(report::build(&backlog, previous, &fates, ledgers))
 }
 
 /// The registration a command names: its journal directory, its slug, or
