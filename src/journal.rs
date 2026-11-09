@@ -7765,7 +7765,7 @@ struct Capability {
 /// name and reads it here; nothing about markers changes to accommodate it.
 fn capability(events: &[JournalEvent], name: &str) -> Option<Capability> {
     events.iter().enumerate().find_map(|(position, event)| {
-        (event.known() && event.event == "capability" && event.name.as_deref() == Some(name)).then(
+        (event.event == "capability" && event.name.as_deref() == Some(name) && event.known()).then(
             || Capability {
                 position,
                 since: event.ts.clone(),
@@ -7867,10 +7867,10 @@ fn question_deliveries(
     events
         .iter()
         .filter(|event| {
-            event.known()
-                && event.event == "question-delivered"
+            event.event == "question-delivered"
                 && event.file.as_deref() == Some(file)
                 && event.question_id.as_deref() == Some(question)
+                && event.known()
         })
         .map(|event| QuestionDelivery {
             to: event.delivered_to.clone().unwrap_or_default(),
@@ -8592,7 +8592,7 @@ fn questions_from(
     let amendments = |file: &str| by_file.get(file).unwrap_or(&unamended);
     let answered: HashSet<(&str, &str)> = events
         .iter()
-        .filter(|event| event.known() && event.event == "answer")
+        .filter(|event| event.event == "answer" && event.known())
         .filter_map(|event| Some((event.file.as_deref()?, event.question_id.as_deref()?)))
         .filter(|(file, question)| amendments(file).answer_stands(question))
         .collect();
@@ -8601,7 +8601,7 @@ fn questions_from(
     for (posed_at, event) in events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event.known() && event.event == "question")
+        .filter(|(_, event)| event.event == "question" && event.known())
     {
         let (Some(file), Some(question)) = (event.file.as_deref(), event.question_id.as_deref())
         else {
@@ -8617,10 +8617,10 @@ fn questions_from(
             events
                 .iter()
                 .filter(|event| {
-                    event.known()
-                        && event.event == "position"
+                    event.event == "position"
                         && event.file.as_deref() == Some(file)
                         && event.question_id.as_deref() == Some(question)
+                        && event.known()
                         && !amendments(file).position_retracted(event)
                         && amendments(file).position_branch(event).as_deref() == Some(option)
                 })
@@ -11023,23 +11023,30 @@ fn terminal_kind(event: &JournalEvent) -> Option<&'static str> {
 fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
     let mut claims: Vec<ArtifactClaim> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    for event in events.iter().filter(|event| event.known()) {
+    // Only an event naming the artifact, or superseding it, acts on its
+    // claims. That test is cheap, so it runs before the full validity check.
+    let addressed = |event: &&JournalEvent| {
+        event.file.as_deref() == Some(file) || event.supersedes.as_deref() == Some(file)
+    };
+    for event in events
+        .iter()
+        .filter(addressed)
+        .filter(|event| event.known())
+    {
         let Some(timestamp) = event.timestamp() else {
             continue;
         };
         // A terminal event ends every claim still open at that point, and is
         // not addressed to any one of them.
-        if event.file.as_deref() == Some(file) || event.supersedes.as_deref() == Some(file) {
-            if let Some(kind) = terminal_kind(event) {
-                for claim in claims.iter_mut().filter(|claim| claim.is_open()) {
-                    claim.closure = Some(ClaimClosure {
-                        outcome: None,
-                        ended_by: Some(kind.to_string()),
-                        ts: event.ts.clone(),
-                    });
-                }
-                continue;
+        if let Some(kind) = terminal_kind(event) {
+            for claim in claims.iter_mut().filter(|claim| claim.is_open()) {
+                claim.closure = Some(ClaimClosure {
+                    outcome: None,
+                    ended_by: Some(kind.to_string()),
+                    ts: event.ts.clone(),
+                });
             }
+            continue;
         }
         if event.file.as_deref() != Some(file) {
             continue;
@@ -12736,20 +12743,19 @@ fn artifact_resolution(
     filename: &str,
 ) -> (Option<String>, Option<String>) {
     if let Some(outcome) = events.iter().rev().find_map(|event| {
-        (event.known() && event.event == "consumed" && event.file.as_deref() == Some(filename))
+        (event.event == "consumed" && event.file.as_deref() == Some(filename) && event.known())
             .then(|| event.outcome.clone())
             .flatten()
     }) {
         return (Some(outcome), Some("consumption".to_string()));
     }
     if let Some(_event) = events.iter().rev().find(|event| {
-        event.known()
-            && matches!(
-                event.event.as_str(),
-                "archived" | "storage-completed" | "note"
-            )
-            && event.file.as_deref() == Some(filename)
+        matches!(
+            event.event.as_str(),
+            "archived" | "storage-completed" | "note"
+        ) && event.file.as_deref() == Some(filename)
             && event.outcome.as_deref() == Some("unresolved")
+            && event.known()
     }) {
         return (Some("unresolved".to_string()), Some("explicit".to_string()));
     }
@@ -12760,7 +12766,7 @@ fn position_metadata(events: &[JournalEvent], filename: &str) -> (Option<String>
     let positions: Vec<&JournalEvent> = events
         .iter()
         .filter(|event| {
-            event.known() && event.event == "position" && event.file.as_deref() == Some(filename)
+            event.event == "position" && event.file.as_deref() == Some(filename) && event.known()
         })
         .collect();
     let last = positions.last().map(|event| event.ts.clone());
@@ -13126,9 +13132,9 @@ fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
         .iter()
         .rev()
         .find(|event| {
-            event.known()
-                && event.event == "consumed"
+            event.event == "consumed"
                 && event.file.as_deref() == Some(filename)
+                && event.known()
                 && event
                     .outcome
                     .as_deref()
@@ -16484,7 +16490,7 @@ fn position_events<'a>(events: &'a [JournalEvent], filename: &str) -> Vec<&'a Jo
     events
         .iter()
         .filter(|event| {
-            event.known() && event.event == "position" && event.file.as_deref() == Some(filename)
+            event.event == "position" && event.file.as_deref() == Some(filename) && event.known()
         })
         .collect()
 }

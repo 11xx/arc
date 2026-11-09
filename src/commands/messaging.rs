@@ -188,12 +188,7 @@ pub(crate) fn collect_debts(
                 .map(|debt| (state, debt))
         })
         .collect();
-    let ranges: Vec<(String, String)> = owed
-        .iter()
-        .filter_map(|(state, debt)| debt_range(state, debt))
-        .map(|(base, head)| (base.to_string(), head.to_string()))
-        .collect();
-    let changed = crate::gitio::changed_paths_of(&ctx.cwd, &ranges);
+    let surfaces = DebtSurfaces::read(&ctx.cwd, owed.iter().copied());
     let mut entries = Vec::new();
     for (state, debt) in owed {
         entries.push(DebtEntry {
@@ -208,9 +203,7 @@ pub(crate) fn collect_debts(
                 .debt_subject_patchset()
                 .map(crate::status::review_subject_for_patchset),
             declared_at: debt.declared_at,
-            surfaces: debt_range(state, debt)
-                .and_then(|(base, head)| changed.get(&(base.to_string(), head.to_string())))
-                .cloned(),
+            surfaces: surfaces.of(state, debt),
         });
     }
     entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
@@ -265,13 +258,28 @@ pub(crate) fn collect_debts(
     })
 }
 
-pub(crate) fn debt_surfaces(
-    cwd: &Path,
-    state: &ChangeState,
-    debt: &crate::state::Debt,
-) -> Option<Vec<String>> {
-    let (base, head) = debt_range(state, debt)?;
-    crate::gitio::changed_paths(cwd, base, head).ok()
+/// The paths each owed debt's range touches, read for all of them in a few
+/// batched Git commands rather than one diff per debt.
+pub(crate) struct DebtSurfaces(std::collections::HashMap<(String, String), Vec<String>>);
+
+impl DebtSurfaces {
+    pub(crate) fn read<'a>(
+        cwd: &Path,
+        owed: impl IntoIterator<Item = (&'a ChangeState, &'a crate::state::Debt)>,
+    ) -> Self {
+        let ranges: Vec<(String, String)> = owed
+            .into_iter()
+            .filter_map(|(state, debt)| debt_range(state, debt))
+            .map(|(base, head)| (base.to_string(), head.to_string()))
+            .collect();
+        Self(crate::gitio::changed_paths_of(cwd, &ranges))
+    }
+
+    /// The paths `debt` on `state` touches, when its range was read.
+    pub(crate) fn of(&self, state: &ChangeState, debt: &crate::state::Debt) -> Option<Vec<String>> {
+        let (base, head) = debt_range(state, debt)?;
+        self.0.get(&(base.to_string(), head.to_string())).cloned()
+    }
 }
 
 /// The range whose diff a debt's surfaces are: the integration, else the

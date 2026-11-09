@@ -1586,7 +1586,8 @@ fn reconcile_artifact(
     }
 }
 
-/// Observe one reachable project into its backlog row.
+/// Observe one reachable project into its backlog row. `queues`, when given,
+/// is what its ledger owes as already observed; otherwise it is read here.
 ///
 /// Components are read independently: a failed ledger read still leaves the
 /// journal facts readable, and each failure is named on the row so the empty
@@ -1595,6 +1596,7 @@ fn project_row(
     ctx: &Ctx,
     project: &crate::registry::Project,
     anchor: &Path,
+    queues: Option<Result<LedgerQueues>>,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
     show_items: bool,
 ) -> ProjectBacklog {
@@ -1602,7 +1604,7 @@ fn project_row(
 
     let (queues, changes) = match &project.ledger {
         Some(root) => {
-            let queues = match ledger_queues(root, Some(anchor)) {
+            let queues = match queues.unwrap_or_else(|| ledger_queues(root, Some(anchor))) {
                 Ok(queues) => queues,
                 Err(error) => {
                     failures.push(ComponentFailure {
@@ -1840,7 +1842,19 @@ fn collect_backlog(
     let mut failed = 0usize;
     let observed_at = chrono::Utc::now();
 
-    for project in crate::registry::projects(&cfg)? {
+    let registered = crate::registry::projects(&cfg)?;
+    let mut queues = observe_queues(
+        registered
+            .iter()
+            .filter(|project| {
+                project.retired.is_none()
+                    && project.reachable
+                    && scope.includes(project.anchor.as_deref())
+            })
+            .filter_map(|project| Some((project.ledger.clone()?, project.anchor.clone()?)))
+            .collect(),
+    );
+    for project in registered {
         if let Some(retirement) = &project.retired {
             if scope.includes(project.anchor.as_deref()) {
                 retired_count += 1;
@@ -1888,7 +1902,11 @@ fn collect_backlog(
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-        let entry = project_row(ctx, &project, &anchor, cutoff, show_items);
+        let observed = project
+            .ledger
+            .clone()
+            .and_then(|root| queues.remove(&(root, anchor.clone())));
+        let entry = project_row(ctx, &project, &anchor, observed, cutoff, show_items);
         for failure in &entry.failures {
             failures.push(CollectionFailure {
                 project: project.label(),
@@ -2888,6 +2906,41 @@ struct LedgerQueues {
     shared_surfaces: BTreeMap<String, Vec<String>>,
 }
 
+/// What each `(ledger, checkout)` owes, read on several threads, largest
+/// ledger first. Each project's observation then runs in order and takes
+/// its ledger reads from the process's shared reads.
+fn observe_queues(
+    mut ledgers: Vec<(PathBuf, PathBuf)>,
+) -> BTreeMap<(PathBuf, PathBuf), Result<LedgerQueues>> {
+    let changes =
+        |root: &Path| std::fs::read_dir(root.join("changes")).map_or(0, |entries| entries.count());
+    ledgers.sort_by_cached_key(|(root, _)| std::cmp::Reverse(changes(root)));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let observed = std::sync::Mutex::new(BTreeMap::new());
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |count| count.get())
+        .min(16)
+        .min(ledgers.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some((root, anchor)) =
+                    ledgers.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                {
+                    let queues = ledger_queues(root, Some(anchor));
+                    observed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert((root.clone(), anchor.clone()), queues);
+                }
+            });
+        }
+    });
+    observed
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
     let Some(mut store) = Store::open_at(root)? else {
         return Ok(LedgerQueues::default());
@@ -2897,6 +2950,16 @@ fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
     }
     let states = store.readable_states()?;
     let now = chrono::Utc::now();
+    let surfaces = crate::commands::messaging::DebtSurfaces::read(
+        root,
+        states.values().filter_map(|state| {
+            state
+                .debt
+                .as_ref()
+                .filter(|_| state.debt_outstanding())
+                .map(|debt| (state, debt))
+        }),
+    );
     let mut needs_review = Vec::new();
     let mut no_patchset = Vec::new();
     let mut debt_owed = Vec::new();
@@ -2906,7 +2969,7 @@ fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
         if state.debt_outstanding() {
             if let Some(debt) = &state.debt {
                 debt_owed.push(DebtOwed {
-                    surfaces: crate::commands::messaging::debt_surfaces(root, state, debt),
+                    surfaces: surfaces.of(state, debt),
                     change_id: state.change_id.clone(),
                     declared_at: debt.declared_at,
                     age_days: days_between(debt.declared_at, now),
