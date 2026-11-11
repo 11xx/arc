@@ -116,8 +116,12 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
 
 /// `program`'s output, if it answers within `deadline`.
 fn run_within(program: &std::ffi::OsStr, deadline: Duration) -> Result<String, &'static str> {
+    run_command_within(Command::new(program), deadline)
+}
+
+fn run_command_within(mut command: Command, deadline: Duration) -> Result<String, &'static str> {
     let mut group = crate::process_group::OwnedGroup::spawn(
-        Command::new(program)
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -168,7 +172,8 @@ mod tests {
     /// as it exits: with the group's only other member escaped into its own
     /// session, the reaped ID is free for reuse, and the kill sent to clear
     /// the leader's pipe would reach whatever process group next takes that
-    /// number.
+    /// number. Fixture scripts are read by the shell so a writable descriptor
+    /// inherited by another fork cannot prevent the status process from starting.
     #[test]
     fn the_status_leader_stays_reserved_until_its_group_is_stopped() {
         use crate::process_group::test_support::{leader_script, LeaderObservation, HANG_BOUND};
@@ -181,12 +186,74 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .unwrap();
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let directory = std::ffi::CString::new(cwd.path().to_str().unwrap()).unwrap();
+        // SAFETY: inotify owns its descriptor and borrows the NUL-terminated path.
+        let mut notifications = unsafe {
+            let fd = libc::inotify_init1(libc::IN_CLOEXEC);
+            assert!(fd >= 0);
+            assert!(libc::inotify_add_watch(fd, directory.as_ptr(), libc::IN_CLOSE_WRITE) >= 0);
+            std::fs::File::from_raw_fd(fd)
+        };
+        let (completed, completion) = std::os::unix::net::UnixStream::pair().unwrap();
         let path = program.clone();
-        let status = std::thread::spawn(move || run_within(path.as_os_str(), HANG_BOUND));
+        let status = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.arg(&path);
+            let answer = run_command_within(command, HANG_BOUND);
+            drop(completion);
+            answer
+        });
+        let mut status = Some(status);
+        let mut finished = false;
+        loop {
+            if std::fs::read_to_string(cwd.path().join("leader.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                !finished,
+                "status fixture ended before writing its PID: {:?}",
+                status.take().unwrap().join().unwrap()
+            );
+            let mut ready = [
+                libc::pollfd {
+                    fd: notifications.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: completed.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: poll borrows two initialized descriptors with a deadlock watchdog.
+            let observed =
+                unsafe { libc::poll(ready.as_mut_ptr(), 2, HANG_BOUND.as_millis() as i32) };
+            if observed < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            assert!(observed > 0, "status fixture never became ready");
+            if ready[0].revents != 0 {
+                let count = notifications.read(&mut [0; 4096]).unwrap();
+                assert!(count > 0, "status readiness watcher closed");
+            }
+            finished = ready[1].revents != 0;
+        }
         let observation = LeaderObservation::new(cwd.path());
         let reserved = observation.reserved_after_exit();
         observation.kill_escaped();
-        let answer = status.join().unwrap();
+        let answer = status.take().unwrap().join().unwrap();
         assert!(
             reserved,
             "status leader was reaped while its group could still be signalled"

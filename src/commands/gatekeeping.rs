@@ -3172,6 +3172,8 @@ fn run_gate_in_shell(
         })
     });
 
+    #[cfg(debug_assertions)]
+    crate::import_authorization::test_rendezvous("gate-command-spawned")?;
     let mut exited = false;
     let mut reader_done = false;
     let timed_out = loop {

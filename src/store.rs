@@ -838,10 +838,11 @@ pub(crate) fn shed_events() {
     shared::shed_events();
 }
 
-/// Forget the process's shared ledger reads after a ledger write.
-pub(crate) fn forget_shared_reads() {
+/// Forget shared ledger reads, scoping locked replica reads to the written path.
+/// A refresh without a write path forgets every held read.
+pub(crate) fn forget_shared_reads(write_path: Option<&Path>) {
     shared::forget();
-    crate::replica::forget_held_events();
+    crate::replica::forget_held_events(write_path);
     crate::journal::forget_projections();
 }
 
@@ -2419,7 +2420,7 @@ impl Store {
         cfg.schema_version = introduced_in;
         let body = serde_json::to_vec_pretty(&cfg)?;
         let temporary = config_path.with_extension(format!("json.{}", ids::new_identifier()));
-        forget_shared_reads();
+        forget_shared_reads(Some(&self.root));
         fs::write(&temporary, &body)?;
         fs::rename(&temporary, &config_path)
             .with_context(|| format!("cannot stamp store format in {}", config_path.display()))
@@ -3592,7 +3593,7 @@ impl Store {
 /// Durably publishes a new file by fsyncing its contents, hard-linking it into
 /// place, and fsyncing the containing directory.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
-    forget_shared_reads();
+    forget_shared_reads(Some(path));
     let file_name = path
         .file_name()
         .context("exclusive-write path has no file name")?

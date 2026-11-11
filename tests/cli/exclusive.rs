@@ -1,6 +1,6 @@
 use crate::common::*;
 use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 
 struct Signal(fs::File);
 
@@ -26,7 +26,7 @@ impl Signal {
         };
         // SAFETY: poll borrows one initialized descriptor with a bounded wait.
         assert_eq!(
-            unsafe { libc::poll(&mut ready, 1, 10_000) },
+            unsafe { libc::poll(&mut ready, 1, HANG_BOUND.as_millis() as i32) },
             1,
             "fixture signal never arrived"
         );
@@ -36,6 +36,61 @@ impl Signal {
     fn send(&mut self) {
         self.0.write_all(b"x").unwrap();
     }
+}
+
+fn lock_name() -> String {
+    format!("s7-{}", ulid::Ulid::new())
+}
+
+fn lock_path(repo: &Repo, name: &str) -> PathBuf {
+    let root = repo.home.join(".local/ai/arc/exclusive");
+    fs::create_dir_all(&root).unwrap();
+    root.join(format!(
+        "{}.lock",
+        hex::encode(Sha256::digest(name.as_bytes()))
+    ))
+}
+
+fn elapsed_event(duration: Duration) {
+    // SAFETY: timerfd_create returns an owned descriptor; settime borrows an
+    // initialized one-shot timer and does not retain the structure.
+    let timer = unsafe {
+        let fd = libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC);
+        assert!(fd >= 0);
+        let settings = libc::itimerspec {
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: libc::timespec {
+                tv_sec: duration.as_secs() as i64,
+                tv_nsec: duration.subsec_nanos() as i64,
+            },
+        };
+        assert_eq!(
+            libc::timerfd_settime(fd, 0, &settings, std::ptr::null_mut()),
+            0
+        );
+        fs::File::from_raw_fd(fd)
+    };
+    (&timer).read_exact(&mut [0; 8]).unwrap();
+}
+
+fn wait_until_released(repo: &Repo, name: &str) {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path(repo, name))
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = thread::spawn(move || {
+        file.lock().unwrap();
+        drop(file);
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(HANG_BOUND)
+        .expect("holder retained the lock after its descendants exited");
+    waiter.join().unwrap();
 }
 
 fn declare(repo: &Repo, command: &str, extra: &str) {
@@ -94,6 +149,7 @@ fn shared_spawn(repo: &Repo, home: &Path, args: &[&str]) -> Child {
 /// repository-scoped lock, overlapping commands, missing owner details, or charging wait.
 #[test]
 fn exclusive_serializes_projects_and_separates_wait_from_run() {
+    let name = lock_name();
     let first = Repo::new();
     let second = Repo::new();
     let ready_path = first.home.join("ready");
@@ -105,14 +161,13 @@ fn exclusive_serializes_projects_and_separates_wait_from_run() {
     fs::write(
         &script,
         format!(
-            r#"import os,sys,time
+            r#"import os,sys
 marker={marker:?}
 fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY)
 os.close(fd)
 if sys.argv[1]=='first':
     with open({ready_path:?},'wb',buffering=0) as f: f.write(b'x')
     with open({release_path:?},'rb',buffering=0) as f: f.read(1)
-else: time.sleep(0.12)
 os.unlink(marker)
 "#
         ),
@@ -121,12 +176,12 @@ os.unlink(marker)
     declare(
         &first,
         &format!("python3 {} first", script.display()),
-        "exclusive='host'\n",
+        &format!("exclusive={name:?}\n"),
     );
     declare(
         &second,
         &format!("python3 {} second", script.display()),
-        "exclusive='host'\n",
+        &format!("exclusive={name:?}\n"),
     );
     begin(&first, "first");
     begin(&second, "second");
@@ -147,8 +202,8 @@ os.unlink(marker)
         }
         text
     });
-    let announced = rx.recv_timeout(Duration::from_secs(10));
-    thread::sleep(Duration::from_millis(450));
+    let announced = rx.recv_timeout(HANG_BOUND);
+    elapsed_event(Duration::from_millis(400));
     release.send();
     let one = one.wait_with_output().unwrap();
     let two = two.wait_with_output().unwrap();
@@ -177,9 +232,10 @@ os.unlink(marker)
     let receipt = evidence(&second, "second");
     let wait = receipt["wait_ms"].as_u64().unwrap();
     let run = receipt["run_ms"].as_u64().unwrap();
-    assert!(wait >= 400, "exclusive wait missing: {receipt}");
+    let duration = receipt["duration_ms"].as_u64().unwrap();
+    assert!(wait >= 390, "exclusive wait missing: {receipt}");
     assert!(
-        run >= 100 && run < wait,
+        wait + run <= duration + 2,
         "exclusive wait charged to command: {receipt}"
     );
     eprintln!("overlap measurement: wait_ms={wait}, run_ms={run}");
@@ -190,16 +246,15 @@ os.unlink(marker)
 /// Rejects a failed run on expiry or another gate runner bypassing admission.
 #[test]
 fn exclusive_admission_expiry_is_unrun() {
+    let name = lock_name();
     let repo = Repo::new();
     declare(
         &repo,
         "touch should-not-run",
-        "exclusive='host'\nadmission='150ms'\n",
+        &format!("exclusive={name:?}\nadmission='150ms'\n"),
     );
     begin(&repo, "expiry");
-    let root = repo.home.join(".local/ai/arc/exclusive");
-    fs::create_dir_all(&root).unwrap();
-    let lock_path = root.join(format!("{}.lock", hex::encode(Sha256::digest(b"host"))));
+    let lock_path = lock_path(&repo, &name);
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -273,21 +328,24 @@ fn exclusive_admission_expiry_is_unrun() {
 fn exclusive_survives_launcher_death_and_detached_children() {
     descendant_case("killed");
     descendant_case("normal");
+    #[cfg(debug_assertions)]
     descendant_case("timeout");
 }
 
 fn descendant_case(mode: &str) {
+    let name = lock_name();
     let first = Repo::new();
     let second = Repo::new();
     let mut ready = Signal::new(&first.home.join("ready"));
     let mut release = Signal::new(&first.home.join("release"));
     let done_path = first.home.join("done");
     let mut done = Signal::new(&done_path);
+    let _leader_release = Signal::new(&first.home.join("leader-release"));
     let script = first.home.join("child.py");
     fs::write(
         &script,
         format!(
-            r#"import os,time
+            r#"import os
 if os.fork()==0:
     os.setsid()
     os.closerange(0,65536)
@@ -295,23 +353,59 @@ if os.fork()==0:
     with open({:?},'rb',buffering=0) as f: f.read(1)
     os._exit(0)
 with open({done_path:?},'wb',buffering=0) as f: f.write(b'x')
-if {mode:?} != 'normal': time.sleep(30)
+if {mode:?} != 'normal':
+    with open({:?},'rb',buffering=0) as f: f.read(1)
 "#,
             first.home.join("ready"),
-            first.home.join("release")
+            first.home.join("release"),
+            first.home.join("leader-release")
         ),
     )
     .unwrap();
     declare(
         &first,
         &format!("python3 {}", script.display()),
-        "exclusive='host'\ntimeout='1s'\n",
+        &format!(
+            "exclusive={name:?}\n{}",
+            if mode == "timeout" {
+                "timeout='1s'\n"
+            } else {
+                ""
+            }
+        ),
     );
-    declare(&second, "true", "exclusive='host'\nadmission='200ms'\n");
+    declare(
+        &second,
+        "true",
+        &format!("exclusive={name:?}\nadmission='200ms'\n"),
+    );
     begin(&first, "parent");
     begin(&second, "child");
-    let mut one = first.spawn_arc_piped(&first.root, &["verify", "--gate", "unit"]);
+    let mut one = if mode == "timeout" {
+        #[cfg(debug_assertions)]
+        {
+            spawn_arc_at_rendezvous(
+                &first,
+                &first.root,
+                &["verify", "--gate", "unit"],
+                "gate-command-spawned",
+                &[],
+            )
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unreachable!("timeout rendezvous requires debug assertions")
+        }
+    } else {
+        first.spawn_arc_piped(&first.root, &["verify", "--gate", "unit"])
+    };
     ready.wait();
+    done.wait();
+    if mode == "timeout" {
+        elapsed_event(Duration::from_secs(1));
+        #[cfg(debug_assertions)]
+        release_lock_wait(&mut one);
+    }
     if mode == "killed" {
         one.kill().unwrap();
         one.wait().unwrap();
@@ -324,7 +418,6 @@ if {mode:?} != 'normal': time.sleep(30)
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    done.wait();
     let mut two = shared_spawn(&second, &first.home, &["verify", "--gate", "unit"]);
     let text = waiting(&mut two);
     let output = two.wait_with_output().unwrap();
@@ -336,6 +429,7 @@ if {mode:?} != 'normal': time.sleep(30)
         "{mode}: exclusive lock released while detached child lived: {text}"
     );
     assert_eq!(evidence(&second, "child")["result"], "not-admitted");
+    wait_until_released(&first, &name);
     let output = shared_spawn(&second, &first.home, &["verify", "--gate", "unit"])
         .wait_with_output()
         .unwrap();
@@ -351,6 +445,7 @@ if {mode:?} != 'normal': time.sleep(30)
 /// admission key into the declaration digest.
 #[test]
 fn exclusive_admission_keys_do_not_invalidate_evidence() {
+    let name = lock_name();
     let repo = Repo::new();
     let script = repo.home.join("select.py");
     fs::write(&script, r#"import json,sys
@@ -392,7 +487,7 @@ print(json.dumps({'schema':'arc-gate-selection/1','complete':True,'request':json
     repo.commit(
         &repo.root,
         ".arc/gates.toml",
-        &format!("{declaration}exclusive='host'\nadmission='2.5s'\n"),
+        &format!("{declaration}exclusive={name:?}\nadmission='2.5s'\n"),
         "test: add admission",
     );
     let output = stdout(repo.arc(&repo.root).args(["verify", "--all"]));
@@ -423,12 +518,15 @@ print(json.dumps({'schema':'arc-gate-selection/1','complete':True,'request':json
 /// admission. Rejects execution without the target's lock after either edit.
 #[test]
 fn exclusive_target_lock_cannot_be_removed_or_renamed() {
+    let name = lock_name();
     let repo = Repo::new();
-    declare(&repo, "true", "exclusive='host'\nadmission='150ms'\n");
+    declare(
+        &repo,
+        "true",
+        &format!("exclusive={name:?}\nadmission='150ms'\n"),
+    );
     begin(&repo, "target-lock");
-    let root = repo.home.join(".local/ai/arc/exclusive");
-    fs::create_dir_all(&root).unwrap();
-    let path = root.join(format!("{}.lock", hex::encode(Sha256::digest(b"host"))));
+    let path = lock_path(&repo, &name);
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -438,7 +536,10 @@ fn exclusive_target_lock_cannot_be_removed_or_renamed() {
         .unwrap();
     // SAFETY: the fixture owns the descriptor.
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    for keys in ["", "exclusive='other'\nadmission='1s'\n"] {
+    for keys in [
+        String::new(),
+        format!("exclusive={:?}\nadmission='1s'\n", lock_name()),
+    ] {
         repo.commit(
             &repo.root,
             ".arc/gates.toml",

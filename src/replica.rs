@@ -182,7 +182,7 @@ impl Drop for ReplicaLock {
 
 /// The replica events of each store whose replica-state lock this process
 /// holds, read at most once under the lock. A ledger write the process makes
-/// forgets them, and releasing the lock drops them.
+/// beneath that store forgets them, and releasing the lock drops them.
 mod held {
     use super::ReplicaEvent;
     use std::collections::BTreeMap;
@@ -204,8 +204,14 @@ mod held {
         with(|held| held.remove(root));
     }
 
-    pub(super) fn forget() {
-        with(|held| held.values_mut().for_each(|events| *events = None));
+    pub(super) fn forget(write_path: Option<&Path>) {
+        with(|held| {
+            for (root, events) in held {
+                if write_path.is_none_or(|path| path.starts_with(root)) {
+                    *events = None;
+                }
+            }
+        });
     }
 
     /// The events `read` gives, held while the lock is: `None` when this
@@ -232,9 +238,9 @@ mod held {
     }
 }
 
-/// Forget the replica events read under a held lock: the process wrote.
-pub(crate) fn forget_held_events() {
-    held::forget();
+/// Forget held replica reads affected by a write, or all of them for a refresh.
+pub(crate) fn forget_held_events(write_path: Option<&Path>) {
+    held::forget(write_path);
 }
 
 /// Serialize every operation whose result depends on local replica state.
@@ -1742,7 +1748,7 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
 
 /// Publish one complete JSON record without replacing an existing fact.
 pub(crate) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
-    crate::store::forget_shared_reads();
+    crate::store::forget_shared_reads(Some(path));
     let file_name = path
         .file_name()
         .context("replica event path has no file name")?
@@ -1855,8 +1861,8 @@ mod authority_tests {
 
     /// Claim: under the held replica-state lock the replica events are read
     /// once, a replica write this process makes under it is seen by the next
-    /// read, and releasing the lock ends the held read. Rejects a held read
-    /// that outlives the process's own write or the lock.
+    /// read, unrelated stores cannot evict it, and releasing the lock ends it.
+    /// Rejects a held read invalidated by another store or retained after its own write.
     #[test]
     fn a_read_under_the_held_lock_sees_this_process_write_and_ends_with_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1873,6 +1879,9 @@ mod authority_tests {
         let events_dir = replica_root(&store).join("events");
         let written = json_files(&events_dir).unwrap();
         fs::remove_file(&written[0]).unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = store_at(other_dir.path());
+        write_local_event(&other, &mut initial.clone()).unwrap();
         assert_eq!(
             load_events(&store).unwrap().len(),
             1,

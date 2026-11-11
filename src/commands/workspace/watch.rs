@@ -340,7 +340,7 @@ impl<'a> Watch<'a> {
         let started_at = chrono::Utc::now();
         let dirty = std::mem::take(&mut self.dirty);
         if dirty.everything {
-            crate::store::forget_shared_reads();
+            crate::store::forget_shared_reads(None);
             crate::journal::forget_projections();
             crate::gitio::retain_range_paths(|_| false);
             self.rows.clear();
