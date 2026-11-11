@@ -22,6 +22,7 @@ mod external;
 mod findings;
 mod forge_cmd;
 pub(crate) mod fork;
+mod gate_reports;
 mod gatekeeping;
 mod history;
 mod hooks;
@@ -92,6 +93,7 @@ pub use doctor::run as run_doctor;
 pub use external::{record_verdict as record_external_verdict, ExternalVerdictArgs};
 pub use findings::{findings, FindingsFormat};
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_observe, forge_pr_state};
+pub use gate_reports::{gate_report, measure_gates};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
     check_selection, close, done, hold, integrate, rebase, release_hold, snapshot_with_verify,
@@ -159,6 +161,8 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "inbox",
     "catchup",
     "stats",
+    "gates",
+    "workspace gates",
     "resume",
     "cost show",
     "cost evidence",
@@ -193,6 +197,9 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "inbox",
     "catchup",
     "stats",
+    "gates",
+    "gates measure",
+    "workspace gates",
     "diff",
     "chain",
     "events",

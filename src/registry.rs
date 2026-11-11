@@ -245,7 +245,7 @@ fn configured_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>
 /// Opening never creates: a project with no ledger reports none. A project that
 /// is not a Git repository has no ledger either, which is not an error — the
 /// journal is what registered it.
-fn ledger_at(cfg: &Config, anchor: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn ledger_at(cfg: &Config, anchor: &Path) -> Result<Option<PathBuf>> {
     // `ARC_DATA_DIR` names one store for one repository, so it cannot stand for
     // every project in a sweep — but it is exactly right for the project the
     // caller is standing in, whose ledger would otherwise be reported missing

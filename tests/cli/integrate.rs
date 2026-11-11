@@ -1087,7 +1087,8 @@ fn reports_over_many_changes_read_past_a_broken_policy() {
 
 /// The guide's read-only list is the contract: every command on it, in each
 /// form that reads something different, runs from a target checkout whose
-/// committed policy cannot be parsed. A command added to the list without a
+/// committed policy cannot be parsed. Rejects an inspection blocked by append policy.
+/// A command added to the list without a
 /// form here fails the test, so the list cannot promise what nothing checks.
 #[test]
 fn every_read_only_command_reads_past_a_broken_policy() {
@@ -1229,6 +1230,13 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["doctor", "--json"],
         vec!["hooks", "status"],
         vec!["instructions", "git"],
+        vec!["gates"],
+        vec!["gates", "--json"],
+        vec!["gates", "measure", "--runs", "1"],
+        vec!["gates", "measure", "--runs", "1", "--gate", "missing"],
+        vec!["workspace", "gates"],
+        vec!["workspace", "gates", "--json"],
+        vec!["workspace", "gates", "--here", "--retired", "--json"],
         vec!["workspace", "list", "--json"],
         vec!["workspace", "inbox", "--json"],
         vec!["workspace", "inventory", "--json"],
@@ -1276,7 +1284,9 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         .collect();
     let mut exercised = exercised;
     for args in &extra_forms {
-        let path = if listed.contains(args[0]) {
+        let path = if args.starts_with(&["gates", "measure"]) {
+            "gates measure".to_string()
+        } else if listed.contains(args[0]) {
             args[0].to_string()
         } else if args[..2] == ["journal", "lane"] {
             args[..3].join(" ")

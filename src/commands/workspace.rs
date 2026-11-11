@@ -2,6 +2,7 @@
 //! many change ledgers. All read-only: no store is ever created while
 //! scanning, and `restack` only prints commands — arc never rewrites branches.
 
+mod gates;
 mod watch;
 
 use super::*;
@@ -24,7 +25,7 @@ fn normalized_cutoff(cutoff: chrono::DateTime<chrono::Utc>) -> String {
 /// Only Git's explicit non-repository answer means there is no fork namespace.
 /// A directory whose common Git directory resolves is a repository, and that
 /// answer is the one later readers of the same directory share.
-fn has_git_repository(anchor: &Path) -> Result<bool> {
+pub(super) fn has_git_repository(anchor: &Path) -> Result<bool> {
     if crate::gitio::common_dir(anchor).is_ok() {
         return Ok(true);
     }
@@ -55,6 +56,10 @@ fn ask_git_repository(anchor: &Path) -> Result<bool> {
 }
 
 pub enum WorkspaceView {
+    Gates {
+        scope: WorkspaceScope,
+        show_retired: bool,
+    },
     List,
     Inbox {
         scope: WorkspaceScope,
@@ -379,6 +384,10 @@ impl BacklogSelection {
 
 pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
     match view {
+        WorkspaceView::Gates {
+            scope,
+            show_retired,
+        } => gates::report(scope, show_retired, json),
         WorkspaceView::List => workspace_list(&workspace_stores()?, json).map(|()| 0),
         WorkspaceView::Inbox { scope } => workspace_inbox(ctx, scope, json).map(|()| 0),
         WorkspaceView::Inventory {

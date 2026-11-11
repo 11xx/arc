@@ -127,6 +127,15 @@ pub struct Capture {
 }
 
 impl Capture {
+    /// Drain output with bounded memory and without creating an artifact file.
+    pub fn transient() -> Self {
+        Self {
+            storage: None,
+            error: None,
+            producing_store: String::new(),
+        }
+    }
+
     pub fn new(root: &Path, producing_store: &str) -> Self {
         let (storage, error) = match Storage::new(root) {
             Ok(storage) => (Some(storage), None),

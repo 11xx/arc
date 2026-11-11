@@ -5434,6 +5434,39 @@ FILES
   with `git update-ref -d`.
 
 GATES
+  `arc gates [--json]` lists every declaration on this tree beside its cost
+  across changes, from per-change verification events. No budget is declared.
+  Runs, exact-tree reuses and selector skips are counted separately; attested
+  evidence and not-admitted attempts are separate from runs and timings.
+  History groups gates by name across declarations. Median (lower middle),
+  p90 (nearest rank) and worst use command `run_ms`; only older events without
+  it use `duration_ms`, including preparation and waiting. The report names
+  how many such samples it uses. `ever_failed` describes observed runs;
+  `last_failed_first` is the latest change whose first observed verification
+  failure was this gate, with its time and event. Dedicated publication
+  receipts carry no timing and are outside this per-change history.
+  Unreadable changes are named, readable history is retained, and a partial
+  report exits 16. JSON is `arc-gates/1`.
+
+  `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
+  this tree, five times by default, honoring timeouts. It prints each run's
+  command wall and child CPU time and the wall min, max and spread. Wall far
+  above CPU indicates waiting; a wide spread indicates load sensitivity.
+  It records no evidence and writes no ledger or output artifacts; the gate
+  commands may write their own build outputs. A failed, timed-out or
+  not-admitted run makes the command exit 1. Unknown gates and zero runs are
+  refused. Every declared gate runs unless `--gate` selects one.
+
+  `arc workspace gates [--json] [--under PATH|--here|--global] [--retired]`
+  lists each registered project's declarations and its own ledger's costs,
+  including projects without gates. Global is the default. Scope and the
+  collection manifest follow `arc workspace backlog`: retired registrations
+  are counted without observation, `--retired` lists them, orphaned anchors
+  are failures, and empty unresolved registrations count as empty. Partial
+  collection retains readable rows and exits 16. JSON is
+  `arc-workspace-gates/1`. These commands record no events and their ledger
+  reads do not require a parseable append policy.
+
   Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
   policy:
 
@@ -5666,6 +5699,8 @@ SCHEMAS
     `arc-metadata/1`                 arc metadata --json
     `arc-chain/5`                    arc chain --json
     `arc-candidate/1`                arc candidate show|list --json
+    `arc-gates/1`                    arc gates --json
+    `arc-workspace-gates/1`          arc workspace gates --json
     `arc-stats/2`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
     `arc-stats-provenance/1`         arc stats --provenance --json
@@ -5965,6 +6000,7 @@ RUN A CHANGE
   arc begin <slug>               open it
   arc brief <change>             record what it must do, then edit and commit
   arc snapshot                   record the patchset
+  arc gates; arc gates measure   inspect gate costs; measure without evidence
   arc verify --all               run the gates and record the evidence
   arc check                      preflight integration
   arc integrate                  land it once review is settled
@@ -6012,7 +6048,6 @@ GO DEEPER
   arc <command> --help           the full contract; -h is its summary
   arc --help                     every root command
   arc instructions git           contribution rules for Git
-
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files

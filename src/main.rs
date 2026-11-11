@@ -703,6 +703,20 @@ enum Cmd {
         #[arg(long, hide = true)]
         oneline: bool,
     },
+    /// Declared gates and their measured cost across changes
+    ///
+    /// Lists commands, events, profiles, timeouts and selectors, with runs, exact-tree
+    /// reuses and selector skips counted separately. Timings prefer run_ms; older
+    /// duration_ms samples are identified. Reports no declared budget. Reads record
+    /// no events and do not require a parseable append policy. JSON: arc-gates/1.
+    Gates {
+        /// Measure commands on this tree without recording evidence
+        #[command(subcommand)]
+        cmd: Option<GatesCmd>,
+        /// Emit arc-gates/1 JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Derived ledger analytics: stage, review, and gate durations, each landing's
     /// round trip, and how often provenance is recorded
     ///
@@ -3963,7 +3977,50 @@ enum ExternalCmd {
 }
 
 #[derive(Subcommand)]
+enum GatesCmd {
+    /// Run declared gates sequentially on this tree without recording evidence
+    ///
+    /// Prints each run's command wall and child CPU time and each gate's spread.
+    /// Wall far above CPU indicates waiting; a wide spread indicates load sensitivity.
+    /// Honors declared timeouts. Runs every declared gate unless --gate selects one.
+    /// Writes no ledger events or captured output files. Gate commands may write their
+    /// own build outputs. Exits 1 if any run fails or is not admitted.
+    Measure {
+        /// Number of runs per gate, greater than zero
+        #[arg(long, default_value = "5", value_parser = clap::value_parser!(u32).range(1..))]
+        runs: u32,
+        /// Measure only this declared gate
+        #[arg(long, value_name = "G")]
+        gate: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkspaceCmd {
+    /// Gate declarations and costs from each registered project's own ledger
+    ///
+    /// Uses --under/--here/--global scope and the workspace collection manifest.
+    /// Retired registrations are counted without observation; --retired lists them.
+    /// Unreachable registrations and unreadable gates or ledgers are named, retaining
+    /// readable rows and exiting 16 on partial collection. No budget is declared.
+    /// Records no events; append policy need not parse. JSON: arc-workspace-gates/1.
+    Gates {
+        /// Report only projects beneath this canonical path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project (the default)
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// List retired registrations as well as counting them
+        #[arg(long)]
+        retired: bool,
+        /// Emit arc-workspace-gates/1 JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Per-repo open-change rows across the data_root
     ///
     /// Unreadable changes are named with their errors on stderr; readable changes remain in
@@ -6747,6 +6804,13 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             commands::log(&ctx, &change, reverse)?;
             Ok(0)
         }
+        Cmd::Gates { cmd, json } => match cmd {
+            None => commands::gate_report(&ctx, json),
+            Some(GatesCmd::Measure { runs, gate }) => {
+                anyhow::ensure!(!json, "gates measure does not accept --json");
+                commands::measure_gates(&ctx, runs, gate.as_deref())
+            }
+        },
         Cmd::Stats {
             change,
             tag,
@@ -8508,6 +8572,19 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         Cmd::HookRun { name, args } => Ok(commands::hook_run(&ctx, &name, &args)),
         Cmd::Workspace { cmd } => {
             let (view, json) = match cmd {
+                WorkspaceCmd::Gates {
+                    under,
+                    here,
+                    global: _,
+                    retired,
+                    json,
+                } => (
+                    commands::WorkspaceView::Gates {
+                        scope: workspace_scope(under, here)?,
+                        show_retired: retired,
+                    },
+                    json,
+                ),
                 WorkspaceCmd::List { json } => (commands::WorkspaceView::List, json),
                 WorkspaceCmd::Inbox {
                     under,
@@ -8643,8 +8720,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
 mod tests {
     use super::*;
 
-    /// Every leaf has one classification; mixed read/write commands belong
-    /// to the writing list because at least one form can change state.
+    /// Claim: every callable command, including a parent with an optional subcommand,
+    /// has one I/O classification. Rejects unclassified report forms; mixed read/write
+    /// commands belong to the writing list because a form can change state.
     #[test]
     fn every_leaf_command_has_an_io_classification() {
         const WRITING_COMMANDS: &[&str] = &[
@@ -8780,6 +8858,9 @@ mod tests {
                     format!("{prefix} {}", child.get_name())
                 };
                 if child.has_subcommands() {
+                    if !child.is_subcommand_required_set() {
+                        out.push(path.clone());
+                    }
                     leaves(child, &path, out);
                 } else {
                     out.push(path);

@@ -3035,14 +3035,20 @@ pub(super) fn run_gate(
     producing_store: &str,
 ) -> Result<GateRun> {
     let (shell, wait_ms) = crate::slots::measured_shell(cwd)?;
+    run_gate_in_shell(shell, wait_ms, cmd, cwd, timeout_seconds, || {
+        crate::verification_output::Capture::new(output_root, producing_store)
+    })
+}
+
+pub(super) fn measure_gate(cmd: &str, cwd: &Path, timeout: Option<u64>) -> Result<GateRun> {
+    let (shell, wait_ms) = crate::slots::measured_shell(cwd)?;
     run_gate_in_shell(
         shell,
         wait_ms,
         cmd,
         cwd,
-        timeout_seconds,
-        output_root,
-        producing_store,
+        timeout,
+        crate::verification_output::Capture::transient,
     )
 }
 
@@ -3052,8 +3058,7 @@ fn run_gate_in_shell(
     cmd: &str,
     cwd: &Path,
     timeout_seconds: Option<u64>,
-    output_root: &Path,
-    producing_store: &str,
+    capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let command = &mut shell.command;
     command
@@ -3083,7 +3088,7 @@ fn run_gate_in_shell(
         .take()
         .context("gate output pipe unavailable")?;
     let (reader_done_tx, reader_done_rx) = mpsc::sync_channel(1);
-    let capture = crate::verification_output::Capture::new(output_root, producing_store);
+    let capture = capture();
     let reader = thread::spawn(move || {
         capture.read_with_notify(stdout, || {
             let _ = reader_done_tx.send(());
@@ -6302,8 +6307,7 @@ mod pipe_deadline_tests {
             cmd,
             cwd,
             timeout_seconds,
-            output_root,
-            producing_store,
+            || crate::verification_output::Capture::new(output_root, producing_store),
         )
     }
 
