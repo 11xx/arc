@@ -557,3 +557,208 @@ fn exclusive_target_lock_cannot_be_removed_or_renamed() {
         );
     }
 }
+
+/// Claim: every measurement round takes the verification lock, reports wait apart
+/// from command wall time, and writes no evidence or output artifacts. Rejects
+/// unlocked measurements, a batch-wide lease overlapping a surviving descendant,
+/// missing admission timing, and persistent capture during measurement.
+#[test]
+fn measurement_takes_exclusive_admission_for_each_transient_round() {
+    let name = lock_name();
+    let owner = Repo::new();
+    let measured = Repo::new();
+    let marker = owner.home.join("active");
+    let owner_ready_path = owner.home.join("owner-ready");
+    let owner_release_path = owner.home.join("owner-release");
+    let descendant_release_path = owner.home.join("descendant-release");
+    let mut owner_ready = Signal::new(&owner_ready_path);
+    let mut owner_release = Signal::new(&owner_release_path);
+    let mut descendant_release = Signal::new(&descendant_release_path);
+    let owner_script = owner.home.join("owner.py");
+    fs::write(
+        &owner_script,
+        format!(
+            r#"import os
+fd=os.open({marker:?},os.O_CREAT|os.O_EXCL|os.O_WRONLY)
+os.close(fd)
+with open({owner_ready_path:?},'wb',buffering=0) as f: f.write(b'x')
+with open({owner_release_path:?},'rb',buffering=0) as f: f.read(1)
+os.unlink({marker:?})
+"#
+        ),
+    )
+    .unwrap();
+    let script = measured.home.join("measure.py");
+    let counter = measured.home.join("round");
+    fs::write(
+        &script,
+        format!(
+            r#"import os,pathlib
+fd=os.open({marker:?},os.O_CREAT|os.O_EXCL|os.O_WRONLY)
+os.close(fd)
+counter=pathlib.Path({counter:?})
+round=int(counter.read_text())+1 if counter.exists() else 1
+counter.write_text(str(round))
+if round==1:
+    r,w=os.pipe()
+    if os.fork()==0:
+        os.close(r)
+        os.setsid()
+        os.write(w,b'x')
+        os.closerange(0,65536)
+        with open({descendant_release_path:?},'rb',buffering=0) as f: f.read(1)
+        os.unlink({marker:?})
+        os._exit(0)
+    os.close(w)
+    os.read(r,1)
+else: os.unlink({marker:?})
+"#
+        ),
+    )
+    .unwrap();
+    let keys = format!("exclusive={name:?}\nadmission='5m'\n");
+    declare(
+        &owner,
+        &format!("python3 {}", owner_script.display()),
+        &keys,
+    );
+    declare(&measured, &format!("python3 {}", script.display()), &keys);
+    begin(&owner, "owner");
+    begin(&measured, "measured");
+    let verifier = owner.spawn_arc_piped(&owner.root, &["verify", "--gate", "unit"]);
+    owner_ready.wait();
+    let before = crate::gate_reports::tree_bytes(&measured.root.join(".git/arc"));
+    let mut measurement = shared_spawn(
+        &measured,
+        &owner.home,
+        &["gates", "measure", "--runs", "2", "--gate", "unit"],
+    );
+    let stderr = measurement.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            if line.contains("waiting for exclusive") {
+                let _ = tx.send(line.clone());
+            }
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
+    });
+    let first_wait = rx.recv_timeout(HANG_BOUND);
+    elapsed_event(Duration::from_millis(400));
+    owner_release.send();
+    let verified = verifier.wait_with_output().unwrap();
+    let second_wait = rx.recv_timeout(HANG_BOUND);
+    descendant_release.send();
+    let output = measurement.wait_with_output().unwrap();
+    let stderr = reader.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "measurement overlapped a lock holder: {text}\n{stderr}"
+    );
+    assert!(
+        first_wait.is_ok() && second_wait.is_ok(),
+        "measurement did not admit each round: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(counter).unwrap(), "2");
+    for round in [1, 2] {
+        let prefix = format!("unit {round}/2: wall ");
+        let line = text.lines().find(|line| line.starts_with(&prefix)).unwrap();
+        assert!(
+            line.contains("; wait "),
+            "measurement omitted separate wait: {line}"
+        );
+        if round == 1 {
+            let wait = line
+                .split("; wait ")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            let seconds = wait.strip_suffix('s').unwrap().parse::<f64>().unwrap();
+            assert!(
+                seconds >= 0.39,
+                "measurement lost admission waiting: {line}"
+            );
+        }
+    }
+    assert!(text.contains("measured 2/2; not measured 0"), "{text}");
+    assert_eq!(
+        before,
+        crate::gate_reports::tree_bytes(&measured.root.join(".git/arc")),
+        "measurement recorded evidence or output artifacts"
+    );
+}
+
+/// Claim: admission expiry and EX_TEMPFAIL leave rounds unmeasured with their
+/// wait, outside wall and CPU statistics, and without ledger writes. Rejects
+/// counting unadmitted attempts as failures or measurement samples.
+#[test]
+fn measurement_admission_expiry_is_unmeasured() {
+    let repo = Repo::new();
+    let name = lock_name();
+    declare(
+        &repo,
+        "touch measured",
+        &format!("exclusive={name:?}\nadmission='150ms'\n"),
+    );
+    begin(&repo, "unmeasured");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path(&repo, &name))
+        .unwrap();
+    lock.lock().unwrap();
+    let before = crate::gate_reports::tree_bytes(&repo.root.join(".git/arc"));
+    for held in [true, false] {
+        if !held {
+            lock.unlock().unwrap();
+            repo.commit(
+                &repo.root,
+                ".arc/gates.toml",
+                &format!("[gates.unit]\ncommand='exit 75'\nexclusive={name:?}\n"),
+                "test: decline measurement from command",
+            );
+        }
+        let output = repo
+            .arc(&repo.root)
+            .args(["gates", "measure", "--runs", "2", "--gate", "unit"])
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains("not measured (not-admitted); wait "))
+                .count(),
+            2,
+            "admission was treated as a measurement failure: {text}"
+        );
+        assert!(!text.contains(": fail"), "{text}");
+        assert!(
+            text.contains(
+                "wall median -, min -, max -, spread -; CPU median -; measured 0/2; not measured 2"
+            ),
+            "unadmitted rounds entered timing statistics: {text}"
+        );
+        assert!(!repo.root.join("measured").exists());
+        assert_eq!(
+            before,
+            crate::gate_reports::tree_bytes(&repo.root.join(".git/arc")),
+            "unmeasured admission wrote evidence or output artifacts"
+        );
+    }
+}

@@ -33,6 +33,8 @@ struct Declaration {
     events: Vec<GateEvent>,
     profiles: Vec<String>,
     timeout_seconds: Option<u64>,
+    exclusive: Option<String>,
+    admission_ms: Option<u128>,
     selector: Option<String>,
     environment: Option<String>,
 }
@@ -96,6 +98,11 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         .gates
         .into_iter()
         .map(|(name, gate)| {
+            let request = crate::exclusive::Request::for_gate(&gate);
+            let admission_ms = gate
+                .admission
+                .or(request.map(|request| request.admission))
+                .map(|duration| duration.as_millis());
             let row = GateRow {
                 name: name.clone(),
                 declaration: Declaration {
@@ -107,6 +114,8 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                     },
                     profiles: gate.profiles,
                     timeout_seconds: gate.timeout,
+                    exclusive: gate.exclusive,
+                    admission_ms,
                     selector: gate.selector,
                     environment: gate.environment,
                 },
@@ -273,6 +282,12 @@ pub(super) fn render(report: &GateReport) {
                 .map_or_else(|| "unbounded".into(), |s| format!("{s}s")),
             d.selector.as_deref().unwrap_or("none")
         );
+        println!(
+            "  exclusive: {}; admission: {}",
+            d.exclusive.as_deref().unwrap_or("none"),
+            d.admission_ms
+                .map_or_else(|| "none".into(), |ms| format!("{:.3}s", ms as f64 / 1000.0))
+        );
         println!("  timing: {} samples; {} legacy duration_ms samples (includes preparation and waiting); attested: {}; not-admitted: {}", timing.samples, timing.legacy_duration_samples, h.attested, h.not_admitted);
     }
 }
@@ -287,7 +302,7 @@ pub fn measure_gates(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i32
             "undeclared gate {name:?}"
         );
     }
-    let mut passed = true;
+    let mut successful = true;
     for (name, gate) in declared
         .gates
         .iter()
@@ -295,20 +310,33 @@ pub fn measure_gates(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i32
     {
         let mut wall = Vec::new();
         let mut cpu = Vec::new();
+        let mut not_measured = 0;
         for round in 1..=runs {
-            let run = super::gatekeeping::measure_gate(&gate.command, &root, gate.timeout)?;
+            let run = super::gatekeeping::measure_gate(gate, name, &root)?;
             let result =
                 VerifyResult::observed(run.status.success(), run.status.code(), run.timed_out);
-            passed &= result == VerifyResult::Pass;
+            successful &= result == VerifyResult::Pass;
             let timing = run.timing;
+            if result == VerifyResult::NotAdmitted {
+                not_measured += 1;
+                println!(
+                    "{name} {round}/{runs}: not measured (not-admitted); wait {}",
+                    ms(timing.wait_ms)
+                );
+                if let Some(tail) = run.output_tail {
+                    eprintln!("{name}: {tail}");
+                }
+                continue;
+            }
             let cpu_ms = timing
                 .cpu_user_ms
                 .zip(timing.cpu_system_ms)
                 .map(|(u, s)| u.saturating_add(s));
             println!(
-                "{name} {round}/{runs}: wall {}; CPU {}; {}{}",
+                "{name} {round}/{runs}: wall {}; CPU {}; wait {}; {}{}",
                 ms(timing.run_ms),
                 ms(cpu_ms),
+                ms(timing.wait_ms),
                 result.as_str(),
                 if run.timed_out { " (timed out)" } else { "" }
             );
@@ -324,14 +352,15 @@ pub fn measure_gates(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i32
         let cpu_distribution = Distribution::of(&mut cpu, 0);
         let spread = wall.last().zip(wall.first()).map(|(max, min)| max - min);
         println!(
-            "{name}: wall median {}, min {}, max {}, spread {}; CPU median {}",
+            "{name}: wall median {}, min {}, max {}, spread {}; CPU median {}; measured {}/{}; not measured {}",
             ms(distribution.median_ms),
             ms(wall.first().copied()),
             ms(distribution.worst_ms),
             ms(spread),
-            ms(cpu_distribution.median_ms)
+            ms(cpu_distribution.median_ms),
+            runs - not_measured, runs, not_measured,
         );
     }
-    println!("Wall far above CPU indicates waiting; a wide spread indicates load sensitivity.");
-    Ok(if passed { 0 } else { 1 })
+    println!("Admission wait is separate from command wall time. Wall far above CPU indicates waiting inside the command; a wide spread indicates load sensitivity.");
+    Ok(if successful { 0 } else { 1 })
 }

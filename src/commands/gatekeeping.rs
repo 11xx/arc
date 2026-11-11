@@ -3085,48 +3085,43 @@ pub(super) fn run_gate_admitted(
     producing_store: &str,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
 ) -> Result<GateRun> {
-    let Some((request, change, gate)) = admission else {
-        return run_gate(cmd, cwd, timeout_seconds, output_root, producing_store);
-    };
-    let (lock, wait_ms) = crate::exclusive::acquire(request, cwd, change, gate)?;
-    let Some(lock) = lock else {
-        return Ok(GateRun::not_admitted(wait_ms));
-    };
-    let (shell, slot_wait_ms) = crate::slots::measured_shell_with_lock(cwd, Some(lock))?;
-    run_gate_in_shell(
-        shell,
-        wait_ms + slot_wait_ms,
-        cmd,
-        cwd,
-        timeout_seconds,
-        output_root,
-        producing_store,
-    )
-}
-
-pub(super) fn run_gate(
-    cmd: &str,
-    cwd: &Path,
-    timeout_seconds: Option<u64>,
-    output_root: &Path,
-    producing_store: &str,
-) -> Result<GateRun> {
-    let (shell, wait_ms) = crate::slots::measured_shell(cwd)?;
-    run_gate_in_shell(shell, wait_ms, cmd, cwd, timeout_seconds, || {
+    run_gate_with_capture(cmd, cwd, timeout_seconds, admission, || {
         crate::verification_output::Capture::new(output_root, producing_store)
     })
 }
 
-pub(super) fn measure_gate(cmd: &str, cwd: &Path, timeout: Option<u64>) -> Result<GateRun> {
-    let (shell, wait_ms) = crate::slots::measured_shell(cwd)?;
-    run_gate_in_shell(
-        shell,
-        wait_ms,
-        cmd,
+pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result<GateRun> {
+    let request = crate::exclusive::Request::for_gate(gate);
+    run_gate_with_capture(
+        &gate.command,
         cwd,
-        timeout,
+        gate.timeout,
+        request
+            .as_ref()
+            .map(|request| (request, "measurement", name)),
         crate::verification_output::Capture::transient,
     )
+}
+
+fn run_gate_with_capture(
+    cmd: &str,
+    cwd: &Path,
+    timeout: Option<u64>,
+    admission: Option<(&crate::exclusive::Request, &str, &str)>,
+    capture: impl FnOnce() -> crate::verification_output::Capture,
+) -> Result<GateRun> {
+    let (shell, wait_ms) = match admission {
+        Some((request, change, gate)) => {
+            let (lock, wait_ms) = crate::exclusive::acquire(request, cwd, change, gate)?;
+            let Some(lock) = lock else {
+                return Ok(GateRun::not_admitted(wait_ms));
+            };
+            let (shell, slot_wait_ms) = crate::slots::measured_shell_with_lock(cwd, Some(lock))?;
+            (shell, wait_ms + slot_wait_ms)
+        }
+        None => crate::slots::measured_shell(cwd)?,
+    };
+    run_gate_in_shell(shell, wait_ms, cmd, cwd, timeout, capture)
 }
 
 fn run_gate_in_shell(

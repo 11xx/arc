@@ -128,7 +128,7 @@ fn declarations_and_costs_exclude_reuse_and_selection() {
     assert_eq!(before, tree_bytes(&repo.root.join(".git/arc")));
 }
 
-fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     if !root.exists() {
         return files;
@@ -362,4 +362,69 @@ fn reports_hold_one_typed_ledger_read_without_reducing_states() {
             assert_eq!(reads["most_reads_per_file"][kind], 1, "{args:?}: {reads}");
         }
     }
+}
+
+/// Claim: local and workspace reports expose the lock name and effective admission
+/// limit, including the lock's default, in text and JSON. Rejects omitted admission
+/// fields, an invented lock on an unrestricted gate, or dropping nested declarations.
+#[test]
+fn reports_include_exclusive_and_effective_admission() {
+    let repo = Repo::new();
+    let name = format!("report-{}", ulid::Ulid::new());
+    repo.redeclare_gates(&format!("[gates.default]\ncommand='true'\nexclusive={name:?}\n[gates.limited]\ncommand='true'\nexclusive={name:?}\nadmission='150ms'\n[gates.plain]\ncommand='true'\n"));
+    let report = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    assert_eq!(report["schema"], "arc-gates/1");
+    let declared = |name: &str| {
+        &report["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap()["declaration"]
+    };
+    assert_eq!(
+        declared("default")["exclusive"],
+        name,
+        "gate report omitted lock"
+    );
+    assert_eq!(
+        declared("default")["admission_ms"],
+        60_000,
+        "gate report omitted effective admission"
+    );
+    assert_eq!(declared("limited")["exclusive"], name);
+    assert_eq!(declared("limited")["admission_ms"], 150);
+    for field in ["exclusive", "admission_ms"] {
+        assert!(
+            declared("plain").get(field).is_some_and(Value::is_null),
+            "missing declaration field {field}: {report}"
+        );
+    }
+    let text = stdout(repo.arc(&repo.root).arg("gates"));
+    assert!(
+        text.contains(&format!("exclusive: {name}; admission: 60.000s")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("exclusive: {name}; admission: 0.150s")),
+        "{text}"
+    );
+    assert!(text.contains("exclusive: none; admission: none"), "{text}");
+    assert!(!repo.root.join(".git/arc/config.json").exists());
+    repo.arc(&repo.root)
+        .args(["begin", "declarations", "--no-worktree"])
+        .assert()
+        .success();
+    let workspace =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "gates", "--here", "--json"]),
+        );
+    assert_eq!(workspace["schema"], "arc-workspace-gates/1");
+    assert_eq!(workspace["projects"][0]["report"]["gates"], report["gates"]);
+    let workspace_text = stdout(repo.arc(&repo.root).args(["workspace", "gates", "--here"]));
+    assert!(
+        workspace_text.contains(&format!("exclusive: {name}; admission: 0.150s")),
+        "{workspace_text}"
+    );
 }

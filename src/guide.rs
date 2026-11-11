@@ -5436,7 +5436,10 @@ FILES
 
 GATES
   `arc gates [--json]` lists every declaration on this tree beside its cost
-  across changes, from per-change verification events. No budget is declared.
+  across changes, from per-change verification events. Declarations include
+  `exclusive` and `admission_ms`, the effective admission limit when a lock is
+  named or an explicitly declared limit. Both are null when omitted without a
+  lock. No budget is declared.
   Runs, exact-tree reuses and selector skips are counted separately; attested
   evidence and not-admitted attempts are separate from runs and timings.
   History groups gates by name across declarations. Median (lower middle),
@@ -5450,13 +5453,17 @@ GATES
   report exits 16. JSON is `arc-gates/1`.
 
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
-  this tree, five times by default, honoring timeouts. It prints each run's
-  command wall and child CPU time and the wall min, max and spread. Wall far
-  above CPU indicates waiting; a wide spread indicates load sensitivity.
-  It records no evidence and writes no ledger or output artifacts; the gate
-  commands may write their own build outputs. A failed, timed-out or
-  not-admitted run makes the command exit 1. Unknown gates and zero runs are
-  refused. Every declared gate runs unless `--gate` selects one.
+  this tree, five times by default, honoring timeouts. Each round follows the
+  `exclusive` and `admission` contract below. It prints command wall and child
+  CPU time with admission wait separately, and the wall min, max and spread.
+  Wall far above CPU indicates waiting inside the command; a wide spread
+  indicates load sensitivity. A round not admitted prints
+  `not measured (not-admitted)` and contributes no timing sample. Summaries
+  count measured and unmeasured rounds. It records no evidence and writes no
+  ledger or output artifacts; the gate commands may write their own build
+  outputs. A failed, timed-out or unmeasured round makes the command exit 1.
+  Unknown gates and zero runs are refused. Every declared gate runs unless
+  `--gate` selects one.
 
   `arc workspace gates [--json] [--under PATH|--here|--global] [--retired]`
   lists each registered project's declarations and its own ledger's costs,

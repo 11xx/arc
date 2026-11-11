@@ -706,7 +706,7 @@ enum Cmd {
     },
     /// Declared gates and their measured cost across changes
     ///
-    /// Lists commands, events, profiles, timeouts and selectors, with runs, exact-tree
+    /// Lists declarations (arc guide gates), with runs, exact-tree
     /// reuses and selector skips counted separately. Timings prefer run_ms; older
     /// duration_ms samples are identified. Reports no declared budget. Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
@@ -3982,10 +3982,10 @@ enum GatesCmd {
     /// Run declared gates sequentially on this tree without recording evidence
     ///
     /// Prints each run's command wall and child CPU time and each gate's spread.
-    /// Wall far above CPU indicates waiting; a wide spread indicates load sensitivity.
-    /// Honors declared timeouts. Runs every declared gate unless --gate selects one.
+    /// Wall far above CPU indicates waiting inside the command; spread indicates load sensitivity.
+    /// Execution and admission follow arc guide gates. Runs every gate unless --gate selects one.
     /// Writes no ledger events or captured output files. Gate commands may write their
-    /// own build outputs. Exits 1 if any run fails or is not admitted.
+    /// own build outputs. Exits 1 if any run fails or is not measured.
     Measure {
         /// Number of runs per gate, greater than zero
         #[arg(long, default_value = "5", value_parser = clap::value_parser!(u32).range(1..))]
