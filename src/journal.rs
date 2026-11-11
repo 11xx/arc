@@ -11297,16 +11297,26 @@ fn render_artifact_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) -> Strin
 
 /// The first claim on an artifact whose lease has run out, if any has.
 ///
-/// This is what a watch on unattended work waits for. An artifact with no
-/// claim has not stalled: there is nobody to stop hearing from.
-pub(crate) fn stalled_artifact_claim(ctx: &Ctx, file: &str) -> Result<Option<String>> {
+/// A stalled claim, or the next lease expiry a watch must check. An artifact
+/// with no claim has not stalled: there is nobody to stop hearing from.
+pub(crate) fn artifact_claim_watch(
+    ctx: &Ctx,
+    file: &str,
+) -> Result<(Option<String>, Option<DateTime<Utc>>)> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
     let now = Utc::now();
-    Ok(open_artifact_claims(&events, file)
-        .into_iter()
-        .find(|claim| !state::claim_timing_at(&claim.state, now).active)
-        .map(|claim| claim.state.claim_id))
+    let mut expires = None;
+    for claim in open_artifact_claims(&events, file) {
+        let timing = state::claim_timing_at(&claim.state, now);
+        if !timing.active {
+            return Ok((Some(claim.state.claim_id), None));
+        }
+        expires = Some(expires.map_or(timing.expires_at, |held: DateTime<Utc>| {
+            held.min(timing.expires_at)
+        }));
+    }
+    Ok((None, expires))
 }
 
 /// What a successor needs in order to pick up an artifact somebody left.

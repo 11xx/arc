@@ -1,5 +1,208 @@
 use super::common::*;
 
+/// Claim: an idle ledger watch reads history once, then sleeps until its
+/// timeout. Rejects periodic ledger re-reads even when output stays quiet.
+#[test]
+fn watch_feed_keeps_idle_ledger_reads_constant() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "idle", "--no-worktree"]),
+    );
+    let counts = repo.home.join("reads.json");
+    repo.arc(&repo.root)
+        .env("ARC_TEST_LEDGER_READS", &counts)
+        .args(["watch", "idle", "--until", "snapshot", "--timeout", "4"])
+        .assert()
+        .code(2)
+        .stdout("timeout: snapshot\n");
+    let reads: serde_json::Value = serde_json::from_slice(&fs::read(counts).unwrap()).unwrap();
+    assert_eq!(
+        reads["most_reads_per_file"]["change"], 1,
+        "idle ledger re-reads: {reads}"
+    );
+}
+
+/// Claim: a running watch promptly answers a selected change's write, and
+/// notices for other changes, ledgers and journals do not re-read its ledger.
+/// Rejects an ignored feed, unfiltered feed wakes, and restored polling.
+#[test]
+fn watch_feed_filters_notices_and_answers_a_write_promptly() {
+    use std::io::Write;
+    let repo = Repo::new();
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "feed-watched",
+        "--no-worktree",
+    ])));
+    let counts = repo.home.join("reads.json");
+    let evaluated = repo.home.join("evaluated");
+    let mut child = Killed(spawn_arc_with_env(
+        &repo,
+        &repo.root,
+        &[
+            "watch",
+            &change,
+            "--until",
+            "brief-recorded",
+            "--timeout",
+            "10",
+        ],
+        &[
+            ("ARC_TEST_LEDGER_READS", &counts),
+            ("ARC_WATCH_EVALUATED", &evaluated),
+        ],
+    ));
+    await_watch_evaluation(&mut child.0, &evaluated);
+    thread::sleep(Duration::from_secs(2));
+    let mut feed = fs::OpenOptions::new()
+        .append(true)
+        .open(repo.home.join(".local/ai/arc/feed/events.jsonl"))
+        .unwrap();
+    for notice in [
+        serde_json::json!({"source": "ledger", "path": repo.home.join("other-ledger/events/E.json"), "change": change}),
+        serde_json::json!({"source": "ledger", "path": repo.root.join(".git/arc/changes/other/events/E.json"), "change": "other"}),
+        serde_json::json!({"source": "journal", "dir": repo.home.join("journal")}),
+    ] {
+        let mut notice = notice;
+        notice["schema"] = "arc-workspace-feed/1".into();
+        writeln!(feed, "{notice}").unwrap();
+        thread::sleep(Duration::from_millis(100));
+    }
+    let started = Instant::now();
+    repo.arc(&repo.root)
+        .args(["brief", &change, "--body-file", "-"])
+        .write_stdin("# Brief\n")
+        .assert()
+        .success();
+    assert!(
+        wait_for_exit(&mut child.0).success(),
+        "watch ignored its change's feed notice"
+    );
+    let latency = started.elapsed();
+    assert!(
+        latency < Duration::from_secs(3),
+        "feed reaction took {latency:?}"
+    );
+    assert_eq!(child_stdout(&mut child.0).trim(), "reached: brief-recorded");
+    let reads: serde_json::Value = serde_json::from_slice(&fs::read(counts).unwrap()).unwrap();
+    assert_eq!(
+        reads["most_reads_per_file"]["change"], 2,
+        "unrelated notices re-read the ledger: {reads}"
+    );
+    eprintln!("feed write-to-exit latency: {latency:?}; reads: {reads}");
+}
+
+/// Claim: repository notices through canonical ledger aliases, unreadable
+/// lines and lost partial lines wake a selected watch; history with no notice
+/// is discovered within the slow fallback bound; an unavailable feed retains
+/// polling. Rejects missing recovery wakes, an absent fallback, and dependence
+/// on a usable feed for correctness.
+#[test]
+fn watch_feed_recovers_missing_or_unreadable_notices() {
+    use std::io::Write;
+    for stimulus in [
+        "repository",
+        "unreadable",
+        "lost",
+        "unavailable",
+        "fallback",
+    ] {
+        let repo = Repo::new();
+        let change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+            "begin",
+            "recovery",
+            "--no-worktree",
+        ])));
+        let feed_dir = repo.home.join(".local/ai/arc/feed");
+        let feed_path = feed_dir.join("events.jsonl");
+        if stimulus == "unavailable" {
+            fs::rename(&feed_dir, repo.home.join("disabled-feed")).unwrap();
+            fs::write(&feed_dir, b"not a directory").unwrap();
+        }
+        let (child, evaluated) = spawn_watch(
+            &repo,
+            &repo.root,
+            &[
+                "watch",
+                &change,
+                "--until",
+                "brief-recorded",
+                "--timeout",
+                if stimulus == "fallback" { "40" } else { "10" },
+            ],
+        );
+        let mut child = Killed(child);
+        await_watch_evaluation(&mut child.0, &evaluated);
+        // A different AI home publishes the same ledger write without notifying
+        // this follower, as a file copy or an older writer would.
+        repo.arc(&repo.root)
+            .env("ARC_AI_HOME", repo.home.join("silent-ai"))
+            .args(["brief", &change, "--body-file", "-"])
+            .write_stdin("# Brief\n")
+            .assert()
+            .success();
+        let started = Instant::now();
+        match stimulus {
+            "repository" => {
+                let alias = repo.home.join("ledger-alias");
+                std::os::unix::fs::symlink(repo.root.join(".git/arc"), &alias).unwrap();
+                let notice = serde_json::json!({
+                    "schema": "arc-workspace-feed/1", "source": "ledger", "path": alias.join("repository"),
+                });
+                writeln!(
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&feed_path)
+                        .unwrap(),
+                    "{notice}"
+                )
+                .unwrap();
+            }
+            "unreadable" => {
+                writeln!(
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&feed_path)
+                        .unwrap(),
+                    "unreadable"
+                )
+                .unwrap();
+            }
+            "lost" => {
+                write!(
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&feed_path)
+                        .unwrap(),
+                    "partial"
+                )
+                .unwrap();
+                fs::rename(&feed_path, feed_dir.join("events.jsonl.1")).unwrap();
+                fs::write(&feed_path, b"").unwrap();
+            }
+            _ => {}
+        }
+        assert!(
+            wait_for_exit(&mut child.0).success(),
+            "{stimulus}: watch missed the write"
+        );
+        assert_eq!(
+            child_stdout(&mut child.0).trim(),
+            "reached: brief-recorded",
+            "{stimulus}"
+        );
+        let bound = if stimulus == "fallback" { 35 } else { 3 };
+        assert!(
+            started.elapsed() < Duration::from_secs(bound),
+            "{stimulus}: slow recovery"
+        );
+    }
+}
+
+/// Claim: file-published reserved history is eventually emitted in ID order
+/// without crossing an unresolved cursor reservation. Rejects a follower
+/// dependent on notices for copied history or one that crosses the reservation.
 #[test]
 fn events_cursor_waits_for_a_reservation_published_after_a_later_event() {
     let repo = Repo::new();
@@ -96,7 +299,7 @@ fn events_cursor_waits_for_a_reservation_published_after_a_later_event() {
         vec![event["event_id"].clone(), later["event_id"].clone()]
     );
     for expected in [&event, &later] {
-        let line = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let line = receiver.recv_timeout(Duration::from_secs(45)).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&line).unwrap()["event_id"],
             expected["event_id"]
@@ -262,6 +465,9 @@ impl Drop for Killed {
     }
 }
 
+/// Claim: follow discovers file-copied imports below its initial cursor within
+/// the slow fallback bound. Rejects a feed-only stream and cursor filtering
+/// that hides imports arriving below already emitted IDs.
 #[test]
 fn events_follow_discovers_an_import_below_its_initial_cursor() {
     let repo = Repo::new();
@@ -307,7 +513,7 @@ fn events_follow_discovers_an_import_below_its_initial_cursor() {
     let temporary = imports.join("late.tmp");
     fs::write(&temporary, serde_json::to_vec(&batch).unwrap()).unwrap();
     fs::rename(temporary, imports.join("late.json")).unwrap();
-    let line = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    let line = receiver.recv_timeout(Duration::from_secs(45)).unwrap();
     let event: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(event["event_id"], id);
     assert_eq!(event["repository_id"], "origin");

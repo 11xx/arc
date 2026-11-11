@@ -3088,10 +3088,15 @@ static OBJECT_ANSWERS: std::sync::OnceLock<
 
 /// While the process shares its reads, the object `name` names, read through
 /// the one `cat-file --batch` this process keeps for `cwd`. `None` when reads
-/// are not shared, the name cannot be one query line, or the reader failed;
-/// a failed reader is dropped and the next lookup starts another.
+/// are not shared, the command has a deadline, the name cannot be one query
+/// line, or the reader failed; a failed reader is dropped and the next lookup
+/// starts another.
 fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
-    if !crate::store::shares_reads() || name.contains(['\n', '\r']) {
+    // Bounded reads use the runner that kills and reaps a timed-out process group.
+    if COMMAND_DEADLINE.get().is_some()
+        || !crate::store::shares_reads()
+        || name.contains(['\n', '\r'])
+    {
         return None;
     }
     let answers = OBJECT_ANSWERS.get_or_init(Default::default);

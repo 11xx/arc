@@ -466,13 +466,12 @@ pub struct ImportBatch {
     pub authorization: Option<crate::import_authorization::ImportAuthorization>,
 }
 
-/// What one process reads from a ledger once and shares across every store
-/// handle it opens. A command that only reads, and never watches the ledger
-/// move, turns sharing on at start with `share_reads`. Each event file, the
-/// import batches, the typed repository events, the privilege scope, each
-/// change's state and event writers, the readable states and the replica
-/// events are then read once per process. Any ledger write the process makes forgets everything
-/// shared, so a later read sees it, and a failed read is never held.
+/// Ledger history shared across every store handle in a process. A command
+/// that renders once enables `share_reads` at start; a follower invalidates
+/// held history before each fresh observation. Each event file, import batch,
+/// repository event, privilege scope, change state and writer, aggregate state
+/// and replica event is read once per observation. A ledger write forgets
+/// everything shared, and a failed read is never held.
 mod shared {
     use super::{ImportBatch, PrivilegeScope};
     use std::collections::{BTreeMap, HashMap};
@@ -745,8 +744,8 @@ mod shared {
 
 /// Share ledger reads across the store handles this process opens for
 /// reading. Called once, at start, by a command that only reads: one that
-/// renders once, or `workspace watch`, which forgets what each notice names
-/// before it reads again.
+/// renders once, or a follower that invalidates held history when a notice
+/// or fallback asks for fresh reads.
 pub fn share_reads() {
     shared::enable();
 }

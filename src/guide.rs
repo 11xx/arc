@@ -92,7 +92,7 @@ SAY WHO YOU ARE (before the first write)
   them seen. A supplied cursor at or above that reservation refuses and names
   the boundary; resume below it or replay without --since. Follow
   emits every subsequently discovered matching event, including imports below
-  that cursor, sorted within each poll. A restart with --since excludes older
+  that cursor, sorted within each read. A restart with --since excludes older
   imports already present; recover them by replaying without --since and
   deduplicating by event ID. A delta export's --since checksum binds an exact
   history prefix. Change exports stop below unresolved reservations, so a

@@ -14,6 +14,7 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub(crate) const SCHEMA: &str = "arc-workspace-feed/1";
 pub(crate) const FILE: &str = "events.jsonl";
@@ -156,11 +157,44 @@ pub(crate) struct Feed {
     file: Option<std::fs::File>,
     /// The start of a line whose end has not been read yet.
     carry: Vec<u8>,
+    lost: bool,
 }
 
 impl Feed {
     pub(crate) fn fd(&self) -> RawFd {
         self.inotify.as_raw_fd()
+    }
+
+    /// Sleep on this feed alone, bounded by a deadline even across signals.
+    pub(crate) fn wait(&self, deadline: Instant) -> Result<()> {
+        loop {
+            crate::interruption::check()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            let mut fd = libc::pollfd {
+                fd: self.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout =
+                libc::c_int::try_from(remaining.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+            // SAFETY: `fd` is valid for the call and the feed owns its descriptor.
+            let count = unsafe { libc::poll(&mut fd, 1, timeout) };
+            crate::interruption::check()?;
+            if count >= 0 {
+                anyhow::ensure!(
+                    fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0,
+                    "the workspace feed descriptor closed"
+                );
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error).context("cannot wait on the workspace feed");
+            }
+        }
     }
 
     pub(crate) fn open() -> Result<Feed> {
@@ -183,7 +217,11 @@ impl Feed {
             libc::inotify_add_watch(
                 inotify.as_raw_fd(),
                 path.as_ptr(),
-                libc::IN_MODIFY | libc::IN_CREATE | libc::IN_MOVED_TO,
+                libc::IN_MODIFY
+                    | libc::IN_CREATE
+                    | libc::IN_MOVED_TO
+                    | libc::IN_DELETE_SELF
+                    | libc::IN_MOVE_SELF,
             )
         };
         if watched < 0 {
@@ -202,22 +240,47 @@ impl Feed {
             inotify,
             file,
             carry: Vec::new(),
+            lost: false,
         })
     }
 
-    /// Discard the queued inotify events: they only say the feed moved.
-    pub(crate) fn drain_wakeups(&self) {
+    /// Discard queued inotify events and report whether the feed woke.
+    pub(crate) fn drain_wakeups(&mut self) -> bool {
         let mut buffer = [0u8; 4096];
-        // SAFETY: the buffer is valid for its length; the descriptor is
-        // non-blocking, so the loop ends when the queue is empty.
-        while unsafe {
-            libc::read(
-                self.inotify.as_raw_fd(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-            )
-        } > 0
-        {}
+        let mut woke = false;
+        loop {
+            // SAFETY: the buffer is valid for its length; the descriptor is
+            // non-blocking, so the loop ends when the queue is empty.
+            let count = unsafe {
+                libc::read(
+                    self.inotify.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if count <= 0 {
+                self.lost |= count < 0
+                    && !matches!(
+                        std::io::Error::last_os_error().kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    );
+                break;
+            }
+            woke = true;
+            let mut at = 0;
+            while at + 16 <= count as usize {
+                let mask = u32::from_ne_bytes(buffer[at + 4..at + 8].try_into().unwrap());
+                let len = u32::from_ne_bytes(buffer[at + 12..at + 16].try_into().unwrap());
+                self.lost |= mask
+                    & (libc::IN_Q_OVERFLOW
+                        | libc::IN_IGNORED
+                        | libc::IN_DELETE_SELF
+                        | libc::IN_MOVE_SELF)
+                    != 0;
+                at += 16 + len as usize;
+            }
+        }
+        woke
     }
 
     /// Every whole line appended since the last call, and whether a line was
@@ -225,11 +288,21 @@ impl Feed {
     /// before the new one.
     pub(crate) fn lines(&mut self) -> (Vec<Vec<u8>>, bool) {
         let mut read = Vec::new();
-        let mut lost = false;
+        let mut lost = std::mem::take(&mut self.lost);
         let path = self.dir.join(crate::feed::FILE);
         loop {
             if let Some(file) = &mut self.file {
-                let _ = file.read_to_end(&mut self.carry);
+                if file
+                    .stream_position()
+                    .ok()
+                    .zip(file.metadata().ok())
+                    .is_some_and(|(at, metadata)| at > metadata.len())
+                {
+                    lost = true;
+                    self.carry.clear();
+                    let _ = file.rewind();
+                }
+                lost |= file.read_to_end(&mut self.carry).is_err();
             }
             let ours = self
                 .file
@@ -242,6 +315,12 @@ impl Feed {
             if current.is_none() || current == ours {
                 break;
             }
+            if let Some(ours) = ours {
+                let previous = std::fs::metadata(self.dir.join(PREVIOUS))
+                    .ok()
+                    .map(|metadata| (metadata.dev(), metadata.ino()));
+                lost |= previous != Some(ours);
+            }
             // The feed moved aside, and whatever the old file ended with
             // without a line end was cut off.
             if !self.carry.is_empty() && !self.carry.ends_with(b"\n") {
@@ -249,6 +328,10 @@ impl Feed {
                 lost = true;
             }
             self.file = std::fs::File::open(&path).ok();
+            if self.file.is_none() {
+                lost = true;
+                break;
+            }
         }
         let whole = self.carry.iter().rposition(|byte| *byte == b'\n');
         if let Some(end) = whole {

@@ -145,8 +145,9 @@ pub use workspace::{
 
 /// Read-only commands that read the ledger once and render it: each shares
 /// one read of every ledger file, the privilege scope, each change's state
-/// and the readable states across the store handles it opens. A command that follows the ledger as
-/// it moves, such as `watch` or `events`, reads afresh and is not one.
+/// and the readable states across the store handles it opens. Followers
+/// manage fresh reads themselves: `watch` invalidates on notices or fallback,
+/// and `events` reads afresh. Neither uses this command-wide scope.
 pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "status",
     "show",
@@ -1573,9 +1574,9 @@ fn hostname_or_unknown(hostname: std::io::Result<std::ffi::OsString>) -> String 
 #[cfg(test)]
 mod tests {
 
-    /// Claim: only read-only commands share ledger reads, and none that
-    /// follows the ledger as it moves. Rejects a shared projection a write or
-    /// a later observation could leave stale.
+    /// Claim: automatic command-wide sharing is restricted to read-only
+    /// commands that render once. Rejects a follower enrolled without its own
+    /// invalidation, which could leave later observations stale.
     #[test]
     fn shared_read_commands_only_read_and_never_follow() {
         for command in SHARED_READ_COMMANDS {

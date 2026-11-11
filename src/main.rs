@@ -1220,7 +1220,9 @@ enum Cmd {
     /// ledger reads do not require a parseable append policy. Local IDs are totally ordered
     /// by issuance across processes. ID cursors wait below unresolved provisional
     /// reservations. Imported events keep their origin IDs; follow emits unseen imports in
-    /// each poll.
+    /// each read. Follow waits on the workspace feed, with a fallback read every
+    /// 30 seconds for writes without notices. If the feed cannot be followed,
+    /// it polls with a backoff from 100 milliseconds to one second.
     Events {
         /// Continue emitting matching events appended after the replay
         #[arg(long)]
@@ -1258,6 +1260,14 @@ enum Cmd {
     /// Aggregate reads name unreadable changes with their errors on stderr and retain
     /// readable changes; a selected unreadable change fails Records no events; ledger reads
     /// do not require a parseable append policy.
+    ///
+    /// Waits on the workspace feed, re-reading on a notice for a selected change,
+    /// its repository, or unreadable or lost notices. Journal artifacts follow
+    /// notices for their journal. A fallback read every 30 seconds covers writes
+    /// without notices. If the feed cannot be followed,
+    /// polling backs off from 100 milliseconds to one second. Stage and lease
+    /// clocks wake at their deadlines; Git-derived conditions are checked each
+    /// second using held ledger history.
     Watch {
         /// A bare `.md` filename held only by another known journal is refused,
         /// naming its owning journal and project.

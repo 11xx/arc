@@ -1,13 +1,143 @@
 //! Raw event replay/follow with resumable cursors and shell hooks, plus
-//! polling watches that can wait for the first of several conditions.
+//! feed followers that can wait for the first of several conditions.
 
 use super::*;
 use crate::perf::Counted;
 
+/// Bound discovery of copied history, older writers and failed feed appends.
+/// Thirty seconds keeps idle reads to two per minute while bounding recovery.
+const FEED_RECHECK: Duration = Duration::from_secs(30);
+
+struct Follower {
+    feed: Option<crate::feed::Feed>,
+    recheck: Instant,
+    poll_interval: Duration,
+}
+
+impl Follower {
+    fn open() -> Self {
+        Self {
+            feed: crate::feed::Feed::open().ok(),
+            recheck: Instant::now() + FEED_RECHECK,
+            poll_interval: POLL_MIN,
+        }
+    }
+
+    /// True asks for fresh history; a timed derived check reuses held history.
+    fn wait(&mut self, due: Option<Instant>, relevant: impl Fn(&[u8]) -> bool) -> Result<bool> {
+        loop {
+            crate::interruption::check()?;
+            let now = Instant::now();
+            if let Some(feed) = &mut self.feed {
+                let mut relevant_notice = false;
+                if feed.drain_wakeups() {
+                    let (lines, lost) = feed.lines();
+                    relevant_notice = lost || lines.iter().any(|line| relevant(line));
+                }
+                if relevant_notice || now >= self.recheck {
+                    self.recheck = now + FEED_RECHECK;
+                    return Ok(true);
+                }
+                if due.is_some_and(|due| now >= due) {
+                    return Ok(false);
+                }
+                if let Err(error) = feed.wait(due.map_or(self.recheck, |due| due.min(self.recheck)))
+                {
+                    if error
+                        .downcast_ref::<crate::interruption::Interrupted>()
+                        .is_some()
+                    {
+                        return Err(error);
+                    }
+                    self.feed = None;
+                }
+            } else {
+                if due.is_some_and(|due| now >= due) {
+                    return Ok(false);
+                }
+                let pause = due.map_or(self.poll_interval, |due| {
+                    self.poll_interval.min(due.saturating_duration_since(now))
+                });
+                thread::sleep(pause);
+                crate::interruption::check()?;
+                self.poll_interval = (self.poll_interval * 2).min(POLL_MAX);
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn earlier(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+fn clock_deadline(at: chrono::DateTime<chrono::Utc>) -> Instant {
+    Instant::now() + (at - chrono::Utc::now()).to_std().unwrap_or_default()
+}
+
+/// Match the canonical ledger root even when a named event has been removed.
+fn canonical_notice_path(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .or_else(|_| {
+            let parent = path.parent().unwrap_or(path).canonicalize()?;
+            Ok::<_, std::io::Error>(parent.join(path.file_name().unwrap_or_default()))
+        })
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Unreadable notices may name anything; valid unrelated notices name nothing
+/// this observer needs. Repository notices affect every selected change.
+fn ledger_notice(line: &[u8], root: &Path, changes: Option<&[String]>) -> bool {
+    let Ok(notice) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return true;
+    };
+    if notice["schema"] != crate::feed::SCHEMA {
+        return true;
+    }
+    match notice["source"].as_str() {
+        Some("ledger") => {
+            let Some(path) = notice["path"].as_str() else {
+                return true;
+            };
+            if !canonical_notice_path(Path::new(path)).starts_with(canonical_notice_path(root)) {
+                return false;
+            }
+            match notice.get("change") {
+                None => true,
+                Some(serde_json::Value::String(change)) => {
+                    changes.is_none_or(|changes| changes.contains(change))
+                }
+                _ => true,
+            }
+        }
+        Some("journal") if notice["dir"].is_string() => false,
+        _ => true,
+    }
+}
+
+fn journal_notice(line: &[u8], dir: &Path) -> bool {
+    let Ok(notice) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return true;
+    };
+    if notice["schema"] != crate::feed::SCHEMA {
+        return true;
+    }
+    match notice["source"].as_str() {
+        Some("journal") => notice["dir"].as_str().is_none_or(|written| {
+            canonical_notice_path(Path::new(written)) == canonical_notice_path(dir)
+        }),
+        Some("ledger") if notice["path"].is_string() => false,
+        _ => true,
+    }
+}
+
 /// Replay raw ledger events as compact NDJSON, optionally continuing as new
 /// event files arrive. Local issuance order equals ID order across processes.
 /// A cursor waits below every unresolved provisional reservation.
-/// Imported IDs retain origin order; each poll emits unseen imports even when
+/// Imported IDs retain origin order; each read emits unseen imports even when
 /// their IDs precede the initial replay cursor.
 /// What to stream, as the CLI expresses it. One struct rather than eight
 /// arguments, because the selectors are mutually exclusive and a call site
@@ -35,6 +165,7 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
     if change.is_some() && !tags.is_empty() {
         bail!("--change and --tag select different scopes; supply one");
     }
+    let mut follower = follow.then(Follower::open);
     let store = ctx.store()?;
     // A flag rather than a reserved reference value: `repository` is a
     // perfectly good slug, and a magic string would shadow the change a
@@ -53,7 +184,6 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
         normalize_tags(tags.to_vec())?
     };
     let mut seen = BTreeSet::new();
-    let mut poll_interval = POLL_MIN;
     let since = since.map(|cursor| cursor.to_string());
     let mut replay = true;
 
@@ -135,12 +265,11 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
             return Ok(());
         }
         replay = false;
-        poll_interval = if observed_events {
-            POLL_MIN
-        } else {
-            (poll_interval * 2).min(POLL_MAX)
-        };
-        thread::sleep(poll_interval);
+        let follower = follower.as_mut().unwrap();
+        if observed_events {
+            follower.poll_interval = POLL_MIN;
+        }
+        follower.wait(None, |line| ledger_notice(line, &store.root, None))?;
     }
 }
 
@@ -225,6 +354,8 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
         exec_command,
         json,
     } = args;
+    // Follow before selection reads either the ledger or the journal.
+    let mut follower = Follower::open();
     if let Some(file) = reference
         .map(|reference| crate::journal::artifact_subject(&ctx.cwd, reference))
         .transpose()?
@@ -239,8 +370,10 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
             timeout_secs,
             exec_command,
             json,
+            &mut follower,
         );
     }
+    crate::store::share_reads();
     // A single change and a tagged set are different questions, and a quorum is
     // meaningless for one change. Refuse rather than guess, because both wrong
     // guesses — returning early or waiting forever — are silent.
@@ -261,7 +394,7 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
     };
     let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
     let result = gitio::with_deadline(deadline, || {
-        watch_until_reached(ctx, &selection, until, deadline)
+        watch_until_reached(ctx, &selection, until, deadline, &mut follower)
     });
     match result {
         Ok(Some(hits)) => {
@@ -306,6 +439,7 @@ fn watch_artifact(
     timeout_secs: Option<u64>,
     exec_command: Option<&str>,
     json: bool,
+    follower: &mut Follower,
 ) -> Result<i32> {
     if !tags.is_empty() || quorum.is_some() {
         bail!("--tag, --any, and --all select changes, not a journal artifact");
@@ -323,19 +457,17 @@ fn watch_artifact(
         bail!("watch requires --until");
     }
     let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
-    let mut poll_interval = POLL_MIN;
+    let dir = crate::journal::resolve_dir(&ctx.cwd)?;
     let claim_id = loop {
-        if let Some(claim_id) = crate::journal::stalled_artifact_claim(ctx, file)? {
+        let (stalled, expires) = crate::journal::artifact_claim_watch(ctx, file)?;
+        if let Some(claim_id) = stalled {
             break Some(claim_id);
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break None;
         }
-        let sleep_for = deadline
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-            .map_or(poll_interval, |remaining| poll_interval.min(remaining));
-        thread::sleep(sleep_for);
-        poll_interval = (poll_interval * 2).min(POLL_MAX);
+        let due = earlier(deadline, expires.map(clock_deadline));
+        follower.wait(due, |line| journal_notice(line, &dir))?;
     };
     let Some(claim_id) = claim_id else {
         report_timeout(until, json)?;
@@ -536,6 +668,7 @@ fn watch_until_reached(
     selection: &WatchSelection,
     until: &[WatchUntil],
     deadline: Option<Instant>,
+    follower: &mut Follower,
 ) -> Result<Option<Vec<WatchHit>>> {
     let store = ctx.store()?;
     let change_ids = selection.change_ids();
@@ -543,13 +676,25 @@ fn watch_until_reached(
         WatchSelection::Single(_) => WatchQuorum::Any,
         WatchSelection::Tagged(_, quorum) => *quorum,
     };
-    let mut poll_interval = POLL_MIN;
     let mut evaluated = false;
+    let mut refresh = true;
+    let mut held = BTreeMap::new();
     loop {
+        gitio::forget_answers();
+        if refresh {
+            held.clear();
+        }
         let mut hits = Vec::new();
         for change_id in change_ids {
+            if !held.contains_key(change_id) {
+                let events = store.load_events(change_id)?;
+                let mut state = store.project_state(&events, &store.rewrites()?)?;
+                crate::replica::localize_change(&store.repository_id, &events, &mut state);
+                held.insert(change_id.clone(), (events, state));
+            }
+            let (events, state) = &held[change_id];
             for condition in until {
-                if let Some(reached) = watch_reached(ctx, &store, change_id, *condition)? {
+                if let Some(reached) = watch_reached(ctx, &store, events, state, *condition)? {
                     hits.push(WatchHit {
                         change_id: change_id.clone(),
                         condition: *condition,
@@ -576,14 +721,44 @@ fn watch_until_reached(
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(None);
         }
-        // Poll the derived condition itself rather than gating checks on event
-        // discovery. `ready` also depends on live Git state. Backoff keeps idle
-        // watchers cheap while retaining sub-second response for fresh work.
-        let sleep_for = deadline
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-            .map_or(poll_interval, |remaining| poll_interval.min(remaining));
-        thread::sleep(sleep_for);
-        poll_interval = (poll_interval * 2).min(POLL_MAX);
+        // Git-derived conditions can change without ledger writes. Their
+        // checks reuse held ledger state; stage clocks wake at their boundary.
+        let mut due = deadline;
+        if until.iter().any(|condition| {
+            matches!(
+                condition,
+                WatchUntil::Ready | WatchUntil::Approved | WatchUntil::GatesGreen
+            )
+        }) {
+            due = earlier(due, Some(Instant::now() + POLL_MAX));
+        }
+        if until
+            .iter()
+            .any(|condition| matches!(condition, WatchUntil::Stalled))
+        {
+            for (_, state) in held.values() {
+                if let Some(claim) = &state.claim {
+                    let now = chrono::Utc::now();
+                    let timing = state::claim_timing_at(claim, now);
+                    if let Some(budget) = timing.budget_seconds {
+                        let seconds = i64::try_from(budget).unwrap_or(i64::MAX).saturating_add(1);
+                        if let Some(stalls_at) = chrono::TimeDelta::try_seconds(seconds)
+                            .and_then(|delta| timing.stage_started_at.checked_add_signed(delta))
+                            .filter(|at| *at > now && *at < timing.expires_at)
+                        {
+                            due = earlier(due, Some(clock_deadline(stalls_at)));
+                        }
+                    }
+                }
+            }
+        }
+        gitio::close_object_readers();
+        refresh = follower.wait(due, |line| {
+            ledger_notice(line, &store.root, Some(change_ids))
+        })?;
+        if refresh {
+            crate::store::forget_ledger(&store.root);
+        }
     }
 }
 
@@ -659,12 +834,10 @@ fn hook_outcome(
 fn watch_reached(
     ctx: &Ctx,
     store: &Store,
-    change_id: &str,
+    events: &[Event],
+    state: &ChangeState,
     until: WatchUntil,
 ) -> Result<Option<WatchReached>> {
-    let events = store.load_events(change_id)?;
-    let mut state = store.project_state(&events, &store.rewrites()?)?;
-    crate::replica::localize_change(&store.repository_id, &events, &mut state);
     let snapshot_event = || {
         events
             .iter()
@@ -729,7 +902,7 @@ fn watch_reached(
             // decides that, so read its answer instead of asking a narrower
             // question here and reporting reached on a change that cannot
             // merge.
-            let report = ctx.report(store, &state)?;
+            let report = ctx.report(store, state)?;
             report
                 .verdict
                 .as_ref()
@@ -747,7 +920,7 @@ fn watch_reached(
                 })
         }
         WatchUntil::GatesGreen => ctx
-            .report(store, &state)?
+            .report(store, state)?
             .gates
             .iter()
             // No required gates is already the universal predicate: no
@@ -759,7 +932,7 @@ fn watch_reached(
                 stall: None,
             }),
         WatchUntil::Ready => ctx
-            .report(store, &state)?
+            .report(store, state)?
             .integrate_ready()
             .then_some(WatchReached {
                 event_id: None,
