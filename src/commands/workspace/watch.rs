@@ -34,12 +34,13 @@ pub(super) fn watch(
     scope: WorkspaceScope,
     previous: Option<&Path>,
     show_retired: bool,
+    library: bool,
 ) -> Result<i32> {
     crate::store::share_reads();
     // The feed is followed from its end before the first read, so a write
     // that lands during that read is a notice the watch reads after it.
     let mut feed = Feed::open()?;
-    let mut watch = Watch::new(ctx, scope, show_retired)?;
+    let mut watch = Watch::new(ctx, scope, show_retired, library)?;
     if let Some(path) = previous {
         watch.previous = Some(previous_report(path, &watch.scope.view())?);
     }
@@ -124,6 +125,7 @@ impl Dirty {
 }
 
 struct Watch<'a> {
+    journal: JournalRead,
     ctx: &'a Ctx,
     scope: ResolvedWorkspaceScope,
     listed: Listed,
@@ -148,8 +150,12 @@ struct Watch<'a> {
 }
 
 impl<'a> Watch<'a> {
-    fn new(ctx: &'a Ctx, scope: WorkspaceScope, show_retired: bool) -> Result<Self> {
+    fn new(ctx: &'a Ctx, scope: WorkspaceScope, show_retired: bool, library: bool) -> Result<Self> {
         let mut watch = Watch {
+            journal: JournalRead {
+                items: true,
+                library,
+            },
             ctx,
             scope: ResolvedWorkspaceScope::resolve(scope)?,
             listed: Listed {
@@ -306,14 +312,23 @@ impl<'a> Watch<'a> {
 
     fn read_and_emit(&mut self, out: &mut impl Write) -> Result<()> {
         let mut report = self.read()?;
-        let observation = report["observation"].take();
-        let bare = serde_json::to_vec(&report)?;
+        let observation = report.observation.take();
+        let encode = |report: &report::Report| -> Result<Vec<u8>> {
+            // The default stream keeps its sorted JSON keys. A library is
+            // serialized from its retained rows without an intermediate tree.
+            Ok(if self.journal.library {
+                serde_json::to_vec(report)?
+            } else {
+                serde_json::to_vec(&serde_json::to_value(report)?)?
+            })
+        };
+        let bare = encode(&report)?;
         if self.emitted.as_ref() == Some(&bare) {
             return Ok(());
         }
         self.emitted = Some(bare);
-        report["observation"] = observation;
-        let mut line = serde_json::to_vec(&report)?;
+        report.observation = observation;
+        let mut line = encode(&report)?;
         line.push(b'\n');
         out.write_all(&line)?;
         out.flush()?;
@@ -321,7 +336,7 @@ impl<'a> Watch<'a> {
     }
 
     /// Forget what is dirty, read it again, and build the report.
-    fn read(&mut self) -> Result<serde_json::Value> {
+    fn read(&mut self) -> Result<report::Report> {
         let started_at = chrono::Utc::now();
         let dirty = std::mem::take(&mut self.dirty);
         if dirty.everything {
@@ -373,7 +388,7 @@ impl<'a> Watch<'a> {
                 observed_in(&self.scope, project) && !self.rows.contains_key(&project.journal_dir)
             },
             None,
-            true,
+            self.journal,
         );
         for (index, row) in unread {
             self.rows
@@ -393,7 +408,7 @@ impl<'a> Watch<'a> {
             },
             |_, project, anchor| {
                 rows.remove(&project.journal_dir)
-                    .unwrap_or_else(|| project_row(ctx, project, anchor, None, true))
+                    .unwrap_or_else(|| project_row(ctx, project, anchor, None, self.journal))
             },
         );
         let facts = &mut self.facts;
@@ -425,7 +440,7 @@ impl<'a> Watch<'a> {
             .collect();
         self.registered = collected.registered;
         self.shed();
-        Ok(serde_json::to_value(report?)?)
+        report
     }
 
     /// Let go of what the next read most likely does not need: every ledger

@@ -4127,6 +4127,10 @@ enum WorkspaceCmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
+        /// Include each project's complete hot and archived journal library in
+        /// JSON, with corrected titles, absolute paths, recorded dates and fates
+        #[arg(long)]
+        library: bool,
     },
     /// Emit the workspace report as one JSON line, then again each time arc
     /// records something that changes it
@@ -4173,6 +4177,10 @@ enum WorkspaceCmd {
         /// counted, as `collection.retired`
         #[arg(long)]
         retired: bool,
+        /// Include each project's complete hot and archived journal library in
+        /// JSON, with corrected titles, absolute paths, recorded dates and fates
+        #[arg(long)]
+        library: bool,
     },
     /// Retire a registration whose project is gone, recording why, so the
     /// workspace views stop observing it.
@@ -8525,12 +8533,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     global: _,
                     previous,
                     retired,
+                    library,
                     json,
                 } => (
                     commands::WorkspaceView::Report {
                         scope: workspace_scope(under, here)?,
                         previous,
                         show_retired: retired,
+                        library,
                     },
                     json,
                 ),
@@ -8540,11 +8550,13 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     global: _,
                     previous,
                     retired,
+                    library,
                 } => (
                     commands::WorkspaceView::Watch {
                         scope: workspace_scope(under, here)?,
                         previous,
                         show_retired: retired,
+                        library,
                     },
                     true,
                 ),

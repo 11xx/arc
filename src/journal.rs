@@ -14433,6 +14433,110 @@ pub(crate) fn inventory_artifacts(
     Ok(project_inventory(ctx, hot, project, None, archived, None, true)?.items)
 }
 
+/// A lightweight library row. Events supply amendments and fate; reading a
+/// body is limited to the same first-heading lookup the actionable rows use.
+#[derive(Debug, Serialize)]
+pub(crate) struct LibraryEntry {
+    file: String,
+    path: String,
+    #[serde(skip)]
+    pub(crate) heading: Option<String>,
+    kind: String,
+    pub(crate) topic: String,
+    timestamp: String,
+    filed_at: Option<String>,
+    changed_at: Option<DateTime<Utc>>,
+    storage: &'static str,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_basis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    superseded_by_relocated: bool,
+}
+
+/// All hot and archived artifacts, plus recorded relocation tombstones, in
+/// descending filename order. Each artifact's events are indexed once, so a
+/// library read does not reconcile every body or scan the whole log per row.
+pub(crate) fn library_artifacts(hot: &Path) -> Result<Vec<LibraryEntry>> {
+    let events = read_events(hot)?;
+    let indexed = FileIndex::new(&events);
+    let facts = reconciliation_facts_from(&events);
+    let cold = archive_dir(hot);
+    let mut locations = BTreeMap::new();
+    for (dir, storage) in [(cold.as_path(), "archived"), (hot, "hot")] {
+        for file in sorted_artifact_names(dir)? {
+            locations.insert(file, (dir.to_path_buf(), storage));
+        }
+    }
+    for (file, destination) in &facts.relocated {
+        let path = Path::new(destination);
+        if let Some(parent) = path.parent() {
+            locations.insert(file.clone(), (parent.to_path_buf(), "relocated"));
+        }
+    }
+    let mut rows = Vec::with_capacity(locations.len());
+    for (file, (dir, storage)) in locations.into_iter().rev() {
+        let Some((timestamp, topic, kind)) = parse_artifact_name(&file) else {
+            continue;
+        };
+        let related = indexed.of(&file);
+        let (resolution, resolution_basis) = artifact_resolution(related, &file);
+        let superseded_by = facts.successors.get(&file).cloned();
+        let status = if storage == "relocated" {
+            "relocated"
+        } else if superseded_by.is_some() {
+            "superseded"
+        } else if facts.consumed.contains_key(&file) {
+            "consumed"
+        } else if storage == "archived" {
+            "archived"
+        } else if is_actionable_kind(&kind) || resolution.as_deref() == Some("unresolved") {
+            "unresolved"
+        } else {
+            "present"
+        };
+        let path = facts
+            .relocated
+            .get(&file)
+            .map_or_else(|| dir.join(&file), PathBuf::from);
+        let heading = if storage == "relocated" {
+            Amendments::collect(related, &file)
+                .title()
+                .map(|title| format!("# {title}"))
+                .or_else(|| first_heading(&path))
+        } else {
+            amended_heading(related, &dir, &file)
+        };
+        rows.push(LibraryEntry {
+            filed_at: filed_at_of(&timestamp),
+            changed_at: related
+                .iter()
+                .filter(|event| event.known())
+                .filter_map(JournalEvent::timestamp)
+                .max(),
+            path: std::path::absolute(path)?.display().to_string(),
+            file,
+            heading,
+            kind,
+            topic,
+            timestamp,
+            storage,
+            status,
+            resolution,
+            resolution_basis,
+            superseded_by_relocated: superseded_by
+                .as_ref()
+                .is_some_and(|successor| facts.relocated.contains_key(successor)),
+            superseded_by,
+        });
+    }
+    Ok(rows)
+}
+
 /// What the event log says about an artifact's place in the queues, for a
 /// reconciliation across two collections: which files a consumption terminal
 /// closed, and which file a transition superseded. The events live in the hot
@@ -14449,8 +14553,12 @@ pub(crate) struct ReconciliationFacts {
 }
 
 pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
+    Ok(reconciliation_facts_from(&read_events(dir)?))
+}
+
+fn reconciliation_facts_from(events: &[JournalEvent]) -> ReconciliationFacts {
     let mut facts = ReconciliationFacts::default();
-    for event in read_events(dir)? {
+    for event in events {
         if !event.known() {
             continue;
         }
@@ -14487,7 +14595,7 @@ pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
             _ => {}
         }
     }
-    Ok(facts)
+    facts
 }
 
 fn inventory(

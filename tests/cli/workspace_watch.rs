@@ -149,3 +149,105 @@ fn watch_follows_writes_and_requests_with_the_report() {
     );
     reader.join().unwrap();
 }
+
+/// A test owns its watch even when an assertion fails.
+struct RunningWatch(std::process::Child);
+
+impl Drop for RunningWatch {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Claim: --library emits a report for non-actionable filings and amendments,
+/// including repeated writes to a held journal, identical to a fresh library
+/// report apart from observation. A refresh with no change stays silent.
+/// Rejects comparisons that omit the library, cached libraries that are not
+/// invalidated on notices, stale event projections and unconditional emissions.
+#[test]
+fn watch_library_emits_non_actionable_writes_and_held_updates() {
+    let repo = Repo::new();
+    journal_artifact(&repo, "reference", "note", "# Reference\n");
+    let mut watch =
+        RunningWatch(repo.spawn_arc_piped(&repo.root, &["workspace", "watch", "--library"]));
+    let mut stdin = watch.0.stdin.take().unwrap();
+    let (lines, reports) = mpsc::channel::<String>();
+    let output = BufReader::new(watch.0.stdout.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        for line in output.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let fresh = || {
+        bare(json_stdout_any_status(repo.arc(&repo.root).args([
+            "workspace",
+            "report",
+            "--library",
+            "--json",
+        ])))
+    };
+    let next = |what: &str| -> Value {
+        let line = reports
+            .recv_timeout(OWED)
+            .unwrap_or_else(|_| panic!("the library watch printed no report {what}"));
+        bare(serde_json::from_str(&line).expect("one JSON report per line"))
+    };
+    assert_eq!(next("at start"), fresh());
+    let (_, conclusion) = journal_artifact(&repo, "finished", "conclusion", "# Finished\n");
+    let filed = next("after a non-actionable conclusion");
+    assert_eq!(filed, fresh());
+    assert!(filed["sections"]["work"].as_array().unwrap().is_empty());
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &conclusion,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Corrected conclusion",
+        ])
+        .assert()
+        .success();
+    let corrected = next("after a title correction in a held journal");
+    assert_eq!(corrected, fresh());
+    assert_ne!(corrected, filed);
+    let row = corrected["projects"][0]["library"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["file"] == conclusion)
+        .unwrap();
+    assert_eq!(row["title"], "Corrected conclusion");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &conclusion, "--outcome", "done"])
+        .assert()
+        .success();
+    let consumed = next("after consumption in a held journal");
+    assert_eq!(consumed, fresh());
+    assert_eq!(
+        consumed["projects"][0]["library"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == conclusion)
+            .unwrap()["status"],
+        "consumed"
+    );
+    request(
+        &mut stdin,
+        serde_json::json!({"schema": "arc-workspace-watch-request/1", "refresh": true}),
+    );
+    assert!(
+        reports.recv_timeout(QUIET).is_err(),
+        "unchanged library emitted again"
+    );
+    drop(stdin);
+    assert!(watch.0.wait().unwrap().success());
+    reader.join().unwrap();
+}

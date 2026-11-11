@@ -218,7 +218,7 @@ FROM A WORKSPACE ROOT (outside a project)
                        project, and the operator journal's when unscoped
                        (arc guide journal-references). Exits 16 when a
                        journal cannot be read. `arc-workspace-pins/1`.
-  arc workspace report [--previous FILE] --json
+  arc workspace report [--previous FILE] [--library] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
                        sections a reader acts from, and attention facts, so
@@ -233,7 +233,26 @@ FROM A WORKSPACE ROOT (outside a project)
                        rows carry the effective `kind`, declared `reason`,
                        nullable `patchset_id`, `declared_at`, and `declared_by`.
                        `--help` lists every attention rule. Versioned
-                       `arc-workspace-report/3`.
+                       `arc-workspace-report/3`. With --library, each observed
+                       project's `library` lists all hot and archived artifacts
+                       and recorded relocations, newest filename first. Rows
+                       carry `project`, `file`, absolute `path`, corrected
+                       `title`, `kind`, `topic`, filename `timestamp`, nullable
+                       RFC 3339 `filed_at` and `changed_at`, and `storage`
+                       (hot, archived, relocated). `changed_at` is the latest
+                       understood event naming the file or superseding it;
+                       without an event it is null. `status` is present,
+                       unresolved, consumed, archived, superseded or relocated;
+                       consumption takes precedence over archiving. Optional
+                       `resolution` and `resolution_basis` retain the inventory
+                       vocabulary; `superseded_by` names a successor and
+                       `superseded_by_relocated: true` marks its relocation.
+                       Titles use the actionable rows' heading and fallback
+                       rules; without a correction the heading lookup reads
+                       the artifact body. No inventory claims, promotions or
+                       content rendering are computed for library rows.
+                       Without --library the field is absent. Failed library
+                       reads enter the collection manifest as `library`.
   <ai-home>/arc/feed/events.jsonl
                        The workspace feed: after each committed ledger or
                        journal write, one `arc-workspace-feed/1` line. A
@@ -246,12 +265,15 @@ FROM A WORKSPACE ROOT (outside a project)
                        follows its write: failing to append fails nothing,
                        and a follower that missed notices reads again. Past
                        1 MiB the file moves to `events.jsonl.1`, replacing it.
-  arc workspace watch [--previous FILE]
+  arc workspace watch [--previous FILE] [--library]
                        The report as one JSON line, then again each time a
                        notice changes it: only the projects the feed names are
                        read again. Requests on stdin compare with a previous
                        report or refresh every project; it ends when stdin
-                       closes. `--help` holds the contract.
+                       closes. --library retains each project's library beside
+                       its row and reads it again only when that project is
+                       dirty; a library-only change emits too. `--help` holds
+                       the contract.
   cd <anchor>          Enter one project named by the report, then orient there.
   arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
                        Take a registration whose project is gone (a probe,
@@ -5572,7 +5594,7 @@ SCHEMAS
     `arc-perf/1`                     ARC_TRACE=1, one line on stderr at exit
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
-    `arc-workspace-report/3`         arc workspace report --json
+    `arc-workspace-report/3`         arc workspace report|watch; optional projects[].library
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-pins/1`           arc workspace pins --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json

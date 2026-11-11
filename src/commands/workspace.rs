@@ -79,11 +79,13 @@ pub enum WorkspaceView {
         scope: WorkspaceScope,
         previous: Option<PathBuf>,
         show_retired: bool,
+        library: bool,
     },
     Watch {
         scope: WorkspaceScope,
         previous: Option<PathBuf>,
         show_retired: bool,
+        library: bool,
     },
     Retire {
         project: String,
@@ -408,12 +410,14 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             scope,
             previous,
             show_retired,
-        } => workspace_report(ctx, scope, previous.as_deref(), show_retired, json),
+            library,
+        } => workspace_report(ctx, scope, previous.as_deref(), show_retired, library, json),
         WorkspaceView::Watch {
             scope,
             previous,
             show_retired,
-        } => watch::watch(ctx, scope, previous.as_deref(), show_retired),
+            library,
+        } => watch::watch(ctx, scope, previous.as_deref(), show_retired, library),
         WorkspaceView::Retire {
             project,
             reason,
@@ -1006,6 +1010,8 @@ enum DebtMissingBasis {
 
 #[derive(Serialize)]
 struct ProjectBacklog {
+    #[serde(skip)]
+    library: Option<Library>,
     project: String,
     anchor: String,
     /// The journal directory this project's questions and items were read
@@ -1629,6 +1635,35 @@ fn fork_inventory(
         .collect())
 }
 
+/// A project's library, shared between its retained read and report without
+/// copying rows or projecting them through intermediate JSON values.
+#[derive(Clone, Debug)]
+struct Library(std::sync::Arc<Vec<LibraryRow>>);
+
+impl Serialize for Library {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LibraryRow {
+    project: String,
+    title: String,
+    #[serde(flatten)]
+    artifact: crate::journal::LibraryEntry,
+}
+
+/// Which journal projections a per-project read retains.
+#[derive(Clone, Copy)]
+struct JournalRead {
+    items: bool,
+    library: bool,
+}
+
 /// Observe one reachable project into its backlog row.
 ///
 /// Components are read independently: a failed ledger read still leaves the
@@ -1639,17 +1674,20 @@ fn project_row(
     project: &crate::registry::Project,
     anchor: &Path,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
-    show_items: bool,
+    journal: JournalRead,
 ) -> ProjectBacklog {
     let mut failures: Vec<ComponentFailure> = Vec::new();
 
     // The journal and the fork inventory read nothing of the ledger, so they
     // are read beside it.
-    let ((queues, changes), (open_queue, forks)) = std::thread::scope(|scope| {
+    let ((queues, changes), (open_queue, forks, library)) = std::thread::scope(|scope| {
         let beside = scope.spawn(|| {
             (
                 crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None),
                 fork_inventory(ctx, anchor),
+                journal
+                    .library
+                    .then(|| crate::journal::library_artifacts(&project.journal_dir)),
             )
         });
         let ledger = match &project.ledger {
@@ -1719,7 +1757,7 @@ fn project_row(
         .iter()
         .map(|entry| (*entry).clone())
         .collect();
-    let backlog_items = if show_items {
+    let backlog_items = if journal.items {
         Some(BacklogItems {
             pending: tiers.pending.iter().map(|entry| (*entry).clone()).collect(),
             open: tiers.open.iter().map(|entry| (*entry).clone()).collect(),
@@ -1767,7 +1805,36 @@ fn project_row(
     let blocking = queues.needs_review.len() + decision_questions;
     let availability = open_items;
     let coverage = queues.debt_owed.len();
+    let library = library
+        .map(|result| match result {
+            Ok(rows) => rows,
+            Err(error) => {
+                failures.push(ComponentFailure {
+                    component: "library",
+                    reason: format!("{error:#}"),
+                });
+                Vec::new()
+            }
+        })
+        .map(|rows| {
+            Library(std::sync::Arc::new(
+                rows.into_iter()
+                    .map(|mut artifact| {
+                        let title = report::title_from_heading(
+                            artifact.heading.take().as_deref(),
+                            &artifact.topic,
+                        );
+                        LibraryRow {
+                            project: project.label(),
+                            title,
+                            artifact,
+                        }
+                    })
+                    .collect(),
+            ))
+        });
     ProjectBacklog {
+        library,
         project: project.label(),
         anchor: anchor.display().to_string(),
         journal_dir: project.journal_dir.display().to_string(),
@@ -1830,7 +1897,7 @@ struct Listed {
 fn collect_backlog(
     ctx: &Ctx,
     since: Option<&str>,
-    show_items: bool,
+    journal: JournalRead,
     scope: WorkspaceScope,
     listed: Listed,
     rank_by: RankBasis,
@@ -1852,7 +1919,7 @@ fn collect_backlog(
         &registered,
         |project| observed_in(&scope, project),
         cutoff,
-        show_items,
+        journal,
     );
     Ok(assemble_backlog(
         registered,
@@ -1866,7 +1933,7 @@ fn collect_backlog(
         },
         |index, project, anchor| {
             rows.remove(&index)
-                .unwrap_or_else(|| project_row(ctx, project, anchor, cutoff, show_items))
+                .unwrap_or_else(|| project_row(ctx, project, anchor, cutoff, journal))
         },
     ))
 }
@@ -2079,7 +2146,18 @@ fn workspace_backlog(
         selection,
         partial,
         ..
-    } = collect_backlog(ctx, since, show_items, scope, listed, rank_by, false)?;
+    } = collect_backlog(
+        ctx,
+        since,
+        JournalRead {
+            items: show_items,
+            library: false,
+        },
+        scope,
+        listed,
+        rank_by,
+        false,
+    )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&backlog)?);
         return Ok(if partial { 16 } else { 0 });
@@ -2528,13 +2606,25 @@ fn workspace_report(
     scope: WorkspaceScope,
     previous: Option<&Path>,
     show_retired: bool,
+    library: bool,
     json: bool,
 ) -> Result<i32> {
     let listed = Listed {
         unreachable: false,
         retired: show_retired,
     };
-    let mut collected = collect_backlog(ctx, None, true, scope, listed, RankBasis::Blocking, true)?;
+    let mut collected = collect_backlog(
+        ctx,
+        None,
+        JournalRead {
+            items: true,
+            library,
+        },
+        scope,
+        listed,
+        RankBasis::Blocking,
+        true,
+    )?;
     let (ledgers, failures) = report_ledger_facts(&collected, project_ledger_facts);
     let previous = match previous {
         Some(path) => Some(previous_report(path, &collected.scope.view())?),
@@ -2696,7 +2786,15 @@ fn build_report(
     backlog["observation"]["finished_at"] = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         .into();
-    Ok(report::build(&backlog, previous, &fates, ledgers))
+    let mut report = report::build(&backlog, previous, &fates, ledgers);
+    let libraries: BTreeMap<_, _> = collected
+        .backlog
+        .projects
+        .iter()
+        .filter_map(|project| Some((project.project.as_str(), project.library.as_ref()?)))
+        .collect();
+    report.attach_libraries(&libraries);
+    Ok(report)
 }
 
 /// The registration a command names: its journal directory, its slug, or
@@ -3034,7 +3132,7 @@ fn observe_rows(
     registered: &[crate::registry::Project],
     observe: impl Fn(&crate::registry::Project) -> bool,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
-    show_items: bool,
+    journal: JournalRead,
 ) -> BTreeMap<usize, ProjectBacklog> {
     let changes = |project: &crate::registry::Project| {
         project.ledger.as_deref().map_or(0, |root| {
@@ -3059,7 +3157,7 @@ fn observe_rows(
                 while let Some((index, project, anchor)) =
                     selected.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                 {
-                    let row = project_row(ctx, project, anchor, cutoff, show_items);
+                    let row = project_row(ctx, project, anchor, cutoff, journal);
                     rows.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(*index, row);
@@ -3451,7 +3549,7 @@ mod report {
     #[derive(Debug, Serialize)]
     pub(crate) struct Report {
         schema: &'static str,
-        observation: Value,
+        pub(super) observation: Value,
         scope: Value,
         collection: Value,
         /// The compared report's `observation.finished_at`, or null.
@@ -3587,6 +3685,8 @@ mod report {
 
     #[derive(Debug, Serialize)]
     struct ProjectSummary {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        library: Option<super::Library>,
         project: String,
         anchor: Option<String>,
         journal_dir: Option<String>,
@@ -3657,14 +3757,17 @@ mod report {
     /// heading is absent, a scaffold heading, or a position block's, in which
     /// case the topic with hyphens as spaces.
     fn title(item: &Value) -> String {
-        let heading = text(item, "heading");
-        let heading = heading.trim_start_matches('#').trim();
+        title_from_heading(opt_text(item, "heading").as_deref(), &text(item, "topic"))
+    }
+
+    pub(super) fn title_from_heading(heading: Option<&str>, topic: &str) -> String {
+        let heading = heading.unwrap_or("").trim_start_matches('#').trim();
         let scaffold = heading.is_empty()
             || heading == "(none)"
             || SCAFFOLD_HEADINGS.contains(&heading)
             || heading.starts_with("Position ");
         if scaffold {
-            text(item, "topic").replace('-', " ")
+            topic.replace('-', " ")
         } else {
             heading.to_string()
         }
@@ -3842,6 +3945,7 @@ mod report {
             let journal_dir = opt_text(project, "journal_dir");
             let items = project.get("items").unwrap_or(&Value::Null);
             let mut summary = ProjectSummary {
+                library: None,
                 project: name.clone(),
                 anchor: opt_text(project, "anchor"),
                 journal_dir: journal_dir.clone(),
@@ -4329,6 +4433,14 @@ mod report {
     }
 
     impl Report {
+        pub(super) fn attach_libraries(&mut self, libraries: &BTreeMap<&str, &super::Library>) {
+            for project in &mut self.projects {
+                project.library = libraries
+                    .get(project.project.as_str())
+                    .map(|library| (*library).clone());
+            }
+        }
+
         /// A compact text summary; `--json` carries every row.
         pub(crate) fn render(&self) {
             if !self.sections.unfinished_provisional_integrations.is_empty() {

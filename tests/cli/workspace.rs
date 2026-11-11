@@ -3805,3 +3805,219 @@ fn workspace_inbox_surfaces_stale_filings_without_open_changes() {
     let value = json_stdout(repo.arc(&repo.root).args(["workspace", "inbox", "--json"]));
     assert_eq!(value["repos"][0]["stale_filed_count"], 1, "{value}");
 }
+
+/// Claim: --library adds every observed project's hot, consumed, archived and
+/// relocated journal artifacts with corrected titles, openable absolute paths,
+/// recorded dates and distinct fates, while an ordinary report has no library
+/// and retains the same other facts. Rejects actionable-only or hot-only lists,
+/// body titles overriding corrections, fabricated dates, lost terminal outcomes,
+/// and a library that changes the actionable report or escapes its scope.
+#[test]
+fn workspace_report_library_carries_every_artifact_and_fate() {
+    let repo = Repo::new();
+    let (dir, todo) = journal_artifact(&repo, "work", "todo", "# Work\n");
+    let (_, done) = journal_artifact(&repo, "finished", "todo", "# Finished\n");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &done, "--outcome", "done"])
+        .assert()
+        .success();
+    let (_, shelved) = journal_artifact(&repo, "shelved", "note", "# Shelved\n");
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &shelved])
+        .assert()
+        .success();
+    let (_, unresolved) = journal_artifact(&repo, "parked-work", "discussion", "# Parked work\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "archive",
+            &unresolved,
+            "--unresolved",
+            "--note",
+            "awaiting a decision",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &done])
+        .assert()
+        .success();
+    let (_, source) = journal_artifact(&repo, "transitioned", "todo", "# Transitioned\n");
+    let successor =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "transition", &source, "--to", "plan"]),
+        );
+    let successor = successor
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("transitioned: ")?
+                .split(" → ")
+                .nth(1)?
+                .split(" (")
+                .next()
+        })
+        .expect("transition names its successor")
+        .to_string();
+    let outside = repo.home.join("outside");
+    repo.arc(&repo.root)
+        .args(["journal", "relocate", &successor, "--to"])
+        .arg(&outside)
+        .args(["--reason", "retain outside the journal"])
+        .assert()
+        .success();
+    let mut expected = Vec::new();
+    for kind in [
+        "conclusion",
+        "decision",
+        "memory",
+        "review",
+        "incident",
+        "handoff",
+        "discussion",
+        "later",
+        "feature-request",
+    ] {
+        let (_, file) = journal_artifact(&repo, kind, kind, &format!("# Filed {kind}\n"));
+        expected.push((kind, file));
+    }
+    let conclusion = &expected[0].1;
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            conclusion,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Corrected conclusion",
+        ])
+        .assert()
+        .success();
+    let legacy = "20260101T000000Z-legacy-note.md";
+    fs::write(dir.join(legacy), "No heading\n").unwrap();
+    let scaffold = "20260101T000000Z-friendly-topic-discussion.md";
+    fs::write(dir.join(scaffold), "# Positions\n").unwrap();
+
+    let plain = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert!(plain["projects"][0].get("library").is_none());
+    let mut report =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--library", "--json"]),
+        );
+    assert_eq!(report["schema"], "arc-workspace-report/3");
+    let project = &report["projects"][0];
+    let library = project["library"]
+        .as_array()
+        .expect("--library supplies a per-project list");
+    let row = |file: &str| {
+        library
+            .iter()
+            .find(|row| row["file"] == file)
+            .unwrap_or_else(|| panic!("{file} missing from the library"))
+    };
+    assert_eq!(library.len(), expected.len() + 8);
+    for (kind, file) in &expected {
+        let item = row(file);
+        assert_eq!(item["kind"], *kind);
+        assert_eq!(item["topic"], *kind);
+        assert_eq!(item["project"], project["project"]);
+        assert_eq!(item["path"], dir.join(file).to_str().unwrap());
+        assert_eq!(item["storage"], "hot");
+        assert_eq!(item["timestamp"], file.split('-').next().unwrap());
+        assert!(chrono::DateTime::parse_from_rfc3339(item["filed_at"].as_str().unwrap()).is_ok());
+        let latest = journal_event_log(&dir)
+            .into_iter()
+            .filter(|event| event["file"] == file.as_str())
+            .filter_map(|event| chrono::DateTime::parse_from_rfc3339(event["ts"].as_str()?).ok())
+            .max()
+            .unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(item["changed_at"].as_str().unwrap()).unwrap(),
+            latest
+        );
+        assert_eq!(
+            item["title"],
+            if *kind == "conclusion" {
+                "Corrected conclusion".to_string()
+            } else if *kind == "discussion" {
+                "Discussion".to_string()
+            } else {
+                format!("Filed {kind}")
+            }
+        );
+    }
+    let rendered = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "render", conclusion, "--json"]),
+    );
+    assert_eq!(row(conclusion)["title"], rendered["pages"][0]["title"]);
+    let relative = json_stdout(repo.arc(&repo.home).env("ARC_AI_HOME", ".local/ai").args([
+        "workspace",
+        "report",
+        "--library",
+        "--json",
+    ]));
+    assert!(relative["projects"][0]["library"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| Path::new(row["path"].as_str().unwrap()).is_absolute()));
+    assert_eq!(row(conclusion)["status"], "present");
+    assert_eq!(row(&todo)["status"], "unresolved");
+    assert_eq!(
+        row(&todo)["title"],
+        plain["sections"]["work"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == todo)
+            .unwrap()["title"]
+    );
+    let cold = dir.with_file_name(format!(
+        "{}-archive",
+        dir.file_name().unwrap().to_str().unwrap()
+    ));
+    assert_eq!(row(&done)["path"], cold.join(&done).to_str().unwrap());
+    assert_eq!(row(&done)["status"], "consumed");
+    assert_eq!(row(&done)["resolution"], "done");
+    assert_eq!(row(&done)["resolution_basis"], "consumption");
+    assert_eq!(row(&done)["storage"], "archived");
+    assert_eq!(row(&shelved)["status"], "archived");
+    assert_eq!(row(&shelved)["path"], cold.join(&shelved).to_str().unwrap());
+    assert_eq!(row(&unresolved)["status"], "archived");
+    assert_eq!(row(&unresolved)["resolution"], "unresolved");
+    assert_eq!(row(&source)["status"], "superseded");
+    assert_eq!(row(&source)["superseded_by"], successor);
+    assert_eq!(row(&source)["superseded_by_relocated"], true);
+    assert_eq!(row(&successor)["status"], "relocated");
+    assert_eq!(row(&successor)["storage"], "relocated");
+    assert_eq!(
+        row(&successor)["path"],
+        outside.join(&successor).to_str().unwrap()
+    );
+    assert_eq!(row(legacy)["title"], "legacy");
+    assert!(row(legacy)["changed_at"].is_null());
+    assert_eq!(row(scaffold)["title"], "friendly topic");
+    assert!(library
+        .windows(2)
+        .all(|pair| pair[0]["file"].as_str() >= pair[1]["file"].as_str()));
+
+    for project in report["projects"].as_array_mut().unwrap() {
+        project.as_object_mut().unwrap().remove("library");
+    }
+    report.as_object_mut().unwrap().remove("observation");
+    let mut plain = plain;
+    plain.as_object_mut().unwrap().remove("observation");
+    assert_eq!(report, plain, "library changed the actionable report");
+    let excluded = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "report", "--library", "--under"])
+            .arg(&outside)
+            .arg("--json"),
+    );
+    assert!(excluded["projects"].as_array().unwrap().is_empty());
+}
