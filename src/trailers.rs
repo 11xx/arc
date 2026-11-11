@@ -798,6 +798,26 @@ fn implementation_identity(
     if !declared {
         return Err(undeclared_recorder(patchset));
     }
+    if let Some(identity) = patchset
+        .inherited_authors
+        .iter()
+        .find(|identity| identity.actor == subject || identity.effective_actor() == subject)
+    {
+        if crate::coordinate::is_person(subject)
+            && crate::coordinate::coordinate_defect(subject, None).is_none()
+        {
+            return Ok(subject.trim().to_string());
+        }
+        if let Some((harness, model)) = identity.harness.as_ref().zip(identity.model.as_ref()) {
+            let coordinate = format!("{harness}:{model}");
+            if crate::coordinate::coordinate_defect(&coordinate, identity.session.as_deref())
+                .is_none()
+            {
+                return Ok(coordinate);
+            }
+        }
+        return Err("retained author has no established harness and model".to_string());
+    }
     let defect = match crate::coordinate::coordinate_defect(subject, patchset.session.as_deref()) {
         None => return Ok(subject.trim().to_string()),
         Some(defect) => defect,

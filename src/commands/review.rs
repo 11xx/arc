@@ -651,7 +651,7 @@ pub(super) fn snapshot_holding(
     let carried_coordinates = carried
         .map(|previous| st.authoring_coordinates(previous))
         .unwrap_or_default();
-    let inherited_subject = carried
+    let mut inherited_subject = carried
         .and_then(|previous| {
             previous.on_behalf_of.clone().or_else(|| {
                 let author = previous.effective_author();
@@ -663,7 +663,7 @@ pub(super) fn snapshot_holding(
                 .as_ref()
                 .is_none_or(|declared| declared.iter().any(|contributor| contributor == subject))
         });
-    let (contributors, inherited_authors) = match carried {
+    let (mut contributors, mut inherited_authors) = match carried {
         Some(previous) => {
             let inherited = carried_coordinates
                 .into_iter()
@@ -742,6 +742,30 @@ pub(super) fn snapshot_holding(
                 .is_some_and(|patchset| patchset.contributors == *requested)
         })
     });
+    let derived = if unchanged_patchset.is_none()
+        && requested_contributors.is_none()
+        && ctx.on_behalf_of.is_none()
+        && replay.is_none()
+    {
+        super::snapshot_attribution::derive(ctx, store, &st, &events, &base_rev, &head)
+    } else {
+        None
+    };
+    if let Some(derived) = &derived {
+        contributors = derived
+            .authors
+            .iter()
+            .map(|author| author.actor.clone())
+            .collect();
+        if derived.includes_invoker && !contributors.contains(&ctx.actor) {
+            contributors.push(ctx.actor.clone());
+        }
+        inherited_subject = derived
+            .authors
+            .first()
+            .map(|author| author.effective_actor().to_string());
+        inherited_authors = derived.authors.clone();
+    }
     if let Some(contributors) = requested_contributors.as_deref() {
         warn_fewer_contributors_than_hands(ctx, &base_rev, &head, contributors);
     }
@@ -778,6 +802,14 @@ pub(super) fn snapshot_holding(
         ev.on_behalf_of = Some(subject);
     }
     store.append_local_event(&mut ev)?;
+    if let Some(derived) = derived {
+        println!(
+            "attribution: {} via completed bound dispatches {} (committer times, worktree, Implemented-by){}",
+            derived.authors.iter().map(|author| format!("{} ({})", author.actor, author.effective_actor())).collect::<Vec<_>>().join(", "),
+            derived.dispatches.join(", "),
+            if derived.includes_invoker { "; invoker also contributed" } else { "" }
+        );
+    }
     // Pin this head with its own ref: reviewed heads must stay reachable
     // individually, even if the branch is rewound or deleted later.
     gitio::update_ref(

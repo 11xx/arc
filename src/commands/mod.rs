@@ -49,6 +49,7 @@ pub(crate) mod sandbox;
 pub(crate) mod scaffold;
 pub(crate) mod selection;
 pub(crate) mod slots;
+mod snapshot_attribution;
 mod squash;
 pub(crate) use scaffold::{
     available as scaffolds_available, default_for_kind as scaffold_default_for_kind,

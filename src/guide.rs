@@ -873,10 +873,12 @@ RUN A CHANGE
                                      A rewrite that invalidated approval
                                      requires a fresh patchset even when the
                                      mapped head already matches the branch.
-                                     A snapshot grants no approval. Only a
+                                     A snapshot grants no approval. A
                                      clean `arc rebase` keeps the replayed
                                      patchset's recorded contributor
                                      coordinates.
+                                     Default executor attribution:
+                                     `arc guide debt-review`.
     --verify [--gate <name>...]      Run required gates, or the named ones,
                                      reusing the newest green evidence at the
                                      same tree; --rerun runs them anyway.
@@ -1263,7 +1265,8 @@ RUN A CHANGE
   resolution is yours, and aborting would throw it away — with the conflicting
   files and the commands that finish the replay. Resolve,
   `git rebase --continue`, then `arc snapshot --verify`, which records the
-  resolved head as the snapshot taker's work. Over another actor's live claim
+  resolved head under the attribution rules in `arc guide debt-review`.
+  Over another actor's live claim
   an unattributed rebase refuses before the branch moves, and the change stays
   locked from that check until the replayed head is recorded. The gates the
   replayed head owes are named after it is recorded; a failure to evaluate
@@ -2566,7 +2569,7 @@ REVIEW COVERAGE AND DEBT
 
   `arc status --json` carries the exact identities the independence check
   compares as `review_subject`: invoker, effective author, the effective
-  contributor set, and whether it was declared or synthesized. For a closed
+  contributor set, and whether a recorded set or author fallback supplies it. For a closed
   integrated change, it names the patchset recorded as shipped while
   `latest_patchset` remains the later history. `arc show` and `arc check` name
   them beside an approval rejection, and `arc catchup` repeats the subject
@@ -2591,8 +2594,8 @@ REVIEW COVERAGE AND DEBT
 
   Repairing a patchset's attribution happens only before any verdict:
   `snapshot --amend <ps> --contributors ...` replaces the whole set, and the
-  refusal after a verdict or closure names the blocker. A run dispatch is
-  activity, not authorship — it repairs no patchset.
+  refusal after a verdict or closure names the blocker. Run evidence affects
+  attribution only when a patchset is recorded; it repairs no existing patchset.
 
   Independence is judged against the patchset a reviewer actually read, not
   against whatever is newest. Otherwise a later snapshot by somebody else
@@ -2600,7 +2603,7 @@ REVIEW COVERAGE AND DEBT
 
   It is also a relation between declared identities. The ledger, never commit
   trailers, says who held which role. A patchset's recorded contributor set,
-  when one was declared, is its authorship; otherwise its implementer is its
+  when nonempty, is its authorship; otherwise its implementer is its
   effective author: its `--on-behalf-of` subject when one was named, else its
   recorder. Its planner is the plan's recorded planners, else an asserted
   `Planned-by`, else the brief's recorder; its orchestrator is the invoker
@@ -2621,9 +2624,50 @@ REVIEW COVERAGE AND DEBT
   that merely replays or records somebody else's work supplies none. An
   explicit `--contributors` or `--solo` decides the replayed patchset's
   contributor set; members the replay carries over keep their recorded
-  coordinates. Any other snapshot records the head as ordinary work: its
-  recorder, or its explicit `--on-behalf-of` or contributor declaration, is
-  the author.
+  coordinates. Ordinary snapshots use their explicit `--contributors`, `--solo`
+  or `--on-behalf-of` declaration when supplied, including an environment
+  subject. With none supplied, completed bound runs can establish authorship
+  under the following rule.
+
+  Snapshot examines commits added since the previous patchset's recorded
+  head, or its resolved base for the first patchset. That boundary must remain
+  an ancestor of the head, with no recorded rewrite touching the boundary or
+  added commits. For each delegated commit, a local dispatch naming this
+  change must have a nonconflicting local implementation binding and a local
+  end.
+  Its dispatch-to-end interval must include the commit's committer timestamp
+  exactly as Git records it, in whole seconds; fractional event times are not
+  rounded. The binding may be recorded after the end but not before dispatch.
+  The dispatch's worktree must resolve to the checkout holding the change
+  branch. Its valid agent `--on-behalf-of` coordinate must name the bound
+  harness, and the commit's `Implemented-by` set must equal that coordinate
+  alone. Trailers corroborate the ledger's dispatch; they supply no identity
+  by themselves. Several covering dispatches must agree on the executor
+  session and model, and one executor session must retain one coordinate
+  throughout the commit range. Dispatches starting after a commit or ending
+  before it are irrelevant to that commit; a nonconflicting reviewer binding
+  supplies no implementation evidence.
+
+  Each established executor contributes its bound `harness:session`, with
+  its dispatch's represented coordinate and model retained as author evidence.
+  Several executors are all recorded. Production names the first executor
+  in commit order as implementer; every executor remains an author for
+  independence and clearance. A commit under the invoker's own binding, or
+  outside every interval with no other implementer's trailer, also includes
+  the invoker as a contributor. Without any established executor, the
+  recorder remains the author. A temporally relevant missing bind or end,
+  conflicting bindings or covering executors, mismatching worktree, coordinate
+  or trailers, an uncovered implementer's trailer, or a rewritten boundary or range retains
+  recorder attribution for the whole patchset. Snapshot prints one line
+  naming that ambiguity and the explicit attribution flags to pass. Successful
+  derivation prints the executors and supporting dispatch ids. A change with
+  no dispatch retains ordinary recorder attribution without that diagnostic.
+  An unchanged patchset keeps its attribution. These rules also govern
+  `review --snapshot`, `done`, squash and ordinary rebase snapshots; mechanical
+  replay and explicitly attributed delivery or candidate promotion retain
+  their own attribution contracts. Live-claim declaration requirements apply.
+  Arc cannot detect an unrecorded rewrite that preserves the boundary,
+  committer times and corroborating trailers.
 
   An approval is refused when its effective author matches the ledger's
   authorship, or when arc assumed the reviewing identity from git config or the
@@ -2897,8 +2941,8 @@ REVIEW COVERAGE AND DEBT
   Production names who set the contract, who implemented it, and the
   orchestrator and integrator when the ledger records them. The planner is the
   plan the work was opened from, else an asserted `Planned-by`, else the
-  brief's recorder. The implementer is the identity of the patchset's declared
-  contributor set when one was recorded, else its effective author; the
+  brief's recorder. The implementer is the identity of the patchset's recorded
+  contributor set when nonempty, else its effective author; the
   orchestrator is the invoker recorded beside an `--on-behalf-of` subject, and
   the integrator is the actor of `arc integrate`.
 
@@ -3270,7 +3314,7 @@ REVIEW CLEARANCE
   Candidate and dirty checkout files do not supply either reading.
 
   `review_context.authors` is keyed by patchset. Each set is the union of
-  its declared contributors, else its effective author; the subject's
+  its recorded contributors, else its effective author; the subject's
   production implementer; and every `Implemented-by` coordinate in its
   range. Production is included even outside the contributor declaration.
   `landed_authors` reads a replayed member's landed range, excluding earlier
@@ -3490,17 +3534,19 @@ CONTRIBUTION TRAILERS
                        after opening, brief when writing a contract.
     arc trailers <change> [--json]
                        Print Planned-by and Orchestrated-by assertions and
-                       Implemented-by from declared patchset contributors,
+                       Implemented-by from recorded patchset contributors,
                        or the snapshot subject when none are listed, in
                        convention order. Duplicate lines print once.
                        The subject is --on-behalf-of when set, else the actor.
                        A subject that is a fresh harness:model[#effort] or
-                       Name <email> supplies itself. The recorder's harness
-                       and model apply only to the recorder's own work, on a
-                       snapshot that declared its attribution: a declared
+                       Name <email> supplies itself. Retained replay or
+                       bound-run author coordinates take precedence over
+                       session names. The recorder's harness and model apply
+                       only to the recorder's own work, on a snapshot that declared its attribution: a declared
                        actor, --solo, --contributors or --on-behalf-of. A
-                       derived or git-config recorder is not credited, since
-                       who ran snapshot is not proof of who wrote the diff.
+                       recorder inferred from its harness session or Git
+                       configuration is not credited, since who ran snapshot
+                       is not proof of who wrote the diff.
                        No line carries a placeholder or a session id. What
                        cannot be attributed is omitted and named in a note
                        with the value, why (placeholder, session id,
@@ -5906,9 +5952,9 @@ REVIEW
 
 WORK BESIDE OTHERS
   arc claim takes work. Each writer uses its own branch or worktree.
-  Name contributors with arc snapshot --contributors, and a subject you act for
-  with --on-behalf-of plus --model for its model. arc roles records planners and
-  orchestrators.
+  Snapshots attribute completed bound executor work; `arc guide debt-review`
+  defines the evidence. Override with --contributors, --solo or --on-behalf-of.
+  arc roles records planners and orchestrators.
   ARC_ROLE bounds a delegated run. Integration belongs to the lead.
 
 KEEP WHAT YOU LEARN

@@ -22,9 +22,8 @@ pub struct Patchset {
     pub actor_source: Option<ActorSource>,
     /// Subject the snapshot was taken for, when a lead ran delegated ceremony.
     pub on_behalf_of: Option<String>,
-    /// One author coordinate per member of the replayed patchset's
-    /// authoritative contributor set, model included. Empty on an ordinary
-    /// snapshot.
+    /// Author coordinates carried from a mechanical replay or derived
+    /// from completed, bound implementation runs, model included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited_authors: Vec<crate::model::DebtIdentity>,
     pub base: String,
@@ -4848,7 +4847,7 @@ impl ChangeState {
     }
 
     /// The newest coordinate among the records before `end` that credits
-    /// `actor` with authorship. A replay credits the coordinates it carried, a
+    /// `actor` with authorship. Retained author evidence credits its coordinates, a
     /// declared contributor set credits its members, an `--on-behalf-of`
     /// subject credits itself, and an ordinary snapshot credits its recorder.
     /// A record that only replayed or recorded somebody else's work credits
@@ -4902,7 +4901,7 @@ impl ChangeState {
     }
 
     /// The identity a patchset's implementer is credited with: the coordinate
-    /// a replay carried for that contributor, its recorded contributor set
+    /// retained for that contributor, its recorded contributor set
     /// when one was declared, its subject when one was named, else the session
     /// that recorded it.
     pub(crate) fn implementer_identity(&self, subject: &Patchset) -> DebtIdentity {
@@ -4942,7 +4941,7 @@ impl ChangeState {
     }
 
     /// The coordinate the ledger holds for one contributor of `patchset`: a
-    /// replay's carried coordinate when it names that contributor, this
+    /// retained author coordinate when it names that contributor, this
     /// patchset's own coordinate when it names its recorder, else the
     /// coordinate that contributor's authoring record at or before this
     /// patchset names.
@@ -5065,7 +5064,7 @@ impl ChangeState {
             identities.push(self.implementer_identity(patchset));
         } else {
             for contributor in &patchset.contributors {
-                // A replay's carried coordinate is the one the ledger
+                // A retained author coordinate is the one the ledger
                 // observed, model included. Looking the actor up across the
                 // whole change instead would see the replayer's later model
                 // and lose the recorded one.

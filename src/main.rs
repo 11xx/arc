@@ -463,11 +463,13 @@ enum Cmd {
     },
     /// Print a change's portable trailer block in convention order.
     ///
-    /// Planning and orchestration come from assertions, implementation from declared
+    /// Planning and orchestration come from assertions, implementation from recorded
     /// patchset contributors, or the snapshot subject when none are listed. A subject that
-    /// is a fresh harness:model[#effort] or Name <email> supplies itself. The recorder's
-    /// harness and model apply only to the recorder's own work on a snapshot that declared
-    /// its attribution; a derived or git-config recorder is not credited. No line carries a
+    /// is a fresh harness:model[#effort] or Name <email> supplies itself.
+    /// Retained replay or bound-run author coordinates take precedence over session names.
+    /// The recorder's harness and model apply only to the recorder's own work on a snapshot
+    /// that declared its attribution; a recorder inferred from its harness session or Git
+    /// configuration is not credited. No line carries a
     /// placeholder or a session id: what cannot be attributed is omitted and named in a
     /// note with its reason and remedy. Review credit stays in the ledger; Reviewed-by is
     /// never projected.
@@ -1708,15 +1710,14 @@ enum Cmd {
     /// signature-only preparation; snapshots record evidence, never a judgment. A head
     /// whose rewrite invalidated approval requires a fresh patchset, even when the latest
     /// patchset's mapped head already matches the branch. Re-approval requires a verdict on
-    /// that fresh patchset. Only the replay `arc rebase` performs itself records an
-    /// inherited author: it carries the author coordinates of the patchset whose head it
-    /// replayed, every contributor at its recorded model, and the replaying session is not
+    /// that fresh patchset. The replay `arc rebase` performs itself carries the
+    /// author coordinates of the patchset whose head it replayed, every contributor at its recorded model, and the replaying session is not
     /// its implementer. That replay runs where the project's configuration cannot define a
     /// merge driver or filter, and arc reads its result from the ref Git updated, not from
-    /// command output. A snapshot, or the snapshot after a rebase that fell back to `git
-    /// rebase` or stopped for resolution, records the head as its recorder's work unless
-    /// `--on-behalf-of` or `--contributors` declares another author. At unchanged content,
-    /// an explicit --on-behalf-of (also supplied by ARC_ON_BEHALF_OF) differing from the
+    /// command output. Ordinary snapshots derive executor authorship from completed, bound
+    /// runs when no --contributors, --solo or --on-behalf-of is supplied; the exact evidence
+    /// and conservative fallback rule is in `arc guide debt-review`. Explicit attribution
+    /// takes precedence. At unchanged content, an explicit --on-behalf-of (also supplied by ARC_ON_BEHALF_OF) differing from the
     /// latest effective author records a fresh patchset. An equal or omitted subject
     /// preserves that patchset and its attribution; the unchanged output names the
     /// effective subject. Earlier verdicts remain bound to their original patchsets.
@@ -1892,7 +1893,7 @@ enum Cmd {
     /// that patchset's review head and may be stale for the branch head.
     ///
     /// Authorship is read from the ledger, not from commit trailers: the
-    /// patchset's declared contributors, else its effective author, and its
+    /// patchset's recorded contributors, else its effective author, and its
     /// production record's implementer. Unless the dated tie-break election
     /// in `arc guide debt-review` applies, an approval under that implementer's
     /// model, at any effort, warns that it shows a review happened and not that
@@ -1953,7 +1954,8 @@ enum Cmd {
         #[command(flatten)]
         body: BodyOpts,
         /// Snapshot the clean change worktree before recording the verdict;
-        /// --contributors or --solo attribute that patchset. The findings
+        /// attribution follows `arc snapshot`, including completed bound runs.
+        /// Explicit flags take precedence. The findings
         /// batch and the verdict are validated first, so a refused review
         /// records no patchset. The change stays locked from the snapshot
         /// until the verdict on that patchset is recorded, so a command

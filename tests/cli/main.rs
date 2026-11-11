@@ -38,6 +38,7 @@ mod cost_subject_membership;
 mod cross_links;
 mod debt_plan;
 mod debt_standing;
+mod derived_attribution;
 mod diff;
 mod doctor;
 mod explain;
