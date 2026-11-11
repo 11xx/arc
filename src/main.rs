@@ -1710,10 +1710,10 @@ enum Cmd {
     /// signature-only preparation; snapshots record evidence, never a judgment. A head
     /// whose rewrite invalidated approval requires a fresh patchset, even when the latest
     /// patchset's mapped head already matches the branch. Re-approval requires a verdict on
-    /// that fresh patchset. The replay `arc rebase` performs itself carries the
-    /// author coordinates of the patchset whose head it replayed, every contributor at its recorded model, and the replaying session is not
-    /// its implementer. That replay runs where the project's configuration cannot define a
-    /// merge driver or filter, and arc reads its result from the ref Git updated, not from
+    /// that fresh patchset. The replay `arc rebase` performs itself carries a matching
+    /// patchset's author coordinates, or completed bound-run attribution established at
+    /// the original head before replay; the replaying session is not its implementer.
+    /// That replay runs where the project's configuration cannot define a merge driver or filter, and arc reads its result from the ref Git updated, not from
     /// command output. Ordinary snapshots derive executor authorship from completed, bound
     /// runs when no --contributors, --solo or --on-behalf-of is supplied; the exact evidence
     /// and conservative fallback rule is in `arc guide debt-review`. Explicit attribution
@@ -2396,11 +2396,11 @@ enum Cmd {
     /// repository with no project configuration, sharing only the object store, so a merge
     /// driver or filter the project configures cannot run. The commits it creates carry no
     /// signature, whatever the repository configures for commits it makes; `arc rewrite
-    /// sign` signs a replayed range. Such a replay is recorded as a mechanical replay of
-    /// the patchset whose head it replayed, carrying every contributor's recorded
-    /// coordinate, model included; the replaying session is not its implementer, and the
-    /// patchset names exactly the tip that replay wrote. A `post-rewrite` hook, a reflog
-    /// entry, a merge driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work
+    /// sign` signs a replayed range. Such a replay carries a matching patchset's author
+    /// coordinates, or completed bound-run attribution established at the original head
+    /// before replay under `arc guide debt-review`, model included; the replaying session is
+    /// not its implementer, and the patchset names exactly the tip that replay wrote.
+    /// A `post-rewrite` hook, a reflog entry, a merge driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work
     /// look replayed. A Git that cannot replay, a refusal, or a conflict falls back to `git
     /// rebase`, whose result is recorded as ordinary work; a stopped rebase leaves its
     /// partial resolution in progress. Before either replays, each commit of the replayed

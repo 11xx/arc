@@ -12,7 +12,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let repo = Repo::new();
+        Self::from_repo(Repo::new())
+    }
+
+    fn from_repo(repo: Repo) -> Self {
         repo.declare_gates_locally("[policy]\nforbid_self_approval = true\n");
         stdout(repo.arc(&repo.root).args(["begin", "derived"]));
         let state = json_stdout(repo.arc(&repo.root).args(["show", "derived", "--json"]));
@@ -171,6 +174,193 @@ impl Fixture {
         assert!(ps["on_behalf_of"].is_null(), "{state}");
         assert!(ps.get("contributors").is_none(), "{state}");
         assert!(ps.get("inherited_authors").is_none(), "{state}");
+    }
+}
+
+fn rewritten_base(recorded_at: i64) -> Fixture {
+    let repo = Repo::new();
+    let old = repo.head(&repo.root);
+    git(
+        &repo.root,
+        &["commit", "--amend", "-m", "test: rewritten base"],
+    );
+    let new = repo.head(&repo.root);
+    let f = Fixture::from_repo(repo);
+    let map = f.repo.home.join("base-map.txt");
+    fs::write(&map, format!("{old} {new}\n")).unwrap();
+    f.event(
+        stdout(f.lead().args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "record fixture base",
+        ])),
+        recorded_at,
+    );
+    f
+}
+
+/// A base produced by a rewrite recorded before dispatch permits executor attribution;
+/// rejects treating an earlier change's rewritten target as evidence against new work.
+#[test]
+fn earlier_rewrite_producing_base_allows_executor_attribution() {
+    let f = rewritten_base(-20);
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("work", 10, Some(COORDINATE));
+    let output = f.snapshot();
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("recorder retained"),
+        "{output:?}"
+    );
+    assert_eq!(f.state()["patchsets"][0]["contributors"], json!([EXECUTOR]));
+}
+
+/// An incoming boundary rewrite recorded during dispatch retains recorder attribution;
+/// rejects ignoring a rewritten boundary merely because it is a map's new side.
+#[test]
+fn boundary_rewrite_recorded_during_dispatch_keeps_recorder() {
+    let f = rewritten_base(5);
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("work", 10, Some(COORDINATE));
+    f.assert_recorder(&f.snapshot(), "recorded rewrite touches");
+}
+
+/// A rewrite naming the boundary on its old side refuses attribution even before dispatch;
+/// rejects using the event's age to excuse a stale boundary that the map replaced.
+#[test]
+fn rewrite_of_old_boundary_keeps_recorder_regardless_of_age() {
+    let f = Fixture::new();
+    let old = f.repo.head(&f.repo.root);
+    f.repo
+        .commit(&f.repo.root, "successor", "successor", "feat: successor");
+    let new = f.repo.head(&f.repo.root);
+    git(&f.repo.root, &["reset", "--hard", &old]);
+    let map = f.repo.home.join("old-boundary.txt");
+    fs::write(&map, format!("{old} {new}\n")).unwrap();
+    f.event(
+        stdout(f.lead().args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "record fixture boundary",
+        ])),
+        -20,
+    );
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("work", 10, Some(COORDINATE));
+    f.assert_recorder(&f.snapshot(), "recorded rewrite touches");
+}
+
+fn assert_executor_patchsets(f: &Fixture) {
+    let state = f.state();
+    for patchset in state["patchsets"].as_array().unwrap() {
+        assert_eq!(patchset["contributors"], json!([EXECUTOR]), "{state}");
+        assert_eq!(
+            patchset["inherited_authors"][0]["model"], "writer-model#high",
+            "{state}"
+        );
+    }
+}
+
+/// The lead's dispatch-to-integration flow retains executor authorship without attribution flags;
+/// rejects losing attribution before mechanical replay or approval after a complete role append.
+#[test]
+fn lead_flow_preserves_executor_through_replay_role_append_and_integration() {
+    for initial_snapshot in [true, false] {
+        let f = rewritten_base(-20);
+        f.repo.declare_gates_locally(
+            "[policy]\nforbid_self_approval = true\n[gates.smoke]\ncommand = 'true'\n",
+        );
+        let dispatch = f.dispatch(Some(COORDINATE), 0);
+        f.bind(&dispatch, "codex", "executor-one", 1);
+        f.commit("work", 10, Some(COORDINATE));
+        f.commit("more-work", 12, Some(COORDINATE));
+        f.end(&dispatch, 20);
+        if initial_snapshot {
+            f.snapshot();
+            assert_executor_patchsets(&f);
+        }
+        f.repo
+            .commit(&f.repo.root, "target", "target", "feat: target");
+        let target = f.repo.head(&f.repo.root);
+        stdout(f.lead().args(["rebase", &f.change]));
+        assert_executor_patchsets(&f);
+        f.snapshot();
+        assert_executor_patchsets(&f);
+        stdout(f.lead().args(["verify", &f.change, "--all"]));
+        stdout(
+            f.lead()
+                .args(["review", &f.change, "--verdict", "approved"]),
+        );
+        assert_eq!(f.status()["has_valid_approval"], true);
+        let replayed = git_out(&f.worktree, &["rev-parse", "HEAD^"]);
+        stdout(f.lead().args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &replayed,
+            "--append",
+            "Reviewed-by: claude:reader-model#high",
+            "--no-sign",
+        ]));
+        assert_eq!(f.status()["has_valid_approval"], true);
+        let output = f.snapshot();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("(unchanged)"),
+            "{output:?}"
+        );
+        assert_executor_patchsets(&f);
+        assert_eq!(f.status()["has_valid_approval"], true);
+        stdout(f.lead().args(["integrate", &f.change]));
+        assert_executor_patchsets(&f);
+        assert_eq!(f.status()["has_valid_approval"], true);
+        let commits = git_out(&f.repo.root, &["rev-list", &format!("{target}..master")]);
+        assert_eq!(commits.lines().count(), 2, "{commits}");
+        for commit in commits.lines() {
+            let message = git_out(&f.repo.root, &["show", "-s", "--format=%B", commit]);
+            assert!(
+                message.contains(&format!("Implemented-by: {COORDINATE}")),
+                "{message}"
+            );
+            assert!(
+                message.contains("Reviewed-by: claude:reader-model#high"),
+                "{message}"
+            );
+        }
+    }
+}
+
+/// Plain Git replay keeps recorder attribution and names Arc's mechanical replay remedy;
+/// rejects both executor credit outside its interval and a diagnostic that hides arc rebase.
+#[test]
+fn plain_git_rebase_keeps_recorder_and_names_arc_rebase() {
+    for initial_snapshot in [false, true] {
+        let f = Fixture::new();
+        f.run(COORDINATE, "codex", "executor-one", 0, 20);
+        f.commit("work", 10, Some(COORDINATE));
+        if initial_snapshot {
+            f.snapshot();
+        }
+        f.repo
+            .commit(&f.repo.root, "target", "target", "feat: target");
+        git(&f.worktree, &["rebase", "master"]);
+        let output = f.snapshot();
+        f.assert_recorder(
+            &output,
+            if initial_snapshot {
+                "previous patchset or base was rewritten"
+            } else {
+                "outside a matching completed interval"
+            },
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("arc rebase"),
+            "{output:?}"
+        );
     }
 }
 

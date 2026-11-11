@@ -2107,9 +2107,8 @@ pub fn rebase(
 
     let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
-    // Only the recorded patchset's own head can be replayed mechanically. A
-    // branch carrying commits nobody recorded is new work, and the snapshot
-    // that records its replay belongs to whoever produced it.
+    // Recorded authorship and run evidence are established at the original
+    // head, before mechanical replay changes the commits' timestamps.
     let replay_of = st
         .latest_patchset()
         .filter(|patchset| patchset.head == head);
@@ -2134,6 +2133,23 @@ pub fn rebase(
         requested_contributors.is_some(),
         chrono::Utc::now(),
     )?;
+
+    let replay_attribution =
+        if replay_of.is_none() && requested_contributors.is_none() && ctx.on_behalf_of.is_none() {
+            let (base, _) = super::review::patchset_base(ctx, &st, &head)?;
+            super::snapshot_attribution::from_runs(
+                ctx,
+                &store,
+                &st,
+                &store.load_events(&change_id)?,
+                &base,
+                &head,
+            )
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
 
     let _slot_use = crate::slots::exclusive_in(&wt)?;
     let retained = crate::retention::replayed(&ctx.cwd, &store, &change_id, &target_head, &head)?;
@@ -2180,13 +2196,16 @@ pub fn rebase(
                     st.target_branch
                 ),
             );
-            let request = match (&outcome, replay_of) {
-                (gitio::ReplayOutcome::Replayed { tip }, Some(patchset)) => {
+            let request = match (&outcome, replay_of, replay_attribution) {
+                (gitio::ReplayOutcome::Replayed { tip }, Some(patchset), _) => {
                     super::review::SnapshotRequest::replayed(
                         patchset.id.clone(),
                         tip.clone(),
                         requested_contributors,
                     )
+                }
+                (gitio::ReplayOutcome::Replayed { tip }, None, Some(attribution)) => {
+                    super::review::SnapshotRequest::replayed_runs(attribution, tip.clone())
                 }
                 _ => super::review::SnapshotRequest::attributed(requested_contributors),
             }

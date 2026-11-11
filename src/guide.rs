@@ -1249,11 +1249,12 @@ RUN A CHANGE
   against the old head, and brings the worktree to it without discarding a
   local change. The commits it creates carry no signature, whatever the
   repository configures for commits it makes; `arc rewrite sign` signs a
-  replayed range. Such a replay is recorded as a mechanical replay of the
-  patchset whose head it replayed, carrying every contributor the patchset
-  carries at the coordinate the ledger recorded for it, model included; the
-  replaying session is not its implementer, and the patchset names exactly
-  the tip that replay wrote. A `post-rewrite` hook, a reflog entry, a merge
+  replayed range. Such a replay carries the matching patchset's author
+  coordinates, or completed bound-run attribution established at the original
+  head before replay when no matching patchset exists, under the evidence rule
+  in `arc guide debt-review`. It retains every contributor's coordinate,
+  model included; the replaying session is not its implementer, and the
+  patchset names exactly the tip that replay wrote. A `post-rewrite` hook, a reflog entry, a merge
   driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work look
   replayed.
   `--contributors` and `--solo` decide the replayed patchset's contributor
@@ -2610,11 +2611,12 @@ REVIEW COVERAGE AND DEBT
   recorded beside an `--on-behalf-of` subject, and its integrator the actor of
   `arc integrate`, never the subject that command was invoked on behalf of.
   Planning, orchestrating and integrating somebody else's work are not
-  authorship. A clean `arc rebase` that arc performs itself — `git replay`,
+  authorship. A clean `arc rebase` that arc performs itself with `git replay`,
   run in a repository without the project's configuration, whose ref arc
-  reads — records a mechanical replay of the patchset whose head it replayed,
-  carrying every contributor's recorded coordinate, model included, even when
-  context or hunk positions moved. Only that replay's result, applied in the
+  reads, carries the matching patchset's authorship, or completed bound-run
+  attribution established before replay under `arc guide change-integration`,
+  retaining every contributor's coordinate and model even when context or
+  hunk positions moved. Only that replay's result, applied in the
   same invocation, is the replay: a snapshot of any other head, and any replay
   that fell back to `git rebase` or stopped for a person to resolve, is
   ordinary work. Reflog text, hooks, merge drivers, and inherited
@@ -2631,8 +2633,11 @@ REVIEW COVERAGE AND DEBT
 
   Snapshot examines commits added since the previous patchset's recorded
   head, or its resolved base for the first patchset. That boundary must remain
-  an ancestor of the head, with no recorded rewrite touching the boundary or
-  added commits. For each delegated commit, a local dispatch naming this
+  an ancestor of the head. A recorded rewrite refuses derivation when its old
+  side names the boundary or an added commit, or when it was recorded at or
+  after a covering dispatch began and its new side names either. An earlier
+  rewrite whose new side produced the boundary does not refuse derivation.
+  For each delegated commit, a local dispatch naming this
   change must have a nonconflicting local implementation binding and a local
   end.
   Its dispatch-to-end interval must include the commit's committer timestamp
@@ -2657,13 +2662,16 @@ REVIEW COVERAGE AND DEBT
   the invoker as a contributor. Without any established executor, the
   recorder remains the author. A temporally relevant missing bind or end,
   conflicting bindings or covering executors, mismatching worktree, coordinate
-  or trailers, an uncovered implementer's trailer, or a rewritten boundary or range retains
-  recorder attribution for the whole patchset. Snapshot prints one line
-  naming that ambiguity and the explicit attribution flags to pass. Successful
+  or trailers, an uncovered implementer's trailer, or a rewrite that fails
+  the boundary and dispatch-time checks retains recorder attribution for the
+  whole patchset. Snapshot prints one line naming that ambiguity and the explicit attribution flags to pass. Successful
   derivation prints the executors and supporting dispatch ids. A change with
   no dispatch retains ordinary recorder attribution without that diagnostic.
-  An unchanged patchset keeps its attribution. These rules also govern
-  `review --snapshot`, `done`, squash and ordinary rebase snapshots; mechanical
+  An unchanged patchset keeps its attribution, including after a recorded
+  signature-only rewrite or append of complete role entries. A plain `git
+  rebase` inherits no authorship; when run evidence cannot attribute its
+  result, the diagnostic names `arc rebase` as the mechanical replay remedy.
+  These rules also govern `review --snapshot`, `done`, squash and ordinary rebase snapshots; mechanical
   replay and explicitly attributed delivery or candidate promotion retain
   their own attribution contracts. Live-claim declaration requirements apply.
   Arc cannot detect an unrecorded rewrite that preserves the boundary,

@@ -456,7 +456,7 @@ pub fn snapshot(
 pub(super) struct SnapshotRequest {
     /// A normalized declaration, as `contributor_declaration` returns it.
     contributors: Option<Vec<String>>,
-    /// The replay `arc rebase` performed from one patchset's head, and the
+    /// The replay `arc rebase` performed from an attributed head, and the
     /// tip its isolated replay wrote. Only `arc rebase` can set it, and only
     /// from the replay it ran itself, so no snapshot can claim an inherited
     /// author by asking for one and nothing read back from the project's refs
@@ -469,14 +469,18 @@ pub(super) struct SnapshotRequest {
     thread: Option<ExternalThreadRef>,
 }
 
-/// A replay `arc rebase` performed, and the tip that replay wrote to its
+/// A replay `arc rebase` performed, its author evidence, and the tip written to its
 /// isolated ref. A snapshot whose head is any other commit records ordinary
 /// work, whatever the request says.
 pub(super) struct Replay {
-    /// The patchset whose recorded head the rebase replayed.
-    patchset: String,
+    source: ReplaySource,
     /// The tip `git replay` wrote to the ref of its isolated repository.
     tip: String,
+}
+
+enum ReplaySource {
+    Patchset(String),
+    Runs(super::snapshot_attribution::Attribution),
 }
 
 impl SnapshotRequest {
@@ -505,11 +509,29 @@ impl SnapshotRequest {
     ) -> Self {
         Self {
             contributors,
-            replay: Some(Replay { patchset, tip }),
+            replay: Some(Replay {
+                source: ReplaySource::Patchset(patchset),
+                tip,
+            }),
             rebase_started_at: None,
             pin_brief: false,
             journal_refs: Vec::new(),
             thread: None,
+        }
+    }
+
+    /// Carry run evidence established at the original head through the exact
+    /// tip Arc's isolated mechanical replay produced.
+    pub(super) fn replayed_runs(
+        attribution: super::snapshot_attribution::Attribution,
+        tip: String,
+    ) -> Self {
+        Self {
+            replay: Some(Replay {
+                source: ReplaySource::Runs(attribution),
+                tip,
+            }),
+            ..Self::attributed(None)
         }
     }
 
@@ -639,10 +661,12 @@ pub(super) fn snapshot_holding(
     let carried = replay
         .as_ref()
         .filter(|replay| replay.tip == head)
-        .and_then(|replay| {
-            st.patchsets
+        .and_then(|replay| match &replay.source {
+            ReplaySource::Patchset(patchset) => st
+                .patchsets
                 .iter()
-                .find(|previous| previous.id == replay.patchset)
+                .find(|previous| &previous.id == patchset),
+            ReplaySource::Runs(_) => None,
         })
         .filter(|previous| previous.head != head);
     // Every contributor the replayed patchset carries keeps the coordinate the
@@ -745,9 +769,18 @@ pub(super) fn snapshot_holding(
     let derived = if unchanged_patchset.is_none()
         && requested_contributors.is_none()
         && ctx.on_behalf_of.is_none()
-        && replay.is_none()
     {
-        super::snapshot_attribution::derive(ctx, store, &st, &events, &base_rev, &head)
+        match replay
+            .as_ref()
+            .filter(|replay| replay.tip == head)
+            .map(|replay| &replay.source)
+        {
+            Some(ReplaySource::Runs(attribution)) => Some(attribution.clone()),
+            _ if replay.is_none() => {
+                super::snapshot_attribution::derive(ctx, store, &st, &events, &base_rev, &head)
+            }
+            _ => None,
+        }
     } else {
         None
     };
@@ -804,9 +837,10 @@ pub(super) fn snapshot_holding(
     store.append_local_event(&mut ev)?;
     if let Some(derived) = derived {
         println!(
-            "attribution: {} via completed bound dispatches {} (committer times, worktree, Implemented-by){}",
+            "attribution: {} via completed bound dispatches {} (source committer times, worktree, Implemented-by){}{}",
             derived.authors.iter().map(|author| format!("{} ({})", author.actor, author.effective_actor())).collect::<Vec<_>>().join(", "),
             derived.dispatches.join(", "),
+            if replay.is_some() { "; mechanical replay" } else { "" },
             if derived.includes_invoker { "; invoker also contributed" } else { "" }
         );
     }
