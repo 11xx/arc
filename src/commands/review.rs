@@ -319,9 +319,9 @@ fn review_verdict<'a>(
     }
 }
 
-/// The contributors a patchset write declares. Contributors are actors, so a
-/// session-form actor is one and a placeholder, or a `harness:model` form
-/// carrying one, names nobody and refuses.
+/// The contributors a patchset write declares. A session-form actor needs a
+/// nonempty session. A placeholder, or a `harness:model` form carrying one,
+/// names nobody and refuses.
 pub(crate) fn contributor_declaration(
     ctx: &Ctx,
     contributors: Option<Vec<String>>,

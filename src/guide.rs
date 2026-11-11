@@ -49,6 +49,7 @@ SAY WHO YOU ARE (before the first write)
   synthetic), an actor of the form harness:model carrying one, and a model
   that is one or is a session id. Reads and Git hooks never refuse.
   Agent harness, model and supplied effort segments must be nonempty.
+  An actor written as harness:session requires a nonempty session.
 
   Text views validate recorded producer models. A missing model, a placeholder
   or a session id prints as `<harness> (model not recorded)`, or
@@ -2571,6 +2572,7 @@ REVIEW COVERAGE AND DEBT
   An event's effective author is its `--on-behalf-of` subject when set,
   otherwise its actor. A patchset's effective contributors are its recorded
   set when nonempty, otherwise its effective author alone.
+  Contributor declarations follow the actor rules in `arc guide identity-basics`.
 
   `arc status` and `arc review <change>` print the rule as `review_options`:
   for ordinary scope, `declare_debt` then `request_review`, with

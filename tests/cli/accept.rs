@@ -134,6 +134,21 @@ impl Delivery {
     }
 }
 
+/// Claim: delivery acceptance refuses an empty-session contributor by value.
+/// Rejects importing a harness-only contributor into the local patchset.
+#[test]
+fn empty_session_actors_refuse_accept_contributors() {
+    let delivery = Delivery::new();
+    delivery
+        .command()
+        .args(["--contributors", "codex:"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("codex:"))
+        .stdout(predicates::str::contains("nonempty"));
+    assert!(!delivery.receiver.root.join(".git/arc/changes").exists());
+}
+
 #[test]
 fn accept_delivery_prepares_signed_local_review_without_transport() {
     let d = Delivery::new();

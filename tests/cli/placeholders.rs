@@ -47,6 +47,166 @@ fn refused(cmd: &mut AssertCommand) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Claim: declared actors and represented subjects need a nonempty session.
+/// Rejects writing a harness-only identity supplied by a flag or environment.
+#[test]
+fn empty_session_actors_refuse_declared_identity_before_writes() {
+    let repo = Repo::new();
+    let (change, _) = open(&repo, "empty-identity");
+    let before = event_count(&repo, &change);
+    let journal_before = journal_events(&repo);
+    for (variable, flag) in [
+        ("ARC_ACTOR", "--actor"),
+        ("ARC_ON_BEHALF_OF", "--on-behalf-of"),
+    ] {
+        for value in ["codex:", "claude:   "] {
+            for from_env in [false, true] {
+                for journal in [false, true] {
+                    let mut command = repo.arc(&repo.root);
+                    if from_env {
+                        command.env(variable, value);
+                    } else {
+                        command.args([flag, value]);
+                    }
+                    if journal {
+                        command.args(["journal", "log", "empty-identity", "unrecorded"]);
+                    } else {
+                        command.args(["roles", &change, "--planned-by", "lead:planner"]);
+                    }
+                    let stderr = refused(&mut command);
+                    assert!(stderr.contains(value.trim()), "{stderr}");
+                    assert!(stderr.contains("nonempty"), "{stderr}");
+                    assert_eq!(event_count(&repo, &change), before);
+                    assert_eq!(journal_events(&repo), journal_before);
+                }
+            }
+        }
+    }
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "codex:")
+        .args(["status", &change])
+        .assert()
+        .success();
+}
+
+/// Claim: every patchset entry point refuses an empty-session contributor.
+/// Rejects recording or rewriting work under a harness-only contributor,
+/// including a sole contributor taken from the Git identity fallback.
+#[test]
+fn empty_session_actors_refuse_patchset_contributors_before_mutation() {
+    let repo = Repo::new();
+    let (change, worktree) = open(&repo, "empty-contributor");
+    repo.commit(&worktree, "one.txt", "one\n", "feat: one");
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    let head = repo.head(&worktree);
+    let before = event_count(&repo, &change);
+    let commands: &[&[&str]] = &[
+        &["snapshot", &change],
+        &["snapshot", &change, "--amend", "ps-01"],
+        &["done", &change],
+        &["review", &change, "--snapshot", "--verdict", "comment-only"],
+        &["rebase", &change],
+        &["squash", &change, "-m", "feat: one"],
+    ];
+    for args in commands {
+        for value in ["codex:", "claude:   "] {
+            let stderr = refused(
+                repo.arc(&worktree)
+                    .args(*args)
+                    .args(["--contributors", value]),
+            );
+            assert!(stderr.contains(value.trim()), "{args:?}: {stderr}");
+            assert!(stderr.contains("nonempty"), "{args:?}: {stderr}");
+            assert_eq!(repo.head(&worktree), head);
+            assert_eq!(event_count(&repo, &change), before);
+        }
+    }
+    git(&worktree, &["config", "user.name", "codex:"]);
+    let stderr = refused(
+        repo.arc(&worktree)
+            .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .args(["snapshot", &change, "--solo"]),
+    );
+    assert!(stderr.contains("--solo"), "{stderr}");
+    assert!(stderr.contains("codex:"), "{stderr}");
+    assert!(stderr.contains("nonempty"), "{stderr}");
+    assert_eq!(event_count(&repo, &change), before);
+}
+
+/// Claim: plan metadata cannot credit an empty-session actor.
+/// Rejects accepting that actor through either planner JSON or a body header.
+#[test]
+fn empty_session_actors_refuse_planner_metadata_before_writes() {
+    let repo = Repo::new();
+    let before = journal_events(&repo);
+    let files_before = journal_files(&repo);
+    for from_header in [false, true] {
+        let mut command = repo.arc(&repo.root);
+        command.args(["journal", "plan", "empty-planner", "--body-file", "-"]);
+        let body = if from_header {
+            "# Plan\n\nplanned-by: {\"actor\":\"codex:\"}\n\nBody\n"
+        } else {
+            command.args(["--planned-by", r#"{"actor":"codex:"}"#]);
+            "# Plan\n\nBody\n"
+        };
+        let stderr = refused(command.write_stdin(body));
+        assert!(stderr.contains("codex:"), "{stderr}");
+        assert!(stderr.contains("nonempty"), "{stderr}");
+        assert_eq!(journal_events(&repo), before);
+        assert_eq!(journal_files(&repo), files_before);
+    }
+}
+
+/// Claim: journal identity corrections and provenance repairs need a session.
+/// Rejects persisting a harness-only actor through either repair command,
+/// including a provenance repair requested with --dry-run.
+#[test]
+fn empty_session_actors_refuse_journal_repairs_before_writes() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "empty-repair", "discussion", "# Repair\n");
+    let path = dir.join(&file);
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--stance",
+                "for",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("An argument.\n"),
+    );
+    let position = journal_event_log(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = journal_events(&repo);
+    let body = fs::read(&path).unwrap();
+    let stderr = refused(repo.arc(&repo.root).args([
+        "journal", "correct", &file, "--target", &position, "--field", "actor", "--value", "codex:",
+    ]));
+    assert!(stderr.contains("codex:"), "{stderr}");
+    assert!(stderr.contains("nonempty"), "{stderr}");
+    for dry_run in [false, true] {
+        let mut command = repo.arc(&repo.root);
+        command.args(["journal", "reattribute", &file, "--set-actor", "codex:"]);
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let stderr = refused(&mut command);
+        assert!(stderr.contains("codex:"), "{stderr}");
+        assert!(stderr.contains("nonempty"), "{stderr}");
+    }
+    assert_eq!(journal_events(&repo), before);
+    assert_eq!(fs::read(&path).unwrap(), body);
+}
+
 #[test]
 fn placeholder_declared_identity_refuses_every_write_before_it_records() {
     let repo = Repo::new();

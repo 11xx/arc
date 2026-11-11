@@ -53,6 +53,8 @@ pub(crate) enum Defect {
     /// A harness, model or effort segment, or the whole value, is a
     /// placeholder.
     Placeholder,
+    /// A `harness:session` actor whose session segment is empty.
+    EmptyActorSession,
     /// The model segment is a session id.
     SessionId,
     /// A `Name <address>` whose name carries a `:` or whose address carries
@@ -67,6 +69,7 @@ impl Defect {
         match self {
             Defect::Unreadable => "expected harness:model[#effort] or Name <email> on one line",
             Defect::Placeholder => "a placeholder is not a coordinate",
+            Defect::EmptyActorSession => "a harness:session actor needs a nonempty session",
             Defect::SessionId => "a session id is not a model",
             Defect::NotAnAddress => "Name <email> needs a name without ':' and an address with '@'",
         }
@@ -154,7 +157,8 @@ pub(crate) fn display_model(
 /// Actors are free-form: a person's name, an agent label, or the
 /// `harness:session` form arc derives, so a session id in the second segment
 /// is an actor and not a defect. A value that is itself a placeholder names
-/// nobody, and so does a `harness:model` form carrying one.
+/// nobody, and so does a `harness:model` form carrying one. A `harness:session`
+/// actor needs a nonempty session.
 pub(crate) fn actor_defect(value: &str) -> Option<Defect> {
     if is_placeholder(value) {
         return Some(Defect::Placeholder);
@@ -163,6 +167,9 @@ pub(crate) fn actor_defect(value: &str) -> Option<Defect> {
         return None;
     }
     let (harness, rest) = value.split_once(':')?;
+    if rest.trim().is_empty() {
+        return Some(Defect::EmptyActorSession);
+    }
     let (model, effort) = match rest.split_once('#') {
         Some((model, effort)) => (model, Some(effort)),
         None => (rest, None),

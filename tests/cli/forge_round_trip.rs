@@ -125,6 +125,42 @@ fn declare(repo: &Repo, id: &str, document: &Value) -> AssertCommand {
     ]);
     cmd
 }
+
+/// Claim: disclosure participants cannot name a harness with an empty session.
+/// Rejects recording that identity as an author, publisher, reviewer, editor,
+/// human comment author or role participant, and names the refused value.
+#[test]
+fn empty_session_actors_refuse_forge_participants_before_writes() {
+    let (repo, id) = setup();
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    let doc = disclosure(
+        &id,
+        &observation,
+        "g1",
+        "public bytes",
+        Some(comment(vec![json!({"name":"Ada", "act":"act-1"})])),
+    );
+    let before = event_count(&repo, &id);
+    for pointer in [
+        "/author",
+        "/discloser",
+        "/reviewer",
+        "/editor",
+        "/comment/authors/0/name",
+        "/comment/roles/0/participant",
+    ] {
+        let mut invalid = doc.clone();
+        *invalid.pointer_mut(pointer).unwrap() = json!("codex:");
+        declare(&repo, &id, &invalid)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("codex:"))
+            .stderr(predicates::str::contains("nonempty"));
+        assert_eq!(event_count(&repo, &id), before);
+    }
+    stdout(&mut declare(&repo, &id, &doc));
+}
+
 #[test]
 fn forge_disclosure_binds_actual_outgoing_bytes_and_readback() {
     let (repo, id) = setup();

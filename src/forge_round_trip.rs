@@ -1,20 +1,22 @@
 //! Non-authorizing delivery, disclosure and comment-act evidence.
 use crate::forge_observation::{ForgeObservation, RetainedContentRef};
 use crate::model::{Event, Payload};
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// A single-line value naming a participant: no placeholder, no session id,
-/// and no `harness:model` form carrying either. Absence is `None`, never a
-/// placeholder.
+/// and no `harness:model` form carrying either or `harness:session` form
+/// without a session. Absence is `None`, never a placeholder.
 fn participant(value: &str) -> Result<()> {
     named(value)?;
     ensure!(
-        !crate::coordinate::is_session_id(value, None)
-            && crate::coordinate::actor_defect(value).is_none(),
-        "a placeholder or session id names no participant"
+        !crate::coordinate::is_session_id(value, None),
+        "participant {value:?}: a session id names no participant"
     );
+    if let Some(defect) = crate::coordinate::actor_defect(value) {
+        bail!("participant {value:?}: {}", defect.reason());
+    }
     Ok(())
 }
 

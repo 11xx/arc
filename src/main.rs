@@ -202,8 +202,9 @@ struct BodyOpts {
 struct AttributionOpts {
     /// Explicitly set the contributors for this patchset. Recording a
     /// patchset while another actor holds a live claim on the change requires
-    /// this or --solo. Each is an actor: a harness:session form is one, and a
-    /// placeholder or a harness:model form carrying one refuses
+    /// this or --solo. Each is an actor: a harness:session form requires a
+    /// nonempty session; a placeholder or a harness:model form carrying one
+    /// refuses
     #[arg(
         long = "contributors",
         value_name = "ACTOR[,ACTOR...]",
@@ -212,7 +213,7 @@ struct AttributionOpts {
     )]
     contributors: Option<Vec<String>>,
     /// Record the invoking actor as the sole contributor; a placeholder actor
-    /// refuses
+    /// or a harness:session actor with an empty session refuses
     #[arg(long, conflicts_with = "contributors")]
     solo: bool,
 }
