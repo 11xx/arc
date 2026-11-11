@@ -113,12 +113,15 @@ pub fn publication(
             println!("gate {name}: skipped (publication pass at target tree)");
             VerifyResult::Pass
         } else {
-            let run = super::gatekeeping::run_gate(
+            let run = super::gatekeeping::run_gate_admitted(
                 &gate.command,
                 &scratch.path,
                 gate.timeout,
                 &store.root,
                 &store.repository_id,
+                crate::exclusive::Request::for_gate(gate)
+                    .as_ref()
+                    .map(|request| (request, "publication", name.as_str())),
             )?;
             output_artifact = run.output_artifact;
             if let Some(tail) = run.output_tail {

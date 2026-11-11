@@ -11,8 +11,8 @@
 
 use super::candidate::load_ledger;
 use super::gatekeeping::{
-    checkout_tracked_dirt, checkout_writes, declared_environment, gate_environments, run_gate,
-    ScratchWorktree,
+    checkout_tracked_dirt, checkout_writes, declared_environment, gate_environments,
+    run_gate_admitted, ScratchWorktree,
 };
 use super::relations::repository_relations;
 use super::Ctx;
@@ -239,12 +239,15 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
     for (name, gate) in selected {
         eprintln!("running: {}", gate.command);
         let started = std::time::Instant::now();
-        let run = run_gate(
+        let run = run_gate_admitted(
             &gate.command,
             &scratch.path,
             gate.timeout,
             &store.root,
             &store.repository_id,
+            crate::exclusive::Request::for_gate(gate)
+                .as_ref()
+                .map(|request| (request, st.change_id.as_str(), name.as_str())),
         )?;
         let duration_ms = started.elapsed().as_millis() as u64;
         let result = VerifyResult::observed(run.status.success(), run.status.code(), run.timed_out);
@@ -262,7 +265,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
                 }
             }),
             result,
-            exit_code: Some(run.status.code().unwrap_or(-1)),
+            exit_code: (!run.admission_expired).then(|| run.status.code().unwrap_or(-1)),
             duration_ms: Some(duration_ms),
             output_tail: run.output_tail,
             output_artifact: run.output_artifact,

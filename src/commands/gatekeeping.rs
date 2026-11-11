@@ -97,6 +97,7 @@ pub struct VerifyArgs {
 }
 
 struct VerificationInput {
+    exclusive: Option<crate::exclusive::Request>,
     preparation_ms: u64,
     run_id: Option<String>,
     probe: Option<ProbeEvidenceRef>,
@@ -549,6 +550,7 @@ fn verify_with_landing(
             &store,
             &change_id,
             VerificationInput {
+                exclusive: None,
                 preparation_ms: 0,
                 run_id: None,
                 probe: Some(ProbeEvidenceRef {
@@ -688,6 +690,7 @@ fn verify_with_landing(
                 &store,
                 &change_id,
                 VerificationInput {
+                    exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
                     probe: None,
@@ -713,7 +716,12 @@ fn verify_with_landing(
         println!("gates: {passed}/{total} pass");
         return Ok(if passed == total { 0 } else { 1 });
     }
-    let (cmd, timeout, declared_environment) = declared_check(ctx, &st, gate.as_deref(), command)?;
+    let DeclaredCheck {
+        command: cmd,
+        timeout,
+        environment: declared_environment,
+        exclusive,
+    } = declared_check(ctx, &st, gate.as_deref(), command)?;
     let preparing = Instant::now();
     if !attest {
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
@@ -762,6 +770,7 @@ fn verify_with_landing(
         &store,
         &change_id,
         VerificationInput {
+            exclusive,
             preparation_ms,
             run_id: None,
             probe: None,
@@ -1143,6 +1152,7 @@ fn verify_against(
                 store,
                 change_id,
                 VerificationInput {
+                    exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
                     probe: None,
@@ -1267,6 +1277,7 @@ pub(crate) fn verify_landing_head(
             store,
             run.change_id,
             VerificationInput {
+                exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: 0,
                 run_id: Some(run_id.clone()),
                 probe: None,
@@ -1937,6 +1948,7 @@ fn verify_recorded(
                 &store,
                 &change_id,
                 VerificationInput {
+                    exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: 0,
                     run_id: Some(run_id.clone()),
                     probe: None,
@@ -2338,6 +2350,7 @@ fn verify_all_parallel(
         .into_iter()
         .enumerate()
         .map(|(index, (name, gate))| VerificationInput {
+            exclusive: crate::exclusive::Request::for_gate(gate),
             preparation_ms: if index == 0 { preparation_ms } else { 0 },
             run_id: Some(run_id.to_owned()),
             probe: None,
@@ -2370,6 +2383,7 @@ fn verify_all_parallel(
             let hostname = hostname.clone();
             let output_root = store.root.clone();
             let producing_store = store.repository_id.clone();
+            let change_id = change_id.to_owned();
             thread::spawn(move || {
                 execute_verification(
                     input,
@@ -2378,6 +2392,7 @@ fn verify_all_parallel(
                     hostname,
                     &output_root,
                     &producing_store,
+                    &change_id,
                 )
             })
         })
@@ -2679,6 +2694,7 @@ fn record_verification_at(
         hostname,
         &store.root,
         &store.repository_id,
+        change_id,
     )?;
     if !completed.attested {
         let post = gitio::head(command_cwd)?;
@@ -2720,8 +2736,10 @@ fn execute_verification(
     hostname: String,
     output_root: &Path,
     producing_store: &str,
+    change_id: &str,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
+        exclusive,
         preparation_ms,
         run_id,
         probe,
@@ -2747,8 +2765,16 @@ fn execute_verification(
             Some(result) => (result, None, None, None, None, false),
             None => {
                 let started = std::time::Instant::now();
-                let observed =
-                    run_gate(&command, cwd, timeout_seconds, output_root, producing_store)?;
+                let observed = run_gate_admitted(
+                    &command,
+                    cwd,
+                    timeout_seconds,
+                    output_root,
+                    producing_store,
+                    exclusive
+                        .as_ref()
+                        .map(|request| (request, change_id, gate.as_deref().unwrap_or("command"))),
+                )?;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 timing = observed.timing;
                 timing.prepare_ms = timing.prepare_ms.map(|ms| ms + preparation_ms);
@@ -2757,10 +2783,11 @@ fn execute_verification(
                     observed.status.code(),
                     observed.timed_out,
                 );
-                let exit_code = observed.status.code().unwrap_or(-1);
+                let exit_code =
+                    (!observed.admission_expired).then(|| observed.status.code().unwrap_or(-1));
                 (
                     result,
-                    Some(exit_code),
+                    exit_code,
                     Some(duration_ms),
                     observed.output_tail,
                     observed.output_artifact,
@@ -2982,11 +3009,15 @@ fn record_verifications(
         let marker = if attested { " (attested)" } else { "" };
         println!("verification: {result:?}{marker} at {revision}");
         if result == VerifyResult::NotAdmitted {
-            println!(
-                "not admitted: the command exited {} before any check ran, so nothing was \
-                 evaluated; rerun the gate",
-                crate::model::NOT_ADMITTED_EXIT
-            );
+            if item.exit_code.is_none() && !attested {
+                println!("not admitted: exclusive admission expired before any check ran; rerun the gate");
+            } else {
+                println!(
+                    "not admitted: the command exited {} before any check ran, so nothing was \
+                     evaluated; rerun the gate",
+                    crate::model::NOT_ADMITTED_EXIT
+                );
+            }
         }
         println!("event: {}", ev.event_id);
     }
@@ -3020,11 +3051,57 @@ fn nonempty_attestation_value(value: Option<String>, flag: &str) -> Result<Strin
 }
 
 pub(super) struct GateRun {
+    pub(super) admission_expired: bool,
     pub(super) status: ExitStatus,
     pub(super) output_tail: Option<String>,
     pub(super) output_artifact: Option<crate::verification_output::OutputArtifact>,
     pub(super) timed_out: bool,
     pub(super) timing: crate::verification_timing::VerificationTiming,
+}
+
+impl GateRun {
+    fn not_admitted(wait_ms: u64) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        Self {
+            admission_expired: true,
+            status: ExitStatus::from_raw(75 << 8),
+            output_tail: None,
+            output_artifact: None,
+            timed_out: false,
+            timing: crate::verification_timing::VerificationTiming {
+                wait_ms: Some(wait_ms),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Execute a declared admission contract wherever a gate is evaluated.
+pub(super) fn run_gate_admitted(
+    cmd: &str,
+    cwd: &Path,
+    timeout_seconds: Option<u64>,
+    output_root: &Path,
+    producing_store: &str,
+    admission: Option<(&crate::exclusive::Request, &str, &str)>,
+) -> Result<GateRun> {
+    let Some((request, change, gate)) = admission else {
+        return run_gate(cmd, cwd, timeout_seconds, output_root, producing_store);
+    };
+    let (lock, wait_ms) = crate::exclusive::acquire(request, cwd, change, gate)?;
+    let Some(lock) = lock else {
+        return Ok(GateRun::not_admitted(wait_ms));
+    };
+    let (shell, slot_wait_ms) = crate::slots::measured_shell_with_lock(cwd, Some(lock))?;
+    run_gate_in_shell(
+        shell,
+        wait_ms + slot_wait_ms,
+        cmd,
+        cwd,
+        timeout_seconds,
+        output_root,
+        producing_store,
+    )
 }
 
 pub(super) fn run_gate(
@@ -3139,6 +3216,7 @@ fn run_gate_in_shell(
         .and_then(|(start, end)| end.checked_sub(start))
         .map(|ns| ns / 1_000_000);
     Ok(GateRun {
+        admission_expired: false,
         status,
         output_tail,
         output_artifact,
@@ -6085,14 +6163,20 @@ pub(super) fn release_retention_refs(
     Ok(())
 }
 
-/// The command, timeout and environment probe a `--gate` or `--command`
-/// selection names.
+struct DeclaredCheck {
+    command: String,
+    timeout: Option<u64>,
+    environment: Option<String>,
+    exclusive: Option<crate::exclusive::Request>,
+}
+
+/// The execution contract a `--gate` or `--command` selection names.
 fn declared_check(
     ctx: &Ctx,
     st: &state::ChangeState,
     gate: Option<&str>,
     command: Option<String>,
-) -> Result<(String, Option<u64>, Option<String>)> {
+) -> Result<DeclaredCheck> {
     match (gate, command) {
         (Some(name), None) => {
             let gates = ctx.declarations(st)?.gates;
@@ -6107,13 +6191,19 @@ fn declared_check(
                 ),
                 None => bail!("gate {name:?} not declared in .arc/gates.toml"),
             };
-            Ok((
-                declared.command.clone(),
-                declared.timeout,
-                declared.environment.clone(),
-            ))
+            Ok(DeclaredCheck {
+                command: declared.command.clone(),
+                timeout: declared.timeout,
+                environment: declared.environment.clone(),
+                exclusive: crate::exclusive::Request::for_gate(declared),
+            })
         }
-        (None, Some(command)) => Ok((command, None, None)),
+        (None, Some(command)) => Ok(DeclaredCheck {
+            command,
+            timeout: None,
+            environment: None,
+            exclusive: None,
+        }),
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("{}", missing_selector(ctx, st)),
     }
@@ -6189,8 +6279,12 @@ fn verify_after_integration(
     receipt: Receipt,
 ) -> Result<i32> {
     let integrated_commit = shipped_commit(st)?;
-    let (command, timeout_seconds, declared_environment) =
-        declared_check(ctx, st, receipt.gate.as_deref(), receipt.command)?;
+    let DeclaredCheck {
+        command,
+        timeout: timeout_seconds,
+        environment: declared_environment,
+        ..
+    } = declared_check(ctx, st, receipt.gate.as_deref(), receipt.command)?;
     let environment = attested_environment(
         receipt.gate.as_deref(),
         declared_environment.is_some(),

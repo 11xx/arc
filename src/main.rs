@@ -16,6 +16,7 @@ mod coordinate;
 mod correspondence;
 mod custody;
 mod declarations;
+mod exclusive;
 mod explain;
 mod extent;
 mod feed;
@@ -6393,6 +6394,9 @@ fn main() {
     }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(slots::HOLDER)) {
         slots::holder_main();
+    }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(exclusive::WAITER)) {
+        exclusive::waiter_main();
     }
     perf::start();
 

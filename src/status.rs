@@ -340,8 +340,7 @@ impl GateStatus {
                 "pending" => "no evidence at head",
                 "fail" => "the gate failed",
                 "not-admitted" => {
-                    "the gate was not admitted: its command exited 75 before any check ran, so \
-                     nothing was evaluated; rerun it"
+                    "the gate was not admitted before any check ran, so nothing was evaluated; rerun it"
                 }
                 _ if self.tree_moved => "the worktree changed while the gate ran",
                 _ if self.worktree_dirty == Some(true) => {

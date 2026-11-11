@@ -1113,10 +1113,10 @@ RUN A CHANGE
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
-  Executed verification receipts separate `wait_ms` acquiring a slot's use
-  lock, `prepare_ms` configuring and preparing build storage, and `run_ms`
+  Executed verification receipts separate `wait_ms` in slot or declared exclusive
+  admission (`arc guide gates`), `prepare_ms` configuring build storage, and `run_ms`
   from the command's spawn through its leader's exit and output drain.
-  `duration_ms` spans slot acquisition, in-run preparation, execution and
+  `duration_ms` spans admission, in-run preparation, execution and
   bookkeeping. `prepare_ms` also includes preparation before environment
   probes; a batch charges that shared preparation to its first executed
   command. Preparation before execution need not be inside `duration_ms`.
@@ -1154,7 +1154,8 @@ RUN A CHANGE
   so a calling shell sees an interruption rather than a failure. A signal
   arc inherited as ignored stays ignored.
 
-  A command that exits 75 (`EX_TEMPFAIL`), as a wrapper does when a host
+  An exclusive admission expiry (`arc guide gates`) or a command that exits
+  75 (`EX_TEMPFAIL`), as a wrapper does when a host
   admission queue gives up before any check starts, records `not-admitted`:
   evidence of nothing, neither a pass nor a failure. A timeout outranks it, so
   a command that exits 75 after overrunning its timeout timed out. The gate is
@@ -5474,6 +5475,8 @@ GATES
     profiles = ["<profile>"]            omitted: required for every profile
     events = ["integration"]           omitted: integration and publication
     timeout = "10m"                     s, m, or h; omitted: unbounded
+    exclusive = "host"                  host-wide lock name; omitted: no lock
+    admission = "60s"                   lock wait limit; omitted: 60s
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output, run against
                                         the content being evaluated
@@ -5485,6 +5488,23 @@ GATES
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
+
+  An exclusive name admits one command at a time across checkouts and projects
+  in the account. `host` conventionally reserves the machine; another name
+  can reserve a browser or port. Locks live under
+  `~/.local/ai/arc/exclusive`, independently of repository and ledger paths;
+  a sandbox prefix supplies that home when sandboxing. A holder retains the
+  lock until the command's last descendant exits, including detached children
+  and after the launching arc exits. There is no queue order or role queue.
+  A waiter prints the holding project, change, gate and elapsed hold time.
+  Admission expiry starts no command and records `not-admitted`, not a gate
+  failure. `wait_ms` includes exclusive admission and is separate from `run_ms`.
+  Admission accepts positive durations such as `500ms`, `2.5s`, `2m` or `1h`.
+  Both keys are outside evidence identity: they govern admission, not the check.
+  Either declaration may require a lock; an omitted key cannot remove one.
+  Matching lock names take the shortest admission limit, including the default.
+  Different names conflict between project and operator policy; between target
+  and change they report a divergence and the target's lock stays in force.
 
   `arc verify --all --event integration|publication` selects the event's
   gates. Evidence identifies its event, tree, command and environment;

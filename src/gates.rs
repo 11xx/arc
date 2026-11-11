@@ -58,6 +58,10 @@ pub struct Gate {
     pub selector: Option<String>,
     #[serde(default, deserialize_with = "deserialize_timeout")]
     pub timeout: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_exclusive")]
+    pub exclusive: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_admission")]
+    pub admission: Option<Duration>,
     /// What qualifies a change to skip this gate on an agent's judgement, as
     /// `arc verify --bypass <reason>` records. Absent, the gate cannot be
     /// bypassed. It decides nothing about what the command checks, so it is
@@ -98,6 +102,7 @@ pub struct GateConflict {
 
 #[derive(Debug, Clone)]
 pub struct GateDeclaration {
+    pub exclusive: Option<String>,
     pub selector: Option<String>,
     pub command: String,
     pub environment: Option<String>,
@@ -126,6 +131,7 @@ impl GateDivergence {
 impl GateDeclaration {
     fn of(gate: &Gate, source: &str) -> Self {
         GateDeclaration {
+            exclusive: gate.exclusive.clone(),
             selector: gate.selector.clone(),
             command: gate.command.clone(),
             environment: gate.environment.clone(),
@@ -142,6 +148,10 @@ impl GateDeclaration {
             ),
             None => format!("{} declares {:?}", self.source, self.command),
         };
+        let description = match &self.exclusive {
+            Some(name) => format!("{description} with exclusive lock {name:?}"),
+            None => description,
+        };
         match &self.selector {
             Some(selector) => format!("{description} with delta selector {selector:?}"),
             None => description,
@@ -156,6 +166,46 @@ where
     Option::<String>::deserialize(deserializer)?
         .map(|raw| parse_duration(&raw).map_err(D::Error::custom))
         .transpose()
+}
+
+fn deserialize_exclusive<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let name = Option::<String>::deserialize(deserializer)?;
+    if name.as_ref().is_some_and(|name| name.trim().is_empty()) {
+        return Err(D::Error::custom("exclusive must name a lock"));
+    }
+    Ok(name)
+}
+
+fn deserialize_admission<'de, D>(deserializer: D) -> std::result::Result<Option<Duration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| parse_gate_duration(&raw).map_err(D::Error::custom))
+        .transpose()
+}
+
+/// A positive duration with millisecond, second, minute or hour units.
+pub fn parse_gate_duration(raw: &str) -> Result<Duration> {
+    let (number, scale) = [("ms", 0.001), ("s", 1.0), ("m", 60.0), ("h", 3600.0)]
+        .into_iter()
+        .find_map(|(unit, scale)| raw.strip_suffix(unit).map(|number| (number, scale)))
+        .context("duration needs ms, s, m or h units")?;
+    if number.is_empty()
+        || !number
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        bail!("duration must be a positive number with units");
+    }
+    let duration = Duration::try_from_secs_f64(number.parse::<f64>()? * scale)?;
+    if duration.is_zero() {
+        bail!("duration must be positive");
+    }
+    Ok(duration)
 }
 
 fn deserialize_bypass<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
@@ -430,20 +480,20 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                 None => {
                     merged.gates.insert(name, gate);
                 }
-                // A gate is its command and the environment its evidence
-                // applies to; two layers disagreeing on either declare two
-                // different checks under one name.
+                // Layers must agree on the check and any required lock name.
                 Some(current) if !current.same_check(&gate) => {
                     merged.conflicts.push(GateConflict {
                         name,
                         declarations: vec![
                             GateDeclaration {
+                                exclusive: current.exclusive.clone(),
                                 selector: current.selector.clone(),
                                 command: current.command.clone(),
                                 environment: current.environment.clone(),
                                 source: current.declared_by[0].clone(),
                             },
                             GateDeclaration {
+                                exclusive: gate.exclusive,
                                 selector: gate.selector,
                                 command: gate.command,
                                 environment: gate.environment,
@@ -464,19 +514,35 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
 }
 
 impl Gate {
-    /// Whether two declarations name the same check, environment and
-    /// project selection contract.
+    /// Whether declarations name the same check and compatible lock requirements.
     fn same_check(&self, other: &Gate) -> bool {
         self.command == other.command
             && self.environment == other.environment
             && self.selector == other.selector
+            && (self.exclusive.is_none()
+                || other.exclusive.is_none()
+                || self.exclusive == other.exclusive)
     }
 
     /// Fold another declaration of the same check into this one. Profiles
     /// and events widen and the stricter timeout wins, so one declaration cannot loosen
     /// a gate the other bounds. The gate may be bypassed only if both allow it,
-    /// on this declaration's terms, and binds to commits if either says so.
+    /// on this declaration's terms, and binds to commits if either says so. Either
+    /// declaration may require a lock; the shortest admission limit applies.
     fn absorb(&mut self, other: Gate) {
+        let left = self
+            .admission
+            .or_else(|| self.exclusive.as_ref().map(|_| Duration::from_secs(60)));
+        let right = other
+            .admission
+            .or_else(|| other.exclusive.as_ref().map(|_| Duration::from_secs(60)));
+        self.admission = match (left, right) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        if self.exclusive.is_none() {
+            self.exclusive = other.exclusive;
+        }
         if other.bypass.is_none() {
             self.bypass = None;
         }
@@ -511,7 +577,7 @@ impl GatesFile {
     /// Add what a change's own declarations require on top of this set, the
     /// target's. A gate the change adds is owed. A gate the target already
     /// declares stays the target's check: the change can widen its profiles
-    /// or tighten its timeout but cannot substitute another command or
+    /// or tighten its timeout and require a lock but cannot substitute another command or
     /// environment, and such a substitution is returned so it can be reported.
     /// `target_label` and `change_label` name the two sides in that report.
     pub fn owe_also(

@@ -23,6 +23,8 @@ pub struct VerificationTiming {
 /// The holder's command observations. Its own CPU is excluded.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct CommandReport {
+    #[serde(default)]
+    pub stopped: bool,
     pub started_ns: Option<u64>,
     pub status: Option<i32>,
     pub timing: VerificationTiming,

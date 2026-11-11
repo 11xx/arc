@@ -91,6 +91,7 @@ pub(crate) struct OwnedGroup {
     child: Child,
     status: Option<ExitStatus>,
     report: Option<std::fs::File>,
+    control: Option<std::fs::File>,
     reported: Option<ExitStatus>,
     report_bytes: Vec<u8>,
     pub(crate) observation: crate::verification_timing::CommandReport,
@@ -109,6 +110,7 @@ impl OwnedGroup {
             child,
             status: None,
             report: None,
+            control: None,
             reported: None,
             report_bytes: Vec::new(),
             observation: Default::default(),
@@ -133,6 +135,11 @@ impl OwnedGroup {
 
     pub(crate) fn child(&mut self) -> &mut Child {
         &mut self.child
+    }
+
+    /// Let the holder stop the command while retaining locks for detached children.
+    pub(crate) fn stop_through(&mut self, pipe: std::os::fd::OwnedFd) {
+        self.control = Some(std::fs::File::from(pipe));
     }
 
     /// Whether the command has exited: the leader's report when it makes
@@ -196,6 +203,10 @@ impl OwnedGroup {
         if self.status.is_some() {
             return Ok(());
         }
+        if let Some(control) = self.control.as_mut() {
+            let _ = write_input(control, b"x");
+            return Ok(());
+        }
         kill_process_group(self.child.id())
     }
 
@@ -208,6 +219,38 @@ impl OwnedGroup {
         }
         if self.report.is_some() {
             self.leader_exited()?;
+        }
+        if let Some(mut control) = self.control.take() {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::ExitStatusExt;
+            let _ = write_input(&mut control, b"x");
+            drop(control);
+            let stopped: std::io::Result<()> = (|| {
+                while !self.observation.stopped {
+                    let pipe = self
+                        .report
+                        .as_ref()
+                        .expect("controlled holder reports its exit");
+                    crate::exclusive::wait_readable(pipe.as_raw_fd(), None)?;
+                    self.leader_exited()?;
+                    if self.leader_finished()? {
+                        break;
+                    }
+                }
+                Ok(())
+            })();
+            let status = self.reported.unwrap_or(ExitStatus::from_raw(libc::SIGKILL));
+            self.status = Some(status);
+            let pid = self.child.id() as i32;
+            std::thread::spawn(move || {
+                // SAFETY: this unreaped child belongs to the holder guard.
+                while unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                }
+            });
+            stopped?;
+            return Ok(status);
         }
         kill_process_group(self.child.id())?;
         let status = self.child.wait()?;

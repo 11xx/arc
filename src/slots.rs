@@ -662,7 +662,9 @@ pub fn exclusive_in(cwd: &Path) -> Result<Option<UseLease>> {
 pub struct Shell {
     pub command: Command,
     report: Option<(OwnedFd, OwnedFd)>,
+    control: Option<(OwnedFd, OwnedFd)>,
     _lease: Option<UseLease>,
+    _exclusive: Option<File>,
 }
 
 pub fn shell(cwd: &Path) -> Result<Shell> {
@@ -670,14 +672,20 @@ pub fn shell(cwd: &Path) -> Result<Shell> {
         return Ok(Shell {
             command: Command::new("sh"),
             report: None,
+            control: None,
             _lease: None,
+            _exclusive: None,
         });
     };
-    held_shell(Some(UseLease::shared(&checkout)?))
+    held_shell(Some(UseLease::shared(&checkout)?), None)
 }
 
 /// A command holder that accounts for the command's entire descendant tree.
 pub fn measured_shell(cwd: &Path) -> Result<(Shell, u64)> {
+    measured_shell_with_lock(cwd, None)
+}
+
+pub fn measured_shell_with_lock(cwd: &Path, exclusive: Option<File>) -> Result<(Shell, u64)> {
     let (lease, wait_ms) = match slot_checkout(cwd) {
         Some(checkout) => {
             let waiting = Instant::now();
@@ -686,30 +694,45 @@ pub fn measured_shell(cwd: &Path) -> Result<(Shell, u64)> {
         }
         None => (None, 0),
     };
-    Ok((held_shell(lease)?, wait_ms))
+    Ok((held_shell(lease, exclusive)?, wait_ms))
 }
 
-fn held_shell(lease: Option<UseLease>) -> Result<Shell> {
+fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
     let mut descriptors = [0; 2];
     // SAFETY: pipe2 writes two descriptors into the array on success.
     if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(std::io::Error::last_os_error()).context("cannot create a holder pipe");
     }
     // SAFETY: pipe2 succeeded, so both descriptors are open and owned here.
-    let (read, write) = unsafe {
+    Ok(unsafe {
         (
             OwnedFd::from_raw_fd(descriptors[0]),
             OwnedFd::from_raw_fd(descriptors[1]),
         )
-    };
+    })
+}
+
+const STOP_FD: &str = "ARC_COMMAND_STOP_FD";
+
+fn held_shell(lease: Option<UseLease>, exclusive: Option<File>) -> Result<Shell> {
+    let (read, write) = pipe_pair()?;
+    let control = exclusive.as_ref().map(|_| pipe_pair()).transpose()?;
     let mut command = Command::new(std::env::current_exe().context("cannot locate arc")?);
     command
         .arg(HOLDER)
         .arg("sh")
+        .env_remove(STOP_FD)
         .env(STATUS_FD, write.as_raw_fd().to_string());
     let mut inherited = vec![write.as_raw_fd()];
     if let Some(lease) = &lease {
         inherited.push(lease.file.as_raw_fd());
+    }
+    if let Some(lock) = &exclusive {
+        inherited.push(lock.as_raw_fd());
+    }
+    if let Some((read, _)) = &control {
+        inherited.push(read.as_raw_fd());
+        command.env(STOP_FD, read.as_raw_fd().to_string());
     }
     // SAFETY: fcntl is async-signal-safe. Only the holder clears CLOEXEC, so
     // no unrelated exec inherits the use lock or the report pipe.
@@ -729,7 +752,9 @@ fn held_shell(lease: Option<UseLease>) -> Result<Shell> {
     Ok(Shell {
         command,
         report: Some((read, write)),
+        control,
         _lease: lease,
+        _exclusive: exclusive,
     })
 }
 
@@ -740,6 +765,10 @@ impl Shell {
         if let Some((read, write)) = self.report.take() {
             drop(write);
             group.report_through(read)?;
+        }
+        if let Some((read, write)) = self.control.take() {
+            drop(read);
+            group.stop_through(write);
         }
         Ok(group)
     }
@@ -756,6 +785,9 @@ pub fn holder_main() -> ! {
     let report = std::env::var(STATUS_FD)
         .ok()
         .and_then(|value| value.parse::<i32>().ok());
+    let control = std::env::var(STOP_FD)
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok());
     // SAFETY: prctl and signal take no borrowed memory. The holder must
     // survive a closed report pipe once its launcher is gone.
     let subreaper = unsafe {
@@ -764,8 +796,14 @@ pub fn holder_main() -> ! {
         if let Some(report) = report {
             libc::fcntl(report, libc::F_SETFD, libc::FD_CLOEXEC);
         }
+        if let Some(control) = control {
+            libc::fcntl(control, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
         result == 0
     };
+    if control.is_some() && !subreaper {
+        std::process::exit(127);
+    }
     let mut report = report.map(|fd| {
         // SAFETY: the launcher passed ownership of this report descriptor.
         unsafe { File::from_raw_fd(fd) }
@@ -786,10 +824,12 @@ pub fn holder_main() -> ! {
         started_ns: monotonic_ns(),
         ..Default::default()
     };
-    let spawned = Command::new(program)
-        .args(rest)
-        .env_remove(STATUS_FD)
-        .spawn();
+    let mut command = Command::new(program);
+    command.args(rest).env_remove(STATUS_FD).env_remove(STOP_FD);
+    if control.is_some() {
+        command.process_group(0);
+    }
+    let spawned = command.spawn();
     send(&observation);
     // The launcher reads the command's output to its end; only the command
     // and its descendants may hold those pipes open.
@@ -804,6 +844,44 @@ pub fn holder_main() -> ! {
                 libc::close(null);
             }
         }
+    }
+    if let (Some(control), Ok(child)) = (control, &spawned) {
+        let pid = child.id();
+        let stop = std::thread::spawn(move || {
+            // SAFETY: the launcher passed ownership of this pipe descriptor.
+            let mut pipe = unsafe { File::from_raw_fd(control) };
+            let mut byte = [0];
+            loop {
+                match std::io::Read::read(&mut pipe, &mut byte) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    _ => break,
+                }
+            }
+            // The command remains unreaped until this thread has used its group ID.
+            let _ = process_group::kill_process_group(pid);
+        });
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: waitid initializes info and leaves the command's PID reserved.
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            // SAFETY: waitid initialized info.
+            let info = unsafe { info.assume_init() };
+            let status = unsafe { info.si_status() };
+            observation.status = Some(if info.si_code == libc::CLD_EXITED {
+                status << 8
+            } else {
+                status
+            });
+            send(&observation);
+        }
+        let _ = stop.join();
     }
     let (raw, mut user, mut system, mut complete) =
         match spawned.and_then(|child| wait_usage(child.id() as i32, 0)) {
@@ -821,6 +899,7 @@ pub fn holder_main() -> ! {
                 system += child_system;
             }
             Ok(None) => {
+                observation.stopped = control.is_some();
                 send(&observation);
                 flags = 0;
             }
@@ -834,6 +913,7 @@ pub fn holder_main() -> ! {
         observation.timing.cpu_user_ms = Some(user / 1000);
         observation.timing.cpu_system_ms = Some(system / 1000);
     }
+    observation.stopped = control.is_some();
     send(&observation);
     let code = if libc::WIFEXITED(raw) {
         libc::WEXITSTATUS(raw)
@@ -905,7 +985,9 @@ pub fn identity(checkout: &Path, declaration: &Declaration) -> Result<String> {
     let mut shell = Shell {
         command: Command::new("sh"),
         report: None,
+        control: None,
         _lease: None,
+        _exclusive: None,
     };
     let (code, out, err) = captured(&mut shell, checkout, script, IDENTITY_TIMEOUT)
         .context("slot identity command failed")?;
@@ -1494,7 +1576,7 @@ fn empty_outbox(path: &Path) -> bool {
 fn invalidate(path: &Path, declaration: &Declaration, cwd: &Path) -> Result<()> {
     if let Some(script) = &declaration.invalidate {
         let lease = UseLease::exclusive(path)?.context("slot is in use")?;
-        let mut shell = held_shell(Some(lease))?;
+        let mut shell = held_shell(Some(lease), None)?;
         let _storage = crate::warm_worktree::configure_invalidation(&mut shell.command, path)?;
         let (code, _, err) = captured(&mut shell, path, script, INVALIDATE_TIMEOUT)?;
         if code != 0 {
