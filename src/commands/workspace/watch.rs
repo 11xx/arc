@@ -10,10 +10,10 @@
 //! facts its last read gave.
 
 use super::*;
+use crate::feed::Feed;
 use std::collections::HashMap;
-use std::io::{Read, Seek, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::MetadataExt;
+use std::io::Write;
+use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 
 /// How long the feed stays quiet before the watch reads, so one command's
@@ -53,7 +53,7 @@ pub(super) fn watch(
             let due = (last + SETTLE).min(first + SETTLE_AT_MOST);
             due.saturating_duration_since(Instant::now())
         });
-        let ready = wait(feed.inotify.as_raw_fd(), timeout)?;
+        let ready = wait(feed.fd(), timeout)?;
         if ready.output_gone {
             return Ok(0);
         }
@@ -463,119 +463,6 @@ impl<'a> Watch<'a> {
         unsafe {
             libc::malloc_trim(0);
         }
-    }
-}
-
-/// The feed file, followed from where the watch started across rotation.
-struct Feed {
-    dir: PathBuf,
-    inotify: OwnedFd,
-    /// The feed file being read, or `None` before the first notice ever.
-    file: Option<std::fs::File>,
-    /// The start of a line whose end has not been read yet.
-    carry: Vec<u8>,
-}
-
-impl Feed {
-    fn open() -> Result<Feed> {
-        let dir = crate::feed::dir()
-            .context("the AI home cannot be resolved, so there is no workspace feed to follow")?;
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("cannot create the workspace feed {}", dir.display()))?;
-        // SAFETY: `inotify_init1` takes flags only and returns a new descriptor.
-        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error()).context("cannot start inotify");
-        }
-        // SAFETY: `fd` is a descriptor this process just opened and owns.
-        let inotify = unsafe { OwnedFd::from_raw_fd(fd) };
-        let path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())
-            .context("the workspace feed's path holds a NUL byte")?;
-        // SAFETY: both arguments are valid for the call; the watch lives as
-        // long as the descriptor.
-        let watched = unsafe {
-            libc::inotify_add_watch(
-                inotify.as_raw_fd(),
-                path.as_ptr(),
-                libc::IN_MODIFY | libc::IN_CREATE | libc::IN_MOVED_TO,
-            )
-        };
-        if watched < 0 {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("cannot watch {}", dir.display()));
-        }
-        let file = match std::fs::File::open(dir.join(crate::feed::FILE)) {
-            Ok(mut file) => {
-                file.seek(std::io::SeekFrom::End(0))?;
-                Some(file)
-            }
-            Err(_) => None,
-        };
-        Ok(Feed {
-            dir,
-            inotify,
-            file,
-            carry: Vec::new(),
-        })
-    }
-
-    /// Discard the queued inotify events: they only say the feed moved.
-    fn drain_wakeups(&self) {
-        let mut buffer = [0u8; 4096];
-        // SAFETY: the buffer is valid for its length; the descriptor is
-        // non-blocking, so the loop ends when the queue is empty.
-        while unsafe {
-            libc::read(
-                self.inotify.as_raw_fd(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-            )
-        } > 0
-        {}
-    }
-
-    /// Every whole line appended since the last call, and whether a line was
-    /// lost. When the feed has moved aside, the rest of the old file is read
-    /// before the new one.
-    fn lines(&mut self) -> (Vec<Vec<u8>>, bool) {
-        let mut read = Vec::new();
-        let mut lost = false;
-        let path = self.dir.join(crate::feed::FILE);
-        loop {
-            if let Some(file) = &mut self.file {
-                let _ = file.read_to_end(&mut self.carry);
-            }
-            let ours = self
-                .file
-                .as_ref()
-                .and_then(|file| file.metadata().ok())
-                .map(|metadata| (metadata.dev(), metadata.ino()));
-            let current = std::fs::metadata(&path)
-                .ok()
-                .map(|metadata| (metadata.dev(), metadata.ino()));
-            if current.is_none() || current == ours {
-                break;
-            }
-            // The feed moved aside, and whatever the old file ended with
-            // without a line end was cut off.
-            if !self.carry.is_empty() && !self.carry.ends_with(b"\n") {
-                self.carry.clear();
-                lost = true;
-            }
-            self.file = std::fs::File::open(&path).ok();
-        }
-        let whole = self.carry.iter().rposition(|byte| *byte == b'\n');
-        if let Some(end) = whole {
-            let rest = self.carry.split_off(end + 1);
-            let complete = std::mem::replace(&mut self.carry, rest);
-            read.extend(
-                complete
-                    .split(|byte| *byte == b'\n')
-                    .filter(|line| !line.is_empty())
-                    .map(<[u8]>::to_vec),
-            );
-        }
-        (read, lost)
     }
 }
 
