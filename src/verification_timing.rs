@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerificationTiming {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_limit_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_limit_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_at_run: Option<crate::gate_budget::BudgetJudgement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepare_ms: Option<u64>,

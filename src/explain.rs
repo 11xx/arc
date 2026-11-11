@@ -480,8 +480,11 @@ pub struct CaptureRow {
     pub at_risk: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Explanation {
+    pub historical_budget_authorization: Option<crate::model::AuthorizationBasis>,
+    pub current_budget_applicability: Vec<crate::status::GateStatus>,
+    pub current_budget_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge_view: Option<serde_json::Value>,
     pub schema: &'static str,
@@ -510,6 +513,27 @@ pub fn explain(ctx: &Ctx, reference: &str, at: Option<&str>, json: bool) -> Resu
     if json {
         println!("{}", serde_json::to_string_pretty(&explanation)?);
     } else {
+        for gate in &explanation.current_budget_applicability {
+            println!(
+                "current budget applicability, gate {}: {}",
+                gate.name,
+                crate::render::gate_line(gate)
+            );
+        }
+        if let Some(basis) = &explanation.historical_budget_authorization {
+            println!(
+                "historical authorization budgets: {:?}; total {:?}",
+                basis
+                    .gates
+                    .iter()
+                    .map(|(n, g)| (n, g.budget_ms))
+                    .collect::<Vec<_>>(),
+                basis.budget_rules
+            );
+        }
+        for error in &explanation.current_budget_errors {
+            println!("current budget applicability: {error}");
+        }
         print!(
             "{}{}",
             render(&explanation),
@@ -633,7 +657,44 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         contract.absence = None;
     }
 
+    let current_applicability = (|| -> Result<_> {
+        let mut current_subject = subject_state.clone();
+        current_subject.target_branch =
+            crate::declarations::accepted_target(&subject_state).to_owned();
+        let target = crate::gitio::branch_head(&ctx.cwd, &current_subject.target_branch)?;
+        let declarations =
+            crate::declarations::for_change_at(&ctx.cwd, &current_subject, Some(&target))?;
+        let dependencies = crate::status::BlockerStatus {
+            schema: crate::status::BLOCKER_STATUS_SCHEMA,
+            blocked: false,
+            blockers_ready: Vec::new(),
+        };
+        let report = crate::status::build(
+            &current_subject,
+            &ctx.cwd,
+            &declarations,
+            dependencies,
+            Vec::new(),
+            None,
+        )?;
+        Ok((report.gates, report.budget_errors))
+    })();
+    let (current_budget_applicability, current_budget_errors) = match current_applicability {
+        Ok(report) => report,
+        Err(error) => (
+            Vec::new(),
+            vec![format!(
+                "current budget applicability unavailable: {error:#}"
+            )],
+        ),
+    };
     Ok(Explanation {
+        historical_budget_authorization: full
+            .closure
+            .as_ref()
+            .and_then(|c| c.authorization.clone()),
+        current_budget_applicability,
+        current_budget_errors,
         forge_view: if crate::forge_round_trip::applies(&subject_state) {
             Some(crate::forge_view::build(
                 &store,

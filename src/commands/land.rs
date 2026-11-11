@@ -2096,6 +2096,7 @@ fn commit(
                 range_base,
                 integrated_commit,
                 authorization: crate::model::AuthorizationBasis {
+                    budget_rules: None,
                     selected_verdict_provenance,
                     verdict_event_id: approval.verdict_event_id,
                     external_verdict: approval.external_verdict,

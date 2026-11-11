@@ -24,6 +24,7 @@ mod forge;
 mod forge_observation;
 mod forge_round_trip;
 mod forge_view;
+mod gate_budget;
 mod gates;
 mod gitio;
 mod guide;
@@ -708,7 +709,8 @@ enum Cmd {
     ///
     /// Lists declarations (arc guide gates), with runs, exact-tree
     /// reuses and selector skips counted separately. Timings prefer run_ms; older
-    /// duration_ms samples are identified. Reports no declared budget. Reads record
+    /// duration_ms samples are identified and excluded from budget shares. Lists budgets,
+    /// totals and the latest over-budget run. Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
     Gates {
         /// Inspect coverage or measure commands without recording evidence
@@ -2204,6 +2206,9 @@ enum Cmd {
     /// descendant was accounted for.
     /// `load_average` and `core_count` describe the host at command start.
     /// These fields appear in `show --json` and `status`; attestations carry none.
+    /// Budgets judge command run_ms under arc guide gates. An over-budget raw pass
+    /// exits 1; reuse refuses it until --rerun. Untimed evidence is unmeasured.
+    /// Declared timeout_seconds and effective execution_limit_ms are recorded apart.
     /// See `arc guide change-gates` for accounting boundaries.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -3988,6 +3993,16 @@ enum GatesCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Measure each gate once and write its budget and their sum; refuses existing budgets
+    Init,
+    /// Show the newest measured over-budget run and its host observations
+    Over {
+        /// Limit history to this change
+        change: Option<String>,
+        /// Inspect only this gate
+        #[arg(long, value_name = "G")]
+        gate: Option<String>,
+    },
     /// Run declared gates sequentially on this tree without recording evidence
     ///
     /// Prints each run's command wall and child CPU time and each gate's spread.
@@ -4012,7 +4027,7 @@ enum WorkspaceCmd {
     /// Uses --under/--here/--global scope and the workspace collection manifest.
     /// Retired registrations are counted without observation; --retired lists them.
     /// Unreachable registrations and unreadable gates or ledgers are named, retaining
-    /// readable rows and exiting 16 on partial collection. No budget is declared.
+    /// readable rows and exiting 16 on partial collection. Lists budgets and declared totals.
     /// Records no events; append policy need not parse. JSON: arc-workspace-gates/1.
     Gates {
         /// Report only projects beneath this canonical path
@@ -6821,6 +6836,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             None => commands::gate_report(&ctx, json),
             Some(GatesCmd::Paths { json: paths_json }) => {
                 commands::gate_paths(&ctx, json || paths_json)
+            }
+            Some(GatesCmd::Init) => {
+                anyhow::ensure!(!json, "gates init does not accept --json");
+                commands::init_budgets(&ctx)
+            }
+            Some(GatesCmd::Over { change, gate }) => {
+                anyhow::ensure!(!json, "gates over does not accept --json");
+                commands::over_budgets(&ctx, change.as_deref(), gate.as_deref())
             }
             Some(GatesCmd::Measure { runs, gate }) => {
                 anyhow::ensure!(!json, "gates measure does not accept --json");

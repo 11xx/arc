@@ -2195,7 +2195,15 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn adopt_budgets(&self) -> Result<()> {
+        self.refuse_read_only()?;
+        self.stamp_format(Some(8))
+    }
+
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
+        if crate::gate_budget::budgeted_payload(payload) {
+            self.adopt_budgets()?;
+        }
         let introduced_in = match payload {
             // An older reader ignores the field and keeps a finding resolved
             // that the event reopens, so it must refuse the store instead.
@@ -2290,6 +2298,9 @@ impl Store {
     /// share their classification with typed records.
     #[cfg(test)]
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
+        if value.is_some_and(has_budget_semantics) {
+            self.adopt_budgets()?;
+        }
         if value
             .and_then(|value| value.get("session_resolution"))
             .and_then(serde_json::Value::as_str)
@@ -3414,6 +3425,14 @@ impl Store {
             message: format!("batch directory preparation failed: {error:#}"),
         })?;
         let path = dir.join(format!("{}.json", ids::new_identifier()));
+        if batch
+            .events
+            .iter()
+            .chain(&batch.repository_events)
+            .any(has_budget_semantics)
+        {
+            self.stamp_format_locked(8)?;
+        }
         crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
             "import admission publication failed; inspect the published batch before retrying",
         )?;
@@ -3527,8 +3546,20 @@ fn authorization_has_no_verdict(
 /// as open, then closing it a second way. Refusing is the only honest answer,
 /// and it has to hold on every path that opens a store, not just the one that
 /// creates it.
+fn has_budget_semantics(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            matches!(key.as_str(), "budget_at_run" | "budget_rules" | "budget_ms")
+                && !value.is_null()
+                || has_budget_semantics(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(has_budget_semantics),
+        _ => false,
+    }
+}
+
 fn ensure_readable_format(schema_version: u32, path: &Path) -> Result<()> {
-    ensure_readable_format_at(schema_version, crate::model::SCHEMA_VERSION)
+    ensure_readable_format_at(schema_version, crate::model::STORE_FORMAT)
         .with_context(|| format!("{} was written by a newer arc", path.display()))
 }
 
@@ -4605,5 +4636,45 @@ mod tests {
             fs::read(dir.path().join("config.json")).unwrap_or_default(),
             before
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_format_tests {
+    use super::*;
+
+    /// Claim: adopting budgets fences every reader through format 7, while a
+    /// budget-free ledger keeps its format. Rejects adoption that an executable
+    /// ignoring budget keys can still open and authorize.
+    #[test]
+    fn budget_adoption_fences_older_readers_only_when_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::discover(dir.path());
+        assert!(store.is_err());
+        for budgeted in [false, true] {
+            let root = dir.path().join(if budgeted { "budgeted" } else { "plain" });
+            fs::create_dir(&root).unwrap();
+            fs::write(
+                root.join("config.json"),
+                serde_json::to_vec(&StoreConfig {
+                    schema_version: 1,
+                    repository_id: "fixture".into(),
+                    created_at: chrono::Utc::now(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let store = Store::open_at(&root).unwrap().unwrap();
+            if budgeted {
+                store.adopt_budgets().unwrap();
+            }
+            let config: StoreConfig =
+                serde_json::from_slice(&fs::read(root.join("config.json")).unwrap()).unwrap();
+            assert_eq!(config.schema_version, if budgeted { 8 } else { 1 });
+            assert_eq!(
+                ensure_readable_format_at(config.schema_version, 7).is_err(),
+                budgeted
+            );
+        }
     }
 }

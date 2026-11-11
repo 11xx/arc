@@ -142,6 +142,9 @@ pub fn gate_line(gate: &GateStatus) -> String {
 /// checkout or the change's own. Empty when nothing disagrees.
 fn declaration_notes(report: &StatusReport) -> String {
     let mut out = String::new();
+    for error in &report.budget_errors {
+        let _ = writeln!(out, "{error}");
+    }
     if !report.declaration_notes.is_empty() {
         let _ = writeln!(out, "Declarations differ:");
         for note in &report.declaration_notes {
@@ -1057,6 +1060,15 @@ pub fn markdown(
             // A passing run that cannot be reused reads as `Pass` above, next
             // to a gate summary that says the same gate is not green. Saying
             // why here is what keeps the two from contradicting each other.
+            if let Some(gate) = report
+                .gates
+                .iter()
+                .find(|g| g.evidence_event_id.as_deref() == Some(v.event_id.as_str()))
+            {
+                if let Some(reason) = gate.budget.reason(&v.timing, &v.hostname) {
+                    let _ = writeln!(w, "  - current budget applicability: {reason}");
+                }
+            }
             if let Some(reason) =
                 unusable_gate_evidence_reason(v, state.eligible_dirty_tree_waiver())
             {
@@ -1652,6 +1664,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 }
             }
             Blocker::GatesNotGreen => {
+                for error in &report.budget_errors {
+                    let _ = writeln!(out, "  {error}");
+                }
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
                     let _ = writeln!(
                         out,
@@ -1735,6 +1750,8 @@ pub fn next_step(report: &StatusReport) -> String {
         ("snapshot_replayed_head", _) => format!("arc snapshot {change} --verify; obtain fresh review or declare debt for the recorded patchset"),
         ("replay_provisional_ancestry", _) => format!("in the change checkout: git rebase {}; arc snapshot {change} --verify; obtain fresh review or debt", crate::context::shell_quote(&report.target_branch)),
         ("check_provisional", _) => format!("arc check {change} --provisional; acquire authority only through the replica offer protocol"),
+        ("repair_gate_budgets", _) => "repair the declared gate budgets and total; arc guide gates".into(),
+        ("inspect_gate_budget", gate) => format!("arc gates over {change} --gate {gate}; fix the cost, then arc verify {change} --gate {gate} --rerun"),
         ("none", "closed") => "nothing; the change is closed".to_string(),
         ("restore_branch", _) => match &report.latest_patchset {
             Some(patchset) => format!(

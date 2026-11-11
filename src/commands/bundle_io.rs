@@ -865,7 +865,7 @@ fn import_events(
         println!("aborted: no events or refs written");
         return Ok(crate::model::OperationResult::unpublished(1));
     }
-    validate_import_candidate(
+    let imported_state = validate_import_candidate(
         Some(&store),
         validated,
         &plan.new_events,
@@ -891,6 +891,15 @@ fn import_events(
     };
     let published = !batch.events.is_empty() || !batch.repository_events.is_empty();
     if published {
+        let budgeted = ctx
+            .declarations(&imported_state)
+            .is_ok_and(|d| d.gates.has_budgets())
+            || imported_state.latest_patchset().is_some_and(|p| {
+                crate::gates::inspect_at(&ctx.cwd, &p.head).is_ok_and(|g| g.has_budgets())
+            });
+        if budgeted {
+            store.adopt_budgets()?;
+        }
         store.publish_import(&batch)?;
     }
     if rewrites > 0 {
@@ -1486,7 +1495,7 @@ fn validate_import_candidate(
     new_events: &[String],
     repository: &BTreeMap<String, Vec<u8>>,
     rewrites: &crate::rewrite::RewriteMap,
-) -> Result<()> {
+) -> Result<ChangeState> {
     let mut candidate = Vec::new();
     if let Some(store) = store {
         if store
@@ -1672,7 +1681,7 @@ fn validate_import_candidate(
             );
         }
     }
-    Ok(())
+    Ok(projected)
 }
 
 #[allow(clippy::too_many_arguments)]

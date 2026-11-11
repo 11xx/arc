@@ -93,7 +93,7 @@ pub use doctor::run as run_doctor;
 pub use external::{record_verdict as record_external_verdict, ExternalVerdictArgs};
 pub use findings::{findings, FindingsFormat};
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_observe, forge_pr_state};
-pub use gate_reports::{gate_paths, gate_report, measure_gates};
+pub use gate_reports::{gate_paths, gate_report, init_budgets, measure_gates, over_budgets};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
     check_selection, close, done, hold, integrate, rebase, release_hold, snapshot_with_verify,
@@ -200,6 +200,8 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "gates",
     "gates measure",
     "gates paths",
+    "gates over",
+    "gates init",
     "workspace gates",
     "diff",
     "chain",
@@ -837,6 +839,9 @@ impl Ctx {
         created_at: chrono::DateTime<chrono::Utc>,
         payload: Payload,
     ) -> Result<crate::store::LocalEvent> {
+        if crate::gate_budget::budgeted_payload(&payload) {
+            store.adopt_budgets()?;
+        }
         self.announce_assumed_identity();
         let attribution = self.resolve_model();
         // The store's verdict on the session this event names, whether
@@ -1413,6 +1418,45 @@ pub fn write_atomically(path: &Path, contents: &[u8], mode: FileMode) -> Result<
     })();
     let _ = std::fs::remove_file(&temp);
     publish
+}
+
+/// Parse a positive duration exactly in milliseconds, rejecting lost precision and overflow.
+pub fn parse_duration_ms(raw: &str) -> Result<u64> {
+    let (number, scale) = [("ms", 1_u64), ("s", 1_000), ("m", 60_000), ("h", 3_600_000)]
+        .into_iter()
+        .find_map(|(unit, scale)| raw.strip_suffix(unit).map(|number| (number, scale)))
+        .context("duration needs ms, s, m or h units")?;
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || (number.contains('.') && fraction.is_empty())
+    {
+        bail!("duration must be a positive decimal with units");
+    }
+    let mut ms = whole
+        .parse::<u64>()?
+        .checked_mul(scale)
+        .context("duration overflow")?;
+    if !fraction.is_empty() {
+        let divisor = 10_u64
+            .checked_pow(u32::try_from(fraction.len())?)
+            .context("duration precision overflow")?;
+        let part = fraction
+            .parse::<u64>()?
+            .checked_mul(scale)
+            .context("duration overflow")?;
+        if part % divisor != 0 {
+            bail!("duration must resolve to whole milliseconds");
+        }
+        ms = ms
+            .checked_add(part / divisor)
+            .context("duration overflow")?;
+    }
+    if ms == 0 {
+        bail!("duration must be positive");
+    }
+    Ok(ms)
 }
 
 pub fn parse_duration(raw: &str) -> Result<u64> {

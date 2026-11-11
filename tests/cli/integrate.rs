@@ -1235,6 +1235,8 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["gates", "paths"],
         vec!["gates", "paths", "--json"],
         vec!["gates", "measure", "--runs", "1"],
+        vec!["gates", "over"],
+        vec!["gates", "init"],
         vec!["gates", "measure", "--runs", "1", "--gate", "missing"],
         vec!["workspace", "gates"],
         vec!["workspace", "gates", "--json"],
@@ -1286,16 +1288,19 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         .collect();
     let mut exercised = exercised;
     for args in &extra_forms {
-        let path =
-            if args.starts_with(&["gates", "measure"]) || args.starts_with(&["gates", "paths"]) {
-                args[..2].join(" ")
-            } else if listed.contains(args[0]) {
-                args[0].to_string()
-            } else if args[..2] == ["journal", "lane"] {
-                args[..3].join(" ")
-            } else {
-                args[..2].join(" ")
-            };
+        let path = if args.first() == Some(&"gates")
+            && args
+                .get(1)
+                .is_some_and(|a| ["measure", "paths", "over", "init"].contains(a))
+        {
+            args[..2].join(" ")
+        } else if listed.contains(args[0]) {
+            args[0].to_string()
+        } else if args[..2] == ["journal", "lane"] {
+            args[..3].join(" ")
+        } else {
+            args[..2].join(" ")
+        };
         exercised.insert(path);
     }
     // Inspection parses the policy inputs whose contents it reports.

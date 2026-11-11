@@ -36,11 +36,11 @@ impl std::fmt::Display for OperationFailure {
 }
 impl std::error::Error for OperationFailure {}
 
-/// The store format this build writes and understands. A build refuses a
-/// store stamped newer than this, because the alternative is what silently
-/// went wrong before: an older binary skipping event types it does not know,
-/// concluding the change is still open, and closing it a second way.
+/// The envelope version emitted by ordinary events.
 pub const SCHEMA_VERSION: u32 = 7;
+
+/// The newest ledger format this build understands.
+pub const STORE_FORMAT: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -2718,6 +2718,8 @@ pub struct ExternalVerdictBasis {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBasis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_rules: Option<crate::gate_budget::BudgetRules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_verdict_provenance: Option<crate::import_authorization::SelectedVerdictProvenance>,
     /// The verdict that approved the merged patchset, when one did. Absent
     /// when a declared debt stood in for a review nobody performed: the
@@ -2934,6 +2936,10 @@ pub struct NormalizedGate {
     pub paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inert: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budget_sources: Vec<crate::gate_budget::BudgetSource>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<GateEvent>,

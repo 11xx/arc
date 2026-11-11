@@ -38,6 +38,8 @@ pub struct GatesFile {
     #[serde(skip)]
     pub dangerous: Vec<String>,
     #[serde(default)]
+    pub budget: Option<crate::gate_budget::BudgetRules>,
+    #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
     #[serde(skip)]
     pub conflicts: Vec<GateConflict>,
@@ -102,6 +104,10 @@ impl Coverage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Gate {
     pub command: String,
+    #[serde(default, deserialize_with = "crate::gate_budget::deserialize_ms")]
+    pub budget: Option<u64>,
+    #[serde(skip)]
+    pub budget_sources: Vec<crate::gate_budget::BudgetSource>,
     /// A command whose output identifies the environment this gate's evidence
     /// applies to. The identity is a digest of the probe's stdout, and only a
     /// successful run that prints something yields one. `verify` records that
@@ -550,9 +556,11 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
         let Some((origin, text)) = layer else {
             continue;
         };
-        let layer =
+        let mut layer =
             toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?;
         let source = source.to_string();
+        layer.name_budget_sources(&origin);
+        crate::gate_budget::merge_rules(&mut merged.budget, layer.budget.take());
 
         merged.selection.inert.extend(layer.selection.inert);
         for (name, mut gate) in layer.gates {
@@ -618,11 +626,12 @@ impl Gate {
     }
 
     /// Fold another declaration of the same check into this one. Profiles
-    /// and events widen and the stricter timeout wins, so one declaration cannot loosen
+    /// and events widen and the stricter timeout and budget win, so one declaration cannot loosen
     /// a gate the other bounds. The gate may be bypassed only if both allow it,
     /// on this declaration's terms, and binds to commits if either says so. Either
     /// declaration may require a lock; the shortest admission limit applies.
     fn absorb(&mut self, other: Gate) {
+        self.absorb_budget(&other);
         let left = self
             .admission
             .or_else(|| self.exclusive.as_ref().map(|_| Duration::from_secs(60)));
@@ -687,7 +696,7 @@ impl GatesFile {
     /// Add what a change's own declarations require on top of this set, the
     /// target's. A gate the change adds is owed. A gate the target already
     /// declares stays the target's check: the change can widen its profiles
-    /// or tighten its timeout and require a lock but cannot substitute another command or
+    /// or tighten its timeout or budget and require a lock but cannot substitute another command or
     /// environment, and such a substitution is returned so it can be reported.
     /// `target_label` and `change_label` name the two sides in that report.
     pub fn owe_also(
@@ -696,6 +705,7 @@ impl GatesFile {
         target_label: &str,
         change_label: &str,
     ) -> Vec<GateDivergence> {
+        crate::gate_budget::merge_rules(&mut self.budget, own.budget);
         let mut divergences = Vec::new();
         for (name, gate) in own.gates {
             match self.gates.get_mut(&name) {
@@ -703,11 +713,14 @@ impl GatesFile {
                     self.gates.insert(name, gate);
                 }
                 Some(current) if current.same_check(&gate) => current.absorb(gate),
-                Some(current) => divergences.push(GateDivergence {
-                    target: GateDeclaration::of(current, target_label),
-                    change: GateDeclaration::of(&gate, change_label),
-                    name,
-                }),
+                Some(current) => {
+                    current.absorb_budget(&gate);
+                    divergences.push(GateDivergence {
+                        target: GateDeclaration::of(current, target_label),
+                        change: GateDeclaration::of(&gate, change_label),
+                        name,
+                    });
+                }
             }
         }
         self.set_danger(self.dangerous.clone());

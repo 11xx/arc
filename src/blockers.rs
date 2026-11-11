@@ -105,6 +105,7 @@ pub struct GateFact {
 /// The facts a change's blockers follow from.
 #[derive(Debug, Clone)]
 pub struct BlockerFacts {
+    pub invalid_gate_budget: bool,
     pub mode_refused: bool,
     pub closed: bool,
     pub branch_missing: bool,
@@ -161,7 +162,9 @@ impl BlockerFacts {
             Blocker::NoValidApproval => {
                 !self.iterating && !self.approval_valid && !self.waiver_satisfies_approval
             }
-            Blocker::GatesNotGreen => self.gates.iter().any(|gate| !gate.green_at_head),
+            Blocker::GatesNotGreen => {
+                self.invalid_gate_budget || self.gates.iter().any(|gate| !gate.green_at_head)
+            }
             Blocker::AcceptanceProbesNotGreen => {
                 self.probes_discriminating.iter().any(|probe| !probe)
             }
@@ -215,6 +218,7 @@ mod tests {
 
     fn clear() -> BlockerFacts {
         BlockerFacts {
+            invalid_gate_budget: false,
             mode_refused: false,
             closed: false,
             branch_missing: false,
@@ -303,6 +307,7 @@ mod tests {
     #[test]
     fn all_facts_raise_every_blocker_in_priority_order() {
         let facts = BlockerFacts {
+            invalid_gate_budget: true,
             mode_refused: true,
             closed: true,
             branch_missing: true,
@@ -355,6 +360,7 @@ mod tests {
     #[test]
     fn waiver_satisfies_a_missing_approval() {
         let facts = BlockerFacts {
+            invalid_gate_budget: false,
             approval_valid: false,
             waiver_satisfies_approval: true,
             ..clear()
@@ -369,6 +375,7 @@ mod tests {
             evidence_recorded: false,
         };
         let facts = BlockerFacts {
+            invalid_gate_budget: false,
             merged_tree_evaluated: true,
             gates: vec![unevaluated, GREEN_WITH_EVIDENCE],
             ..clear()
@@ -425,6 +432,7 @@ mod tests {
     #[test]
     fn exit_code_is_the_first_blocker_in_priority_order() {
         let facts = BlockerFacts {
+            invalid_gate_budget: false,
             needs_rebase: true,
             open_blocking_findings: true,
             approval_valid: false,

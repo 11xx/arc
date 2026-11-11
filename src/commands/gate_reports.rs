@@ -5,11 +5,17 @@ use serde::Serialize;
 
 const GATES_SCHEMA: &str = "arc-gates/1";
 
+type BudgetSample = (chrono::DateTime<chrono::Utc>, Option<String>, u64);
+
 #[derive(Serialize)]
 pub(super) struct GateReport {
     schema: &'static str,
     unclaimed_paths: usize,
     pub(super) budget_declared: bool,
+    budget_rules: Option<crate::gate_budget::BudgetRules>,
+    integration_budget_sum_ms: Option<u64>,
+    integration_budget_sums_ms: BTreeMap<String, Option<u64>>,
+    budget_errors: Vec<String>,
     pub(super) gates: Vec<GateRow>,
     pub(super) failures: Vec<ReadFailure>,
 }
@@ -25,7 +31,22 @@ pub(super) struct GateRow {
     pub(super) name: String,
     declaration: Declaration,
     budget_ms: Option<u64>,
+    budget_sources: Vec<crate::gate_budget::BudgetSource>,
+    budget_share_percent: Option<f64>,
+    budget_timing: Distribution,
+    last_over_budget: Option<OverRun>,
     history: History,
+}
+
+#[derive(Serialize)]
+struct OverRun {
+    change_id: String,
+    event_id: String,
+    at: chrono::DateTime<chrono::Utc>,
+    run_ms: u64,
+    hostname: String,
+    timing: crate::verification_timing::VerificationTiming,
+    output_artifact: Option<crate::verification_output::OutputArtifact>,
 }
 
 #[derive(Serialize)]
@@ -90,7 +111,12 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         gates::inspect(cwd)?
     } else {
         match std::fs::read_to_string(cwd.join(".arc/gates.toml")) {
-            Ok(text) => toml::from_str(&text).context("malformed gate declarations")?,
+            Ok(text) => {
+                let mut declared: gates::GatesFile =
+                    toml::from_str(&text).context("malformed gate declarations")?;
+                declared.name_budget_sources(".arc/gates.toml");
+                declared
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 gates::GatesFile::default()
             }
@@ -117,6 +143,27 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
     } else {
         0
     };
+    let budget_declared = declared.has_budgets();
+    let budget_rules = declared.budget.clone();
+    let budget_errors = declared.budget_errors();
+    let integration_budget_sum_ms = declared
+        .required_for("")
+        .iter()
+        .try_fold(0_u64, |sum, (_, g)| sum.checked_add(g.budget?));
+    let profiles = std::iter::once(String::new())
+        .chain(declared.gates.values().flat_map(|g| g.profiles.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let integration_budget_sums_ms = profiles
+        .into_iter()
+        .map(|profile| {
+            let sum = declared
+                .required_for(&profile)
+                .iter()
+                .try_fold(0_u64, |sum, (_, g)| sum.checked_add(g.budget?));
+            (profile, sum)
+        })
+        .collect();
+    let mut budget_samples: BTreeMap<String, Vec<BudgetSample>> = BTreeMap::new();
     let mut rows: BTreeMap<_, _> = declared
         .gates
         .into_iter()
@@ -144,7 +191,11 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                     selector: gate.selector,
                     environment: gate.environment,
                 },
-                budget_ms: None,
+                budget_ms: gate.budget,
+                budget_sources: gate.budget_sources,
+                budget_share_percent: None,
+                budget_timing: Distribution::default(),
+                last_over_budget: None,
                 history: History::default(),
             };
             (name, (row, Vec::new(), 0))
@@ -171,6 +222,11 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                         gate,
                         result,
                         duration_ms,
+                        command,
+                        timeout_seconds,
+                        environment,
+                        hostname,
+                        output_artifact,
                         timing,
                         attested,
                         ..
@@ -206,6 +262,39 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                                 at: event.created_at,
                             });
                         }
+                        if command == &row.declaration.command
+                            && timeout_seconds == &row.declaration.timeout_seconds
+                        {
+                            if let Some(ms) = timing.run_ms {
+                                budget_samples.entry(row.name.clone()).or_default().push((
+                                    event.created_at,
+                                    environment.as_ref().map(|e| e.identity.clone()),
+                                    ms,
+                                ));
+                                if crate::gate_budget::judge(
+                                    row.budget_ms,
+                                    &row.budget_sources,
+                                    Some(ms),
+                                )
+                                .verdict
+                                    == crate::gate_budget::BudgetVerdict::OverBudget
+                                    && row
+                                        .last_over_budget
+                                        .as_ref()
+                                        .is_none_or(|r| event.created_at > r.at)
+                                {
+                                    row.last_over_budget = Some(OverRun {
+                                        change_id: id.clone(),
+                                        event_id: event.event_id.clone(),
+                                        at: event.created_at,
+                                        run_ms: ms,
+                                        hostname: hostname.clone(),
+                                        timing: timing.clone(),
+                                        output_artifact: output_artifact.clone(),
+                                    });
+                                }
+                            }
+                        }
                         if let Some(ms) = timing.run_ms.or(*duration_ms) {
                             samples.push(ms);
                             *legacy += usize::from(timing.run_ms.is_none());
@@ -229,13 +318,32 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         .into_values()
         .map(|(mut row, mut samples, legacy)| {
             row.history.timing = Distribution::of(&mut samples, legacy);
+            let mut observations = budget_samples.remove(&row.name).unwrap_or_default();
+            observations.sort_by_key(|s| s.0);
+            let environment = observations.last().and_then(|s| s.1.clone());
+            let mut recent = observations
+                .iter()
+                .rev()
+                .filter(|s| s.1 == environment)
+                .take(20)
+                .map(|s| s.2)
+                .collect::<Vec<_>>();
+            row.budget_timing = Distribution::of(&mut recent, 0);
+            row.budget_share_percent = row
+                .budget_ms
+                .zip(row.budget_timing.median_ms)
+                .map(|(budget, median)| median as f64 * 100.0 / budget as f64);
             row
         })
         .collect();
     Ok(GateReport {
         schema: GATES_SCHEMA,
         unclaimed_paths,
-        budget_declared: false,
+        budget_declared,
+        budget_rules,
+        budget_errors,
+        integration_budget_sum_ms,
+        integration_budget_sums_ms,
         gates,
         failures,
     })
@@ -264,13 +372,52 @@ fn ms(value: Option<u64>) -> String {
 }
 
 pub(super) fn render(report: &GateReport) {
-    println!("budget: none declared");
+    match report.budget_rules.as_ref().and_then(|b| b.total) {
+        Some(total) => println!(
+            "budget total: {}; unqualified integration sum {}",
+            crate::gate_budget::duration(total),
+            ms(report.integration_budget_sum_ms)
+        ),
+        None if report.budget_declared => println!("budget: gates declared; total undeclared"),
+        None => println!("budget: none declared"),
+    }
+    for (profile, sum) in report
+        .integration_budget_sums_ms
+        .iter()
+        .filter(|(p, _)| !p.is_empty())
+    {
+        println!("integration budget sum for {profile}: {}", ms(*sum));
+    }
+    for error in &report.budget_errors {
+        println!("{error}");
+    }
     println!("tracked paths nobody names: {}", report.unclaimed_paths);
     println!(
         "gate  runs  reused  selected-out  median  p90  worst  ever-failed  last-failed-first"
     );
     for gate in &report.gates {
         let h = &gate.history;
+        if let Some(budget) = gate.budget_ms {
+            println!(
+                "{} budget {}; median share {}; sources {}",
+                gate.name,
+                crate::gate_budget::duration(budget),
+                gate.budget_share_percent.map_or_else(
+                    || "unmeasured".into(),
+                    |p| format!("{p:.1}%{}", if p > 80.0 { " (above 80%)" } else { "" })
+                ),
+                crate::gate_budget::sources(&gate.budget_sources)
+            );
+            if let Some(run) = &gate.last_over_budget {
+                println!(
+                    "  last over-budget: {} {} ran {} on {}",
+                    run.change_id,
+                    run.event_id,
+                    ms(Some(run.run_ms)),
+                    run.hostname
+                );
+            }
+        }
         let timing = &h.timing;
         let failure = h.last_failed_first.as_ref().map_or_else(
             || "-".into(),
@@ -496,6 +643,177 @@ pub fn gate_paths(ctx: &Ctx, json: bool) -> Result<i32> {
             "tracked paths nobody names: {}",
             report.unclaimed_paths.len()
         );
+    }
+    Ok(0)
+}
+
+fn declaration_text(file: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", file.display())),
+    }
+}
+
+pub fn init_budgets(ctx: &Ctx) -> Result<i32> {
+    let root = gitio::toplevel(&ctx.cwd)?;
+    let file = root.join(".arc/gates.toml");
+    let original = declaration_text(&file)?;
+    let operator_file = crate::policy::operator_path(&root)?;
+    let operator_text = declaration_text(&operator_file)?;
+    let declared = gates::inspect(&root)?;
+    declared.ensure_unconflicted()?;
+    anyhow::ensure!(
+        !declared.has_budgets(),
+        "refusing to replace an existing budget"
+    );
+    anyhow::ensure!(!declared.gates.is_empty(), "no gates declared");
+    let mut document: toml::Value = toml::from_str(original.as_deref().unwrap_or(""))?;
+    let operator: toml::Value = toml::from_str(operator_text.as_deref().unwrap_or(""))?;
+    let tables = document
+        .as_table_mut()
+        .context("gate declaration must be a table")?
+        .entry("gates")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .context("gates must be a table")?;
+    for name in declared.gates.keys() {
+        if !tables.contains_key(name) {
+            let gate = operator
+                .get("gates")
+                .and_then(|g| g.get(name))
+                .context("operator gate declaration unavailable")?;
+            tables.insert(name.clone(), gate.clone());
+        }
+    }
+    let mut total = 0_u64;
+    for (name, gate) in &declared.gates {
+        let run = super::gatekeeping::measure_gate(gate, name, &root)?;
+        anyhow::ensure!(
+            run.status.success() && !run.timed_out && !run.admission_expired,
+            "gate {name} was not measured successfully: {}",
+            run.output_tail.unwrap_or_default()
+        );
+        let measured = run
+            .timing
+            .run_ms
+            .context("command run_ms unavailable")?
+            .max(1);
+        total = total
+            .checked_add(measured)
+            .context("budget total overflow")?;
+        let table = document.get_mut("gates").and_then(|g| g.get_mut(name)).and_then(toml::Value::as_table_mut).with_context(|| format!("gate {name} is declared only by operator policy; declare it in .arc/gates.toml"))?;
+        table.insert(
+            "budget".into(),
+            toml::Value::String(format!("{measured}ms")),
+        );
+        println!(
+            "gate {name}: budget {} (one command measurement)",
+            crate::gate_budget::duration(measured)
+        );
+    }
+    document
+        .as_table_mut()
+        .context("gate declaration must be a table")?
+        .insert(
+            "budget".into(),
+            toml::Value::Table(toml::map::Map::from_iter([(
+                "total".into(),
+                toml::Value::String(format!("{total}ms")),
+            )])),
+        );
+    anyhow::ensure!(
+        declaration_text(&file)? == original && declaration_text(&operator_file)? == operator_text,
+        "gate declaration changed during measurement"
+    );
+    let text = toml::to_string_pretty(&document)?;
+    use std::os::unix::fs::PermissionsExt;
+    let mode = match std::fs::metadata(&file) {
+        Ok(meta) => FileMode::Keep(meta.permissions().mode()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileMode::Create(0o644),
+        Err(error) => return Err(error.into()),
+    };
+    std::fs::create_dir_all(file.parent().context("gate file has no parent")?)?;
+    write_atomically(&file, text.as_bytes(), mode)?;
+    println!(
+        "budget total: {}; wrote .arc/gates.toml",
+        crate::gate_budget::duration(total)
+    );
+    Ok(0)
+}
+
+pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) -> Result<i32> {
+    let store = Store::discover_for_reading(&ctx.cwd)?;
+    let states = match reference {
+        Some(reference) => vec![store.state(&store.resolve_change(reference)?)?],
+        None => store.readable_states()?.into_values().collect(),
+    };
+    let mut runs = Vec::new();
+    for mut state in states {
+        state.target_branch = crate::declarations::accepted_target(&state).to_owned();
+        let target = gitio::branch_head(&ctx.cwd, &state.target_branch)?;
+        let mut declared = gates::load_at(&ctx.cwd, &target)?;
+        let head = if state.is_closed() {
+            state.closed_head().map(str::to_owned)
+        } else {
+            gitio::branch_head(&ctx.cwd, &state.branch).ok()
+        };
+        if let Some(head) = head {
+            declared.owe_also(
+                gates::inspect_at(&ctx.cwd, &head)?,
+                "destination",
+                "change head",
+            );
+        }
+        for entry in &state.verifications {
+            let Some(name) = entry
+                .gate
+                .as_deref()
+                .filter(|n| selected.is_none_or(|s| s == *n))
+            else {
+                continue;
+            };
+            let Some(gate) = declared.gates.get(name) else {
+                continue;
+            };
+            if !status::matches_declaration(entry, gate) {
+                continue;
+            }
+            let judgement = gate.budget_judgement(entry.timing.run_ms);
+            if judgement.verdict == crate::gate_budget::BudgetVerdict::OverBudget {
+                runs.push((
+                    entry.created_at,
+                    state.change_id.clone(),
+                    name.to_owned(),
+                    entry.clone(),
+                    judgement,
+                ));
+            }
+        }
+    }
+    runs.sort_by_key(|r| r.0);
+    if let Some((_, change, gate, entry, judgement)) = runs.last() {
+        println!(
+            "{change}: gate {gate}: {}",
+            judgement
+                .reason(&entry.timing, &entry.hostname)
+                .unwrap_or_default()
+        );
+        println!(
+            "evidence {}; output {:?}; declared budget history {:?}",
+            entry.event_id, entry.output_artifact, judgement.sources
+        );
+        println!(
+            "budget recorded with run: {}",
+            entry
+                .timing
+                .budget_at_run
+                .as_ref()
+                .map(|b| serde_json::to_string(b).unwrap_or_default())
+                .unwrap_or_else(|| "unrecorded".into())
+        );
+    } else {
+        println!("no over-budget run found");
     }
     Ok(0)
 }

@@ -89,6 +89,7 @@ pub struct Approval {
 /// The gate and policy declarations an integration consumes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declarations {
+    pub budget_rules: Option<crate::gate_budget::BudgetRules>,
     pub gates: BTreeMap<String, NormalizedGate>,
     pub policy: NormalizedPolicy,
 }
@@ -560,7 +561,10 @@ fn decision(facts: IntegrationFacts) -> Decision {
         return Decision::Refused(Refusal::ConfigurationMoved);
     }
     let declarations = observed!(facts.declarations);
-    if declarations.gates != authorization.gates || declarations.policy != authorization.policy {
+    if declarations.gates != authorization.gates
+        || declarations.policy != authorization.policy
+        || declarations.budget_rules != authorization.budget_rules
+    {
         return Decision::Refused(Refusal::ConfigurationMoved);
     }
 
@@ -691,6 +695,11 @@ fn moved(prior: &IntegrationPlan, facts: &IntegrationFacts) -> Vec<Moved> {
         if !changed.is_empty() {
             moved.push(Moved::Gates { changed });
         }
+        if prior.authorization.budget_rules != declarations.budget_rules {
+            moved.push(Moved::Gates {
+                changed: vec!["[budget]".into()],
+            });
+        }
         if prior.authorization.policy != declarations.policy {
             moved.push(Moved::Policy);
         }
@@ -818,6 +827,8 @@ mod tests {
                 coverage_identity: None,
                 paths: Vec::new(),
                 inert: Vec::new(),
+                budget_ms: None,
+                budget_sources: Vec::new(),
                 events: Vec::new(),
                 selector: None,
                 command: "make build".to_string(),
@@ -831,6 +842,7 @@ mod tests {
 
     fn basis() -> AuthorizationBasis {
         AuthorizationBasis {
+            budget_rules: None,
             selected_verdict_provenance: None,
             verdict_event_id: Some("verdict-1".to_string()),
             external_verdict: None,
@@ -877,6 +889,7 @@ mod tests {
                 ..Approval::default()
             },
             declarations: Ok(Declarations {
+                budget_rules: None,
                 gates: gates(),
                 policy: policy(),
             }),
@@ -1148,6 +1161,8 @@ mod tests {
                 coverage_identity: None,
                 paths: Vec::new(),
                 inert: Vec::new(),
+                budget_ms: None,
+                budget_sources: Vec::new(),
                 events: Vec::new(),
                 selector: None,
                 command: "make lint".to_string(),
@@ -1161,6 +1176,7 @@ mod tests {
         changed_policy.forbid_self_approval = true;
         let facts = IntegrationFacts {
             declarations: Ok(Declarations {
+                budget_rules: None,
                 gates: changed_gates,
                 policy: changed_policy,
             }),
@@ -1190,6 +1206,7 @@ mod tests {
         rebound.get_mut("build").unwrap().binds = crate::gates::Binding::Commit;
         let facts = IntegrationFacts {
             declarations: Ok(Declarations {
+                budget_rules: None,
                 gates: rebound,
                 policy: policy(),
             }),

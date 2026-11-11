@@ -2535,11 +2535,15 @@ fn closed_change_append_policy_matches_command_families() {
     }
 }
 
+/// Claim: append refusals have one authority while read-only lifecycle filters
+/// remain explicit. Rejects a new unclassified closure check or a local append guard.
 #[test]
 fn append_policy_has_a_single_authority() {
     let commands = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
     let allowed = [
         "chain.rs::chain::state:ifstate.is_closed(){",
+        "doctor.rs::run::forstateinstates.values().filter(|s|!s.is_closed()){",
+        "gate_reports.rs::over_budgets::lethead=ifstate.is_closed(){",
         "claims.rs::ready_candidate::!candidate.is_closed()",
         "fork.rs::open_change_on_branch::.find(|state|!state.is_closed()&&state.branch==branch)",
         "gatekeeping.rs::check_tagged::ifstate.is_closed(){",

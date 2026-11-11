@@ -1176,7 +1176,8 @@ RUN A CHANGE
   cannot add `bypass` to a gate its target declares, and one that omits it
   withdraws it.
   The bypass meets that gate's integration requirement at its immutable
-  recorded head alone, while its declaration still names `bypass`; every new
+  recorded head alone, while its declaration still names `bypass` and the
+  budget applicability in `arc guide gates` permits it; every new
   head, including a recorded rewrite holding the same tree, or a merged tree,
   needs a run or a new bypass. `status`, `check`, `show`, `explain` and their
   JSON name it `bypassed` with its reason, never `pass`. `verify` never reuses it, no
@@ -5122,7 +5123,8 @@ EXIT CODES
     `arc check` exits 2 while a blocking finding is open.
     `arc check` exits 3 when no valid approval covers the current head.
     `arc check` exits 4 while a hold is active.
-    `arc check` exits 5 when a required gate is not green at the head.
+    `arc check` exits 5 when a required gate is not green at the head or its
+      effective budget declarations are invalid (`arc guide gates`).
     `arc check` exits 6 for a closed change, a missing branch, or a target
       branch that cannot be resolved.
     `arc check` exits 7 while a prerequisite change is unresolved.
@@ -5442,7 +5444,9 @@ GATES
   across changes, from per-change verification events. Declarations include
   `exclusive` and `admission_ms`, the effective admission limit when a lock is
   named or an explicitly declared limit. Both are null when omitted without a
-  lock. No budget is declared.
+  lock. Gate rows include budget_ms, sources, command-time budget share and the
+  last measured over-budget run. The report includes the declared total and
+  the unqualified integration sum; profile violations are listed separately.
   Runs, exact-tree reuses and selector skips are counted separately; attested
   evidence and not-admitted attempts are separate from runs and timings.
   History groups gates by name across declarations. Median (lower middle),
@@ -5464,6 +5468,22 @@ GATES
   rows (`path`, `gates`, `inert`, `unclaimed`) and `unclaimed_paths` names.
   Paths beneath inert exclusions are excluded from the unclaimed count;
   dangerous inert paths still affect every gate.
+
+  Budget shares use at most the latest 20 command-time observations for the
+  current command and declared timeout, in the newest observed environment.
+  Legacy duration_ms samples remain in the named historical distribution and
+  never enter budget shares. A median above 80% is labelled in the report.
+
+  `arc gates init` measures each declaration once, writes each observed run_ms
+  as its budget in .arc/gates.toml, and sets total to their sum. Operator-only
+  declarations are copied into that project file; operator policy is untouched.
+  A sub-millisecond measurement declares 1ms. It refuses
+  existing project or operator budgets, failed or unmeasured commands, and
+  declarations edited during measurement. It records no verification evidence.
+  `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
+  the applicable budget, its history sources, host observations and output
+  artifact. Investigate the slow checks, make them faster, remove checks worth
+  less, and consider a declared raise only after that work.
 
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
   this tree, five times by default, honoring timeouts. Each round follows the
@@ -5494,7 +5514,8 @@ GATES
     command = "<shell command>"
     profiles = ["<profile>"]            omitted: required for every profile
     events = ["integration"]           omitted: integration and publication
-    timeout = "10m"                     s, m, or h; omitted: unbounded
+    timeout = "10m"                     s, m, or h; omitted: no declared timeout
+    budget = "2.5s"                     command wall limit for acceptance
     paths = ["src/", "tests/"]           omitted or empty: every non-inert path
     exclusive = "host"                  host-wide lock name; omitted: no lock
     admission = "60s"                   lock wait limit; omitted: 60s
@@ -5506,6 +5527,67 @@ GATES
     binds = "commit"                    a pass answers for its commit, not
                                         its tree; omitted: "tree", as an
                                         older arc reads it
+
+  Budget durations accept positive whole milliseconds with ms, s, m or h
+  units, including decimal forms such as 2.5s and 0.001s. Overflow and precision
+  below a millisecond are refused. A [budget] table may declare total = "15s".
+  Every required integration gate needs a budget when that table exists.
+  The total is the sum of all required gate budgets, without a concurrency
+  discount. The effective suite is validated after layering for every declared
+  profile and the unqualified case. A missing budget or excessive sum is a
+  doctor finding and independently blocks check, accept and integrate, even
+  when every gate row is green or the active profile requires no gate.
+
+  The budget in force is the minimum of every applicable selected destination,
+  committed change-head, operator and provisional staging declaration. Absence
+  never loosens a budget or total. A change may add or tighten an obligation;
+  it cannot raise one through a declaration alone. These constraints and their
+  sources enter the authorization basis and are confirmed before integration.
+  Budgets are outside execution identity. Reuse selects the same structurally
+  eligible receipt and then judges its command time, with no search for an
+  older faster receipt and no implicit rerun. An over-budget selected receipt
+  is refused until explicit verify --rerun. The integration queue stops on a
+  recorded budget refusal. Reduction and replay read structural facts only.
+
+  A command outcome remains pass in the ledger even when its run_ms exceeds
+  the budget in force. Equality passes; one millisecond over fails. Ordinary
+  verify exits 1 for a budget refusal, including parallel preflight whose
+  receipts retain unknown cleanliness. Status, check and show project current
+  budget applicability beside the raw result. Show JSON adds gate_status beside
+  raw verifications; status gate rows carry budget.verdict, budget_ms, run_ms,
+  excess_ms and sources. budget_rules.total is milliseconds in JSON.
+  Missing run_ms is unmeasured
+  and cannot satisfy a budget, including legacy local, imported and attested
+  evidence. duration_ms never substitutes for run_ms. A bypass cannot overrule
+  an observed budget refusal. Explain labels historical authorization apart
+  from applicability under the current destination and operator declarations;
+  a later reduction does not rewrite closure or the recorded authorization.
+
+  Without a declared timeout, a budgeted command has an execution limit of
+  ten times its effective budget, computed in checked milliseconds. The clock
+  starts with the command and includes output drain, excluding admission and
+  preparation. Evidence keeps timeout_seconds exactly as declared, including
+  absence, and separately records execution_limit_ms and its origin, timeout
+  or budget-times-ten. A receipt's recorded budget is provenance; current
+  judgement uses the budget in force when the receipt is read. Timed evidence
+  needs no recorded budget judgement to count. Verify warns when the median of
+  up to 20 matching command-time observations in this change exceeds 80% of
+  its budget; legacy total durations are excluded.
+
+  Refusals name command time, effective budget and sources, excess, host,
+  start load averages and online cores, CPU where recorded, and excluded wait
+  and preparation. Missing observations stay missing. Load above the core count
+  may indicate possible host contention; it never changes the judgement.
+
+  A ledger adopts store format 8 before gate verification or reuse under any
+  budget declaration, including a total with missing individual budgets,
+  before writing budget-bearing evidence or authorization, or when an
+  import consumes budget declarations, evidence or authorization. Older
+  executables supporting formats through 7 refuse that ledger. Reads alone do
+  not adopt it; budget-free writes retain the ordinary event envelope and
+  ledger format.
+  Land, candidate selection and promotion, and arc publication do not judge
+  budgets. Their acceptance contracts do not provide budget enforcement.
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
@@ -5871,7 +5953,7 @@ SCHEMAS
   are recovery evidence, separate from versioned journal events.
 
   Internal:
-    store format 7                   .git/arc/config.json and the change ledger
+    store format 8                   .git/arc/config.json and the change ledger
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization

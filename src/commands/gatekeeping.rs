@@ -32,6 +32,9 @@ pub fn check_selection(
 
 #[derive(serde::Serialize)]
 struct CheckOutput<'a> {
+    gates: &'a [crate::status::GateStatus],
+    budget_errors: &'a [String],
+    budget_rules: &'a Option<crate::gate_budget::BudgetRules>,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_context: Option<&'a crate::review_context::ReviewContext>,
     verdict_assessments: &'a [crate::status::VerdictAssessment],
@@ -98,6 +101,7 @@ pub struct VerifyArgs {
 
 struct VerificationInput {
     declaration: Option<String>,
+    budget: Option<crate::gate_budget::BudgetJudgement>,
     exclusive: Option<crate::exclusive::Request>,
     preparation_ms: u64,
     run_id: Option<String>,
@@ -165,7 +169,20 @@ pub(crate) fn verify_landing_stack(
     target: &str,
     gates: &[(String, gates::Gate)],
 ) -> Result<i32> {
-    verify_with_landing(ctx, reference, args, Some((target, gates)))
+    let gates = landing_execution_gates(gates);
+    verify_with_landing(ctx, reference, args, Some((target, &gates)))
+}
+
+fn landing_execution_gates(gates: &[(String, gates::Gate)]) -> Vec<(String, gates::Gate)> {
+    gates
+        .iter()
+        .cloned()
+        .map(|(name, mut gate)| {
+            gate.budget = None;
+            gate.budget_sources.clear();
+            (name, gate)
+        })
+        .collect()
 }
 
 fn verify_with_landing(
@@ -553,6 +570,7 @@ fn verify_with_landing(
             &change_id,
             VerificationInput {
                 declaration: None,
+                budget: None,
                 exclusive: None,
                 preparation_ms: 0,
                 run_id: None,
@@ -616,6 +634,9 @@ fn verify_with_landing(
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
         }
+        if gates.has_budgets() {
+            store.adopt_budgets()?;
+        }
         let preparing = Instant::now();
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
         let mut preparation_ms = preparing.elapsed().as_millis() as u64;
@@ -638,6 +659,7 @@ fn verify_with_landing(
             required.iter().map(|(name, gate)| (name.as_str(), *gate)),
         )?;
         let Partition {
+            budget_refused,
             mut reused,
             delta_reuses,
             to_run,
@@ -677,7 +699,7 @@ fn verify_with_landing(
                 &change_id,
                 to_run,
                 total,
-                reused.len(),
+                reused.len() - budget_refused,
                 &run_id,
                 &head,
                 &environments,
@@ -686,13 +708,14 @@ fn verify_with_landing(
                 landing,
             );
         }
-        let mut passed = reused.len();
+        let mut passed = reused.len() - budget_refused;
         for (name, gate) in to_run {
             let result = record_verification(
                 run_ctx,
                 &store,
                 &change_id,
                 VerificationInput {
+                    budget: Some(gate.budget_judgement(None)),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
@@ -726,7 +749,12 @@ fn verify_with_landing(
         environment: declared_environment,
         exclusive,
         declaration,
+        budget,
+        adopt_budget_format,
     } = declared_check(ctx, &st, gate.as_deref(), command)?;
+    if adopt_budget_format {
+        store.adopt_budgets()?;
+    }
     let preparing = Instant::now();
     if !attest {
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
@@ -757,7 +785,7 @@ fn verify_with_landing(
         .as_deref()
         .filter(|_| reuse && !attest && falsified_by.is_none())
     {
-        if reuse_named_gate(
+        if let Some(code) = reuse_named_gate(
             run_ctx,
             &store,
             &change_id,
@@ -765,7 +793,7 @@ fn verify_with_landing(
             name,
             environment_identity.as_deref(),
         )? {
-            return Ok(0);
+            return Ok(code);
         }
     }
     let falsification =
@@ -776,6 +804,7 @@ fn verify_with_landing(
         &change_id,
         VerificationInput {
             declaration,
+            budget,
             exclusive,
             preparation_ms,
             run_id: None,
@@ -808,10 +837,10 @@ fn reuse_named_gate(
     st: &ChangeState,
     name: &str,
     environment: Option<&str>,
-) -> Result<bool> {
+) -> Result<Option<i32>> {
     let declarations = run_ctx.declarations(st)?.gates;
     let Some((name, gate)) = declarations.gates.get_key_value(name) else {
-        return Ok(false);
+        return Ok(None);
     };
     let head = gitio::head(&run_ctx.cwd)?;
     let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
@@ -847,8 +876,14 @@ fn reuse_named_gate(
             environment,
             GateEvent::Integration,
         ) else {
-            return Ok(false);
+            return Ok(None);
         };
+        let source_evidence = st
+            .verifications
+            .iter()
+            .find(|e| e.event_id == source)
+            .context("selected reuse source is missing")?;
+        let judgement = gate.budget_judgement(source_evidence.timing.run_ms);
         let run_id = start_verification_run(
             run_ctx,
             store,
@@ -876,7 +911,16 @@ fn reuse_named_gate(
             &tree,
             &[(name.clone(), source, delta)],
         )?;
-        return Ok(true);
+        if let Some(reason) = judgement.reason(&source_evidence.timing, &source_evidence.hostname) {
+            println!("gate {name}: {reason}; rerun explicitly with --rerun");
+        }
+        return Ok(Some(if judgement.accepted() { 0 } else { 1 }));
+    };
+    let judgement = gate.budget_judgement(evidence.timing.run_ms);
+    let label = if judgement.accepted() {
+        label
+    } else {
+        "structurally eligible receipt"
     };
     let reused = [(name.clone(), evidence.event_id.clone())];
     let run_id = start_verification_run(
@@ -893,7 +937,10 @@ fn reuse_named_gate(
         gate.declared_by.join(", ")
     );
     append_reuses(run_ctx, store, change_id, &run_id, &head, &tree, &reused)?;
-    Ok(true)
+    if let Some(reason) = judgement.reason(&evidence.timing, &evidence.hostname) {
+        println!("gate {name}: {reason}; rerun explicitly with --rerun");
+    }
+    Ok(Some(if judgement.accepted() { 0 } else { 1 }))
 }
 
 /// Record that `gate` was judged not to need its run at the change's head.
@@ -930,6 +977,19 @@ fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i
     let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
+    let legacy_trees = status::legacy_evidence_trees(&st, &ctx.cwd);
+    if let Some(evidence) =
+        st.gate_evidence_at_tree_matching(gate, &tree, &|r| legacy_trees.get(r).cloned(), |e| {
+            e.bypass.is_none() && status::matches_declaration(e, declared)
+        })
+    {
+        if let Some(reason) = declared
+            .budget_judgement(evidence.timing.run_ms)
+            .reason(&evidence.timing, &evidence.hostname)
+        {
+            bail!("gate {gate}: {reason}; a bypass cannot overrule an observed budget refusal");
+        }
+    }
     if let Some(failed) = st
         .gate_evidence_at_matching(gate, &revision, |evidence| {
             evidence.result == VerifyResult::Fail
@@ -942,6 +1002,9 @@ fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i
              Fix it and run the gate",
             failed.event_id
         );
+    }
+    if declarations.has_budgets() {
+        store.adopt_budgets()?;
     }
     let payload = Payload::VerificationBypassed {
         gate: gate.to_owned(),
@@ -1066,6 +1129,9 @@ fn verify_against(
     if required.is_empty() {
         bail!("no gates declared for profile {}", st.profile);
     }
+    if declarations.has_budgets() {
+        store.adopt_budgets()?;
+    }
     let target_head = gitio::branch_head(&ctx.cwd, target)
         .with_context(|| format!("cannot resolve target {target:?}"))?;
     let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
@@ -1151,6 +1217,7 @@ fn verify_against(
         required.iter().map(|(name, gate)| (name.as_str(), *gate)),
     )?;
     let Partition {
+        budget_refused,
         mut reused,
         delta_reuses,
         to_run,
@@ -1187,7 +1254,7 @@ fn verify_against(
             .map(|(name, source, _)| (name.clone(), source.clone())),
     );
 
-    let mut passed = reused.len();
+    let mut passed = reused.len() - budget_refused;
     let mut preparation_ms = _scratch
         .as_ref()
         .map_or(0, |scratch| scratch.preparation_ms);
@@ -1201,6 +1268,7 @@ fn verify_against(
                 store,
                 change_id,
                 VerificationInput {
+                    budget: Some(gate.budget_judgement(None)),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
@@ -1258,8 +1326,9 @@ pub(crate) fn verify_landing_head(
     run: LandingGateRun<'_>,
 ) -> Result<(i32, BTreeMap<String, String>)> {
     let event = GateEvent::Integration;
+    let gates = landing_execution_gates(run.gates);
     let required: Vec<(&String, &gates::Gate)> =
-        run.gates.iter().map(|(name, gate)| (name, gate)).collect();
+        gates.iter().map(|(name, gate)| (name, gate)).collect();
     let checkout_ctx = ctx.with_cwd(run.checkout.to_path_buf());
     // The evidence about to be recorded cites the composed head, which a
     // failed attempt leaves on no branch: without a pin the record would
@@ -1290,6 +1359,7 @@ pub(crate) fn verify_landing_head(
         required.iter().map(|(name, gate)| (name.as_str(), *gate)),
     )?;
     let Partition {
+        budget_refused,
         reused,
         delta_reuses,
         to_run,
@@ -1320,13 +1390,14 @@ pub(crate) fn verify_landing_head(
         run.tree,
         &delta_reuses,
     )?;
-    let mut failed = 0;
+    let mut failed = budget_refused;
     for (name, gate) in to_run {
         let code = record_verification(
             &checkout_ctx,
             store,
             run.change_id,
             VerificationInput {
+                budget: Some(gate.budget_judgement(None)),
                 exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: 0,
                 run_id: Some(run_id.clone()),
@@ -1568,6 +1639,9 @@ fn start_verification_run_for_event(
     gates: &[(&String, &gates::Gate)],
     event: GateEvent,
 ) -> Result<String> {
+    if gates.iter().any(|(_, gate)| gate.budget.is_some()) {
+        store.adopt_budgets()?;
+    }
     let _transition = store.lock_transition(change_id)?;
     let state = store.state(change_id)?;
     let payload = Payload::VerificationRunStarted {
@@ -1603,6 +1677,7 @@ struct Answering<'a> {
 /// Which of a run's gates are answered by evidence already recorded, and
 /// which are left to run.
 struct Partition<'a> {
+    budget_refused: usize,
     reused: Vec<(String, String)>,
     delta_reuses: Vec<(String, String, DeltaSelection)>,
     to_run: Vec<(&'a String, &'a gates::Gate)>,
@@ -1624,6 +1699,7 @@ fn partition<'a>(
     reuse: bool,
 ) -> Partition<'a> {
     let mut partition = Partition {
+        budget_refused: 0,
         reused: Vec::new(),
         delta_reuses: Vec::new(),
         to_run: Vec::new(),
@@ -1653,9 +1729,20 @@ fn partition<'a>(
         ) {
             println!(
                 "gate {name}: skipped ({}; declared by {})",
-                answering.label,
+                if gate.budget_judgement(evidence.timing.run_ms).accepted() {
+                    answering.label
+                } else {
+                    "structurally eligible receipt"
+                },
                 gate.declared_by.join(", ")
             );
+            if let Some(reason) = gate
+                .budget_judgement(evidence.timing.run_ms)
+                .reason(&evidence.timing, &evidence.hostname)
+            {
+                println!("gate {name}: {reason}; rerun explicitly with --rerun");
+                partition.budget_refused += 1;
+            }
             partition
                 .reused
                 .push((name.clone(), evidence.event_id.clone()));
@@ -1680,6 +1767,15 @@ fn partition<'a>(
                 },
                 delta.source_tree
             );
+            if let Some(evidence) = st.verifications.iter().find(|e| e.event_id == source) {
+                if let Some(reason) = gate
+                    .budget_judgement(evidence.timing.run_ms)
+                    .reason(&evidence.timing, &evidence.hostname)
+                {
+                    println!("gate {name}: {reason}; rerun explicitly with --rerun");
+                    partition.budget_refused += 1;
+                }
+            }
             partition.delta_reuses.push((name.clone(), source, delta));
         } else {
             partition.to_run.push((name, gate));
@@ -1970,6 +2066,9 @@ fn verify_recorded(
                     .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))
             })
             .collect::<Result<Vec<_>>>()?;
+        if declarations.has_budgets() {
+            store.adopt_budgets()?;
+        }
         let revision = gitio::head(&run_ctx.cwd)?;
         let tree = gitio::commit_tree(&run_ctx.cwd, &revision)?;
         let run_id = start_verification_run(
@@ -1987,6 +2086,7 @@ fn verify_recorded(
         )?;
         let total = selected.len();
         let Partition {
+            budget_refused,
             reused,
             delta_reuses,
             to_run,
@@ -2014,13 +2114,14 @@ fn verify_recorded(
             &tree,
             &delta_reuses,
         )?;
-        let mut passed = reused.len() + delta_reuses.len();
+        let mut passed = reused.len() + delta_reuses.len() - budget_refused;
         for (name, gate) in to_run {
             let code = record_verification(
                 run_ctx,
                 &store,
                 &change_id,
                 VerificationInput {
+                    budget: Some(gate.budget_judgement(None)),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: 0,
                     run_id: Some(run_id.clone()),
@@ -2413,6 +2514,9 @@ fn verify_all_parallel(
     note: Option<String>,
     landing: Option<String>,
 ) -> Result<i32> {
+    if required.iter().any(|(_, gate)| gate.budget.is_some()) {
+        store.adopt_budgets()?;
+    }
     let hostname = super::local_hostname();
     let cwd = ctx.cwd.clone();
     // Every gate shares this worktree, so capture the batch boundary once on
@@ -2424,6 +2528,7 @@ fn verify_all_parallel(
         .into_iter()
         .enumerate()
         .map(|(index, (name, gate))| VerificationInput {
+            budget: Some(gate.budget_judgement(None)),
             exclusive: crate::exclusive::Request::for_gate(gate),
             preparation_ms: if index == 0 { preparation_ms } else { 0 },
             run_id: Some(run_id.to_owned()),
@@ -2512,9 +2617,27 @@ fn verify_all_parallel(
         item.worktree_dirty = None;
         item.tree_moved = tree_moved;
     }
+    let current = ctx.declarations(&store.state(change_id)?)?;
+    if current.gates.has_budgets() {
+        store.adopt_budgets()?;
+    }
     let ran_passed = completed
         .iter()
-        .filter(|item| item.result == VerifyResult::Pass)
+        .filter(|item| {
+            let judged = item
+                .gate
+                .as_ref()
+                .and_then(|name| current.gates.gates.get(name))
+                .map(|g| g.budget_judgement(item.timing.run_ms));
+            let budget = judged.as_ref().or(item.timing.budget_at_run.as_ref());
+            if let Some(reason) = budget.and_then(|b| b.reason(&item.timing, &item.hostname)) {
+                println!(
+                    "gate {}: {reason}",
+                    item.gate.as_deref().unwrap_or("command")
+                );
+            }
+            item.result == VerifyResult::Pass && budget.is_none_or(|b| b.accepted())
+        })
         .count();
     append_verifications(ctx, store, change_id, completed)?;
     let passed = ran_passed + skipped_green;
@@ -2743,6 +2866,9 @@ fn record_verification_at(
     change_id: &str,
     input: VerificationInput,
 ) -> Result<i32> {
+    if input.budget.as_ref().is_some_and(|b| b.budget_ms.is_some()) {
+        store.adopt_budgets()?;
+    }
     let revision = match &input.tested_revision {
         Some(revision) => revision.clone(),
         None => gitio::head(command_cwd)?,
@@ -2799,9 +2925,32 @@ fn record_verification_at(
             completed.tested_tree = Some(before);
         }
     }
+    let mut budget = completed.timing.budget_at_run.clone();
+    if completed.landing.is_none() {
+        if let Some(name) = completed.gate.as_deref() {
+            let current = ctx.declarations(&store.state(change_id)?)?;
+            if current.gates.has_budgets() {
+                store.adopt_budgets()?;
+            }
+            if let Some(gate) = current.gates.gates.get(name) {
+                budget = Some(gate.budget_judgement(completed.timing.run_ms));
+            }
+        }
+    }
+    let accepted = budget.as_ref().is_none_or(|b| b.accepted());
+    if let Some(reason) = budget.and_then(|b| b.reason(&completed.timing, &completed.hostname)) {
+        println!(
+            "gate {}: {reason}",
+            completed.gate.as_deref().unwrap_or("command")
+        );
+    }
     let result = completed.result;
     append_verifications(ctx, store, change_id, vec![completed])?;
-    Ok(if result == VerifyResult::Pass { 0 } else { 1 })
+    Ok(if result == VerifyResult::Pass && accepted {
+        0
+    } else {
+        1
+    })
 }
 
 fn execute_verification(
@@ -2815,6 +2964,7 @@ fn execute_verification(
 ) -> Result<CompletedVerification> {
     let VerificationInput {
         declaration,
+        budget,
         exclusive,
         preparation_ms,
         run_id,
@@ -2834,6 +2984,23 @@ fn execute_verification(
     } = input;
     let attested = attested_result.is_some();
     let mut timing = crate::verification_timing::VerificationTiming::default();
+    let (execution_limit_ms, origin) = match timeout_seconds {
+        Some(seconds) => (
+            Some(seconds.checked_mul(1000).context("gate timeout overflow")?),
+            Some("timeout".to_string()),
+        ),
+        None => (
+            budget
+                .as_ref()
+                .and_then(|b| b.budget_ms)
+                .map(|ms| ms.checked_mul(10).context("ten-times budget overflow"))
+                .transpose()?,
+            budget
+                .as_ref()
+                .and_then(|b| b.budget_ms)
+                .map(|_| "budget-times-ten".to_string()),
+        ),
+    };
     let (result, exit_code, duration_ms, output_tail, output_artifact, timed_out) =
         match attested_result {
             // Attested evidence has only the caller's result because arc did not
@@ -2841,10 +3008,10 @@ fn execute_verification(
             Some(result) => (result, None, None, None, None, false),
             None => {
                 let started = std::time::Instant::now();
-                let observed = run_gate_admitted(
+                let observed = run_gate_budgeted(
                     &command,
                     cwd,
-                    timeout_seconds,
+                    execution_limit_ms.map(Duration::from_millis),
                     output_root,
                     producing_store,
                     exclusive
@@ -2871,6 +3038,13 @@ fn execute_verification(
                 )
             }
         };
+    if !attested {
+        timing.execution_limit_ms = execution_limit_ms;
+        timing.execution_limit_origin = origin;
+    }
+    timing.budget_at_run = budget
+        .filter(|b| b.budget_ms.is_some())
+        .map(|b| crate::gate_budget::judge(b.budget_ms, &b.sources, timing.run_ms));
     Ok(CompletedVerification {
         declaration,
         run_id,
@@ -2957,6 +3131,35 @@ fn record_verifications(
         let revision = item.revision.clone();
         let attested = item.attested;
         let captured_tree = item.tested_tree.clone();
+        if let Some(budget) = item.timing.budget_at_run.as_ref().and_then(|b| b.budget_ms) {
+            let mut recent = std::iter::once(item.timing.run_ms)
+                .chain(
+                    st.verifications
+                        .iter()
+                        .rev()
+                        .filter(|e| {
+                            e.command == item.command
+                                && e.timeout_seconds == item.timeout_seconds
+                                && e.environment.as_ref().map(|e| &e.identity)
+                                    == item.environment_identity.as_ref()
+                        })
+                        .map(|e| e.timing.run_ms),
+                )
+                .flatten()
+                .take(20)
+                .collect::<Vec<_>>();
+            recent.sort_unstable();
+            if let Some(median) = recent.get(recent.len().saturating_sub(1) / 2) {
+                if u128::from(*median) * 100 > u128::from(budget) * 80 {
+                    eprintln!(
+                        "gate {}: recent command median {} exceeds 80% of budget {}",
+                        item.gate.as_deref().unwrap_or("command"),
+                        crate::gate_budget::duration(*median),
+                        crate::gate_budget::duration(budget)
+                    );
+                }
+            }
+        }
         let falsification_inferred = (item.result == VerifyResult::Pass && item.probe.is_none())
             .then(|| {
                 state::infer_falsification(&st.verifications, item.gate.as_deref(), &item.command)
@@ -3163,7 +3366,25 @@ pub(super) fn run_gate_admitted(
     producing_store: &str,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
 ) -> Result<GateRun> {
-    run_gate_with_capture(cmd, cwd, timeout_seconds, admission, || {
+    run_gate_budgeted(
+        cmd,
+        cwd,
+        timeout_seconds.map(Duration::from_secs),
+        output_root,
+        producing_store,
+        admission,
+    )
+}
+
+fn run_gate_budgeted(
+    cmd: &str,
+    cwd: &Path,
+    timeout: Option<Duration>,
+    output_root: &Path,
+    producing_store: &str,
+    admission: Option<(&crate::exclusive::Request, &str, &str)>,
+) -> Result<GateRun> {
+    run_gate_with_capture(cmd, cwd, timeout, admission, || {
         crate::verification_output::Capture::new(output_root, producing_store)
     })
 }
@@ -3173,7 +3394,7 @@ pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result
     run_gate_with_capture(
         &gate.command,
         cwd,
-        gate.timeout,
+        gate.execution_limit()?.0.map(Duration::from_millis),
         request
             .as_ref()
             .map(|request| (request, "measurement", name)),
@@ -3184,7 +3405,7 @@ pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result
 fn run_gate_with_capture(
     cmd: &str,
     cwd: &Path,
-    timeout: Option<u64>,
+    timeout: Option<Duration>,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
@@ -3207,7 +3428,7 @@ fn run_gate_in_shell(
     wait_ms: u64,
     cmd: &str,
     cwd: &Path,
-    timeout_seconds: Option<u64>,
+    timeout: Option<Duration>,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let command = &mut shell.command;
@@ -3221,14 +3442,10 @@ fn run_gate_in_shell(
     let preparing = Instant::now();
     let _preparation = crate::warm_worktree::prepare_command(command, cwd)?;
     let prepare_ms = preparing.elapsed().as_millis() as u64;
-    let started = Instant::now();
-    let deadline = timeout_seconds
-        .map(|seconds| {
-            started
-                .checked_add(Duration::from_secs(seconds))
-                .context("gate timeout is too large")
-        })
-        .transpose()?;
+    #[cfg(not(test))]
+    let mut deadline = None;
+    #[cfg(test)]
+    let mut deadline = timeout.and_then(|limit| Instant::now().checked_add(limit));
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
     let mut child = shell.spawn().context("failed to run gate command")?;
@@ -3254,6 +3471,20 @@ fn run_gate_in_shell(
             exited = child
                 .leader_exited()
                 .context("failed to wait for gate command")?;
+        }
+        if deadline.is_none() {
+            if let (Some(limit), Some(start_ns), Some(now_ns)) = (
+                timeout,
+                child.observation.started_ns,
+                crate::verification_timing::monotonic_ns(),
+            ) {
+                let elapsed = Duration::from_nanos(now_ns.saturating_sub(start_ns));
+                deadline = Some(
+                    Instant::now()
+                        .checked_add(limit.saturating_sub(elapsed))
+                        .context("gate timeout is too large")?,
+                );
+            }
         }
         if !reader_done {
             reader_done = match reader_done_rx.try_recv() {
@@ -3290,6 +3521,10 @@ fn run_gate_in_shell(
         .zip(finished_ns)
         .and_then(|(start, end)| end.checked_sub(start))
         .map(|ns| ns / 1_000_000);
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var("ARC_TEST_COMMAND_RUN_MS") {
+        timing.run_ms = Some(raw.parse().context("invalid test command run_ms")?);
+    }
     Ok(GateRun {
         admission_expired: false,
         status,
@@ -3683,6 +3918,25 @@ fn integrate_queue(
 }
 
 /// One change's turn in the queue.
+fn queue_budget_stop(st: &ChangeState, report: &StatusReport) -> Option<QueueStep> {
+    if report.budget_errors.is_empty()
+        && !report.gates.iter().any(|g| {
+            g.result == VerifyResult::Pass.as_str()
+                && !g.green_at_head
+                && !g.budget.accepted()
+                && g.evidence_event_id.is_some()
+        })
+    {
+        return None;
+    }
+    eprint!("{}", render::blocker_explanation(st, report));
+    Some(QueueStep::Stopped {
+        code: 5,
+        reason: "budget refusal; inspect declarations or rerun explicitly after fixing the cost"
+            .into(),
+    })
+}
+
 fn queue_step(
     ctx: &Ctx,
     change_id: &str,
@@ -3738,6 +3992,9 @@ fn queue_step(
             code: blocker.exit_code(),
             reason: blocker.as_str().into(),
         });
+    }
+    if let Some(stop) = queue_budget_stop(&st, &report) {
+        return Ok(stop);
     }
     if shape == integration::Shape::NoFf && report.needs_rebase {
         let code = rebase(ctx, change_id, false, None, false)?;
@@ -3882,6 +4139,9 @@ fn queue_dry_run(
                 reason: blocker.as_str().into(),
             });
         }
+        if let Some(stop) = queue_budget_stop(&st, &report) {
+            return Ok(stop);
+        }
         println!("dry-run: would integrate {change_id} into {}; destination ancestry, merged policy, style, history and authorization are conditional on earlier merges", st.target_branch);
         projected_closures.insert(change_id.to_string());
         return Ok(QueueStep::Planned(st.target_branch));
@@ -3949,6 +4209,9 @@ fn queue_dry_run(
             code: blocker.exit_code(),
             reason: blocker.as_str().into(),
         });
+    }
+    if let Some(stop) = queue_budget_stop(&st, &report) {
+        return Ok(stop);
     }
     if shape == integration::Shape::NoFf && conflicts {
         println!(
@@ -5052,6 +5315,7 @@ fn authorization_basis(
             },
         );
     Ok(crate::model::AuthorizationBasis {
+        budget_rules: declarations.budget_rules.clone(),
         selected_verdict_provenance,
         verdict_event_id: approval.verdict_event_id,
         external_verdict: approval.external_verdict,
@@ -5108,6 +5372,7 @@ pub(super) fn normalized_declarations(
     st: &ChangeState,
 ) -> integration::Declarations {
     let (gates, policy) = (declarations.gates, declarations.policy);
+    let gates_budget = gates.budget.clone();
     let gates = gates
         .required_for(&st.profile)
         .into_iter()
@@ -5118,6 +5383,8 @@ pub(super) fn normalized_declarations(
                     coverage_identity: gates::coverage_identity(gate),
                     paths: gate.paths.clone(),
                     inert: gate.coverage.inert.clone(),
+                    budget_ms: gate.budget,
+                    budget_sources: gate.budget_sources.clone(),
                     command: gate.command.clone(),
                     events: gate.events.clone(),
                     selector: gate.selector.clone(),
@@ -5130,6 +5397,7 @@ pub(super) fn normalized_declarations(
         })
         .collect();
     integration::Declarations {
+        budget_rules: gates_budget,
         gates,
         policy: crate::model::NormalizedPolicy {
             replica: policy.replica,
@@ -5397,6 +5665,11 @@ fn integration_facts(
         .as_ref()
         .context("no patchset recorded")
         .and_then(|_| authorization_basis(ctx, store, st, report, &patchset_id, target, selection));
+    let basis = basis.and_then(|basis| {
+        #[cfg(debug_assertions)]
+        crate::import_authorization::test_rendezvous("integration-budget-confirmation")?;
+        Ok(basis)
+    });
     // Read after the first basis: agreement between the two is the evidence
     // that the configuration held still across the decision.
     let confirmation = if evaluating {
@@ -6065,6 +6338,9 @@ fn check(
             }
         }
         let output = CheckOutput {
+            gates: &report.gates,
+            budget_errors: &report.budget_errors,
+            budget_rules: &report.budget_rules,
             review_context: report.review_context.as_ref(),
             schema: "arc-check/4",
             verdict_assessments: &report.verdict_assessments,
@@ -6243,6 +6519,8 @@ pub(super) fn release_retention_refs(
 
 struct DeclaredCheck {
     declaration: Option<String>,
+    adopt_budget_format: bool,
+    budget: Option<crate::gate_budget::BudgetJudgement>,
     command: String,
     timeout: Option<u64>,
     environment: Option<String>,
@@ -6272,6 +6550,8 @@ fn declared_check(
             };
             Ok(DeclaredCheck {
                 declaration: gates::coverage_identity(declared),
+                adopt_budget_format: gates.has_budgets(),
+                budget: Some(declared.budget_judgement(None)),
                 command: declared.command.clone(),
                 timeout: declared.timeout,
                 environment: declared.environment.clone(),
@@ -6280,6 +6560,8 @@ fn declared_check(
         }
         (None, Some(command)) => Ok(DeclaredCheck {
             declaration: None,
+            adopt_budget_format: false,
+            budget: None,
             command,
             timeout: None,
             environment: None,
@@ -6481,7 +6763,7 @@ mod pipe_deadline_tests {
             0,
             cmd,
             cwd,
-            timeout_seconds,
+            timeout_seconds.map(Duration::from_secs),
             || crate::verification_output::Capture::new(output_root, producing_store),
         )
     }

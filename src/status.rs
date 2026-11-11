@@ -57,6 +57,8 @@ pub enum Discrimination {
 
 #[derive(Debug, Serialize)]
 pub struct GateStatus {
+    pub budget: crate::gate_budget::BudgetJudgement,
+    pub execution_host: Option<String>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
@@ -273,6 +275,12 @@ impl GateStatus {
         if self.green_at_head {
             return None;
         }
+        if let Some(reason) = self.budget.reason(
+            &self.timing,
+            self.execution_host.as_deref().unwrap_or("unrecorded"),
+        ) {
+            return Some(reason);
+        }
         // A bypass is a judgement about one head's diff, so the only question
         // is why that judgement does not reach what is being evaluated now.
         if self.bypass.is_some() {
@@ -370,6 +378,9 @@ impl GateStatus {
     pub fn clearing_action(&self, worktree_dirty: Option<bool>) -> String {
         if self.green_at_head {
             return "integrate".into();
+        }
+        if !self.budget.accepted() && self.evidence_event_id.is_some() {
+            return format!("inspect_gate_budget:{}", self.name);
         }
         // While the tree is dirty, no local run can produce evidence that
         // counts — attested evidence carries its own execution context and is
@@ -656,6 +667,8 @@ impl Serialize for Readiness {
 
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
+    pub budget_errors: Vec<String>,
+    pub budget_rules: Option<crate::gate_budget::BudgetRules>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_context: Option<crate::review_context::ReviewContext>,
     pub integration_mode: crate::integration::Mode,
@@ -1722,8 +1735,18 @@ fn build_report(
         // A bypass is a judgement about one head's diff: it answers for that
         // head only, never for a merged tree, and only while the gate still
         // declares that it may be bypassed.
+        let observed_over_budget = gate.budget.is_some()
+            && gate.bypass.is_some()
+            && evidence_at(&|e| {
+                e.bypass.is_none()
+                    && matches_declaration(e, gate)
+                    && e.result == VerifyResult::Pass
+                    && !gate.budget_judgement(e.timing.run_ms).accepted()
+            })
+            .is_some();
         let bypass_counts = |e: &state::VerificationEntry| {
             e.bypass.is_some()
+                && !observed_over_budget
                 && gate.bypass.is_some()
                 && evaluated_tree.is_none()
                 && current_head.as_deref() == Some(e.recorded_revision.as_str())
@@ -1789,7 +1812,11 @@ fn build_report(
             Some(tree) => state.gate_falsification_at_tree(name, tree, &resolve_tree),
             None => state.gate_falsification_at(name, &e.revision),
         });
+        let budget = gate.budget_judgement(evidence.and_then(|e| e.timing.run_ms));
+        let budget_ok = budget.accepted();
         gate_statuses.push(GateStatus {
+            budget,
+            execution_host: evidence.map(|e| e.hostname.clone()),
             name: name.clone(),
             duration_ms: evidence.and_then(|e| e.duration_ms),
             timing: evidence.map(|e| e.timing.clone()).unwrap_or_default(),
@@ -1825,6 +1852,7 @@ fn build_report(
                     || e.green_at_head(state.eligible_dirty_tree_waiver())
                         && matches_declaration(e, gate)
                         && environment_applies
+                        && budget_ok
             }),
             bypass: evidence.and_then(|e| e.bypass.clone()),
             declaration_changed: evidence.is_some_and(|e| {
@@ -1923,7 +1951,9 @@ fn build_report(
         })
         .unwrap_or_default();
 
+    let budget_errors = gates.budget_errors();
     let blockers = blockers::derive(&BlockerFacts {
+        invalid_gate_budget: !budget_errors.is_empty(),
         mode_refused: false,
         closed: state.is_closed(),
         branch_missing: current_head.is_none(),
@@ -2027,6 +2057,8 @@ fn build_report(
             "resolve_findings".into()
         } else if let Some(hold) = state.holds.values().next() {
             format!("release_hold:{}", hold.hold_event_id)
+        } else if !budget_errors.is_empty() {
+            "repair_gate_budgets".into()
         } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
             // A gate read at a merged tree is not repaired by running it at the
             // head: that records evidence for content the merge discards. The
@@ -2105,6 +2137,7 @@ fn build_report(
         || !approved_head_matches
         || !open_blocking.is_empty()
         || !state.holds.is_empty()
+        || !budget_errors.is_empty()
         || gate_statuses.iter().any(|gate| !gate.green_at_head)
         || probe_statuses
             .iter()
@@ -2236,6 +2269,8 @@ fn build_report(
         holds: hold_entries(state),
         gates: gate_statuses,
         policy_sources: policy.sources.as_map(),
+        budget_errors,
+        budget_rules: gates.budget.clone(),
         declaration_notes: Vec::new(),
         probes: probe_statuses,
         blocker_summary,

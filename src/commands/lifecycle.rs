@@ -1647,6 +1647,17 @@ fn show(
     };
     if json {
         let mut value = serde_json::to_value(&st)?;
+        match match at {
+            Some(_) => ctx.report_as_of(&store, &st, at),
+            None => ctx.report(&store, &st),
+        } {
+            Ok(report) => {
+                value["gate_status"] = serde_json::to_value(&report.gates)?;
+                value["budget_errors"] = serde_json::to_value(&report.budget_errors)?;
+                value["budget_rules"] = serde_json::to_value(&report.budget_rules)?;
+            }
+            Err(error) => value["gate_status_error"] = serde_json::json!(format!("{error:#}")),
+        }
         if crate::forge_round_trip::applies(&st) {
             value["forge_view"] = crate::forge_view::build(
                 &store,
@@ -1706,7 +1717,24 @@ fn show_tagged(ctx: &Ctx, tags: Vec<String>, json: bool) -> Result<()> {
         bail!("no changes match tags {}", tags.join(", "));
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&selected)?);
+        let projected = selected
+            .iter()
+            .map(|state| {
+                let mut value = serde_json::to_value(state)?;
+                match ctx.report(&store, state) {
+                    Ok(report) => {
+                        value["gate_status"] = serde_json::to_value(&report.gates)?;
+                        value["budget_errors"] = serde_json::to_value(&report.budget_errors)?;
+                        value["budget_rules"] = serde_json::to_value(&report.budget_rules)?;
+                    }
+                    Err(error) => {
+                        value["gate_status_error"] = serde_json::json!(format!("{error:#}"))
+                    }
+                }
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("{}", serde_json::to_string_pretty(&projected)?);
     } else {
         for state in selected {
             let report = ctx.report(&store, state)?;

@@ -191,6 +191,16 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // declarations and tracked files. A change's target would hide local
     // mistakes until they reached that branch.
     inspect_gate_conflicts(&ctx.cwd, &mut problems);
+    for state in states.values().filter(|s| !s.is_closed()) {
+        if let Ok(declarations) = ctx.declarations(state) {
+            for detail in declarations.gates.budget_errors() {
+                problems.push(Finding {
+                    code: "gate-budget-invalid",
+                    detail: format!("{}: {detail}", state.change_id),
+                });
+            }
+        }
+    }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     match crate::policy::load(&toplevel) {
         Ok(policy) => {
@@ -1101,6 +1111,12 @@ fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
             return;
         }
     };
+    for detail in gates.budget_errors() {
+        problems.push(Finding {
+            code: "gate-budget-invalid",
+            detail,
+        });
+    }
     for conflict in gates.conflicts {
         let declarations = conflict
             .declarations
