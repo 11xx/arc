@@ -3,6 +3,7 @@
 use super::{run, Ctx};
 use crate::gitio;
 use crate::model::{DebtIdentity, Event, Payload};
+use crate::rewrite::RewriteMap;
 use crate::state::ChangeState;
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
@@ -43,26 +44,60 @@ pub(super) fn from_runs(
         Payload::PatchsetAdded { head, .. } => Some(head.as_str()),
         _ => None,
     });
-    let start = previous.unwrap_or(base);
-    if previous.is_some_and(|head| st.latest_patchset().is_some_and(|ps| ps.head != head))
-        || !gitio::is_ancestor(&ctx.cwd, start, head)?
-    {
+    let recorded_start = previous.unwrap_or(base);
+    let start = previous
+        .and_then(|_| st.latest_patchset().map(|ps| ps.head.as_str()))
+        .unwrap_or(base);
+    if !gitio::is_ancestor(&ctx.cwd, start, head)? {
         bail!("the previous patchset or base was rewritten; use arc rebase to preserve attribution during replay");
     }
     let revisions = gitio::range_commits(&ctx.cwd, start, head)?;
+    let rewrites: Vec<_> = repository_events
+        .iter()
+        .filter(|event| matches!(event.payload, Payload::HistoryRewritten { .. }))
+        .collect();
+    let mut relevant: BTreeSet<_> = revisions.iter().cloned().collect();
+    relevant.insert(start.to_string());
+    relevant.insert(recorded_start.to_string());
+    let mut connected = relevant.clone();
+    expand_rewrite_range(&mut connected, &rewrites);
+    let preserving: Vec<_> = rewrites
+        .iter()
+        .copied()
+        .filter(|event| {
+            let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
+                unreachable!();
+            };
+            mapping.iter().any(|(old, new)| {
+                names_revision(&connected, old)
+                    || new
+                        .as_deref()
+                        .is_some_and(|new| names_revision(&connected, new))
+            }) && preserves_run_evidence(ctx, event, &rounds)
+        })
+        .collect();
+    let carried = RewriteMap::from_events(preserving.iter().copied())?;
+    if carried.current(recorded_start)? != start {
+        bail!("the previous patchset or base was rewritten; use arc rebase to preserve attribution during replay");
+    }
     if revisions.is_empty() {
         return Ok(None);
     }
-    let relevant = |revision: &str| {
-        revisions.iter().any(|commit| commit.starts_with(revision)) || start.starts_with(revision)
-    };
-    if repository_events.iter().any(|event| match &event.payload {
-        Payload::HistoryRewritten { mapping, .. } => mapping.iter().any(|(old, _)| relevant(old)),
+    expand_rewrite_range(&mut relevant, &preserving);
+    let preserving_ids: BTreeSet<_> = preserving.iter().map(|event| &event.event_id).collect();
+    let refusing: Vec<_> = rewrites
+        .into_iter()
+        .filter(|event| !preserving_ids.contains(&event.event_id))
+        .collect();
+    if refusing.iter().any(|event| match &event.payload {
+        Payload::HistoryRewritten { mapping, .. } => {
+            mapping.keys().any(|old| names_revision(&relevant, old))
+        }
         _ => false,
     }) {
         bail!("a recorded rewrite touches the commit range");
     }
-    let incoming_rewrite_at = repository_events
+    let incoming_rewrite_at = refusing
         .iter()
         .filter_map(|event| {
             let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
@@ -71,7 +106,7 @@ pub(super) fn from_runs(
             mapping
                 .values()
                 .flatten()
-                .any(|new| relevant(new))
+                .any(|new| names_revision(&relevant, new))
                 .then_some(event.created_at)
         })
         .max();
@@ -84,19 +119,8 @@ pub(super) fn from_runs(
     let mut dispatches = BTreeSet::new();
     let mut includes_invoker = false;
     for (revision, commit) in revisions.iter().zip(commits) {
-        let seconds: i64 = commit
-            .committer
-            .date
-            .split_whitespace()
-            .next()
-            .context("commit has no committer time")?
-            .parse()?;
-        let time = DateTime::<Utc>::from_timestamp(seconds, 0)
-            .context("commit has an invalid committer time")?;
-        let trailers: BTreeSet<_> = crate::trailers::contribution_trailers(&commit.message)
-            .into_iter()
-            .filter_map(|(role, value)| (role == "Implemented-by").then_some(value))
-            .collect();
+        let time = committer_time(&commit)?;
+        let trailers = implementers(&commit.message);
         let mut covered = Vec::new();
         for round in &rounds {
             let dispatch = round.dispatch;
@@ -252,6 +276,118 @@ pub(super) fn from_runs(
         dispatches: dispatches.into_iter().collect(),
         includes_invoker,
     }))
+}
+
+fn names_revision(revisions: &BTreeSet<String>, revision: &str) -> bool {
+    let revision = crate::rewrite::canonical_revision(revision);
+    revisions.contains(&revision)
+        || revisions.iter().any(|held| {
+            held.len() != revision.len()
+                && held.len().min(revision.len()) >= crate::rewrite::ABBREVIATION_FLOOR
+                && (held.starts_with(&revision) || revision.starts_with(held))
+        })
+}
+
+/// Keep intermediate revisions visible so a permitted link cannot hide an
+/// earlier rewrite that changed the evidence.
+fn expand_rewrite_range(revisions: &mut BTreeSet<String>, events: &[&Event]) {
+    loop {
+        let before = revisions.len();
+        for event in events {
+            let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
+                unreachable!();
+            };
+            for (old, new) in mapping {
+                if names_revision(revisions, old)
+                    || new
+                        .as_deref()
+                        .is_some_and(|new| names_revision(revisions, new))
+                {
+                    revisions.insert(crate::rewrite::canonical_revision(old));
+                    revisions.extend(
+                        new.iter()
+                            .map(|new| crate::rewrite::canonical_revision(new)),
+                    );
+                }
+            }
+        }
+        if before == revisions.len() {
+            break;
+        }
+    }
+}
+
+/// Recorded per-commit judgments prove complete role additions and unchanged
+/// headers. Read both sides to require the same implementer set, and refuse
+/// a rewrite recorded by a session bound to produce a recreated commit.
+fn preserves_run_evidence(ctx: &Ctx, event: &Event, rounds: &[run::Round<'_>]) -> bool {
+    let Payload::HistoryRewritten {
+        mapping,
+        signature_only,
+        role_additions,
+        ..
+    } = &event.payload
+    else {
+        return false;
+    };
+    if mapping.is_empty()
+        || mapping.iter().any(|(old, new)| {
+            new.is_none() || (!signature_only.contains(old) && !role_additions.contains(old))
+        })
+    {
+        return false;
+    }
+    let revisions: Vec<_> = mapping
+        .iter()
+        .flat_map(|(old, new)| [old.as_str(), new.as_deref().unwrap()])
+        .collect();
+    let Ok(commits) = gitio::read_commits(&ctx.cwd, &revisions) else {
+        return false;
+    };
+    commits.chunks_exact(2).all(|pair| {
+        let [before, after] = pair else {
+            unreachable!();
+        };
+        if implementers(&before.message) != implementers(&after.message) {
+            return false;
+        }
+        let Ok(time) = committer_time(before) else {
+            return false;
+        };
+        !rounds.iter().any(|round| {
+            let Some(binding) = &round.binding else {
+                return false;
+            };
+            binding.role.as_deref() != Some("reviewer")
+                && round.dispatch.created_at <= time
+                && round
+                    .ending
+                    .as_ref()
+                    .is_none_or(|end| end.event.created_at >= time)
+                && (event.actor
+                    == format!("{}:{}", binding.executor_harness, binding.executor_session)
+                    || (event.harness.as_ref() == Some(binding.executor_harness)
+                        && event.session.as_ref() == Some(binding.executor_session)))
+        })
+    })
+}
+
+fn implementers(message: &[u8]) -> BTreeSet<String> {
+    crate::trailers::contribution_trailers(message)
+        .into_iter()
+        .filter_map(|(role, value)| (role == "Implemented-by").then_some(value))
+        .collect()
+}
+
+fn committer_time(commit: &gitio::RawCommit) -> Result<DateTime<Utc>> {
+    let seconds = commit
+        .committer
+        .date
+        .split_whitespace()
+        .next()
+        .context("commit has no committer time")?
+        .parse()?;
+    DateTime::<Utc>::from_timestamp(seconds, 0).context("commit has an invalid committer time")
 }
 
 /// Report incomplete evidence once when recording an ordinary snapshot.

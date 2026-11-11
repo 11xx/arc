@@ -2656,12 +2656,15 @@ REVIEW COVERAGE AND DEBT
   subject. With none supplied, completed bound runs can establish authorship
   under the following rule.
 
-  Snapshot examines commits added since the previous patchset's recorded
-  head, or its resolved base for the first patchset. That boundary must remain
-  an ancestor of the head. A recorded rewrite refuses derivation when its old
-  side names the boundary or an added commit, or when it was recorded at or
-  after a covering dispatch began and its new side names either. An earlier
-  rewrite whose new side produced the boundary does not refuse derivation.
+  Snapshot examines commits since the previous patchset's mapped head, or
+  the first patchset's resolved base. That boundary must remain an
+  ancestor of the head. Maps require recorded proof of complete role
+  appends (`arc guide rewrites-evidence`) or signature-only changes for every
+  recreated commit, readable objects, unchanged `Implemented-by` sets and a
+  recorder outside covering executor bindings. Other rewrites refuse if
+  their old side names the boundary or an added commit, or their new side
+  names either and they were recorded at or after a covering dispatch
+  began.
   For each delegated commit, a local dispatch naming this
   change must have a nonconflicting local implementation binding and a local
   end.

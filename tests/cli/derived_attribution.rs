@@ -266,6 +266,279 @@ fn assert_executor_patchsets(f: &Fixture) {
     }
 }
 
+fn append_roles(f: &Fixture, from: &str, roles: &[&str]) {
+    let mut command = f.lead();
+    command.args(["rewrite", "trailers", "--from", from, "--no-sign"]);
+    for role in roles {
+        command.args(["--append", role]);
+    }
+    stdout(&mut command);
+}
+
+fn record_rewrite(f: &Fixture, mapping: &[(String, String)]) {
+    git(
+        &f.worktree,
+        &["reset", "--hard", &mapping.last().unwrap().1],
+    );
+    let text: String = mapping
+        .iter()
+        .map(|(old, new)| format!("{old} {new}\n"))
+        .collect();
+    f.lead()
+        .args(["history", "rewrite", "--map", "-", "--reason", "edit roles"])
+        .write_stdin(text)
+        .assert()
+        .success();
+}
+
+fn assert_lead_approval(f: &Fixture) {
+    stdout(
+        f.lead()
+            .args(["review", &f.change, "--verdict", "approved"]),
+    );
+    assert_eq!(f.status()["has_valid_approval"], true);
+}
+
+/// A lead's complete role appends before the first snapshot preserve executor
+/// authorship and approval gating without attribution flags; rejects recorder
+/// attribution caused by the rewrite, including chained maps over a range.
+#[test]
+fn role_append_before_first_snapshot_preserves_executor_and_lead_approval() {
+    let f = Fixture::new();
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("one", 10, Some(COORDINATE));
+    let from = f.repo.head(&f.worktree);
+    f.commit("two", 12, Some(COORDINATE));
+    append_roles(&f, &from, &["Reviewed-by: claude:reader-model#high"]);
+    append_roles(
+        &f,
+        "HEAD^",
+        &[
+            "Planned-by: claude:planner-model#high",
+            "Orchestrated-by: claude:reader-model#high",
+            &format!("Implemented-by: {COORDINATE}"),
+        ],
+    );
+    let old = f.repo.head(&f.worktree);
+    let mut raw = super::role_carry::raw_commit(&f.worktree, &old);
+    raw.extend_from_slice(format!("Implemented-by: {COORDINATE}\n").as_bytes());
+    let new = super::role_carry::write_commit(&f.worktree, &raw);
+    record_rewrite(&f, &[(old, new)]);
+    let output = f.snapshot();
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("recorder retained"),
+        "{output:?}"
+    );
+    assert_executor_patchsets(&f);
+    assert_lead_approval(&f);
+}
+
+/// A lead's role append between snapshots preserves the previous boundary
+/// when a completed executor follow-up adds commits; rejects recorder
+/// attribution and self-approval rejection from using the replaced head.
+#[test]
+fn role_append_before_followup_preserves_executor_at_every_snapshot() {
+    let f = Fixture::new();
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("one", 10, Some(COORDINATE));
+    f.snapshot();
+    assert_executor_patchsets(&f);
+    assert_lead_approval(&f);
+    append_roles(&f, "HEAD", &["Reviewed-by: claude:reader-model#high"]);
+    f.snapshot();
+    assert_executor_patchsets(&f);
+    assert_eq!(f.status()["has_valid_approval"], true);
+    f.run(COORDINATE, "codex", "executor-one", 30, 50);
+    f.commit("two", 40, Some(COORDINATE));
+    let output = f.snapshot();
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("recorder retained"),
+        "{output:?}"
+    );
+    assert_executor_patchsets(&f);
+    assert_lead_approval(&f);
+}
+
+fn refused_role_rewrite(case: &str) {
+    let orders = [(false, false), (true, true)]
+        .into_iter()
+        .chain(matches!(case, "body" | "drop" | "legacy").then_some((true, false)));
+    for (initial_snapshot, followup) in orders {
+        let f = Fixture::new();
+        f.run(COORDINATE, "codex", "executor-one", 0, 20);
+        f.commit("work", 10, Some(COORDINATE));
+        if initial_snapshot {
+            f.snapshot();
+            assert_executor_patchsets(&f);
+        }
+        match case {
+            "body" => {
+                let old = f.repo.head(&f.worktree);
+                let raw = String::from_utf8(super::role_carry::raw_commit(&f.worktree, &old))
+                    .unwrap()
+                    .replace("feat: work\n", "feat: work\n\nchanged body\n");
+                let raw = format!("{raw}Reviewed-by: claude:reader-model#high\n");
+                let new = super::role_carry::write_commit(&f.worktree, raw.as_bytes());
+                record_rewrite(&f, &[(old, new)]);
+                // A permitted successor must not hide the earlier body edit.
+                append_roles(&f, "HEAD", &["Planned-by: claude:planner-model#high"]);
+            }
+            "drop" => {
+                append_roles(&f, "HEAD", &["Planned-by: claude:planner-model#high"]);
+                stdout(f.lead().args([
+                    "rewrite",
+                    "trailers",
+                    "--from",
+                    "HEAD",
+                    "--drop",
+                    "Planned-by",
+                    "--append",
+                    "Reviewed-by: claude:reader-model#high",
+                    "--no-sign",
+                ]));
+            }
+            "implementer" => {
+                append_roles(&f, "HEAD", &["Implemented-by: codex:other-writer#high"]);
+            }
+            "executor-session" | "executor-actor" => {
+                let mut command = f.lead();
+                if case == "executor-session" {
+                    command
+                        .env("ARC_HARNESS", "codex")
+                        .env("ARC_SESSION", "executor-one");
+                } else {
+                    command.env("ARC_ACTOR", EXECUTOR);
+                }
+                stdout(command.args([
+                    "rewrite",
+                    "trailers",
+                    "--from",
+                    "HEAD",
+                    "--append",
+                    "Reviewed-by: claude:reader-model#high",
+                    "--no-sign",
+                ]));
+            }
+            "legacy" => {
+                append_roles(&f, "HEAD", &["Reviewed-by: claude:reader-model#high"]);
+                for file in super::rewrite::repository_events(&f.repo) {
+                    let mut event: Value =
+                        serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                    if event["event_type"] == "history-rewritten" {
+                        assert!(event["role_additions"].is_array(), "{event}");
+                        event.as_object_mut().unwrap().remove("role_additions");
+                        fs::write(file, serde_json::to_vec(&event).unwrap()).unwrap();
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        if followup {
+            f.run(COORDINATE, "codex", "executor-one", 30, 50);
+            f.commit("followup", 40, Some(COORDINATE));
+        }
+        f.assert_recorder(
+            &f.snapshot(),
+            if initial_snapshot {
+                "previous patchset or base was rewritten"
+            } else {
+                "recorded rewrite touches"
+            },
+        );
+        stdout(
+            f.lead()
+                .args(["review", &f.change, "--verdict", "approved"]),
+        );
+        assert_eq!(f.status()["has_valid_approval"], false);
+    }
+}
+
+/// A role append accompanied by a body edit retains recorder attribution and
+/// its diagnostic in both orders; rejects laundering that edit through a safe link.
+#[test]
+fn role_append_with_body_edit_keeps_recorder() {
+    refused_role_rewrite("body");
+}
+
+/// Dropping a role while appending another retains recorder attribution and
+/// its diagnostic in both orders; rejects treating replacement as a complete append.
+#[test]
+fn role_append_with_dropped_trailer_keeps_recorder() {
+    refused_role_rewrite("drop");
+}
+
+/// Adding a different implementer retains recorder attribution with a rewrite
+/// diagnostic in both orders; rejects accepting approval-carry proof as authorship proof.
+#[test]
+fn role_append_with_different_implementer_keeps_recorder() {
+    refused_role_rewrite("implementer");
+}
+
+/// An executor's role append retains recorder attribution in both orders even
+/// under another actor label; rejects ignoring the bound harness/session identity.
+#[test]
+fn role_append_by_executor_session_keeps_recorder() {
+    refused_role_rewrite("executor-session");
+}
+
+/// An executor actor's role append retains recorder attribution in both orders;
+/// rejects ignoring the bound actor when the recording session differs.
+#[test]
+fn role_append_by_executor_actor_keeps_recorder() {
+    refused_role_rewrite("executor-actor");
+}
+
+/// A rewrite without recorded role-addition proof retains recorder attribution
+/// in both orders; rejects inferring permission from the command name or current objects.
+#[test]
+fn role_append_without_recorded_proof_keeps_recorder() {
+    refused_role_rewrite("legacy");
+}
+
+/// Appending corroboration to an uncorroborated commit cannot manufacture
+/// executor authorship; rejects checking only the successor's implementer set.
+#[test]
+fn role_append_cannot_supply_missing_implementer() {
+    let f = Fixture::new();
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("work", 10, None);
+    append_roles(&f, "HEAD", &[&format!("Implemented-by: {COORDINATE}")]);
+    f.assert_recorder(&f.snapshot(), "recorded rewrite touches");
+}
+
+/// Every recreated commit must preserve its implementer set, including those
+/// below a safe rewritten tip; rejects admitting a partially safe rewrite event.
+#[test]
+fn role_append_requires_unchanged_implementers_over_the_whole_mapping() {
+    let f = Fixture::new();
+    f.run(COORDINATE, "codex", "executor-one", 0, 20);
+    f.commit("one", 10, None);
+    let first = f.repo.head(&f.worktree);
+    f.commit("two", 12, Some(COORDINATE));
+    let second = f.repo.head(&f.worktree);
+    let first_raw = super::role_carry::raw_commit(&f.worktree, &first);
+    let first_new = super::role_carry::write_commit(
+        &f.worktree,
+        &[
+            first_raw,
+            format!("\nImplemented-by: {COORDINATE}\n").into_bytes(),
+        ]
+        .concat(),
+    );
+    let second_raw = String::from_utf8(super::role_carry::raw_commit(&f.worktree, &second))
+        .unwrap()
+        .replace(
+            &format!("parent {first}\n"),
+            &format!("parent {first_new}\n"),
+        );
+    let second_new = super::role_carry::write_commit(
+        &f.worktree,
+        format!("{second_raw}Reviewed-by: claude:reader-model#high\n").as_bytes(),
+    );
+    record_rewrite(&f, &[(first, first_new), (second, second_new)]);
+    f.assert_recorder(&f.snapshot(), "recorded rewrite touches");
+}
+
 /// The lead's dispatch-to-integration flow retains executor authorship without attribution flags;
 /// rejects losing attribution before mechanical replay or approval after a complete role append.
 #[test]
