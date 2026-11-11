@@ -3806,6 +3806,75 @@ fn workspace_inbox_surfaces_stale_filings_without_open_changes() {
     assert_eq!(value["repos"][0]["stale_filed_count"], 1, "{value}");
 }
 
+/// Claim: --library marks only artifacts with an in-force project-journal pin
+/// with `pinned: true`, omits the key for unpinned and never-pinned artifacts,
+/// and dates pin changes in changed_at. Rejects missing or false-valued marks,
+/// historical pins surviving an unpin, and pin changes absent from row dates.
+#[test]
+fn workspace_report_library_marks_only_in_force_pins() {
+    let repo = Repo::new();
+    let (dir, reference) = journal_artifact(&repo, "reference", "note", "# Reference\n");
+    let (_, released) = journal_artifact(&repo, "released", "note", "# Released\n");
+    let (_, ordinary) = journal_artifact(&repo, "ordinary", "note", "# Ordinary\n");
+    for file in [&reference, &released] {
+        age_journal_events(&dir, 60);
+        repo.arc(&repo.root)
+            .args(["journal", "pin", file])
+            .assert()
+            .success();
+    }
+    age_journal_events(&dir, 60);
+    repo.arc(&repo.root)
+        .args(["journal", "unpin", &released])
+        .assert()
+        .success();
+    let report =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--library", "--json"]),
+        );
+    let library = report["projects"][0]["library"].as_array().unwrap();
+    let events = journal_event_log(&dir);
+    for file in [&reference, &released, &ordinary] {
+        let row = library.iter().find(|row| row["file"] == *file).unwrap();
+        if file == &reference {
+            assert_eq!(row["pinned"], true, "an in-force pin needs its mark");
+        } else {
+            assert!(row.get("pinned").is_none(), "{file} has no in-force pin");
+        }
+        let latest = events
+            .iter()
+            .filter(|event| event["file"] == file.as_str())
+            .filter_map(|event| chrono::DateTime::parse_from_rfc3339(event["ts"].as_str()?).ok())
+            .max()
+            .unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(row["changed_at"].as_str().unwrap()).unwrap(),
+            latest,
+            "changed_at must include pin and unpin events"
+        );
+    }
+    repo.arc(&repo.root)
+        .args(["journal", "pin", &released])
+        .assert()
+        .success();
+    let repinned =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--library", "--json"]),
+        );
+    assert_eq!(
+        repinned["projects"][0]["library"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == released)
+            .unwrap()["pinned"],
+        true,
+        "a later pin takes effect after an unpin"
+    );
+}
+
 /// Claim: --library adds every observed project's hot, consumed, archived and
 /// relocated journal artifacts with corrected titles, openable absolute paths,
 /// recorded dates and distinct fates, while an ordinary report has no library

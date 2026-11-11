@@ -248,6 +248,9 @@ FROM A WORKSPACE ROOT (outside a project)
                        `resolution` and `resolution_basis` retain the inventory
                        vocabulary; `superseded_by` names a successor and
                        `superseded_by_relocated: true` marks its relocation.
+                       `pinned: true` marks an in-force pin in the project's
+                       journal; otherwise the key is absent. Operator journal
+                       pins belong to that journal, not to project libraries.
                        Titles use the actionable rows' heading and fallback
                        rules; without a correction the heading lookup reads
                        the artifact body. No inventory claims, promotions or
@@ -273,8 +276,8 @@ FROM A WORKSPACE ROOT (outside a project)
                        report or refresh every project; it ends when stdin
                        closes. --library retains each project's library beside
                        its row and reads it again only when that project is
-                       dirty; a library-only change emits too. `--help` holds
-                       the contract.
+                       dirty; a library-only change, including a pin or unpin,
+                       emits too. `--help` holds the contract.
   cd <anchor>          Enter one project named by the report, then orient there.
   arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
                        Take a registration whose project is gone (a probe,

@@ -14448,6 +14448,8 @@ pub(crate) struct LibraryEntry {
     changed_at: Option<DateTime<Utc>>,
     storage: &'static str,
     status: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pinned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolution: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -14513,6 +14515,7 @@ pub(crate) fn library_artifacts(hot: &Path) -> Result<Vec<LibraryEntry>> {
         };
         rows.push(LibraryEntry {
             filed_at: filed_at_of(&timestamp),
+            pinned: pins::is_pinned(related, &file),
             changed_at: related
                 .iter()
                 .filter(|event| event.known())

@@ -4129,7 +4129,8 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
         /// Include each project's complete hot and archived journal library in
-        /// JSON, with corrected titles, absolute paths, recorded dates and fates
+        /// JSON, with corrected titles, absolute paths, recorded dates and fates.
+        /// Rows carry `pinned: true` only while pinned in that project's journal
         #[arg(long)]
         library: bool,
     },
@@ -4179,7 +4180,9 @@ enum WorkspaceCmd {
         #[arg(long)]
         retired: bool,
         /// Include each project's complete hot and archived journal library in
-        /// JSON, with corrected titles, absolute paths, recorded dates and fates
+        /// JSON, with corrected titles, absolute paths, recorded dates and fates.
+        /// Rows carry `pinned: true` only while pinned in that project's journal;
+        /// pinning or unpinning emits a report
         #[arg(long)]
         library: bool,
     },

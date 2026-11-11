@@ -162,9 +162,12 @@ impl Drop for RunningWatch {
 
 /// Claim: --library emits a report for non-actionable filings and amendments,
 /// including repeated writes to a held journal, identical to a fresh library
-/// report apart from observation. A refresh with no change stays silent.
+/// report apart from observation. Pinning and unpinning a consumed artifact
+/// each emit its current mark, including within one recorded second.
+/// A refresh with no change stays silent.
 /// Rejects comparisons that omit the library, cached libraries that are not
-/// invalidated on notices, stale event projections and unconditional emissions.
+/// invalidated on notices, missed pin changes, stale marks,
+/// stale event projections and unconditional emissions.
 #[test]
 fn watch_library_emits_non_actionable_writes_and_held_updates() {
     let repo = Repo::new();
@@ -239,6 +242,24 @@ fn watch_library_emits_non_actionable_writes_and_held_updates() {
             .unwrap()["status"],
         "consumed"
     );
+    let mut previous = consumed;
+    for (verb, mark) in [("pin", Some(true)), ("unpin", None)] {
+        repo.arc(&repo.root)
+            .args(["journal", verb, &conclusion])
+            .assert()
+            .success();
+        let changed = next(&format!("after {verb} in a held journal"));
+        assert_eq!(changed, fresh());
+        let row = changed["projects"][0]["library"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == conclusion)
+            .unwrap();
+        assert_eq!(row.get("pinned").and_then(Value::as_bool), mark);
+        assert_ne!(changed, previous);
+        previous = changed;
+    }
     request(
         &mut stdin,
         serde_json::json!({"schema": "arc-workspace-watch-request/1", "refresh": true}),
