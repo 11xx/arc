@@ -118,8 +118,9 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         .collect();
     let mut failures = Vec::new();
     if let Some(store) = store {
-        for id in store.list_change_ids()? {
-            let events = match store.load_events(&id) {
+        let read = store.read()?;
+        for id in read.change_ids()? {
+            let events = match read.held_events(&id) {
                 Ok(events) => events,
                 Err(error) => {
                     failures.push(ReadFailure {
@@ -130,7 +131,7 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                 }
             };
             let mut failed_first = false;
-            for event in events {
+            for event in events.iter() {
                 match &event.payload {
                     Payload::VerificationRecorded {
                         gate,

@@ -306,3 +306,60 @@ fn workspace_uses_own_ledgers_scope_and_registration_accounting() {
     );
     assert_eq!(scoped, under);
 }
+
+/// Claim: gate cost reports read imported and local verification history with one
+/// ledger observation and no change-state reduction. Rejects fetching and cloning
+/// the import batches for every change, or reducing states to read gate events.
+#[test]
+fn reports_hold_one_typed_ledger_read_without_reducing_states() {
+    let source = declared("true");
+    let (imported, _, _) = change_with_patchset(&source, "imported-costs");
+    let bundle = source.home.join("gate-costs.json");
+    source
+        .arc(&source.root)
+        .args(["export", &imported, "--output"])
+        .arg(&bundle)
+        .assert()
+        .success();
+    let repo = declared("true");
+    deliver_git_objects(&source, &repo);
+    repo.arc(&repo.root)
+        .arg("import")
+        .arg(&bundle)
+        .assert()
+        .success();
+    change_with_patchset(&repo, "local-costs");
+    for args in [
+        vec!["gates", "--json"],
+        vec!["workspace", "gates", "--global", "--json"],
+    ] {
+        let (trace, reads, code) = crate::landing_reads::traced(&repo, &repo.root, &args);
+        assert_eq!(code, Some(0), "{args:?}: {trace}");
+        assert_eq!(trace["ledger"]["import"]["decoded"], 1, "{args:?}: {trace}");
+        assert_eq!(
+            trace["cache"]["import_batches"]["hits"]
+                .as_u64()
+                .unwrap_or(0),
+            0,
+            "{args:?} fetched held import batches per change: {trace}"
+        );
+        for key in [
+            "changes_reduced",
+            "scope_derivations",
+            "repository_materializations",
+        ] {
+            assert_eq!(
+                trace["counts"][key].as_u64().unwrap_or(0),
+                0,
+                "{args:?}: {key}: {trace}"
+            );
+        }
+        assert_eq!(
+            trace["ledger"]["change"]["opened"], trace["ledger"]["change"]["decoded"],
+            "{args:?}: {trace}"
+        );
+        for kind in ["change", "import"] {
+            assert_eq!(reads["most_reads_per_file"][kind], 1, "{args:?}: {reads}");
+        }
+    }
+}

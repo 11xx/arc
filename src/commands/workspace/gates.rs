@@ -43,7 +43,13 @@ pub(super) fn report(scope: WorkspaceScope, show_retired: bool, json: bool) -> R
         unreachable: Vec::new(),
         retired: Vec::new(),
     };
-    for project in crate::registry::projects(&cfg)? {
+    let registered = crate::registry::projects(&cfg)?;
+    let mut reports = observe_projects(
+        &registered,
+        |project| observed_in(&scope, project),
+        |project, anchor| project_report(&cfg, project, anchor),
+    );
+    for (index, project) in registered.into_iter().enumerate() {
         let c = &mut output.collection;
         if let Some(retirement) = &project.retired {
             if scope.includes(project.anchor.as_deref()) {
@@ -91,15 +97,9 @@ pub(super) fn report(scope: WorkspaceScope, show_retired: bool, json: bool) -> R
             .anchor
             .as_deref()
             .expect("reachable project has an anchor");
-        let result = (|| -> Result<_> {
-            // A failed registry ledger lookup must not turn unreadable evidence into no runs.
-            let ledger = match &project.ledger {
-                Some(root) => Some(root.clone()),
-                None => crate::registry::ledger_at(&cfg, anchor)?,
-            };
-            let store = ledger.as_deref().map(Store::open_at).transpose()?.flatten();
-            gate_reports::collect(anchor, store.as_ref())
-        })();
+        let result = reports
+            .remove(&index)
+            .expect("every selected project is read");
         match result {
             Ok(report) => {
                 let declares_gates = !report.gates.is_empty();
@@ -173,4 +173,18 @@ pub(super) fn report(scope: WorkspaceScope, show_retired: bool, json: bool) -> R
         );
     }
     Ok(if output.collection.failed == 0 { 0 } else { 16 })
+}
+
+fn project_report(
+    cfg: &crate::config::Config,
+    project: &crate::registry::Project,
+    anchor: &Path,
+) -> Result<gate_reports::GateReport> {
+    // A failed registry ledger lookup must not turn unreadable evidence into no runs.
+    let ledger = match &project.ledger {
+        Some(root) => Some(root.clone()),
+        None => crate::registry::ledger_at(cfg, anchor)?,
+    };
+    let store = ledger.as_deref().map(Store::open_at).transpose()?.flatten();
+    gate_reports::collect(anchor, store.as_ref())
 }

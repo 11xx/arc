@@ -3143,6 +3143,17 @@ fn observe_rows(
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
     journal: JournalRead,
 ) -> BTreeMap<usize, ProjectBacklog> {
+    observe_projects(registered, observe, |project, anchor| {
+        project_row(ctx, project, anchor, cutoff, journal)
+    })
+}
+
+/// Observe the largest ledgers first and retain registry order for assembly.
+fn observe_projects<T: Send>(
+    registered: &[crate::registry::Project],
+    observe: impl Fn(&crate::registry::Project) -> bool,
+    row_of: impl Fn(&crate::registry::Project, &Path) -> T + Sync,
+) -> BTreeMap<usize, T> {
     let changes = |project: &crate::registry::Project| {
         project.ledger.as_deref().map_or(0, |root| {
             std::fs::read_dir(root.join("changes")).map_or(0, |entries| entries.count())
@@ -3166,7 +3177,7 @@ fn observe_rows(
                 while let Some((index, project, anchor)) =
                     selected.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                 {
-                    let row = project_row(ctx, project, anchor, cutoff, journal);
+                    let row = row_of(project, anchor);
                     rows.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(*index, row);

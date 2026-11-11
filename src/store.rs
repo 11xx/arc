@@ -219,7 +219,7 @@ impl LedgerRead<'_> {
     }
 
     /// `events`, shared rather than copied.
-    fn held_events(&self, change_id: &str) -> Result<Arc<Vec<Event>>> {
+    pub(crate) fn held_events(&self, change_id: &str) -> Result<Arc<Vec<Event>>> {
         self.store.change_events(change_id, &self.batches)
     }
 
