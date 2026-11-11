@@ -63,6 +63,7 @@ mod store;
 mod style;
 mod trailers;
 mod verification_output;
+mod verification_timing;
 mod warm_worktree;
 mod worktree_usage;
 
@@ -708,6 +709,7 @@ enum Cmd {
     /// Aggregate reads name unreadable changes with their errors on stderr and retain
     /// readable changes; a selected unreadable change fails Records no events; ledger reads
     /// do not require a parseable append policy.
+    /// Gate costs use command `run_ms`, falling back to `duration_ms` for older events.
     Stats {
         /// Report a single change
         #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
@@ -762,8 +764,8 @@ enum Cmd {
         /// there instead. Rebase: from `rebase_started_at` to the patchset;
         /// null when the patchset records none. Gates: the union of every
         /// arc-observed `verification-recorded` run after the patchset, each
-        /// spanning its `duration_ms` back from its event and clamped to the
-        /// time before integration, so concurrent runs count once; per gate,
+        /// spanning its `run_ms` (or legacy `duration_ms`) back from its event
+        /// and clamped to the time before integration, so concurrent runs count once; per gate,
         /// each gate's own run time. Integration: from the `started_at` the
         /// integration event records (`integration_start: recorded`), or
         /// without one from the last event before it (`last-event`), to the
@@ -1182,6 +1184,8 @@ enum Cmd {
     /// coverage retain raw values with model_recorded: false; valid models omit the flag.
     /// With a registry file, bindings and author facts appear as
     /// `review_context`; see `arc guide debt-clearance`.
+    /// Gate rows carry recorded wait, preparation, command wall and CPU time and
+    /// host observations; see `arc guide change-gates`.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2177,6 +2181,15 @@ enum Cmd {
     /// as `not recorded:` and is not evidence; see `arc guide rules-claims`. A command
     /// exiting 75 within its timeout records `not-admitted`, and `--bypass` records a
     /// judgement in place of a run; see `arc guide change-gates`.
+    /// Executed receipts separate `wait_ms`, `prepare_ms`, and command `run_ms`;
+    /// `duration_ms` spans execution, including slot acquisition and in-run preparation.
+    /// `prepare_ms` also includes preparation before environment probes; a batch
+    /// charges shared preparation to its first executed command. `cpu_user_ms`
+    /// and `cpu_system_ms` exclude the holder and are absent unless every
+    /// descendant was accounted for.
+    /// `load_average` and `core_count` describe the host at command start.
+    /// These fields appear in `show --json` and `status`; attestations carry none.
+    /// See `arc guide change-gates` for accounting boundaries.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

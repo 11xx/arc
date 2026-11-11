@@ -900,18 +900,23 @@ fn prepared_attempt(repo: &Repo) -> String {
 /// target holds the landing and none stays open when it does. Rejects
 /// recovery that publishes before arc's own ref transaction, that leaves a
 /// moved target unclosed, or that changes anything on a second run.
+/// A gate interruption targets the launcher independently of its command holder.
 #[test]
 fn recovery_after_every_crash_point_closes_exactly_what_landed() {
     for point in ["prepared", "gate", "authorized", "moved", "applied"] {
         let repo = Repo::new();
         repo.redeclare_gates(
-            "[gates.smoke]\ncommand = \"if test -e \\\"$HOME/kill-lander\\\"; then kill -9 $PPID; fi; test -f README.md\"\n",
+            "[gates.smoke]\ncommand = \"if test -e \\\"$HOME/kill-lander\\\"; then kill -9 \\\"$(cat \\\"$HOME/lander.pid\\\")\\\"; fi; test -f README.md\"\n",
         );
         let ((lower, _, _), (upper, _, upper_head)) = stack(&repo);
         let before = git_out(&repo.root, &["rev-parse", "master"]);
         let kill = repo.home.join("kill-lander");
-        let mut land = repo.arc(&repo.root);
-        land.args(["land", &lower, &upper]);
+        let mut land = repo.arc_shell(
+            &repo.root,
+            &format!(
+                "echo $$ > \"$HOME/lander.pid\"; exec \"$ARC_UNDER_TEST\" land {lower} {upper}"
+            ),
+        );
         if point == "gate" {
             fs::write(&kill, "").unwrap();
         } else {

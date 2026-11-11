@@ -1,5 +1,7 @@
 use crate::common::*;
 
+/// Claim: command-time statistics identify their versioned contract and selected
+/// change. Rejects the total-execution-time schema or an omitted selection.
 #[test]
 fn stats_json_carries_schema_and_reports_selected_change() {
     let repo = Repo::new();
@@ -14,7 +16,7 @@ fn stats_json_carries_schema_and_reports_selected_change() {
         .success();
 
     let report = json_stdout(repo.arc(&repo.root).args(["stats", "--all", "--json"]));
-    assert_eq!(report["schema"], "arc-stats/1");
+    assert_eq!(report["schema"], "arc-stats/2");
 
     let changes = report["changes"].as_array().unwrap();
     let feat = changes

@@ -97,6 +97,7 @@ pub struct VerifyArgs {
 }
 
 struct VerificationInput {
+    preparation_ms: u64,
     run_id: Option<String>,
     probe: Option<ProbeEvidenceRef>,
     gate: Option<String>,
@@ -130,6 +131,7 @@ struct CompletedVerification {
     result: VerifyResult,
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
+    timing: crate::verification_timing::VerificationTiming,
     output_tail: Option<String>,
     output_artifact: Option<crate::verification_output::OutputArtifact>,
     timed_out: bool,
@@ -547,6 +549,7 @@ fn verify_with_landing(
             &store,
             &change_id,
             VerificationInput {
+                preparation_ms: 0,
                 run_id: None,
                 probe: Some(ProbeEvidenceRef {
                     brief_event_id: brief.event_id.clone(),
@@ -608,7 +611,9 @@ fn verify_with_landing(
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
         }
+        let preparing = Instant::now();
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
+        let mut preparation_ms = preparing.elapsed().as_millis() as u64;
         let total = required.len();
         let head = gitio::head(&run_ctx.cwd)?;
         let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
@@ -671,6 +676,7 @@ fn verify_with_landing(
                 &run_id,
                 &head,
                 &environments,
+                preparation_ms,
                 note,
                 landing,
             );
@@ -682,6 +688,7 @@ fn verify_with_landing(
                 &store,
                 &change_id,
                 VerificationInput {
+                    preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
                     probe: None,
                     gate: Some(name.clone()),
@@ -707,9 +714,15 @@ fn verify_with_landing(
         return Ok(if passed == total { 0 } else { 1 });
     }
     let (cmd, timeout, declared_environment) = declared_check(ctx, &st, gate.as_deref(), command)?;
+    let preparing = Instant::now();
     if !attest {
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
     }
+    let preparation_ms = if attest {
+        0
+    } else {
+        preparing.elapsed().as_millis() as u64
+    };
     let environment_identity = match (attest, &declared_environment) {
         (true, declared) => attested_environment(gate.as_deref(), declared.is_some(), environment)?,
         // A run arc performs reads the identity from the gate's declared probe.
@@ -749,6 +762,7 @@ fn verify_with_landing(
         &store,
         &change_id,
         VerificationInput {
+            preparation_ms,
             run_id: None,
             probe: None,
             gate,
@@ -899,15 +913,18 @@ pub(super) struct ScratchWorktree {
     repo: PathBuf,
     pub(super) path: PathBuf,
     preserve: bool,
+    pub(super) preparation_ms: u64,
 }
 
 impl ScratchWorktree {
     pub(super) fn create(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
         let mut scratch = Self::create_for_probe(repo, path, revision)?;
+        let preparing = Instant::now();
         if let Err(error) = crate::warm_worktree::prepare(&scratch.path) {
             scratch.preserve = error.is::<crate::warm_worktree::SourceMutation>();
             return Err(error);
         }
+        scratch.preparation_ms = preparing.elapsed().as_millis() as u64;
         Ok(scratch)
     }
 
@@ -918,6 +935,7 @@ impl ScratchWorktree {
             repo: repo.to_path_buf(),
             path,
             preserve: false,
+            preparation_ms: 0,
         })
     }
 
@@ -1112,6 +1130,9 @@ fn verify_against(
     );
 
     let mut passed = reused.len();
+    let mut preparation_ms = _scratch
+        .as_ref()
+        .map_or(0, |scratch| scratch.preparation_ms);
     if !to_run.is_empty() {
         let scratch_ctx = scratch_ctx
             .as_ref()
@@ -1122,6 +1143,7 @@ fn verify_against(
                 store,
                 change_id,
                 VerificationInput {
+                    preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
                     probe: None,
                     gate: Some(name.clone()),
@@ -1245,6 +1267,7 @@ pub(crate) fn verify_landing_head(
             store,
             run.change_id,
             VerificationInput {
+                preparation_ms: 0,
                 run_id: Some(run_id.clone()),
                 probe: None,
                 gate: Some(name.clone()),
@@ -1914,6 +1937,7 @@ fn verify_recorded(
                 &store,
                 &change_id,
                 VerificationInput {
+                    preparation_ms: 0,
                     run_id: Some(run_id.clone()),
                     probe: None,
                     gate: Some(name.clone()),
@@ -2299,6 +2323,7 @@ fn verify_all_parallel(
     run_id: &str,
     revision: &str,
     environments: &DeclaredEnvironments,
+    preparation_ms: u64,
     note: Option<String>,
     landing: Option<String>,
 ) -> Result<i32> {
@@ -2311,7 +2336,9 @@ fn verify_all_parallel(
     let before = gitio::worktree_tree(&ctx.cwd)?;
     let inputs = required
         .into_iter()
-        .map(|(name, gate)| VerificationInput {
+        .enumerate()
+        .map(|(index, (name, gate))| VerificationInput {
+            preparation_ms: if index == 0 { preparation_ms } else { 0 },
             run_id: Some(run_id.to_owned()),
             probe: None,
             gate: Some(name.clone()),
@@ -2695,6 +2722,7 @@ fn execute_verification(
     producing_store: &str,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
+        preparation_ms,
         run_id,
         probe,
         gate,
@@ -2711,6 +2739,7 @@ fn execute_verification(
         landing,
     } = input;
     let attested = attested_result.is_some();
+    let mut timing = crate::verification_timing::VerificationTiming::default();
     let (result, exit_code, duration_ms, output_tail, output_artifact, timed_out) =
         match attested_result {
             // Attested evidence has only the caller's result because arc did not
@@ -2721,6 +2750,8 @@ fn execute_verification(
                 let observed =
                     run_gate(&command, cwd, timeout_seconds, output_root, producing_store)?;
                 let duration_ms = started.elapsed().as_millis() as u64;
+                timing = observed.timing;
+                timing.prepare_ms = timing.prepare_ms.map(|ms| ms + preparation_ms);
                 let result = VerifyResult::observed(
                     observed.status.success(),
                     observed.status.code(),
@@ -2747,6 +2778,7 @@ fn execute_verification(
         result,
         exit_code,
         duration_ms,
+        timing,
         output_tail,
         output_artifact,
         timed_out,
@@ -2836,6 +2868,7 @@ fn record_verifications(
             result: item.result,
             exit_code: item.exit_code,
             duration_ms: item.duration_ms,
+            timing: item.timing,
             output_tail: item.output_tail,
             output_artifact: item.output_artifact,
             timed_out: item.timed_out,
@@ -2991,6 +3024,7 @@ pub(super) struct GateRun {
     pub(super) output_tail: Option<String>,
     pub(super) output_artifact: Option<crate::verification_output::OutputArtifact>,
     pub(super) timed_out: bool,
+    pub(super) timing: crate::verification_timing::VerificationTiming,
 }
 
 pub(super) fn run_gate(
@@ -3000,7 +3034,27 @@ pub(super) fn run_gate(
     output_root: &Path,
     producing_store: &str,
 ) -> Result<GateRun> {
-    let mut shell = crate::slots::shell(cwd)?;
+    let (shell, wait_ms) = crate::slots::measured_shell(cwd)?;
+    run_gate_in_shell(
+        shell,
+        wait_ms,
+        cmd,
+        cwd,
+        timeout_seconds,
+        output_root,
+        producing_store,
+    )
+}
+
+fn run_gate_in_shell(
+    mut shell: crate::slots::Shell,
+    wait_ms: u64,
+    cmd: &str,
+    cwd: &Path,
+    timeout_seconds: Option<u64>,
+    output_root: &Path,
+    producing_store: &str,
+) -> Result<GateRun> {
     let command = &mut shell.command;
     command
         .arg("-c")
@@ -3009,7 +3063,9 @@ pub(super) fn run_gate(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
+    let preparing = Instant::now();
     let _preparation = crate::warm_worktree::prepare_command(command, cwd)?;
+    let prepare_ms = preparing.elapsed().as_millis() as u64;
     let started = Instant::now();
     let deadline = timeout_seconds
         .map(|seconds| {
@@ -3056,6 +3112,7 @@ pub(super) fn run_gate(
         }
         thread::sleep(Duration::from_millis(10));
     };
+    let finished_ns = crate::verification_timing::monotonic_ns();
     let status = child
         .stop()
         .context("failed to stop the gate's process group")?;
@@ -3067,11 +3124,21 @@ pub(super) fn run_gate(
         .map(|(output, artifact)| (output, Some(artifact)))
         .unwrap_or_default();
     let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
+    let mut timing = child.observation.timing.clone();
+    timing.wait_ms = Some(wait_ms);
+    timing.prepare_ms = Some(prepare_ms);
+    timing.run_ms = child
+        .observation
+        .started_ns
+        .zip(finished_ns)
+        .and_then(|(start, end)| end.checked_sub(start))
+        .map(|ns| ns / 1_000_000);
     Ok(GateRun {
         status,
         output_tail,
         output_artifact,
         timed_out,
+        timing,
     })
 }
 
@@ -6219,6 +6286,26 @@ fn shipped_commit(st: &state::ChangeState) -> Result<String> {
 #[cfg(test)]
 mod pipe_deadline_tests {
     use super::*;
+
+    // The unit-test executable has no holder entry point. These tests exercise
+    // process-group cleanup; CLI tests exercise the command holder and receipts.
+    fn run_gate(
+        cmd: &str,
+        cwd: &Path,
+        timeout_seconds: Option<u64>,
+        output_root: &Path,
+        producing_store: &str,
+    ) -> Result<GateRun> {
+        run_gate_in_shell(
+            crate::slots::shell(cwd)?,
+            0,
+            cmd,
+            cwd,
+            timeout_seconds,
+            output_root,
+            producing_store,
+        )
+    }
 
     #[test]
     fn escaped_gate_descendant_cannot_extend_pipe_cleanup() {

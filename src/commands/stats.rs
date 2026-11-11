@@ -455,8 +455,9 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
 ///
 /// The phases partition that window. `rebase` runs from the recorded rebase
 /// start to the patchset. `gates` is the union of the arc-observed gate runs
-/// recorded after the patchset, each run spanning its `duration_ms` back from
-/// its own event, so concurrent runs count once. `integration` runs from the
+/// recorded after the patchset, each run spanning its `run_ms` (or legacy
+/// `duration_ms`) back from its own event, so concurrent runs count once.
+/// `integration` runs from the
 /// recorded start of `arc integrate`, or without one from the last event
 /// before the integration event, to that event. `waiting` is the rest. A
 /// reuse runs nothing and takes no time.
@@ -609,11 +610,13 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
                 gate,
                 command,
                 duration_ms: Some(duration_ms),
+                timing,
                 attested: false,
                 ..
             } => {
                 let ran_until = event.created_at.timestamp_millis();
-                let from = (ran_until - *duration_ms as i64).clamp(recorded, integration_from);
+                let duration_ms = timing.run_ms.unwrap_or(*duration_ms);
+                let from = (ran_until - duration_ms as i64).clamp(recorded, integration_from);
                 let to = ran_until.clamp(recorded, integration_from);
                 *gates
                     .entry(gate.clone().unwrap_or_else(|| command.clone()))
@@ -816,7 +819,7 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) 
     let aggregate = aggregate_stats(&changes, &gate_runs);
     if json {
         let output = StatsOutput {
-            schema: "arc-stats/1",
+            schema: "arc-stats/2",
             changes,
             aggregate,
         };
@@ -949,10 +952,14 @@ fn observed_gate_runs(events: &[Event]) -> Vec<(String, u64)> {
         .filter_map(|event| match &event.payload {
             Payload::VerificationRecorded {
                 gate: Some(gate),
-                duration_ms: Some(duration_ms),
+                duration_ms,
+                timing,
                 attested: false,
                 ..
-            } => Some((gate.clone(), duration_ms / 1000)),
+            } => timing
+                .run_ms
+                .or(*duration_ms)
+                .map(|ms| (gate.clone(), ms / 1000)),
             _ => None,
         })
         .collect()
@@ -1490,6 +1497,7 @@ mod tests {
                 result: VerifyResult::Pass,
                 exit_code: Some(0),
                 duration_ms: Some(5000),
+                timing: Default::default(),
                 output_tail: None,
                 output_artifact: None,
                 timed_out: false,
@@ -1523,6 +1531,7 @@ mod tests {
                 result: VerifyResult::Pass,
                 exit_code: None,
                 duration_ms: None,
+                timing: Default::default(),
                 output_tail: None,
                 output_artifact: None,
                 timed_out: false,
@@ -1638,6 +1647,7 @@ mod tests {
                 result: VerifyResult::Pass,
                 exit_code: Some(0),
                 duration_ms: Some(duration_seconds * 1000),
+                timing: Default::default(),
                 output_tail: None,
                 output_artifact: None,
                 timed_out: false,

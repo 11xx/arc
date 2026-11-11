@@ -673,10 +673,23 @@ pub fn shell(cwd: &Path) -> Result<Shell> {
             _lease: None,
         });
     };
-    held_shell(UseLease::shared(&checkout)?)
+    held_shell(Some(UseLease::shared(&checkout)?))
 }
 
-fn held_shell(lease: UseLease) -> Result<Shell> {
+/// A command holder that accounts for the command's entire descendant tree.
+pub fn measured_shell(cwd: &Path) -> Result<(Shell, u64)> {
+    let (lease, wait_ms) = match slot_checkout(cwd) {
+        Some(checkout) => {
+            let waiting = Instant::now();
+            let lease = UseLease::shared(&checkout)?;
+            (Some(lease), waiting.elapsed().as_millis() as u64)
+        }
+        None => (None, 0),
+    };
+    Ok((held_shell(lease)?, wait_ms))
+}
+
+fn held_shell(lease: Option<UseLease>) -> Result<Shell> {
     let mut descriptors = [0; 2];
     // SAFETY: pipe2 writes two descriptors into the array on success.
     if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -694,12 +707,15 @@ fn held_shell(lease: UseLease) -> Result<Shell> {
         .arg(HOLDER)
         .arg("sh")
         .env(STATUS_FD, write.as_raw_fd().to_string());
-    let inherited = [write.as_raw_fd(), lease.file.as_raw_fd()];
+    let mut inherited = vec![write.as_raw_fd()];
+    if let Some(lease) = &lease {
+        inherited.push(lease.file.as_raw_fd());
+    }
     // SAFETY: fcntl is async-signal-safe. Only the holder clears CLOEXEC, so
     // no unrelated exec inherits the use lock or the report pipe.
     unsafe {
         command.pre_exec(move || {
-            for descriptor in inherited {
+            for &descriptor in &inherited {
                 let flags = libc::fcntl(descriptor, libc::F_GETFD);
                 if flags < 0
                     || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
@@ -713,7 +729,7 @@ fn held_shell(lease: UseLease) -> Result<Shell> {
     Ok(Shell {
         command,
         report: Some((read, write)),
-        _lease: Some(lease),
+        _lease: lease,
     })
 }
 
@@ -734,26 +750,47 @@ impl Shell {
 /// left. As a child subreaper it inherits every descendant whose parent
 /// exits, including ones that detach into another session.
 pub fn holder_main() -> ! {
+    use crate::verification_timing::{host_at_start, monotonic_ns, wait_usage, CommandReport};
+    use std::io::Write;
     let arguments: Vec<OsString> = std::env::args_os().skip(2).collect();
     let report = std::env::var(STATUS_FD)
         .ok()
         .and_then(|value| value.parse::<i32>().ok());
     // SAFETY: prctl and signal take no borrowed memory. The holder must
     // survive a closed report pipe once its launcher is gone.
-    unsafe {
-        libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+    let subreaper = unsafe {
+        let result = libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         if let Some(report) = report {
             libc::fcntl(report, libc::F_SETFD, libc::FD_CLOEXEC);
         }
-    }
+        result == 0
+    };
+    let mut report = report.map(|fd| {
+        // SAFETY: the launcher passed ownership of this report descriptor.
+        unsafe { File::from_raw_fd(fd) }
+    });
+    let mut send = |message: &CommandReport| {
+        if let Some(report) = &mut report {
+            if let Ok(mut bytes) = serde_json::to_vec(message) {
+                bytes.push(b'\n');
+                let _ = report.write_all(&bytes);
+            }
+        }
+    };
     let Some((program, rest)) = arguments.split_first() else {
         std::process::exit(2);
+    };
+    let mut observation = CommandReport {
+        timing: host_at_start(),
+        started_ns: monotonic_ns(),
+        ..Default::default()
     };
     let spawned = Command::new(program)
         .args(rest)
         .env_remove(STATUS_FD)
         .spawn();
+    send(&observation);
     // The launcher reads the command's output to its end; only the command
     // and its descendants may hold those pipes open.
     // SAFETY: open and dup2 take a NUL-terminated literal and descriptors.
@@ -768,26 +805,36 @@ pub fn holder_main() -> ! {
             }
         }
     }
-    let raw = match spawned.and_then(|mut child| child.wait()) {
-        Ok(status) => {
-            use std::os::unix::process::ExitStatusExt;
-            status.into_raw()
-        }
-        Err(_) => 127 << 8,
-    };
-    if let Some(report) = report {
-        // SAFETY: the launcher passed this descriptor for exactly this write.
-        let mut file = unsafe { File::from_raw_fd(report) };
-        let _ = std::io::Write::write_all(&mut file, &raw.to_le_bytes());
-    }
+    let (raw, mut user, mut system, mut complete) =
+        match spawned.and_then(|child| wait_usage(child.id() as i32, 0)) {
+            Ok(Some((raw, user, system))) => (raw, user, system, subreaper),
+            _ => (127 << 8, 0, 0, false),
+        };
+    observation.status = Some(raw);
+    // Reap adopted children already done before publishing the leader's exit.
+    // A complete report accompanies that exit whenever no descendant remains.
+    let mut flags = libc::WNOHANG;
     loop {
-        // SAFETY: waitpid with a null status pointer reaps any child.
-        if unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) } == -1
-            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-        {
-            break;
+        match wait_usage(-1, flags) {
+            Ok(Some((_, child_user, child_system))) => {
+                user += child_user;
+                system += child_system;
+            }
+            Ok(None) => {
+                send(&observation);
+                flags = 0;
+            }
+            Err(error) => {
+                complete &= error.raw_os_error() == Some(libc::ECHILD);
+                break;
+            }
         }
     }
+    if complete {
+        observation.timing.cpu_user_ms = Some(user / 1000);
+        observation.timing.cpu_system_ms = Some(system / 1000);
+    }
+    send(&observation);
     let code = if libc::WIFEXITED(raw) {
         libc::WEXITSTATUS(raw)
     } else {
@@ -1447,7 +1494,7 @@ fn empty_outbox(path: &Path) -> bool {
 fn invalidate(path: &Path, declaration: &Declaration, cwd: &Path) -> Result<()> {
     if let Some(script) = &declaration.invalidate {
         let lease = UseLease::exclusive(path)?.context("slot is in use")?;
-        let mut shell = held_shell(lease)?;
+        let mut shell = held_shell(Some(lease))?;
         let _storage = crate::warm_worktree::configure_invalidation(&mut shell.command, path)?;
         let (code, _, err) = captured(&mut shell, path, script, INVALIDATE_TIMEOUT)?;
         if code != 0 {

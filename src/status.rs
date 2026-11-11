@@ -58,6 +58,10 @@ pub enum Discrimination {
 #[derive(Debug, Serialize)]
 pub struct GateStatus {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(flatten)]
+    pub timing: crate::verification_timing::VerificationTiming,
     pub command: String,
     /// Policy files that declared this effective gate. Additive in
     /// `arc-status/23`.
@@ -1788,6 +1792,8 @@ fn build_report(
         });
         gate_statuses.push(GateStatus {
             name: name.clone(),
+            duration_ms: evidence.and_then(|e| e.duration_ms),
+            timing: evidence.map(|e| e.timing.clone()).unwrap_or_default(),
             command: gate.command.clone(),
             declared_by: gate.declared_by.clone(),
             evaluated_tree: evaluated_tree.clone(),

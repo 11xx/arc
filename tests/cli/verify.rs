@@ -4535,6 +4535,8 @@ impl Drop for FixturePid {
 /// rejects swallowing the signal into an ordinary failure exit. The gate's
 /// child outlives every bound the test waits, so only arc stopping it ends it
 /// in time.
+/// The launcher records its PID before exec so the signal reaches arc through
+/// any command-holder arrangement.
 #[test]
 fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
     for signal in ["INT", "TERM"] {
@@ -4542,7 +4544,7 @@ fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
         let marks = repo.home.join("marks");
         fs::create_dir_all(&marks).unwrap();
         let gate = format!(
-            "echo $PPID > {m}/arc.pid; echo $$ > {m}/leader.pid; \
+            "echo $$ > {m}/leader.pid; \
              sleep {s} & echo $! > {m}/child.pid; wait",
             m = marks.display(),
             s = 2 * HANG_BOUND.as_secs()
@@ -4560,8 +4562,13 @@ fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
                 .args(["begin", "interrupted", "--no-worktree"]),
         );
 
-        let mut verify = repo.arc(&repo.root);
-        verify.args(["verify", "interrupted", "--gate", "slow"]);
+        let mut verify = repo.arc_shell(
+            &repo.root,
+            &format!(
+                "echo $$ > '{m}/arc.pid'; exec \"$ARC_UNDER_TEST\" verify interrupted --gate slow",
+                m = marks.display(),
+            ),
+        );
         let run = thread::spawn(move || verify.output().unwrap());
         let arc = FixturePid::read(&marks.join("arc.pid"));
         let leader = FixturePid::read(&marks.join("leader.pid"));

@@ -1142,6 +1142,10 @@ pub struct VerificationEntry {
     pub recorded_revision: String,
     pub result: VerifyResult,
     pub attested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(flatten)]
+    pub timing: crate::verification_timing::VerificationTiming,
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_artifact: Option<crate::verification_output::OutputArtifact>,
@@ -3558,6 +3562,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             Payload::VerificationRecorded {
                 gate,
                 command,
+                duration_ms,
+                timing,
                 timeout_seconds,
                 revision,
                 result,
@@ -3709,6 +3715,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     recorded_revision: revision.clone(),
                     result: *result,
                     attested: *attested,
+                    duration_ms: *duration_ms,
+                    timing: timing.clone(),
                     output_tail: output_tail.clone(),
                     output_artifact: output_artifact.clone(),
                     timed_out: *timed_out,
@@ -3740,6 +3748,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     recorded_revision: revision.clone(),
                     result: VerifyResult::Bypassed,
                     attested: false,
+                    duration_ms: None,
+                    timing: Default::default(),
                     output_tail: None,
                     output_artifact: None,
                     timed_out: false,
@@ -6719,6 +6729,7 @@ mod tests {
                 result: VerifyResult::Pass,
                 exit_code: Some(0),
                 duration_ms: Some(1),
+                timing: Default::default(),
                 output_tail: None,
                 output_artifact: None,
                 timed_out: false,

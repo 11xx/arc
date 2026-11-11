@@ -133,6 +133,7 @@ mod trailer_projection;
 mod tree_gates;
 mod variant_share_pricing;
 mod verification_outcomes;
+mod verification_timing;
 mod verify;
 mod warm_worktrees;
 mod workspace;

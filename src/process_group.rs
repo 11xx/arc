@@ -92,6 +92,8 @@ pub(crate) struct OwnedGroup {
     status: Option<ExitStatus>,
     report: Option<std::fs::File>,
     reported: Option<ExitStatus>,
+    report_bytes: Vec<u8>,
+    pub(crate) observation: crate::verification_timing::CommandReport,
 }
 
 impl OwnedGroup {
@@ -108,6 +110,8 @@ impl OwnedGroup {
             status: None,
             report: None,
             reported: None,
+            report_bytes: Vec::new(),
+            observation: Default::default(),
         }
     }
 
@@ -134,22 +138,34 @@ impl OwnedGroup {
     /// Whether the command has exited: the leader's report when it makes
     /// one, else the leader's own exit. Its PID stays reserved either way.
     pub(crate) fn leader_exited(&mut self) -> std::io::Result<bool> {
-        if self.reported.is_some() {
-            return Ok(true);
-        }
         if let Some(report) = self.report.as_mut() {
             use std::os::unix::process::ExitStatusExt;
-            let mut bytes = [0_u8; 4];
-            match report.read(&mut bytes) {
-                Ok(4) => {
-                    self.reported = Some(ExitStatus::from_raw(i32::from_le_bytes(bytes)));
-                    return Ok(true);
+            let mut bytes = [0_u8; 1024];
+            loop {
+                match report.read(&mut bytes) {
+                    Ok(0) => break,
+                    Ok(read) => self.report_bytes.extend_from_slice(&bytes[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
                 }
-                Ok(_) => self.report = None,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
+                while let Some(end) = self.report_bytes.iter().position(|byte| *byte == b'\n') {
+                    self.observation = serde_json::from_slice(&self.report_bytes[..end])?;
+                    self.report_bytes.drain(..=end);
+                    if let Some(raw) = self.observation.status {
+                        self.reported = Some(ExitStatus::from_raw(raw));
+                    }
+                }
+                if self.report_bytes.len() > 4096 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "command report exceeds 4096 bytes",
+                    ));
+                }
             }
+        }
+        if self.reported.is_some() {
+            return Ok(true);
         }
         self.leader_finished()
     }
@@ -189,6 +205,9 @@ impl OwnedGroup {
     pub(crate) fn stop(&mut self) -> std::io::Result<ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
+        }
+        if self.report.is_some() {
+            self.leader_exited()?;
         }
         kill_process_group(self.child.id())?;
         let status = self.child.wait()?;

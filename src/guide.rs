@@ -1113,6 +1113,30 @@ RUN A CHANGE
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
+  Executed verification receipts separate `wait_ms` acquiring a slot's use
+  lock, `prepare_ms` configuring and preparing build storage, and `run_ms`
+  from the command's spawn through its leader's exit and output drain.
+  `duration_ms` spans slot acquisition, in-run preparation, execution and
+  bookkeeping. `prepare_ms` also includes preparation before environment
+  probes; a batch charges that shared preparation to its first executed
+  command. Preparation before execution need not be inside `duration_ms`.
+  A wrapper's own admission wait belongs to its command's `run_ms`; arc
+  cannot separate work inside a command. `show --json` and `status` carry
+  these observations.
+  `load_average` holds the host's 1, 5 and 15 minute load averages and
+  `core_count` its online logical CPUs, sampled at command start.
+
+  `cpu_user_ms` and `cpu_system_ms` sum the command's and its descendants'
+  usage, excluding arc's holder. The holder is a child subreaper and uses
+  wait4 for the command and adopted children, including usage their waited
+  descendants contribute. CPU is absent unless every descendant was reaped;
+  a timeout or group cleanup that interrupts accounting, or unavailable
+  accounting, supplies no CPU figure. Work delegated to an existing external service
+  is outside that accounting. Unavailable host observations are absent.
+  Attestations, bypasses and older events supply no missing measurements.
+  `arc stats` uses `run_ms`, falling back to `duration_ms` only for events
+  without command timing. These observations impose no cost limit.
+
   A pass already recorded for the content answers again instead of running
   again: `verify`, `snapshot --verify`, `done`, `rebase --verify` and an
   integration queue record `verification-reused` for each declared gate whose
@@ -5642,7 +5666,7 @@ SCHEMAS
     `arc-metadata/1`                 arc metadata --json
     `arc-chain/5`                    arc chain --json
     `arc-candidate/1`                arc candidate show|list --json
-    `arc-stats/1`                    arc stats --json
+    `arc-stats/2`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
     `arc-stats-provenance/1`         arc stats --provenance --json
     `arc-stats-round-trip/1`         arc stats --round-trip --json
