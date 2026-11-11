@@ -5314,46 +5314,8 @@ FILES
   Integration history folds with contribution history; squash requires at
   most one reviewed commit above the target. Integration alone stays local.
 
-  Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
-  policy:
-
-    command = "<shell command>"
-    profiles = ["<profile>"]            omitted: required for every profile
-    events = ["integration"]           omitted: integration and publication
-    timeout = "10m"                     s, m, or h; omitted: unbounded
-    environment = "<probe command>"     evidence counts only where the probe
-                                        prints the same output, run against
-                                        the content being evaluated
-    bypass = "<what qualifies>"         omitted: the gate cannot be bypassed;
-                                        every declaration of it must name one
-    binds = "commit"                    a pass answers for its commit, not
-                                        its tree; omitted: "tree", as an
-                                        older arc reads it
-
-  A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
-  records as `not-admitted`. Both are described in `arc guide change-gates`.
-
-  `arc verify --all --event integration|publication` selects the event's
-  gates. Evidence identifies its event, tree, command and environment;
-  a publication pass does not satisfy an integration requirement.
-  Historical verification evidence with no recorded event is integration
-  evidence. An omitted event on a gate declaration applies to both events.
-  `arc publication --target <branch> --profile <profile>` runs the complete
-  publication tier at that branch's head. Push and release tooling can use
-  `--revision <full-commit-id>` to require the exact revision queued by the
-  caller and use its exit status as a local guard. Arc makes no network
-  request and installs no hook implicitly. A failed publication names the integrations since the
-  most recent successful publication pass.
-
-  A gate's `selector` reads `arc-gate-delta/1` JSON: `source_tree`,
-  `target_tree`, `paths` and `gates`. Its `arc-gate-selection/1` answer
-  includes `complete: true`, `request` equal to the complete input object,
-  and `gates` naming affected checks. A successful stdin write does not prove
-  consumption. Missing, failed, malformed, incomplete, unknown or mismatched
-  answers run the required checks. Selection applies to integration;
-  publication checks every required gate on a changed tree. Reuse receipts
-  retain the passing source tree, target tree, selector and declarations;
-  they grant no result to another event or environment.
+  Gate declarations in `.arc/gates.toml` and the operator policy are
+  described in `arc guide gates`.
 
   `.arc/worktrees.toml` declares optional build preparation:
 
@@ -5446,6 +5408,48 @@ FILES
   Export and import preserve the tested objects and pin identity. Integration cleanup keeps these refs while the
   publication history cites them; an operator may release one deliberately
   with `git update-ref -d`.
+
+GATES
+  Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
+  policy:
+
+    command = "<shell command>"
+    profiles = ["<profile>"]            omitted: required for every profile
+    events = ["integration"]           omitted: integration and publication
+    timeout = "10m"                     s, m, or h; omitted: unbounded
+    environment = "<probe command>"     evidence counts only where the probe
+                                        prints the same output, run against
+                                        the content being evaluated
+    bypass = "<what qualifies>"         omitted: the gate cannot be bypassed;
+                                        every declaration of it must name one
+    binds = "commit"                    a pass answers for its commit, not
+                                        its tree; omitted: "tree", as an
+                                        older arc reads it
+
+  A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
+  records as `not-admitted`. Both are described in `arc guide change-gates`.
+
+  `arc verify --all --event integration|publication` selects the event's
+  gates. Evidence identifies its event, tree, command and environment;
+  a publication pass does not satisfy an integration requirement.
+  Historical verification evidence with no recorded event is integration
+  evidence. An omitted event on a gate declaration applies to both events.
+  `arc publication --target <branch> --profile <profile>` runs the complete
+  publication tier at that branch's head. Push and release tooling can use
+  `--revision <full-commit-id>` to require the exact revision queued by the
+  caller and use its exit status as a local guard. Arc makes no network
+  request and installs no hook implicitly. A failed publication names the integrations since the
+  most recent successful publication pass.
+
+  A gate's `selector` reads `arc-gate-delta/1` JSON: `source_tree`,
+  `target_tree`, `paths` and `gates`. Its `arc-gate-selection/1` answer
+  includes `complete: true`, `request` equal to the complete input object,
+  and `gates` naming affected checks. A successful stdin write does not prove
+  consumption. Missing, failed, malformed, incomplete, unknown or mismatched
+  answers run the required checks. Selection applies to integration;
+  publication checks every required gate on a changed tree. Reuse receipts
+  retain the passing source tree, target tree, selector and declarations;
+  they grant no result to another event or environment.
 
 SLOTS
   `[slots]` in `.arc/worktrees.toml` declares a pool of fixed-path checkouts
@@ -5988,7 +5992,7 @@ GO DEEPER
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files
-  slots schemas boundaries
+  gates slots schemas boundaries
 "#;
 
 pub fn print() {
@@ -6108,7 +6112,8 @@ const SECTIONS: &[Section] = &[
     Section { name: "cost-evidence", family: "cost", title: "Portable attribution evidence", start: "  - `arc cost evidence <change|journal-file>... | --all` writes the evidence" },
     Section { name: "rules-rounds", family: "rules", title: "Round endings and execution roles", start: "  - A bounded round records what it deliberately left, so the next round" },
     Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
-    Section { name: "files", family: "files", title: "Configuration, gates, build storage and retention", start: "FILES" },
+    Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
+    Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },
     Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
     Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },

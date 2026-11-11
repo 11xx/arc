@@ -1,5 +1,57 @@
 use super::common::*;
 
+/// Gate declarations have one discoverable topic; rejects missing keys or declarations in files.
+#[test]
+fn gate_declarations_have_one_discoverable_guide_home() {
+    let repo = Repo::new();
+    let gates = stdout(repo.arc(&repo.home).args(["guide", "gates"]));
+    let files = stdout(repo.arc(&repo.home).args(["guide", "files"]));
+    assert!(
+        files.contains("arc guide gates"),
+        "missing files cross-reference"
+    );
+    for declaration in [
+        "Gates are `[gates.<name>]` tables",
+        "command = \"<shell command>\"",
+        "profiles = [\"<profile>\"]",
+        "events = [\"integration\"]",
+        "timeout = \"10m\"",
+        "environment = \"<probe command>\"",
+        "bypass = \"<what qualifies>\"",
+        "binds = \"commit\"",
+        "A gate's `selector` reads `arc-gate-delta/1`",
+    ] {
+        assert!(
+            gates.contains(declaration),
+            "missing declaration: {declaration}"
+        );
+        assert!(
+            !files.contains(declaration),
+            "duplicate declaration: {declaration}"
+        );
+    }
+    let index = stdout(repo.arc(&repo.home).arg("guide"));
+    assert!(index.contains("arc guide gates"), "missing topic in index");
+    let map = stdout(&mut repo.arc(&repo.home));
+    let topics = map.split_once("Topics:").unwrap().1;
+    assert!(
+        topics.split_whitespace().any(|word| word == "gates"),
+        "missing topic in map"
+    );
+    let search = stdout(
+        repo.arc(&repo.home)
+            .args(["guide", "--search", "arc-gate-delta/1"]),
+    );
+    assert!(
+        search.contains("arc guide gates:"),
+        "missing declaration search route"
+    );
+    assert!(
+        !search.contains("arc guide files:"),
+        "declaration search routes to files"
+    );
+}
+
 #[test]
 fn guide_navigation_is_stateless_with_broken_configuration_and_every_role() {
     let repo = Repo::new();
