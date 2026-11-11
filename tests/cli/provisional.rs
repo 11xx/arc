@@ -3436,3 +3436,111 @@ fn resolving_a_provisional_integration_releases_its_slot() {
     let events = stdout(worker.arc(&worker.root).args(["log", &change]));
     assert!(events.contains("slot-released"), "{events}");
 }
+
+/// Claim: provisional integration preserves budget minima and total rules from
+/// staging history. Rejects a staging union dropping a tighter budget or authorizing
+/// an invalid effective sum, including when the canonical gate rows are green.
+#[test]
+fn budget_refusal_and_staging_total_block_provisional_integration() {
+    for total in [false, true] {
+        let (_authority, worker) = worker();
+        let path = worker.root.join(".git/arc/operator-policy.toml");
+        let policy = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{policy}\n[gates.unit]\ncommand='true'\nbudget='10s'\n{}",
+                if total { "[budget]\ntotal='9s'\n" } else { "" }
+            ),
+        )
+        .unwrap();
+        let change = prepared(&worker);
+        let wt = worker.home.join(".worktrees/repo-prepared");
+        worker
+            .arc(&wt)
+            .env(
+                "ARC_TEST_COMMAND_RUN_MS",
+                if total { "1000" } else { "11000" },
+            )
+            .args(["verify", "--all"])
+            .assert()
+            .code(if total { 0 } else { 1 });
+        let before = worker.head(&worker.root);
+        worker
+            .arc(&worker.root)
+            .args(["integrate", &change, "--provisional"])
+            .assert()
+            .code(5);
+        assert_eq!(worker.head(&worker.root), before);
+        assert!(status(&worker, &change)["provisional_integrations"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+/// Claim: staging history tightens budgets and totals after canonical layering,
+/// independently of green rows. Rejects dropping staging's budget minima or letting
+/// green merged-tree evidence authorize an invalid staging total.
+#[test]
+fn budget_staging_history_minima_bind_with_green_rows() {
+    let (_authority, worker) = worker();
+    let policy_path = worker.root.join(".git/arc/operator-policy.toml");
+    let policy = fs::read_to_string(&policy_path).unwrap();
+    fs::write(
+        &policy_path,
+        format!("{policy}\n[budget]\ntotal='20s'\n[gates.unit]\ncommand='true'\nbudget='10s'\n"),
+    )
+    .unwrap();
+    let stage = worker.home.join("staging-tree");
+    let branch = "arc/provisional/worker/master";
+    git(
+        &worker.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            stage.to_str().unwrap(),
+            "master",
+        ],
+    );
+    fs::create_dir_all(stage.join(".arc")).unwrap();
+    worker.commit(
+        &stage,
+        ".arc/gates.toml",
+        "[budget]\ntotal='4s'\n[gates.unit]\ncommand='true'\nbudget='5s'\n",
+        "test: declare staging obligations",
+    );
+    git(
+        &worker.root,
+        &["worktree", "remove", stage.to_str().unwrap()],
+    );
+    let change = prepared(&worker);
+    let wt = worker.home.join(".worktrees/repo-prepared");
+    worker
+        .arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .args(["verify", &change, "--against", branch])
+        .assert()
+        .success();
+    let check = json_stdout_any_status(worker.arc(&worker.root).args([
+        "check",
+        &change,
+        "--provisional",
+        "--json",
+    ]));
+    assert_eq!(check["gates"][0]["budget"]["budget_ms"], 5000);
+    assert_eq!(check["budget_rules"]["total"], 4000);
+    assert!(check["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|g| g["green_at_head"] == true));
+    assert!(!check["budget_errors"].as_array().unwrap().is_empty());
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(5);
+}

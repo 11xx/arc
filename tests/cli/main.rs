@@ -54,6 +54,7 @@ mod forge_observation;
 mod forge_round_trip;
 mod forge_view;
 mod fork;
+mod gate_budgets;
 mod gate_declarations;
 mod gate_environment;
 mod gate_paths;

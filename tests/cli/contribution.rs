@@ -764,3 +764,33 @@ fn change_trailers_use_recorder_coordinates_only_for_declared_recorder_work() {
         );
     }
 }
+
+/// Claim: contribution readiness refuses a recorded over-budget pass. Rejects
+/// recording ready-to-send merely because the command exited zero.
+#[test]
+fn budget_refusal_blocks_contribution_readiness() {
+    let repo = contribution_repo("preserve");
+    let path = repo.root.join(".git/arc/operator-policy.toml");
+    let policy = fs::read_to_string(&path).unwrap();
+    fs::write(
+        path,
+        format!("{policy}\n[gates.smoke]\ncommand='true'\nbudget='10s'\n"),
+    )
+    .unwrap();
+    let (id, wt, _) = change_with_patchset(&repo, "budget-contribution");
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "11000")
+        .args(["verify", "--all"])
+        .assert()
+        .code(1);
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .code(5);
+    let shown = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+    assert!(shown["ready_to_send"].is_null());
+}

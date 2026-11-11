@@ -2005,3 +2005,60 @@ fn accept_delivery_preflight_refuses_a_change_its_landing_integrated() {
     assert!(!retried.status.success(), "{transcript}");
     assert!(transcript.contains("is integrated"), "{transcript}");
 }
+
+/// Claim: accept refuses measured over-budget passes and invalid totals even with
+/// green rows. Rejects an independent acceptance path treating raw pass as sufficient.
+#[test]
+fn budget_acceptance_refuses_overruns_and_invalid_green_totals() {
+    for total in [false, true] {
+        let d = Delivery::new();
+        d.gates("true");
+        let path = d.receiver.root.join(".git/arc/operator-policy.toml");
+        let policy = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{policy}budget='10s'\n{}",
+                if total { "[budget]\ntotal='9s'\n" } else { "" }
+            ),
+        )
+        .unwrap();
+        d.local_approval();
+        let out = d
+            .command()
+            .env(
+                "ARC_TEST_COMMAND_RUN_MS",
+                if total { "1000" } else { "11000" },
+            )
+            .assert()
+            .code(5)
+            .get_output()
+            .stdout
+            .clone();
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            result["stopped_at"],
+            if total {
+                "readiness"
+            } else {
+                "gate:acceptance"
+            }
+        );
+        if total {
+            assert!(!result["readiness"]["budget_errors"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        }
+        let shown = json_stdout(
+            d.receiver
+                .arc(&d.receiver.root)
+                .args(["show", &d.change, "--json"]),
+        );
+        assert!(shown["closure"].is_null());
+        assert_eq!(
+            shown["verifications"].as_array().unwrap().last().unwrap()["result"],
+            "pass"
+        );
+    }
+}
