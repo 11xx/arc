@@ -815,6 +815,9 @@ mod tests {
         BTreeMap::from([(
             "build".to_string(),
             NormalizedGate {
+                coverage_identity: None,
+                paths: Vec::new(),
+                inert: Vec::new(),
                 events: Vec::new(),
                 selector: None,
                 command: "make build".to_string(),
@@ -1142,6 +1145,9 @@ mod tests {
         changed_gates.insert(
             "lint".to_string(),
             NormalizedGate {
+                coverage_identity: None,
+                paths: Vec::new(),
+                inert: Vec::new(),
                 events: Vec::new(),
                 selector: None,
                 command: "make lint".to_string(),

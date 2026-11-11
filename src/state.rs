@@ -1120,6 +1120,8 @@ impl PostIntegrationVerificationEntry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<String>,
     pub event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<crate::model::DeltaSelection>,
@@ -3560,6 +3562,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::VerificationRecorded {
+                declaration,
                 gate,
                 command,
                 duration_ms,
@@ -3697,6 +3700,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     )?;
                 }
                 state.verifications.push(VerificationEntry {
+                    declaration: declaration.clone(),
                     event_id: ev.event_id.clone(),
                     delta: None,
                     timeout_seconds: *timeout_seconds,
@@ -3737,6 +3741,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 qualification,
             } => {
                 state.verifications.push(VerificationEntry {
+                    declaration: None,
                     event_id: ev.event_id.clone(),
                     delta: None,
                     run_id: None,
@@ -3807,6 +3812,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                             && !delta.selected_gates.contains(gate)
                             && !delta.selector.is_empty()
                             && !delta.declaration.is_empty()
+                            && evidence
+                                .declaration
+                                .as_ref()
+                                .map_or(delta.selector != crate::gates::PATH_SELECTOR, |id| {
+                                    id == &delta.declaration
+                                })
                             && evidence.green_at_head(state.eligible_dirty_tree_waiver())
                     }
                     None => match tree {
@@ -6719,6 +6730,7 @@ mod tests {
         let evidence = ev(
             change,
             Payload::VerificationRecorded {
+                declaration: None,
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,

@@ -1232,6 +1232,8 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["instructions", "git"],
         vec!["gates"],
         vec!["gates", "--json"],
+        vec!["gates", "paths"],
+        vec!["gates", "paths", "--json"],
         vec!["gates", "measure", "--runs", "1"],
         vec!["gates", "measure", "--runs", "1", "--gate", "missing"],
         vec!["workspace", "gates"],
@@ -1284,15 +1286,16 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         .collect();
     let mut exercised = exercised;
     for args in &extra_forms {
-        let path = if args.starts_with(&["gates", "measure"]) {
-            "gates measure".to_string()
-        } else if listed.contains(args[0]) {
-            args[0].to_string()
-        } else if args[..2] == ["journal", "lane"] {
-            args[..3].join(" ")
-        } else {
-            args[..2].join(" ")
-        };
+        let path =
+            if args.starts_with(&["gates", "measure"]) || args.starts_with(&["gates", "paths"]) {
+                args[..2].join(" ")
+            } else if listed.contains(args[0]) {
+                args[0].to_string()
+            } else if args[..2] == ["journal", "lane"] {
+                args[..3].join(" ")
+            } else {
+                args[..2].join(" ")
+            };
         exercised.insert(path);
     }
     // Inspection parses the policy inputs whose contents it reports.
@@ -1314,6 +1317,9 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     for args in extra_forms {
         let out = repo.arc(&repo.root).args(&args).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
+        if args.starts_with(&["gates", "paths"]) {
+            assert!(out.status.success(), "{args:?}\n{stderr}");
+        }
         assert!(!stderr.contains("policy.toml"), "{args:?}\n{stderr}");
         if !args.starts_with(&["history", "resolve"]) {
             assert_ne!(out.status.code(), Some(2), "{args:?}\n{stderr}");

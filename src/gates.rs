@@ -34,9 +34,69 @@ pub const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
 #[derive(Debug, Default, Deserialize)]
 pub struct GatesFile {
     #[serde(default)]
+    pub selection: PathSelection,
+    #[serde(skip)]
+    pub dangerous: Vec<String>,
+    #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
     #[serde(skip)]
     pub conflicts: Vec<GateConflict>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PathSelection {
+    #[serde(default)]
+    pub inert: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Coverage {
+    pub dangerous: Vec<String>,
+    pub inert: Vec<String>,
+    pub gates: BTreeMap<String, Vec<String>>,
+}
+
+pub const PATH_SELECTOR: &str = "arc:paths";
+
+impl Coverage {
+    pub fn is_inert(&self, path: &str) -> bool {
+        self.inert
+            .iter()
+            .any(|pattern| crate::policy::glob_match(pattern, path))
+    }
+
+    pub fn is_named(&self, path: &str) -> bool {
+        self.gates
+            .values()
+            .flatten()
+            .any(|pattern| crate::policy::glob_match(pattern, path))
+    }
+
+    pub fn affects(&self, name: &str, path: &str) -> bool {
+        if self
+            .dangerous
+            .iter()
+            .any(|pattern| crate::policy::glob_match(pattern, path))
+        {
+            return true;
+        }
+        if self.is_inert(path) {
+            return false;
+        }
+        if !self.is_named(path) {
+            return true;
+        }
+        self.gates.get(name).is_none_or(|patterns| {
+            patterns.is_empty()
+                || patterns
+                    .iter()
+                    .any(|pattern| crate::policy::glob_match(pattern, path))
+        })
+    }
+
+    pub fn enabled(&self) -> bool {
+        !self.inert.is_empty() || self.gates.values().any(|paths| !paths.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,6 +116,10 @@ pub struct Gate {
     pub events: Vec<GateEvent>,
     #[serde(default)]
     pub selector: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(skip)]
+    pub coverage: Coverage,
     #[serde(default, deserialize_with = "deserialize_timeout")]
     pub timeout: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_exclusive")]
@@ -102,6 +166,8 @@ pub struct GateConflict {
 
 #[derive(Debug, Clone)]
 pub struct GateDeclaration {
+    pub paths: Vec<String>,
+    pub inert: Vec<String>,
     pub exclusive: Option<String>,
     pub selector: Option<String>,
     pub command: String,
@@ -131,6 +197,8 @@ impl GateDivergence {
 impl GateDeclaration {
     fn of(gate: &Gate, source: &str) -> Self {
         GateDeclaration {
+            paths: gate.paths.clone(),
+            inert: gate.coverage.inert.clone(),
             exclusive: gate.exclusive.clone(),
             selector: gate.selector.clone(),
             command: gate.command.clone(),
@@ -152,10 +220,14 @@ impl GateDeclaration {
             Some(name) => format!("{description} with exclusive lock {name:?}"),
             None => description,
         };
-        match &self.selector {
+        let description = match &self.selector {
             Some(selector) => format!("{description} with delta selector {selector:?}"),
             None => description,
-        }
+        };
+        format!(
+            "{description} with paths {:?} and inert {:?}",
+            self.paths, self.inert
+        )
     }
 }
 
@@ -433,7 +505,11 @@ pub fn validate_operator_text(text: &str) -> Result<()> {
 pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
     let path = repo_toplevel.join(PROJECT_SOURCE);
     let project = read_optional(&path)?.map(|text| (path.display().to_string(), text));
-    layered(repo_toplevel, project)
+    let mut gates = layered(repo_toplevel, project)?;
+    gates.set_danger(
+        crate::policy::danger_paths(repo_toplevel, None).unwrap_or_else(|_| vec!["**".into()]),
+    );
+    Ok(gates)
 }
 
 /// Load both declarations with the project layer read from the tree committed
@@ -441,7 +517,11 @@ pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
 pub fn inspect_at(cwd: &Path, revision: &str) -> Result<GatesFile> {
     let project = crate::gitio::file_at(cwd, revision, PROJECT_SOURCE)?
         .map(|text| (format!("{PROJECT_SOURCE} at {revision}"), text));
-    layered(cwd, project)
+    let mut gates = layered(cwd, project)?;
+    gates.set_danger(
+        crate::policy::danger_paths(cwd, Some(revision)).unwrap_or_else(|_| vec!["**".into()]),
+    );
+    Ok(gates)
 }
 
 /// Load declarations at `revision`, rejecting ambiguous gate commands.
@@ -474,6 +554,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
             toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?;
         let source = source.to_string();
 
+        merged.selection.inert.extend(layer.selection.inert);
         for (name, mut gate) in layer.gates {
             gate.declared_by.push(source.clone());
             match merged.gates.get_mut(&name) {
@@ -486,6 +567,8 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                         name,
                         declarations: vec![
                             GateDeclaration {
+                                paths: current.paths.clone(),
+                                inert: current.coverage.inert.clone(),
                                 exclusive: current.exclusive.clone(),
                                 selector: current.selector.clone(),
                                 command: current.command.clone(),
@@ -493,6 +576,8 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                                 source: current.declared_by[0].clone(),
                             },
                             GateDeclaration {
+                                paths: gate.paths.clone(),
+                                inert: gate.coverage.inert.clone(),
                                 exclusive: gate.exclusive,
                                 selector: gate.selector,
                                 command: gate.command,
@@ -510,6 +595,12 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
         }
     }
 
+    merged.selection.inert.sort();
+    merged.selection.inert.dedup();
+    for gate in merged.gates.values_mut() {
+        gate.coverage.inert = merged.selection.inert.clone();
+    }
+    merged.refresh_coverage();
     Ok(merged)
 }
 
@@ -519,6 +610,8 @@ impl Gate {
         self.command == other.command
             && self.environment == other.environment
             && self.selector == other.selector
+            && self.paths == other.paths
+            && self.coverage.inert == other.coverage.inert
             && (self.exclusive.is_none()
                 || other.exclusive.is_none()
                 || self.exclusive == other.exclusive)
@@ -574,6 +667,23 @@ impl Gate {
 }
 
 impl GatesFile {
+    fn set_danger(&mut self, paths: Vec<String>) {
+        self.dangerous = paths.clone();
+        for gate in self.gates.values_mut() {
+            gate.coverage.dangerous = paths.clone();
+        }
+    }
+    fn refresh_coverage(&mut self) {
+        let coverage: BTreeMap<_, _> = self
+            .gates
+            .iter()
+            .map(|(name, gate)| (name.clone(), gate.paths.clone()))
+            .collect();
+        for gate in self.gates.values_mut() {
+            gate.coverage.gates = coverage.clone();
+        }
+    }
+
     /// Add what a change's own declarations require on top of this set, the
     /// target's. A gate the change adds is owed. A gate the target already
     /// declares stays the target's check: the change can widen its profiles
@@ -600,6 +710,8 @@ impl GatesFile {
                 }),
             }
         }
+        self.set_danger(self.dangerous.clone());
+        self.refresh_coverage();
         divergences
     }
 
@@ -645,14 +757,19 @@ impl GatesFile {
 
 /// Identity of the gate declaration whose evidence can be reused.
 ///
-/// A tree binding is the default and adds nothing, so the identity of every
-/// declaration that does not name `binds` is the one it has always had.
+/// Default bindings and absent coverage settings add no identity fields.
+/// Scoped declarations bind the complete coverage map and dangerous patterns,
+/// since they determine the fallback for a path no gate names.
 pub fn declaration_identity(gate: &Gate) -> String {
     let mut value = serde_json::json!({
         "command": gate.command, "environment": gate.environment,
         "profiles": gate.profiles, "events": gate.events,
         "timeout": gate.timeout, "selector": gate.selector,
     });
+    if gate.coverage.enabled() {
+        value["paths"] = serde_json::json!(gate.paths);
+        value["coverage"] = serde_json::json!(gate.coverage);
+    }
     if gate.binds == Binding::Commit {
         value["binds"] = serde_json::json!("commit");
     }
@@ -662,7 +779,38 @@ pub fn declaration_identity(gate: &Gate) -> String {
     )
 }
 
-/// Ask a project selector whether the delta affects one gate. Any incomplete,
+/// Scoped evidence binds every input to declarative selection.
+pub fn coverage_identity(gate: &Gate) -> Option<String> {
+    gate.coverage.enabled().then(|| declaration_identity(gate))
+}
+
+/// Read both sides of renames once for each source and destination tree pair.
+pub fn delta_paths(cwd: &Path, source_tree: &str, target_tree: &str) -> Option<Vec<String>> {
+    let raw = crate::gitio::git(
+        cwd,
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            source_tree,
+            target_tree,
+            "--",
+        ],
+    )
+    .ok()?;
+    if raw.len() > 65536 || raw.contains('\u{fffd}') {
+        return None;
+    }
+    let paths = raw
+        .split('\0')
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some(paths)
+}
+
+/// Resolve path coverage, then ask a declared selector for an affected gate. Any incomplete,
 /// malformed, failed, oversized or timed-out answer leaves the gate to run.
 pub fn select_delta(
     cwd: &Path,
@@ -671,28 +819,49 @@ pub fn select_delta(
     source_tree: &str,
     target_tree: &str,
     declared_gates: &[String],
+    paths: &[String],
 ) -> Option<DeltaSelection> {
-    let selector = gate.selector.as_deref()?;
-    let raw = crate::gitio::git(
-        cwd,
-        &["diff", "--name-only", "-z", source_tree, target_tree, "--"],
-    )
-    .ok()?;
-    if raw.len() > 65536 || raw.contains('\u{fffd}') {
-        return None;
-    }
-    let paths: Vec<String> = raw
-        .split('\0')
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let selector = gate.selector.as_deref();
     let request = serde_json::json!({
         "schema": "arc-gate-delta/1", "source_tree": source_tree,
         "target_tree": target_tree, "paths": paths, "gates": declared_gates,
     });
-    let output = selector_output(cwd, selector, &request.to_string(), gate.timeout)
-        .ok()
-        .flatten()?;
+    let protected = paths.iter().any(|path| {
+        gate.coverage
+            .dangerous
+            .iter()
+            .any(|pattern| crate::policy::glob_match(pattern, path))
+            || (!gate.coverage.is_inert(path) && !gate.coverage.is_named(path))
+    });
+    if protected && gate.coverage.enabled() {
+        return None;
+    }
+    let (selector, output) =
+        if gate.coverage.enabled() && !paths.iter().any(|path| gate.coverage.affects(name, path)) {
+            let selected: Vec<_> = declared_gates
+                .iter()
+                .filter(|name| paths.iter().any(|path| gate.coverage.affects(name, path)))
+                .collect();
+            (
+                PATH_SELECTOR,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "arc-gate-selection/1", "complete": true,
+                    "request": request, "gates": selected,
+                }))
+                .ok()?,
+            )
+        } else {
+            let selector = selector?;
+            (
+                selector,
+                selector_output(cwd, selector, &request.to_string(), gate.timeout)
+                    .ok()
+                    .flatten()?,
+            )
+        };
+    if output.len() > 65536 {
+        return None;
+    }
     let answer: serde_json::Value = serde_json::from_slice(&output).ok()?;
     if answer.get("schema")?.as_str()? != "arc-gate-selection/1"
         || !answer.get("complete")?.as_bool()?
@@ -717,7 +886,7 @@ pub fn select_delta(
         target_tree: target_tree.to_owned(),
         declaration: declaration_identity(gate),
         selector: selector.to_owned(),
-        changed_paths: paths,
+        changed_paths: paths.to_vec(),
         selected_gates: selected,
         output_sha256: format!("sha256:{}", hex::encode(Sha256::digest(&output))),
         output: String::from_utf8(output).ok()?,

@@ -1729,6 +1729,10 @@ pub enum Payload {
         gates: Vec<VerificationRunGate>,
     },
     VerificationRecorded {
+        /// Identity of a declaration with path coverage. Absence answers only
+        /// declarations without coverage settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        declaration: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         gate: Option<String>,
         command: String,
@@ -2924,6 +2928,12 @@ pub enum DangerRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedGate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inert: Vec<String>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<GateEvent>,

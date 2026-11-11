@@ -368,6 +368,32 @@ pub fn validate_operator_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read dangerous patterns without interpreting unrelated append-policy rules.
+pub fn danger_paths(cwd: &Path, revision: Option<&str>) -> Result<Vec<String>> {
+    #[derive(Default, Deserialize)]
+    struct Paths {
+        #[serde(default)]
+        paths: Vec<String>,
+    }
+    #[derive(Deserialize)]
+    struct CoveragePolicy {
+        #[serde(default)]
+        danger: Paths,
+    }
+    let project = match revision {
+        Some(revision) => crate::gitio::file_at(cwd, revision, PROJECT_SOURCE)?,
+        None => read_optional(&cwd.join(PROJECT_SOURCE))?,
+    };
+    let operator = read_optional(&operator_path(cwd)?)?;
+    let mut paths = BTreeSet::new();
+    for text in [project, operator].into_iter().flatten() {
+        let layer: CoveragePolicy =
+            toml::from_str(&text).context("malformed danger declarations")?;
+        paths.extend(layer.danger.paths);
+    }
+    Ok(paths.into_iter().collect())
+}
+
 /// Load the policy in force in the checkout at `repo_toplevel`.
 pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
     load_with_operator_path(repo_toplevel, &operator_path(repo_toplevel)?)

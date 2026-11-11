@@ -97,6 +97,7 @@ pub struct VerifyArgs {
 }
 
 struct VerificationInput {
+    declaration: Option<String>,
     exclusive: Option<crate::exclusive::Request>,
     preparation_ms: u64,
     run_id: Option<String>,
@@ -123,6 +124,7 @@ struct VerificationInput {
 }
 
 struct CompletedVerification {
+    declaration: Option<String>,
     run_id: Option<String>,
     probe: Option<ProbeEvidenceRef>,
     gate: Option<String>,
@@ -550,6 +552,7 @@ fn verify_with_landing(
             &store,
             &change_id,
             VerificationInput {
+                declaration: None,
                 exclusive: None,
                 preparation_ms: 0,
                 run_id: None,
@@ -697,6 +700,7 @@ fn verify_with_landing(
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
+                    declaration: gates::coverage_identity(gate),
                     attested_result: None,
                     tested_revision: None,
                     execution_host: None,
@@ -721,6 +725,7 @@ fn verify_with_landing(
         timeout,
         environment: declared_environment,
         exclusive,
+        declaration,
     } = declared_check(ctx, &st, gate.as_deref(), command)?;
     let preparing = Instant::now();
     if !attest {
@@ -770,6 +775,7 @@ fn verify_with_landing(
         &store,
         &change_id,
         VerificationInput {
+            declaration,
             exclusive,
             preparation_ms,
             run_id: None,
@@ -812,7 +818,7 @@ fn reuse_named_gate(
     let legacy_trees = status::legacy_evidence_trees(st, &run_ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
     let label = "green at head";
-    let Some(evidence) = reusable_evidence_for_event(
+    let evidence = reusable_evidence_for_event(
         &run_ctx.cwd,
         st,
         name,
@@ -826,8 +832,51 @@ fn reuse_named_gate(
         &resolve_tree,
         environment,
         GateEvent::Integration,
-    ) else {
-        return Ok(false);
+    );
+    let Some(evidence) = evidence else {
+        let declared_names = declarations.gates.keys().cloned().collect::<Vec<_>>();
+        let mut deltas = BTreeMap::new();
+        let Some((source, delta)) = incremental_evidence(
+            run_ctx,
+            st,
+            name,
+            gate,
+            &tree,
+            &declared_names,
+            &mut deltas,
+            environment,
+            GateEvent::Integration,
+        ) else {
+            return Ok(false);
+        };
+        let run_id = start_verification_run(
+            run_ctx,
+            store,
+            change_id,
+            &head,
+            VerificationRunMode::Sequential,
+            true,
+            &[(name, gate)],
+        )?;
+        println!(
+            "gate {name}: skipped ({} proves unchanged scope from {})",
+            if delta.selector == gates::PATH_SELECTOR {
+                "arc paths"
+            } else {
+                "project selector"
+            },
+            delta.source_tree
+        );
+        append_delta_reuses(
+            run_ctx,
+            store,
+            change_id,
+            &run_id,
+            &head,
+            &tree,
+            &[(name.clone(), source, delta)],
+        )?;
+        return Ok(true);
     };
     let reused = [(name.clone(), evidence.event_id.clone())];
     let run_id = start_verification_run(
@@ -1159,6 +1208,7 @@ fn verify_against(
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
+                    declaration: gates::coverage_identity(gate),
                     attested_result: None,
                     tested_revision: Some(synthesized.clone()),
                     execution_host: None,
@@ -1284,6 +1334,7 @@ pub(crate) fn verify_landing_head(
                 gate: Some(name.clone()),
                 command: gate.command.clone(),
                 timeout_seconds: gate.timeout,
+                declaration: gates::coverage_identity(gate),
                 attested_result: None,
                 tested_revision: Some(run.commit.to_string()),
                 execution_host: None,
@@ -1587,6 +1638,7 @@ fn partition<'a>(
         .iter()
         .map(|(name, _)| (*name).clone())
         .collect::<Vec<_>>();
+    let mut deltas = BTreeMap::new();
     for (name, gate) in gates {
         let environment = declared_environment(environments, gate);
         if let Some(evidence) = reusable_evidence_for_event(
@@ -1614,12 +1666,18 @@ fn partition<'a>(
             gate,
             answering.tree,
             &declared_names,
+            &mut deltas,
             environment,
             event,
         ) {
             delta.against_target = answering.against_target.map(str::to_owned);
             println!(
-                "gate {name}: skipped (project selector proves unchanged scope from {})",
+                "gate {name}: skipped ({} proves unchanged scope from {})",
+                if delta.selector == gates::PATH_SELECTOR {
+                    "arc paths"
+                } else {
+                    "project selector"
+                },
                 delta.source_tree
             );
             partition.delta_reuses.push((name.clone(), source, delta));
@@ -1675,6 +1733,7 @@ fn incremental_evidence(
     gate: &gates::Gate,
     tree: &str,
     declared_names: &[String],
+    deltas: &mut BTreeMap<String, Option<Vec<String>>>,
     environment: Option<&str>,
     event: GateEvent,
 ) -> Option<(String, DeltaSelection)> {
@@ -1683,7 +1742,9 @@ fn incremental_evidence(
     if event != GateEvent::Integration || gate.binds == gates::Binding::Commit {
         return None;
     }
-    gate.selector.as_deref()?;
+    if gate.selector.is_none() && !gate.coverage.enabled() {
+        return None;
+    }
     let head = gitio::head(&ctx.cwd).ok()?;
     if gitio::commit_tree(&ctx.cwd, &head).ok()?.as_str() != tree
         || !gitio::git(
@@ -1707,7 +1768,19 @@ fn incremental_evidence(
     if source_tree == tree {
         return None;
     }
-    let delta = gates::select_delta(&ctx.cwd, gate, name, source_tree, tree, declared_names)?;
+    let paths = deltas
+        .entry(source_tree.to_owned())
+        .or_insert_with(|| gates::delta_paths(&ctx.cwd, source_tree, tree))
+        .as_deref()?;
+    let delta = gates::select_delta(
+        &ctx.cwd,
+        gate,
+        name,
+        source_tree,
+        tree,
+        declared_names,
+        paths,
+    )?;
     if gitio::head(&ctx.cwd).ok()? != head
         || !gitio::git(
             &ctx.cwd,
@@ -1955,6 +2028,7 @@ fn verify_recorded(
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
+                    declaration: gates::coverage_identity(gate),
                     attested_result: None,
                     tested_revision: None,
                     execution_host: None,
@@ -2357,6 +2431,7 @@ fn verify_all_parallel(
             gate: Some(name.clone()),
             command: gate.command.clone(),
             timeout_seconds: gate.timeout,
+            declaration: gates::coverage_identity(gate),
             attested_result: None,
             tested_revision: None,
             execution_host: None,
@@ -2739,6 +2814,7 @@ fn execute_verification(
     change_id: &str,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
+        declaration,
         exclusive,
         preparation_ms,
         run_id,
@@ -2796,6 +2872,7 @@ fn execute_verification(
             }
         };
     Ok(CompletedVerification {
+        declaration,
         run_id,
         probe,
         gate,
@@ -2886,6 +2963,7 @@ fn record_verifications(
             })
             .flatten();
         let payload = Payload::VerificationRecorded {
+            declaration: item.declaration,
             run_id: item.run_id,
             probe: item.probe,
             gate: item.gate,
@@ -5037,6 +5115,9 @@ pub(super) fn normalized_declarations(
             (
                 name.clone(),
                 crate::model::NormalizedGate {
+                    coverage_identity: gates::coverage_identity(gate),
+                    paths: gate.paths.clone(),
+                    inert: gate.coverage.inert.clone(),
                     command: gate.command.clone(),
                     events: gate.events.clone(),
                     selector: gate.selector.clone(),
@@ -6161,6 +6242,7 @@ pub(super) fn release_retention_refs(
 }
 
 struct DeclaredCheck {
+    declaration: Option<String>,
     command: String,
     timeout: Option<u64>,
     environment: Option<String>,
@@ -6189,6 +6271,7 @@ fn declared_check(
                 None => bail!("gate {name:?} not declared in .arc/gates.toml"),
             };
             Ok(DeclaredCheck {
+                declaration: gates::coverage_identity(declared),
                 command: declared.command.clone(),
                 timeout: declared.timeout,
                 environment: declared.environment.clone(),
@@ -6196,6 +6279,7 @@ fn declared_check(
             })
         }
         (None, Some(command)) => Ok(DeclaredCheck {
+            declaration: None,
             command,
             timeout: None,
             environment: None,

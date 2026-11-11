@@ -1482,6 +1482,7 @@ mod tests {
             "1",
             0,
             Payload::VerificationRecorded {
+                declaration: None,
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
@@ -1516,6 +1517,7 @@ mod tests {
             "2",
             0,
             Payload::VerificationRecorded {
+                declaration: None,
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
@@ -1632,6 +1634,7 @@ mod tests {
             id,
             seconds,
             Payload::VerificationRecorded {
+                declaration: None,
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,

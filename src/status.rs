@@ -2554,11 +2554,15 @@ pub fn matches_declaration(
     evidence: &crate::state::VerificationEntry,
     gate: &crate::gates::Gate,
 ) -> bool {
-    evidence.command == gate.command
+    evidence.declaration.as_ref().map_or_else(
+        || !gate.coverage.enabled(),
+        |identity| identity == &crate::gates::declaration_identity(gate),
+    ) && evidence.command == gate.command
         && evidence.timeout_seconds == gate.timeout
         && evidence.delta.as_ref().is_none_or(|delta| {
             delta.declaration == crate::gates::declaration_identity(gate)
-                && gate.selector.as_deref() == Some(delta.selector.as_str())
+                && ((delta.selector == crate::gates::PATH_SELECTOR && gate.coverage.enabled())
+                    || gate.selector.as_deref() == Some(delta.selector.as_str()))
         })
 }
 

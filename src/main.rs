@@ -711,7 +711,7 @@ enum Cmd {
     /// duration_ms samples are identified. Reports no declared budget. Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
     Gates {
-        /// Measure commands on this tree without recording evidence
+        /// Inspect coverage or measure commands without recording evidence
         #[command(subcommand)]
         cmd: Option<GatesCmd>,
         /// Emit arc-gates/1 JSON
@@ -3979,6 +3979,15 @@ enum ExternalCmd {
 
 #[derive(Subcommand)]
 enum GatesCmd {
+    /// List every tracked path with its affected gates and paths nobody names
+    ///
+    /// Uses path-policy globs, inert exclusions and dangerous-path overrides.
+    /// Reads one tracked inventory, with no per-path commands or ledger reads.
+    Paths {
+        /// Emit arc-gate-paths/1 JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Run declared gates sequentially on this tree without recording evidence
     ///
     /// Prints each run's command wall and child CPU time and each gate's spread.
@@ -6810,6 +6819,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         }
         Cmd::Gates { cmd, json } => match cmd {
             None => commands::gate_report(&ctx, json),
+            Some(GatesCmd::Paths { json: paths_json }) => {
+                commands::gate_paths(&ctx, json || paths_json)
+            }
             Some(GatesCmd::Measure { runs, gate }) => {
                 anyhow::ensure!(!json, "gates measure does not accept --json");
                 commands::measure_gates(&ctx, runs, gate.as_deref())

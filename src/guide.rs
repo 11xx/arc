@@ -5452,8 +5452,18 @@ GATES
   `last_failed_first` is the latest change whose first observed verification
   failure was this gate, with its time and event. Dedicated publication
   receipts carry no timing and are outside this per-change history.
+  Each declaration includes `paths` and its effective `inert` exclusions.
+  `unclaimed_paths` counts tracked paths outside inert exclusions that no
+  explicit gate pattern names; a gate with no paths does not name a path.
   Unreadable changes are named, readable history is retained, and a partial
   report exits 16. JSON is `arc-gates/1`.
+
+  `arc gates paths [--json]` lists every tracked path and its affected gates,
+  including paths nobody names. It uses one `git ls-files` inventory and no
+  per-path commands or ledger reads. JSON is `arc-gate-paths/1`, with `paths`
+  rows (`path`, `gates`, `inert`, `unclaimed`) and `unclaimed_paths` names.
+  Paths beneath inert exclusions are excluded from the unclaimed count;
+  dangerous inert paths still affect every gate.
 
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
   this tree, five times by default, honoring timeouts. Each round follows the
@@ -5485,6 +5495,7 @@ GATES
     profiles = ["<profile>"]            omitted: required for every profile
     events = ["integration"]           omitted: integration and publication
     timeout = "10m"                     s, m, or h; omitted: unbounded
+    paths = ["src/", "tests/"]           omitted or empty: every non-inert path
     exclusive = "host"                  host-wide lock name; omitted: no lock
     admission = "60s"                   lock wait limit; omitted: 60s
     environment = "<probe command>"     evidence counts only where the probe
@@ -5527,6 +5538,38 @@ GATES
   caller and use its exit status as a local guard. Arc makes no network
   request and installs no hook implicitly. A failed publication names the integrations since the
   most recent successful publication pass.
+
+  `[selection] inert = ["**/*.md"]` declares paths that affect no gate.
+  Patterns use `policy::glob_match`, as path policy does: `*` stays within a
+  segment, `**` crosses segments, `**/` includes zero directories, and a
+  trailing `/` includes everything beneath that directory. Patterns are
+  case-sensitive and match repository-relative paths.
+
+  A path affects gates whose `paths` match it. Inert paths affect none. A path
+  no explicit gate pattern names affects every gate. Dangerous policy paths
+  affect every gate, including those beneath inert exclusions. A gate without
+  paths is affected by every non-inert path. Renames check both old and new
+  paths. The inventory includes gates from every profile and event.
+
+  Integration selection needs an earlier pass in the same change, with the
+  same declaration and environment. A new change runs its required gates even
+  for an inert-only delta. Publication and commit-bound gates do not select
+  across trees. Arc emits `arc-gate-selection/1` as selector `arc:paths` when
+  paths prove the gate unaffected. It asks a declared script only when the
+  gate remains affected; unnamed and dangerous paths cannot be cleared by a
+  script while path selection is declared. An uncertain delta runs the gate.
+  An unreadable danger declaration affects every path; inspection remains
+  available when append policy cannot be parsed.
+
+  Paths and inert exclusions participate in evidence identity. The complete
+  coverage map and dangerous patterns also participate because they determine
+  unnamed-path fallback. Declaring nonempty coverage settings requires a fresh
+  pass; legacy evidence without identity cannot answer a scoped declaration.
+  A declaration without coverage settings retains its default identity. Target
+  coverage stays in force until an edited declaration lands, as with selector
+  changes. Project and operator inert lists combine; differing paths for the
+  same gate conflict. Scoped run receipts retain identity, and delta receipts
+  retain the acknowledged request, answer and its digest for replay.
 
   A gate's `selector` reads `arc-gate-delta/1` JSON: `source_tree`,
   `target_tree`, `paths` and `gates`. Its `arc-gate-selection/1` answer
@@ -5730,6 +5773,7 @@ SCHEMAS
     `arc-chain/5`                    arc chain --json
     `arc-candidate/1`                arc candidate show|list --json
     `arc-gates/1`                    arc gates --json
+    `arc-gate-paths/1`               arc gates paths --json
     `arc-workspace-gates/1`          arc workspace gates --json
     `arc-stats/2`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json

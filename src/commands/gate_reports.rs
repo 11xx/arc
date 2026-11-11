@@ -8,6 +8,7 @@ const GATES_SCHEMA: &str = "arc-gates/1";
 #[derive(Serialize)]
 pub(super) struct GateReport {
     schema: &'static str,
+    unclaimed_paths: usize,
     pub(super) budget_declared: bool,
     pub(super) gates: Vec<GateRow>,
     pub(super) failures: Vec<ReadFailure>,
@@ -29,6 +30,8 @@ pub(super) struct GateRow {
 
 #[derive(Serialize)]
 struct Declaration {
+    paths: Vec<String>,
+    inert: Vec<String>,
     command: String,
     events: Vec<GateEvent>,
     profiles: Vec<String>,
@@ -82,7 +85,8 @@ impl Distribution {
 }
 
 pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
-    let declared = if super::workspace::has_git_repository(cwd)? {
+    let repository = super::workspace::has_git_repository(cwd)?;
+    let declared = if repository {
         gates::inspect(cwd)?
     } else {
         match std::fs::read_to_string(cwd.join(".arc/gates.toml")) {
@@ -94,6 +98,25 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         }
     };
     declared.ensure_unconflicted()?;
+    let unclaimed_paths = if repository {
+        tracked_paths(cwd)?
+            .iter()
+            .filter(|path| {
+                !declared
+                    .selection
+                    .inert
+                    .iter()
+                    .any(|pattern| crate::policy::glob_match(pattern, path))
+                    && !declared.gates.values().any(|gate| {
+                        gate.paths
+                            .iter()
+                            .any(|pattern| crate::policy::glob_match(pattern, path))
+                    })
+            })
+            .count()
+    } else {
+        0
+    };
     let mut rows: BTreeMap<_, _> = declared
         .gates
         .into_iter()
@@ -106,6 +129,8 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
             let row = GateRow {
                 name: name.clone(),
                 declaration: Declaration {
+                    paths: gate.paths,
+                    inert: declared.selection.inert.clone(),
                     command: gate.command,
                     events: if gate.events.is_empty() {
                         vec![GateEvent::Integration, GateEvent::Publication]
@@ -209,6 +234,7 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         .collect();
     Ok(GateReport {
         schema: GATES_SCHEMA,
+        unclaimed_paths,
         budget_declared: false,
         gates,
         failures,
@@ -239,6 +265,7 @@ fn ms(value: Option<u64>) -> String {
 
 pub(super) fn render(report: &GateReport) {
     println!("budget: none declared");
+    println!("tracked paths nobody names: {}", report.unclaimed_paths);
     println!(
         "gate  runs  reused  selected-out  median  p90  worst  ever-failed  last-failed-first"
     );
@@ -263,6 +290,19 @@ pub(super) fn render(report: &GateReport) {
         );
         let d = &gate.declaration;
         println!("  command: {}", d.command);
+        println!(
+            "  paths: {}; inert: {}",
+            if d.paths.is_empty() {
+                "all".into()
+            } else {
+                d.paths.join(", ")
+            },
+            if d.inert.is_empty() {
+                "none".into()
+            } else {
+                d.inert.join(", ")
+            }
+        );
         println!(
             "  events: {}; profiles: {}; timeout: {}; selector: {}",
             d.events
@@ -363,4 +403,99 @@ pub fn measure_gates(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i32
     }
     println!("Admission wait is separate from command wall time. Wall far above CPU indicates waiting inside the command; a wide spread indicates load sensitivity.");
     Ok(if successful { 0 } else { 1 })
+}
+
+fn tracked_paths(cwd: &Path) -> Result<Vec<String>> {
+    let raw = gitio::git(cwd, &["ls-files", "-z"])?;
+    anyhow::ensure!(!raw.contains('\u{fffd}'), "tracked paths must be UTF-8");
+    let mut paths: Vec<_> = raw
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+#[derive(Serialize)]
+struct PathRow {
+    path: String,
+    gates: Vec<String>,
+    inert: bool,
+    unclaimed: bool,
+}
+
+#[derive(Serialize)]
+struct PathsReport {
+    schema: &'static str,
+    paths: Vec<PathRow>,
+    unclaimed_paths: Vec<String>,
+}
+
+/// The tracked inventory uses the same coverage rules as delta selection.
+pub fn gate_paths(ctx: &Ctx, json: bool) -> Result<i32> {
+    let root = gitio::toplevel(&ctx.cwd)?;
+    let declared = gates::inspect(&root)?;
+    declared.ensure_unconflicted()?;
+    let mut unclaimed_paths = Vec::new();
+    let mut paths = Vec::new();
+    for path in tracked_paths(&root)? {
+        let inert = declared
+            .selection
+            .inert
+            .iter()
+            .any(|pattern| crate::policy::glob_match(pattern, &path));
+        let dangerous = declared
+            .dangerous
+            .iter()
+            .any(|pattern| crate::policy::glob_match(pattern, &path));
+        let named = declared.gates.values().any(|gate| {
+            gate.paths
+                .iter()
+                .any(|pattern| crate::policy::glob_match(pattern, &path))
+        });
+        let unclaimed = !inert && !named;
+        if unclaimed {
+            unclaimed_paths.push(path.clone());
+        }
+        let affected = declared
+            .gates
+            .iter()
+            .filter(|(name, gate)| gate.coverage.affects(name, &path))
+            .map(|(name, _)| name.clone())
+            .collect();
+        paths.push(PathRow {
+            path,
+            gates: affected,
+            inert: inert && !dangerous,
+            unclaimed,
+        });
+    }
+    let report = PathsReport {
+        schema: "arc-gate-paths/1",
+        paths,
+        unclaimed_paths,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for row in report.paths {
+            println!(
+                "{}: {}{}",
+                serde_json::to_string(&row.path)?,
+                if row.gates.is_empty() {
+                    "none".into()
+                } else {
+                    row.gates.join(", ")
+                },
+                if row.unclaimed { " (nobody names)" } else { "" }
+            );
+        }
+        println!(
+            "tracked paths nobody names: {}",
+            report.unclaimed_paths.len()
+        );
+    }
+    Ok(0)
 }
