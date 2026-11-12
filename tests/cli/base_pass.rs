@@ -1594,3 +1594,161 @@ fn publication_audits_without_the_integrating_cache_snapshot() {
         .stdout(predicates::str::contains("publication gate unit: pass"))
         .stdout(predicates::str::contains("publication gate other: pass"));
 }
+
+fn raised_baseline(changed_command: bool) -> (Repo, String, String) {
+    fn declaration(budget: u64, command: &str) -> String {
+        format!("[budget]\ntotal='20000ms'\n[selection]\nbase_passes=true\ninert=['**/*.md']\n[gates.unit]\ncommand={command:?}\nbudget='{budget}ms'\npaths=['src/']\nevents=['integration']\n")
+    }
+    let repo = Repo::new();
+    repo.redeclare_gates(&declaration(10000, "true"));
+    let (warm, wt) = begin(&repo, "before-raise", "src/initial.rs");
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "9000")
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &warm])
+        .assert()
+        .success();
+    let before = repo.head(&repo.root);
+    let (id, wt) = begin(&repo, "raised", "src/growth.rs");
+    let lines = (0..100).map(|i| format!("item_{i}\n")).collect::<String>();
+    repo.commit(&wt, "src/growth.rs", &lines, "test: counted growth");
+    repo.commit(
+        &wt,
+        ".arc/gates.toml",
+        &declaration(
+            10400,
+            if changed_command {
+                "printf declaration-v2"
+            } else {
+                "true"
+            },
+        ),
+        "test: proposed budget",
+    );
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "10300")
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .code(1);
+    repo.arc(&wt)
+        .args([
+            "gates",
+            "raise",
+            "unit",
+            "--reason",
+            "Measured after reducing the added work",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    let after = repo.head(&repo.root);
+    (repo, before, after)
+}
+
+/// Claim: a pass authorized by a landed raise answers an unaffected change under
+/// the raised budget. Rejects judging reuse by the obsolete budget at execution
+/// or discarding the execution that the completed raise authorized.
+#[test]
+fn raised_budget_judges_the_following_base_pass() {
+    let (repo, _, _) = raised_baseline(false);
+    let (_, wt) = begin(&repo, "after-raise", "notes.md");
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "15000")
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    let s = state(&repo, &wt);
+    assert_eq!(bases(&s), 1, "{s}");
+    assert_eq!(executed(&s), 0, "{s}");
+    assert_eq!(s["gate_status"][0]["budget"]["budget_ms"], 10400);
+    assert_eq!(s["gate_status"][0]["budget"]["run_ms"], 10300);
+    assert_eq!(s["verifications"][0]["budget_at_run"]["budget_ms"], 10000);
+}
+
+/// Claim: a declaration changed alongside a landed raise executes its own check
+/// on the next change. Rejects answering the changed declaration with the older
+/// baseline's pass even though its timing fits the raised budget.
+#[test]
+fn raised_declaration_does_not_borrow_the_old_identity() {
+    let (repo, _, _) = raised_baseline(true);
+    let (id, wt) = begin(&repo, "changed-declaration", "notes.md");
+    let output = repo.arc(&wt).args(["verify", "--all"]).output().unwrap();
+    let direct = event_files(&repo, &id)
+        .iter()
+        .filter(|file| {
+            let event: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+            event["event_type"] == "verification-recorded" && event["gate"] == "unit"
+        })
+        .count();
+    assert_eq!(direct, 1, "the changed check must execute: {output:?}");
+    let s = state(&repo, &wt);
+    assert_eq!(
+        executed(&s),
+        1,
+        "the changed check must execute: {output:?} {s}"
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(bases(&s), 0, "{s}");
+    assert_eq!(s["verifications"][0]["command"], "printf declaration-v2");
+}
+
+/// Claim: raise evidence requires an execution even when a legitimate base pass
+/// has the exact requested head/tree and qualifying timing. Rejects treating a
+/// reuse as direct execution after the destination moves back to an older bound.
+#[test]
+fn raise_never_uses_a_base_pass_as_direct_execution() {
+    let (repo, before, after) = raised_baseline(false);
+    git(&repo.root, &["reset", "--hard", &before]);
+    let out = stdout(repo.arc(&repo.root).args(["begin", "borrowed-raise"]));
+    let id = out
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap();
+    let wt = repo.home.join(".worktrees/repo-borrowed-raise");
+    git(&wt, &["reset", "--hard", &after]);
+    git(
+        &wt,
+        &["commit", "--allow-empty", "-m", "test: equivalent tree"],
+    );
+    git(&repo.root, &["reset", "--hard", &after]);
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    assert_eq!(bases(&state(&repo, &wt)), 1);
+    git(&repo.root, &["reset", "--hard", &before]);
+    repo.arc(&wt)
+        .args([
+            "gates",
+            "raise",
+            "unit",
+            "--reason",
+            "Measured after reducing the added work",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "newest direct execution at this exact head",
+        ));
+    assert!(
+        state(&repo, &wt)["budget_raises"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{id}"
+    );
+}
