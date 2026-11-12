@@ -58,6 +58,7 @@ mod gate_budgets;
 mod gate_declarations;
 mod gate_environment;
 mod gate_paths;
+mod gate_raises;
 mod gate_reports;
 mod gate_reuse;
 mod gate_tiers;
