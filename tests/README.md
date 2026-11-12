@@ -12,7 +12,7 @@ shell commands and harness wrappers. Debug assertions and integer overflow check
 remain enabled. Test code and unit tests use Cargo's ordinary test profile.
 `cargo test --locked` runs the same assertions against the ordinary debug CLI.
 
-The runner uses two test workers per available CPU, capped at 32, to overlap
+The runner uses four test workers per available logical CPU, capped at 64, to overlap
 subprocess waits. An explicit `RUST_TEST_THREADS` selects the worker count.
 
 Silent-write recovery probes select a short debug-only period with
