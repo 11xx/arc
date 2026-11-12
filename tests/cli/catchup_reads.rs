@@ -81,19 +81,20 @@ fn catchup_projects_the_journal_once() {
 /// Claim: the Git processes `catchup` runs, in text and JSON, are the same
 /// for a ledger of three owed debts and open changes as for one of six.
 /// Rejects a Git process per change, such as a diff per debt to find the
-/// paths it touched.
+/// paths it touched. Both output modes read the same pair of fixture ledgers
+/// in separate processes.
 #[test]
 fn catchup_git_processes_do_not_grow_with_the_ledger() {
+    let (small_repo, large_repo) = (ledger(3), ledger(6));
     for args in [&[][..], &["--json"][..]] {
-        let processes = |count: usize| {
-            let repo = ledger(count);
-            let (counts, output) = counted(&repo, args);
+        let processes = |repo: &Repo| {
+            let (counts, output) = counted(repo, args);
             if args.is_empty() {
                 assert!(output.contains("owed-0.txt"), "{output}");
             }
             counts["git_processes"].as_u64().unwrap()
         };
-        let (small, large) = (processes(3), processes(6));
+        let (small, large) = (processes(&small_repo), processes(&large_repo));
         assert_eq!(
             small, large,
             "catchup {args:?}: {small} Git processes for 3 changes, {large} for 6"
