@@ -274,11 +274,29 @@ impl Seed {
         let initializer_spawns = git_spawns_during(|| {
             git(
                 &root,
-                &["init", "-b", "master", &format!("--object-format={format}")],
+                &[
+                    "init",
+                    "--template=",
+                    "-b",
+                    "master",
+                    &format!("--object-format={format}"),
+                ],
             );
+            fs::create_dir_all(root.join(".git/hooks")).unwrap();
+            fs::create_dir_all(root.join(".git/info")).unwrap();
+            fs::write(root.join(".git/info/exclude"), b"").unwrap();
             git(&root, &["config", "user.name", "Tester"]);
             git(&root, &["config", "user.email", "tester@example.invalid"]);
             git(&root, &["config", "commit.gpgsign", "false"]);
+            {
+                use std::io::Write;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(root.join(".git/config"))
+                    .unwrap()
+                    .write_all(b"[maintenance]\n\tauto = false\n")
+                    .unwrap();
+            }
             fs::write(root.join("README.md"), "hello\n").unwrap();
             git(&root, &["add", "."]);
             git(&root, &["commit", "-m", "init"]);

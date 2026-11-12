@@ -21,3 +21,7 @@ seconds. Idle-read, lock-wait and timeout tests retain their ordinary timing.
 
 The integration selector runs every test for an unclassified change. Its narrow
 selections and Markdown exclusions are defined in `.arc/test-selection.py`.
+
+Git seeds contain the initial commit, refs, index and configuration. Hook
+directories and exclude files start empty. Commits run with automatic Git
+maintenance disabled; tests invoke explicit collection and pruning when required.

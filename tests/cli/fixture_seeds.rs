@@ -65,6 +65,54 @@ fn fixture_commands_use_the_selected_executable() {
     );
 }
 
+/// Claim: fixtures start with empty hook and exclude locations and commits
+/// spawn no automatic maintenance, while explicit garbage collection keeps
+/// the same valid head. Rejects inactive template copies, background maintenance
+/// processes and disabling the explicit pruning that retention tests require.
+#[test]
+fn fixtures_omit_inactive_templates_and_automatic_maintenance() {
+    for format in FORMATS {
+        let repo = Repo::with_object_format(format);
+        assert!(
+            fs::read_dir(repo.root.join(".git/hooks"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "{format} fixture copied inactive hook templates"
+        );
+        assert!(fs::read(repo.root.join(".git/info/exclude"))
+            .unwrap()
+            .is_empty());
+        let trace = repo.home.join("git-trace.jsonl");
+        let output = Command::new("git")
+            .current_dir(&repo.root)
+            .args(["commit", "--allow-empty", "-m", "test: fixture maintenance"])
+            .envs(NO_EDITOR)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.home.join(".gitconfig"))
+            .env("XDG_CONFIG_HOME", repo.home.join(".config"))
+            .env("GIT_TRACE2_EVENT", &trace)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let events = fs::read_to_string(trace).unwrap();
+        let automatic = events.lines().any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "child_start"
+                && event["argv"].as_array().is_some_and(|arguments| {
+                    arguments
+                        .iter()
+                        .any(|argument| argument.as_str() == Some("maintenance"))
+                })
+        });
+        assert!(!automatic, "{format} commit spawned automatic maintenance");
+        let head = repo.head(&repo.root);
+        git(&repo.root, &["gc", "--prune=now", "--quiet"]);
+        assert_eq!(repo.head(&repo.root), head, "{format} explicit collection");
+        git(&repo.root, &["fsck", "--no-progress"]);
+    }
+}
+
 /// Every file under each of `dirs`, by path, with a digest of its bytes.
 fn files(dirs: &[&Path]) -> Vec<(PathBuf, String)> {
     fn walk(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
