@@ -714,3 +714,30 @@ fn budget_named_path_reuse_refuses_until_explicit_rerun() {
         .success();
     assert_eq!(fs::read_to_string(counter).unwrap().lines().count(), 2);
 }
+
+/// Claim: verification's recent timing median counts observed runs once, even
+/// after repeated selector reuse. Rejects copied source clocks multiplying a slow
+/// sample and warning above 80% when the observed-run median is below it.
+#[test]
+fn budget_warning_median_does_not_count_selector_receipts_as_runs() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[selection]\ninert=['docs/']\n[gates.unit]\ncommand='true'\npaths=['src/']\nbudget='10s'\n");
+    let (_, wt, _) = change_with_patchset(&repo, "median-budget");
+    verify(&repo, &wt, 9000, 0);
+    fs::create_dir_all(wt.join("docs")).unwrap();
+    for i in 0..5 {
+        repo.commit(
+            &wt,
+            "docs/note.md",
+            &format!("{i}\n"),
+            "test: advance inert scope",
+        );
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    }
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "6000")
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("recent command median").not());
+}

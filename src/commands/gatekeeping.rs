@@ -3136,7 +3136,11 @@ fn record_verifications(
                         .iter()
                         .rev()
                         .filter(|e| {
-                            e.command == item.command
+                            e.gate == item.gate
+                                && e.delta.is_none()
+                                && !e.attested
+                                && e.result != VerifyResult::NotAdmitted
+                                && e.command == item.command
                                 && e.timeout_seconds == item.timeout_seconds
                                 && e.environment.as_ref().map(|e| &e.identity)
                                     == item.environment_identity.as_ref()
