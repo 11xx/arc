@@ -1548,7 +1548,9 @@ RUN A CHANGE
   Gates run sequentially, so this total bounds their summed command budgets
   within one attempt; preparation, admission, replay and additional split
   attempts are outside that bound. Before authorization, every shared receipt
-  is judged against every requiring member's budget. Missing run_ms or an
+  is judged against every requiring member's budget. A budgeted gate refuses
+  authorization if its selected receipt cannot be resolved on the top member.
+  Missing run_ms or an
   over-budget pass refuses with the member, gate, run time and budget, leaves
   the target unmoved and does not trigger splitting or an implicit retry.
   Effective budgets, totals and sources are pinned, confirmed and retained in

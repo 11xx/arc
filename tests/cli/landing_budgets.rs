@@ -458,3 +458,98 @@ fn landing_budgets_confirm_budget_only_authority_changes_stack() {
 fn landing_budgets_confirm_budget_only_authority_changes_composed() {
     landing_budgets_confirm_budget_only_authority_changes(true);
 }
+
+fn move_verifications(repo: &Repo, from: &str, to: &str) {
+    for entry in fs::read_dir(event_dir(repo, from)).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if !event["event_type"]
+            .as_str()
+            .unwrap()
+            .starts_with("verification-")
+        {
+            continue;
+        }
+        event["change_id"] = json!(to);
+        fs::write(
+            event_dir(repo, to).join(path.file_name().unwrap()),
+            serde_json::to_vec(&event).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(path).unwrap();
+    }
+}
+
+fn missing_budget_receipt(composed: bool, reuse: &str, lower_only: bool) {
+    let repo = Repo::new();
+    let selector = "python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(dict(schema=\"arc-gate-selection/1\",complete=True,request=d,gates=[])))'";
+    repo.declare_gates_locally(&format!(
+        "[gates.unit]\ncommand='true'\nbudget='10s'\n{}{}",
+        if lower_only {
+            "profiles=['lower']\n".into()
+        } else {
+            String::new()
+        },
+        if reuse == "selected" {
+            format!("selector={selector:?}\n")
+        } else {
+            String::new()
+        },
+    ));
+    let [(lower, _, _), (upper, wt, _)] = pair(&repo, composed, true);
+    if lower_only {
+        rewrite_event(&repo, &lower, "change-opened", |event| {
+            event["profile"] = json!("lower")
+        });
+    }
+    if reuse != "fresh" {
+        repo.arc(&wt)
+            .env("ARC_TEST_COMMAND_RUN_MS", "9000")
+            .args(["verify", "--all"])
+            .assert()
+            .success();
+        if reuse == "selected" {
+            repo.commit(&wt, "docs.md", "documentation\n", "test: selected delta");
+            snapshot_and_approve(&repo, &wt);
+            repo.arc(&wt).args(["verify", "--all"]).assert().success();
+            assert!(receipts(&repo, &upper)
+                .iter()
+                .any(|r| !r["delta"].is_null()));
+        }
+    }
+    let before = repo.head(&repo.root);
+    let (child, reader) = paused_land(&repo, &lower, &upper);
+    move_verifications(&repo, &upper, &lower);
+    assert!(receipts(&repo, &upper).is_empty());
+    assert!(!receipts(&repo, &lower).is_empty());
+    let (code, error) = release_land(child, reader);
+    assert_unmoved(&repo, &before, &[&lower, &upper]);
+    assert_eq!(code, 5, "{error}");
+    assert!(error.contains(&lower), "{error}");
+    assert!(error.contains("gate unit: no selected receipt"), "{error}");
+    assert!(
+        error.contains("run_ms is missing for budget 10s"),
+        "{error}"
+    );
+}
+
+/// Claim: a stack refuses a budgeted gate when its selected receipt cannot be
+/// resolved on the top member, including reused and selected evidence. Rejects
+/// treating missing receipt lookup as successful budget judgment.
+#[test]
+fn landing_budgets_missing_receipt_stack() {
+    for reuse in ["fresh", "exact", "selected"] {
+        missing_budget_receipt(false, reuse, false);
+    }
+}
+
+/// Claim: composed acceptance resolves every budgeted receipt on the top member,
+/// including a lower-only gate and reused or selected receipts. Rejects a cached
+/// gate key authorizing a receipt that lives only on another change.
+#[test]
+fn landing_budgets_missing_receipt_composed() {
+    for reuse in ["fresh", "exact", "selected"] {
+        missing_budget_receipt(true, reuse, false);
+    }
+    missing_budget_receipt(true, "fresh", true);
+}

@@ -1165,28 +1165,57 @@ fn crash_point(phase: &str) {
     let _ = phase;
 }
 
+/// Missing receipts block authorization; observed cost refusals also stop splitting.
+enum BudgetRefusal {
+    MissingReceipt(String),
+    Observed(String),
+}
+
 /// Judge the shared receipts against each member's effective obligations.
 fn budget_refusal(
     plan: &Plan,
     top: &ChangeState,
     evidence: &BTreeMap<String, String>,
-) -> Option<String> {
+) -> Option<BudgetRefusal> {
+    let mut missing = None;
     for member in &plan.members {
         for (name, gate) in &member.gate_budgets {
+            let Some(budget) = gate.budget_ms else {
+                continue;
+            };
             let receipt = evidence.get(name).and_then(|id| {
                 top.verifications
                     .iter()
                     .find(|receipt| &receipt.event_id == id)
             });
-            let Some(receipt) = receipt else { continue };
-            let judgement =
-                crate::gate_budget::judge(gate.budget_ms, &gate.sources, receipt.timing.run_ms);
-            if let Some(reason) = judgement.reason(&receipt.timing, &receipt.hostname) {
-                return Some(format!("{}: gate {name}: {reason}", member.change_id));
+            match receipt {
+                Some(receipt) => {
+                    let judgement = crate::gate_budget::judge(
+                        Some(budget),
+                        &gate.sources,
+                        receipt.timing.run_ms,
+                    );
+                    if let Some(reason) = judgement.reason(&receipt.timing, &receipt.hostname) {
+                        return Some(BudgetRefusal::Observed(format!(
+                            "{}: gate {name}: {reason}",
+                            member.change_id
+                        )));
+                    }
+                }
+                None => {
+                    missing.get_or_insert_with(|| {
+                        let selected = evidence.get(name).map(|id| format!(" {id}")).unwrap_or_default();
+                        BudgetRefusal::MissingReceipt(format!(
+                            "{}: gate {name}: no selected receipt{selected} in top change {}; run_ms is missing for budget {}; budget source {}",
+                            member.change_id, top.change_id, crate::gate_budget::duration(budget),
+                            crate::gate_budget::sources(&gate.sources),
+                        ))
+                    });
+                }
             }
         }
     }
-    None
+    missing
 }
 
 fn reported_evidence(report: &crate::status::StatusReport) -> BTreeMap<String, String> {
@@ -1596,7 +1625,9 @@ fn run_attempt(
         match gated {
             Ok((0, evidence)) => Some(evidence),
             Ok((_, evidence)) => {
-                if let Some(reason) = budget_refusal(&pinned, &store.state(&top)?, &evidence) {
+                if let Some(BudgetRefusal::Observed(reason)) =
+                    budget_refusal(&pinned, &store.state(&top)?, &evidence)
+                {
                     abandon(ctx, store, &attempt, &reason)?;
                     eprintln!("Cannot land: {reason}; nothing closed");
                     return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
@@ -1678,7 +1709,9 @@ fn run_attempt(
                 &pinned.target_branch,
                 crate::integration::Shape::FfOnly,
             )?;
-            if let Some(reason) = budget_refusal(&pinned, &state, &reported_evidence(&top_report)) {
+            if let Some(BudgetRefusal::Observed(reason)) =
+                budget_refusal(&pinned, &state, &reported_evidence(&top_report))
+            {
                 abandon(ctx, store, &attempt, &reason)?;
                 eprintln!("Cannot land: {reason}; nothing closed");
                 return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
@@ -1984,7 +2017,9 @@ fn commit(
     let selected_evidence = composed_evidence
         .clone()
         .unwrap_or_else(|| reported_evidence(top_report));
-    if let Some(reason) = budget_refusal(&plan, top_state, &selected_evidence) {
+    if let Some(BudgetRefusal::MissingReceipt(reason) | BudgetRefusal::Observed(reason)) =
+        budget_refusal(&plan, top_state, &selected_evidence)
+    {
         abandon_locked(ctx, store, &attempt, &reason)?;
         eprintln!("Cannot land: {reason}; nothing closed");
         return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
