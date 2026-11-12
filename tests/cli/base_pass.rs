@@ -387,26 +387,37 @@ fn structural_paths_and_unusual_names_are_complete() {
     }
 }
 
-/// Claim: budget reductions preserve source selection and historical replay,
-/// while refusing current acceptance without an implicit retry or fallback.
+/// Claim: an over-budget newest entry executes once rather than using an older
+/// faster pass. Rejects either cherry-picking the old pass or refusing without
+/// executing a previously unobserved gate; later observations are not retried.
 #[test]
-fn budget_reduction_refuses_the_selected_base_pass_without_execution() {
-    let declaration = GATES.replace("command='true'", "command='true'\nbudget='1s'");
-    let repo = seed(&declaration);
+fn budget_reduction_executes_without_an_older_faster_fallback() {
+    let declaration = GATES.replace("command='true'", "command='true'\nbudget='10s'");
+    let repo = Repo::new();
+    repo.redeclare_gates(&declaration);
+    for (slug, ms) in [("fast", "100"), ("slow", "9000")] {
+        let (id, wt) = begin(&repo, slug, &format!("{slug}.md"));
+        repo.arc(&wt)
+            .env("ARC_TEST_COMMAND_RUN_MS", ms)
+            .args(["verify", "--all", "--rerun"])
+            .assert()
+            .success();
+        integrate_base_change(&repo, &id, &wt);
+    }
     repo.declare_gates_locally(
-        "[gates.unit]\ncommand='true'\npaths=['src/']\nevents=['integration']\nbudget='1ms'\n",
+        "[gates.unit]\ncommand='true'\npaths=['src/']\nevents=['integration']\nbudget='1s'\n",
     );
     let (_, wt) = begin(&repo, "budget", "notes.md");
     repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1100")
         .args(["verify", "--all"])
         .assert()
-        .code(1)
-        .stdout(predicates::str::contains("over budget"));
+        .code(1);
     let s = state(&repo, &wt);
-    assert_eq!(bases(&s), 2);
-    assert_eq!(executed(&s), 0);
+    assert_eq!(bases(&s), 1, "{s}");
+    assert_eq!(executed(&s), 1, "{s}");
     repo.arc(&wt).args(["verify", "--all"]).assert().code(1);
-    assert_eq!(executed(&state(&repo, &wt)), 0);
+    assert_eq!(executed(&state(&repo, &wt)), 1);
 }
 
 /// Claim: isolated replay rejects fabricated paths and ancestry even when the
@@ -1760,4 +1771,215 @@ fn raise_never_uses_a_base_pass_as_direct_execution() {
             .is_empty(),
         "{id}"
     );
+}
+
+fn integrate_base_change(repo: &Repo, id: &str, wt: &Path) {
+    repo.arc(wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", id])
+        .assert()
+        .success();
+}
+
+/// Claim: consecutive unaffected integrations reuse real executions across empty
+/// baseline snapshots. Rejects alternating between reuse and full execution or
+/// relabelling reused evidence as an execution in a later baseline.
+#[test]
+fn three_documentation_integrations_execute_no_gate_after_warming() {
+    let repo = seed(GATES);
+    for index in 0..3 {
+        let (id, wt) = begin(
+            &repo,
+            &format!("consecutive-{index}"),
+            &format!("notes-{index}.md"),
+        );
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        let s = state(&repo, &wt);
+        assert_eq!(bases(&s), 2, "documentation change {index}: {s}");
+        assert_eq!(executed(&s), 0, "documentation change {index}: {s}");
+        integrate_base_change(&repo, &id, &wt);
+        let last: Value =
+            serde_json::from_slice(&fs::read(baseline_files(&repo).pop().unwrap()).unwrap())
+                .unwrap();
+        assert!(last["baseline"]["gates"].as_object().unwrap().is_empty());
+    }
+}
+
+/// Claim: the newest retained entry blocks an older matching declaration even
+/// when the declaration returns to an earlier value. Rejects searching past an
+/// incompatible entry for an older pass that would otherwise fit the diff.
+#[test]
+fn newest_gate_entry_blocks_an_older_matching_declaration() {
+    let repo = seed(GATES);
+    let different = GATES.replace(
+        "[gates.other]\ncommand='true'",
+        "[gates.other]\ncommand='printf other-v2'",
+    );
+    repo.commit(
+        &repo.root,
+        ".arc/gates.toml",
+        &different,
+        "test: changed target declaration",
+    );
+    let (id, wt) = begin(&repo, "newer-entries", "src/update.rs");
+    repo.arc(&wt)
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success();
+    integrate_base_change(&repo, &id, &wt);
+    repo.commit(
+        &repo.root,
+        ".arc/gates.toml",
+        GATES,
+        "test: restored target declaration",
+    );
+    let (_, wt) = begin(&repo, "matching-older", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let s = state(&repo, &wt);
+    assert_eq!(
+        bases(&s),
+        0,
+        "the newest entries must prevent older matching passes: {s}"
+    );
+    assert_eq!(executed(&s), 2, "{s}");
+}
+
+/// Claim: covered paths changed before the change's own base still force the
+/// gate to execute. Rejects comparing only the change delta rather than the
+/// complete chosen-baseline-to-head diff.
+#[test]
+fn covered_target_changes_since_the_baseline_execute_the_gate() {
+    let repo = seed(GATES);
+    repo.commit(
+        &repo.root,
+        "src/target-update.rs",
+        "changed\n",
+        "test: target advances",
+    );
+    let (id, wt) = begin(&repo, "after-target-update", "notes.md");
+    let output = repo.arc(&wt).args(["verify", "--all"]).output().unwrap();
+    let direct = event_files(&repo, &id)
+        .iter()
+        .filter(|file| {
+            let event: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+            event["event_type"] == "verification-recorded" && event["gate"] == "unit"
+        })
+        .count();
+    assert_eq!(
+        direct, 1,
+        "the covered target path must cause execution: {output:?}"
+    );
+    assert!(output.status.success(), "{output:?}");
+    let s = state(&repo, &wt);
+    assert_eq!(bases(&s), 1, "{s}");
+    assert_eq!(executed(&s), 1, "{s}");
+}
+
+/// Claim: gates can cite different execution baselines in one run, and their
+/// independent proofs survive source-ledger removal, standalone transport and
+/// publication auditing. Rejects one shared baseline/diff or missing citations.
+#[test]
+fn two_baselines_replay_export_import_and_audit_independently() {
+    let source = seed(GATES);
+    let (code, code_wt) = begin(&source, "unit-only", "src/update.rs");
+    source
+        .arc(&code_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    integrate_base_change(&source, &code, &code_wt);
+    let (id, wt) = begin(&source, "two-baselines", "notes.md");
+    source.arc(&wt).args(["verify", "--all"]).assert().success();
+    let s = state(&source, &wt);
+    assert_eq!(bases(&s), 2, "both gates must reuse: {s}");
+    assert_eq!(executed(&s), 0, "{s}");
+    let ids = s["verifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["base_pass"]["baseline_event_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), 2, "{s}");
+    for entry in fs::read_dir(source.root.join(".git/arc/changes")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_str().unwrap() != id {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+    assert_eq!(bases(&state(&source, &wt)), 2);
+    let input = source.home.join("two-baselines.json");
+    source
+        .arc(&wt)
+        .args(["export", &id, "--output", input.to_str().unwrap()])
+        .assert()
+        .success();
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    assert_eq!(
+        bundle["repository_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["event_type"] == "gate-baseline-recorded")
+            .count(),
+        2
+    );
+    integrate_base_change(&source, &id, &wt);
+    source
+        .arc(&source.root)
+        .args(["publication", "--target", "master", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("publication gate unit: pass"))
+        .stdout(predicates::str::contains("publication gate other: pass"));
+    let receiver = Repo::new();
+    receiver
+        .arc(&receiver.root)
+        .args(["replica", "init", "authority"])
+        .assert()
+        .success();
+    let origin = bundle["repository_id"].as_str().unwrap().to_owned();
+    receiver
+        .arc(&receiver.root)
+        .args(["replica", "pair", "producer", "--repository-id", &origin])
+        .assert()
+        .success();
+    let replica = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["replica", "status", "--json"]),
+    );
+    bundle["project_id"] = replica["project_id"].clone();
+    deliver_git_objects(&source, &receiver);
+    git(
+        &receiver.root,
+        &["reset", "--hard", "refs/delivered/heads/master"],
+    );
+    git(
+        &receiver.root,
+        &[
+            "branch",
+            "arc/two-baselines",
+            "refs/delivered/heads/arc/two-baselines",
+        ],
+    );
+    receiver.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{origin}'\n[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['facts','integration']\nactors=['tester']\n"));
+    fs::write(&input, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let digest = hex::encode(Sha256::digest(fs::read(&input).unwrap()));
+    receiver
+        .arc(&receiver.root)
+        .args([
+            "import",
+            input.to_str().unwrap(),
+            "--publisher",
+            "channel",
+            "--received-sha256",
+            &digest,
+        ])
+        .assert()
+        .success();
+    let imported = json_stdout(receiver.arc(&receiver.root).args(["show", &id, "--json"]));
+    assert_eq!(bases(&imported), 2, "{imported}");
 }

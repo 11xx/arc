@@ -423,18 +423,33 @@ pub fn unobserved(state: &ChangeState, gate: &str) -> bool {
         .any(|entry| entry.gate.as_deref() == Some(gate))
 }
 
-/// Select one newest eligible target baseline before considering individual gates.
+#[derive(Clone)]
 pub struct Source {
     pub event_id: String,
     pub baseline: std::sync::Arc<Baseline>,
     pub target_revision: String,
 }
 
-pub fn source(cwd: &Path, store: &Store, state: &ChangeState, revision: &str) -> Option<Source> {
+pub struct Sources {
+    baselines: Vec<Source>,
+}
+
+impl Sources {
+    pub fn for_gate(&self, gate: &str) -> Option<&Source> {
+        self.baselines
+            .iter()
+            .find(|source| source.baseline.gates.contains_key(gate))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.baselines.is_empty()
+    }
+}
+
+pub fn sources(cwd: &Path, store: &Store, state: &ChangeState, revision: &str) -> Option<Sources> {
     let _selection = crate::perf::phase("base_selection");
     let target = crate::gitio::branch_head(cwd, &state.target_branch).ok()?;
-    let declarations = gates::load_at(cwd, &target).ok()?;
-    if !declarations.selection.base_passes {
+    if !gates::load_at(cwd, &target).ok()?.selection.base_passes {
         return None;
     }
     let scope = store.privilege_scope().ok()?;
@@ -446,12 +461,11 @@ pub fn source(cwd: &Path, store: &Store, state: &ChangeState, revision: &str) ->
         .ok()?
         .into_iter()
         .collect::<BTreeMap<_, _>>();
-    store
-        .repository_events()
-        .ok()?
+    let events = store.repository_events().ok()?;
+    let baselines = events
         .iter()
         .rev()
-        .find_map(|event| {
+        .filter_map(|event| {
             let Payload::GateBaselineRecorded { baseline } = &event.payload else {
                 return None;
             };
@@ -468,21 +482,23 @@ pub fn source(cwd: &Path, store: &Store, state: &ChangeState, revision: &str) ->
                 && retained.get(&format!(
                     "refs/arc/baselines/{}/target",
                     baseline.completion.event_id
-                )) == Some(&baseline.revision)
-                && first_parent(cwd, &baseline.revision, &target)
+                )) == Some(&baseline.revision))
+            .then_some((event, baseline))
+        })
+        .take(RETAINED_BASELINES)
+        .filter(|(_, baseline)| {
+            first_parent(cwd, &baseline.revision, &target)
                 && first_parent(cwd, &baseline.revision, revision)
                 && baseline.validate().is_ok()
                 && validate_baseline_git(cwd, baseline).is_ok()
-                && crate::gitio::commit_tree(cwd, &baseline.revision)
-                    .ok()
-                    .as_deref()
-                    == Some(baseline.tree.as_str()))
-            .then(|| Source {
-                event_id: event.event_id.clone(),
-                baseline: std::sync::Arc::new(baseline.as_ref().clone()),
-                target_revision: target.clone(),
-            })
         })
+        .map(|(event, baseline)| Source {
+            event_id: event.event_id.clone(),
+            baseline: std::sync::Arc::new(baseline.as_ref().clone()),
+            target_revision: target.clone(),
+        })
+        .collect();
+    Some(Sources { baselines })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -501,7 +517,11 @@ pub fn select(
         return None;
     }
     let entry = source.baseline.gates.get(name)?;
-    if entry.identity != gates::declaration_identity(gate) {
+    if entry.identity != gates::declaration_identity(gate)
+        || !gate
+            .budget_judgement(entry.execution.timing.run_ms)
+            .accepted()
+    {
         return None;
     }
     let observed = &entry.execution.environment;

@@ -5822,14 +5822,20 @@ BASE PASSES
   Reused, bypassed, attested, untimed, over-budget and dirty-waived evidence
   cannot establish an entry. An empty baseline establishes no gate pass.
 
-  Each gate's first observation on a change may use its target's newest eligible
-  local baseline in both the actual target's and evaluated head's first-parent
-  history. Other gates' observations do not consume that eligibility. Any earlier
+  Each gate's first observation may use the newest retained eligible local
+  baseline containing an entry for that gate, in both the actual target's and
+  evaluated head's first-parent history. Different gates may cite different
+  baselines; an empty snapshot does not obscure an older execution. Other gates' observations do not consume that eligibility. Any earlier
   observation of the same gate, at any head, prevents a baseline answer, including
   a pass, failure, not-admitted attempt or budget refusal. Concurrent verifiers
   recheck the gate under its change transition lock before publishing an answer.
-  Selection chooses the baseline before considering individual gate entries or
-  current budgets. Missing entries run; an older faster receipt is never sought.
+  Selection considers at most eight retained baselines for the target/profile,
+  newest first, and stops at the first eligible baseline holding the gate's
+  entry. That entry must match the declaration, environment and coverage and
+  fit the budget in force. Otherwise the gate executes; an older matching or
+  faster entry is never sought. A gate with no retained entry executes.
+  Each witness proves the complete diff from its chosen baseline to the
+  evaluated tree. Paths and Git validation are shared only for the same subject.
   Later failures, not-admitted attempts and budget refusals cannot be rescued
   by a baseline. Rewrites do not advance baseline coordinates. Missing objects,
   nonancestor or force-moved history, changed declaration/coverage context,

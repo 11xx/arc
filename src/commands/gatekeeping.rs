@@ -875,7 +875,9 @@ fn reuse_named_gate(
     let head = gitio::head(&run_ctx.cwd)?;
     let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
     if gate.coverage.base_passes && crate::base_pass::unobserved(st, name) {
-        if let Some(source) = crate::base_pass::source(&run_ctx.cwd, store, st, &head) {
+        if let Some(source) = crate::base_pass::sources(&run_ctx.cwd, store, st, &head)
+            .and_then(|sources| sources.for_gate(name).cloned())
+        {
             let paths = gates::delta_paths(&run_ctx.cwd, &source.baseline.tree, &tree);
             let clean = gitio::git(
                 &run_ctx.cwd,
@@ -1835,18 +1837,18 @@ fn partition<'a>(
         .map(|(name, _)| (*name).clone())
         .collect::<Vec<_>>();
     let mut deltas = BTreeMap::new();
-    let baseline = (event == GateEvent::Integration
+    let baselines = (event == GateEvent::Integration
         && gates.iter().any(|(name, gate)| {
             gate.coverage.base_passes && crate::base_pass::unobserved(st, name)
         }))
     .then(|| ctx.store().ok())
     .flatten()
-    .and_then(|store| crate::base_pass::source(&ctx.cwd, &store, st, answering.head));
-    let baseline_paths = baseline
+    .and_then(|store| crate::base_pass::sources(&ctx.cwd, &store, st, answering.head));
+    let evaluated_revision = baselines
         .as_ref()
-        .and_then(|source| gates::delta_paths(&ctx.cwd, &source.baseline.tree, answering.tree));
-    let evaluated_revision = baseline.as_ref().and_then(|_| gitio::head(&ctx.cwd).ok());
-    let clean = baseline.is_some()
+        .filter(|sources| !sources.is_empty())
+        .and_then(|_| gitio::head(&ctx.cwd).ok());
+    let clean = evaluated_revision.is_some()
         && gitio::git(
             &ctx.cwd,
             &["status", "--porcelain=v1", "--untracked-files=normal"],
@@ -1912,14 +1914,21 @@ fn partition<'a>(
                 }
             }
             partition.delta_reuses.push((name.clone(), source, delta));
-        } else if let Some(witness) = baseline
+        } else if let Some(witness) = baselines
             .as_ref()
-            .zip(baseline_paths.as_ref())
+            .filter(|_| crate::base_pass::unobserved(st, name))
+            .and_then(|sources| sources.for_gate(name))
             .filter(|_| clean)
-            .and_then(|(baseline, paths)| {
+            .and_then(|source| {
+                let paths = deltas
+                    .entry(source.baseline.tree.clone())
+                    .or_insert_with(|| {
+                        gates::delta_paths(&ctx.cwd, &source.baseline.tree, answering.tree)
+                    })
+                    .as_deref()?;
                 crate::base_pass::select(
                     st,
-                    baseline,
+                    source,
                     name,
                     gate,
                     evaluated_revision.as_deref()?,
