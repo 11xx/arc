@@ -96,6 +96,9 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         }
         for event in &events {
+            for commit in crate::base_pass::cited_commits(&event.payload) {
+                add(&event.event_id, "base-pass Git witness".into(), commit);
+            }
             for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
                 add(&event.event_id, "disclosure Git support".into(), commit);
             }
@@ -125,6 +128,14 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
         })
         .collect();
     for event in &repository_events {
+        for commit in crate::base_pass::cited_commits(&event.payload) {
+            found.push(Cited {
+                change_id: Store::REPOSITORY_SCOPE.into(),
+                subject: event.event_id.clone(),
+                what: "base-pass Git witness".into(),
+                commit: commit.to_owned(),
+            });
+        }
         for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
             found.push(Cited {
                 change_id: Store::REPOSITORY_SCOPE.into(),

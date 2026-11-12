@@ -608,7 +608,7 @@ impl Ctx {
         gitio::primary_worktree(&self.cwd).unwrap_or_else(|_| self.cwd.clone())
     }
 
-    fn event(
+    pub(crate) fn event(
         &self,
         store: &Store,
         change_id: &str,

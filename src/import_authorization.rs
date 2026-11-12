@@ -187,6 +187,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
             roles
         }
         ChangeIntegrated { .. }
+        | GateBaselineRecorded { .. }
         | IntegrationAsserted { .. }
         | ChangeClosed { .. }
         | ReadyToSend { .. } => vec![vec![Integration]],
@@ -216,6 +217,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | GateBudgetRaised { .. }
         | PostIntegrationVerificationRecorded { .. }
         | VerificationReused { .. }
+        | VerificationBaseReused { .. }
         | HoldSet { .. }
         | IterationScopeSet { .. }
         | ForgeProjection { .. }

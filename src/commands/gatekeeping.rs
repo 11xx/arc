@@ -650,6 +650,7 @@ fn verify_with_landing(
             budget_refused,
             mut reused,
             delta_reuses,
+            base_reuses,
             to_run,
         } = partition(
             run_ctx,
@@ -665,7 +666,26 @@ fn verify_with_landing(
             event,
             reuse,
         );
-        append_reuses(ctx, &store, &change_id, &run_id, &head, &tree, &reused)?;
+        append_base_reuses(ctx, &store, &change_id, &run_id, &head, &tree, &base_reuses)?;
+        reused.extend(base_reuses.iter().map(|(name, witness)| {
+            (
+                name.clone(),
+                crate::base_pass::execution(witness).event_id.clone(),
+            )
+        }));
+        append_reuses(
+            ctx,
+            &store,
+            &change_id,
+            &run_id,
+            &head,
+            &tree,
+            &reused
+                .iter()
+                .filter(|(name, _)| !base_reuses.iter().any(|(base, _)| base == name))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )?;
         append_delta_reuses(
             ctx,
             &store,
@@ -739,6 +759,7 @@ fn verify_with_landing(
         declaration,
         budget,
         adopt_budget_format,
+        profiled_gate,
     } = declared_check(ctx, &st, gate.as_deref(), command)?;
     if adopt_budget_format {
         store.adopt_budgets()?;
@@ -786,6 +807,27 @@ fn verify_with_landing(
     }
     let falsification =
         resolve_falsification(&store, &change_id, gate.as_deref(), &cmd, falsified_by)?;
+    let run_id = if !attest {
+        profiled_gate
+            .as_ref()
+            .zip(gate.as_ref())
+            .map(|(declared, name)| {
+                let head = gitio::head(&run_ctx.cwd)?;
+                start_verification_run_for_event(
+                    run_ctx,
+                    &store,
+                    &change_id,
+                    &head,
+                    VerificationRunMode::Sequential,
+                    reuse,
+                    &[(name, declared)],
+                    event,
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
     record_verification(
         run_ctx,
         &store,
@@ -795,7 +837,7 @@ fn verify_with_landing(
             budget,
             exclusive,
             preparation_ms,
-            run_id: None,
+            run_id,
             probe: None,
             gate,
             command: cmd,
@@ -832,6 +874,62 @@ fn reuse_named_gate(
     };
     let head = gitio::head(&run_ctx.cwd)?;
     let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
+    if gate.coverage.base_passes {
+        if let Some(source) = crate::base_pass::source(&run_ctx.cwd, store, st, &head) {
+            let paths = gates::delta_paths(&run_ctx.cwd, &source.baseline.tree, &tree);
+            let clean = gitio::git(
+                &run_ctx.cwd,
+                &["status", "--porcelain=v1", "--untracked-files=normal"],
+            )?
+            .is_empty();
+            if let Some(witness) = paths.filter(|_| clean).and_then(|paths| {
+                crate::base_pass::select(
+                    &source,
+                    name,
+                    gate,
+                    &head,
+                    &tree,
+                    None,
+                    environment,
+                    &paths,
+                )
+            }) {
+                let Payload::VerificationRecorded {
+                    timing, hostname, ..
+                } = &crate::base_pass::execution(&witness).payload
+                else {
+                    unreachable!()
+                };
+                let judgement = gate.budget_judgement(timing.run_ms);
+                if let Some(reason) = judgement.reason(timing, hostname) {
+                    println!("gate {name}: {reason}; rerun explicitly with --rerun");
+                }
+                let run_id = start_verification_run(
+                    run_ctx,
+                    store,
+                    change_id,
+                    &head,
+                    VerificationRunMode::Sequential,
+                    true,
+                    &[(name, gate)],
+                )?;
+                println!(
+                    "gate {name}: base pass from {} at {}",
+                    witness.baseline_event_id, witness.baseline.revision
+                );
+                append_base_reuses(
+                    run_ctx,
+                    store,
+                    change_id,
+                    &run_id,
+                    &head,
+                    &tree,
+                    &[(name.clone(), witness)],
+                )?;
+                return Ok(Some(if judgement.accepted() { 0 } else { 1 }));
+            }
+        }
+    }
     let legacy_trees = status::legacy_evidence_trees(st, &run_ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
     let label = "green at head";
@@ -1208,6 +1306,7 @@ fn verify_against(
         budget_refused,
         mut reused,
         delta_reuses,
+        base_reuses,
         to_run,
     } = partition(
         probe_ctx,
@@ -1218,6 +1317,25 @@ fn verify_against(
         event,
         reuse,
     );
+    append_base_reuses(
+        ctx,
+        store,
+        change_id,
+        &run_id,
+        &synthesized,
+        &merged_tree,
+        &base_reuses,
+    )?;
+    let base_names = base_reuses
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    reused.extend(base_reuses.iter().map(|(name, witness)| {
+        (
+            name.clone(),
+            crate::base_pass::execution(witness).event_id.clone(),
+        )
+    }));
     append_reuses(
         ctx,
         store,
@@ -1225,7 +1343,11 @@ fn verify_against(
         &run_id,
         &synthesized,
         &merged_tree,
-        &reused,
+        &reused
+            .iter()
+            .filter(|(name, _)| !base_names.contains(name))
+            .cloned()
+            .collect::<Vec<_>>(),
     )?;
     append_delta_reuses(
         ctx,
@@ -1349,6 +1471,7 @@ pub(crate) fn verify_landing_head(
         budget_refused,
         reused,
         delta_reuses,
+        base_reuses,
         to_run,
     } = partition(
         &checkout_ctx,
@@ -1359,6 +1482,15 @@ pub(crate) fn verify_landing_head(
         event,
         true,
     );
+    append_base_reuses(
+        ctx,
+        store,
+        run.change_id,
+        &run_id,
+        run.commit,
+        run.tree,
+        &base_reuses,
+    )?;
     append_reuses(
         ctx,
         store,
@@ -1632,6 +1764,7 @@ fn start_verification_run_for_event(
     let _transition = store.lock_transition(change_id)?;
     let state = store.state(change_id)?;
     let payload = Payload::VerificationRunStarted {
+        profile: Some(state.profile.clone()),
         event,
         revision: revision.to_owned(),
         mode,
@@ -1667,6 +1800,7 @@ struct Partition<'a> {
     budget_refused: usize,
     reused: Vec<(String, String)>,
     delta_reuses: Vec<(String, String, DeltaSelection)>,
+    base_reuses: Vec<(String, crate::base_pass::Reuse)>,
     to_run: Vec<(&'a String, &'a gates::Gate)>,
 }
 
@@ -1686,6 +1820,7 @@ fn partition<'a>(
     reuse: bool,
 ) -> Partition<'a> {
     let mut partition = Partition {
+        base_reuses: Vec::new(),
         budget_refused: 0,
         reused: Vec::new(),
         delta_reuses: Vec::new(),
@@ -1702,6 +1837,21 @@ fn partition<'a>(
         .map(|(name, _)| (*name).clone())
         .collect::<Vec<_>>();
     let mut deltas = BTreeMap::new();
+    let baseline = (event == GateEvent::Integration
+        && gates.iter().any(|(_, gate)| gate.coverage.base_passes))
+    .then(|| ctx.store().ok())
+    .flatten()
+    .and_then(|store| crate::base_pass::source(&ctx.cwd, &store, st, answering.head));
+    let baseline_paths = baseline
+        .as_ref()
+        .and_then(|source| gates::delta_paths(&ctx.cwd, &source.baseline.tree, answering.tree));
+    let evaluated_revision = baseline.as_ref().and_then(|_| gitio::head(&ctx.cwd).ok());
+    let clean = baseline.is_some()
+        && gitio::git(
+            &ctx.cwd,
+            &["status", "--porcelain=v1", "--untracked-files=normal"],
+        )
+        .is_ok_and(|text| text.is_empty());
     for (name, gate) in gates {
         let environment = declared_environment(environments, gate);
         if let Some(evidence) = reusable_evidence_for_event(
@@ -1762,6 +1912,43 @@ fn partition<'a>(
                 }
             }
             partition.delta_reuses.push((name.clone(), source, delta));
+        } else if let Some(witness) = baseline
+            .as_ref()
+            .zip(baseline_paths.as_ref())
+            .filter(|_| clean)
+            .and_then(|(baseline, paths)| {
+                crate::base_pass::select(
+                    baseline,
+                    name,
+                    gate,
+                    evaluated_revision.as_deref()?,
+                    answering.tree,
+                    answering.against_target,
+                    environment,
+                    paths,
+                )
+            })
+        {
+            let Payload::VerificationRecorded {
+                timing, hostname, ..
+            } = &crate::base_pass::execution(&witness).payload
+            else {
+                unreachable!()
+            };
+            if let Some(reason) = gate
+                .budget_judgement(timing.run_ms)
+                .reason(timing, hostname)
+            {
+                println!("gate {name}: {reason}; rerun explicitly with --rerun");
+                partition.budget_refused += 1;
+            }
+            println!(
+                "gate {name}: base pass from {} at {} (executed {})",
+                witness.baseline_event_id,
+                witness.baseline.revision,
+                crate::base_pass::execution(&witness).created_at
+            );
+            partition.base_reuses.push((name.clone(), witness));
         } else {
             partition.to_run.push((name, gate));
         }
@@ -1873,6 +2060,46 @@ fn incremental_evidence(
         return None;
     }
     Some((source.event_id.clone(), delta))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_base_reuses(
+    ctx: &Ctx,
+    store: &Store,
+    change: &str,
+    run: &str,
+    revision: &str,
+    tree: &str,
+    reuses: &[(String, crate::base_pass::Reuse)],
+) -> Result<()> {
+    if reuses.is_empty() {
+        return Ok(());
+    }
+    store.adopt_base_passes()?;
+    let _transition = store.lock_transition(change)?;
+    let mut checked = BTreeSet::new();
+    for (gate, witness) in reuses {
+        let subject = crate::base_pass::digest(&(
+            &witness.baseline_digest,
+            &witness.revision,
+            &witness.tree,
+            &witness.target_revision,
+            &witness.changed_paths,
+        ));
+        if checked.insert(subject) {
+            crate::base_pass::validate_git(&ctx.cwd, witness)?;
+        }
+        let payload = Payload::VerificationBaseReused {
+            run_id: run.into(),
+            gate: gate.clone(),
+            revision: revision.into(),
+            tree: tree.into(),
+            witness: Box::new(witness.clone()),
+        };
+        let mut event = ctx.event(store, change, payload)?;
+        store.append_local_event(&mut event)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2074,6 +2301,7 @@ fn verify_recorded(
             budget_refused,
             reused,
             delta_reuses,
+            base_reuses,
             to_run,
         } = partition(
             run_ctx,
@@ -2089,6 +2317,15 @@ fn verify_recorded(
             GateEvent::Integration,
             !rerun,
         );
+        append_base_reuses(
+            ctx,
+            &store,
+            &change_id,
+            &run_id,
+            &revision,
+            &tree,
+            &base_reuses,
+        )?;
         append_reuses(ctx, &store, &change_id, &run_id, &revision, &tree, &reused)?;
         append_delta_reuses(
             ctx,
@@ -2099,7 +2336,7 @@ fn verify_recorded(
             &tree,
             &delta_reuses,
         )?;
-        let mut passed = reused.len() + delta_reuses.len() - budget_refused;
+        let mut passed = reused.len() + delta_reuses.len() + base_reuses.len() - budget_refused;
         for (name, gate) in to_run {
             let code = record_verification(
                 run_ctx,
@@ -4815,6 +5052,11 @@ fn integrate_one(
         );
         return Err(integration_recovery(&wt, &target, cause));
     }
+    if let Err(error) =
+        crate::base_pass::record(ctx, &store, &ev, &st, || Ok(ctx.declarations(&st)?.gates))
+    {
+        eprintln!("warning: integration recorded; baseline unavailable: {error:#}");
+    }
     // Git updates the checkout before the ledger records the closure.
     // Retention and worktree cleanup are post-closure maintenance and may
     // invoke Git hooks or other arc commands, so no state lock spans them.
@@ -6377,6 +6619,11 @@ fn check(
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
     }
+    if !explain {
+        for gate in report.gates.iter().filter(|gate| gate.base_pass.is_some()) {
+            println!("gate {}: {}", gate.name, render::gate_line(gate));
+        }
+    }
     crate::render::verdict_assessments(&report.verdict_assessments);
     if let Some(queue) = &review_queue {
         queue.render();
@@ -6503,6 +6750,7 @@ pub(super) fn release_retention_refs(
 }
 
 struct DeclaredCheck {
+    profiled_gate: Option<gates::Gate>,
     declaration: Option<String>,
     adopt_budget_format: bool,
     budget: Option<crate::gate_budget::BudgetJudgement>,
@@ -6534,6 +6782,7 @@ fn declared_check(
                 None => bail!("gate {name:?} not declared in .arc/gates.toml"),
             };
             Ok(DeclaredCheck {
+                profiled_gate: declared.coverage.base_passes.then(|| declared.clone()),
                 declaration: gates::coverage_identity(declared),
                 adopt_budget_format: gates.has_budgets(),
                 budget: Some(declared.budget_judgement(None)),
@@ -6544,6 +6793,7 @@ fn declared_check(
             })
         }
         (None, Some(command)) => Ok(DeclaredCheck {
+            profiled_gate: None,
             declaration: None,
             adopt_budget_format: false,
             budget: None,

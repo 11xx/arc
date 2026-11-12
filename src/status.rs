@@ -57,6 +57,8 @@ pub enum Discrimination {
 
 #[derive(Debug, Serialize)]
 pub struct GateStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_pass: Option<crate::base_pass::Accounting>,
     pub budget: crate::gate_budget::BudgetJudgement,
     pub execution_host: Option<String>,
     pub name: String,
@@ -1689,6 +1691,10 @@ fn build_report(
                 |entry: &state::VerificationEntry| {
                     crate::state::verification_event(state, entry)
                         == crate::model::GateEvent::Integration
+                        && entry
+                            .base_pass
+                            .as_ref()
+                            .is_none_or(|base| base.target == state.target_branch)
                         && bound(entry)
                         && matches(entry)
                 },
@@ -1697,6 +1703,10 @@ fn build_report(
                 state.gate_evidence_at_matching(name, head, |entry: &state::VerificationEntry| {
                     crate::state::verification_event(state, entry)
                         == crate::model::GateEvent::Integration
+                        && entry
+                            .base_pass
+                            .as_ref()
+                            .is_none_or(|base| base.target == state.target_branch)
                         && matches(entry)
                 })
             }
@@ -1816,6 +1826,7 @@ fn build_report(
         let budget = gate.budget_judgement(evidence.and_then(|e| e.timing.run_ms));
         let budget_ok = budget.accepted();
         gate_statuses.push(GateStatus {
+            base_pass: evidence.and_then(|entry| entry.base_pass.clone()),
             budget,
             execution_host: evidence.map(|e| e.hostname.clone()),
             name: name.clone(),

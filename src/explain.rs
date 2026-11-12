@@ -277,6 +277,8 @@ pub enum Detail {
         cites: Vec<String>,
     },
     Gate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_pass: Option<crate::base_pass::Accounting>,
         gate: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         evidence_event_id: Option<String>,
@@ -1179,6 +1181,7 @@ fn gate_row(
                 "evidence {evidence_event_id} is not on this change's ledger"
             )),
             Detail::Gate {
+                base_pass: None,
                 gate: gate.to_string(),
                 evidence_event_id: Some(evidence_event_id.to_string()),
                 result: None,
@@ -1218,6 +1221,7 @@ fn gate_detail(state: &ChangeState, gate: &str, entry: &VerificationEntry) -> De
         })
         .collect();
     Detail::Gate {
+        base_pass: entry.base_pass.clone(),
         gate: gate.to_string(),
         evidence_event_id: Some(entry.event_id.clone()),
         result: Some(kebab(&entry.result)),
@@ -1308,6 +1312,7 @@ fn open_evaluation(
                     gate.name, patchset.id
                 )),
                 Detail::Gate {
+                    base_pass: None,
                     gate: gate.name.clone(),
                     evidence_event_id: None,
                     result: None,
@@ -1950,6 +1955,7 @@ fn describe(detail: &Detail) -> String {
             }
         }
         Detail::Gate {
+            base_pass,
             gate,
             evidence_event_id,
             result,
@@ -1985,6 +1991,12 @@ fn describe(detail: &Detail) -> String {
                     .map(|seconds| format!("{seconds}s"))
                     .unwrap_or_else(|| "unrecorded".to_string())
             );
+            if let Some(base) = base_pass {
+                text.push_str(&format!(
+                    ", base pass from {} at {}; executed {}",
+                    base.baseline_event_id, base.revision, base.executed_at
+                ));
+            }
             for reuse in reused {
                 let _ = std::fmt::Write::write_fmt(
                     &mut text,

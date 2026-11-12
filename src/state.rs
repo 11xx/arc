@@ -1123,6 +1123,8 @@ impl PostIntegrationVerificationEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_pass: Option<crate::base_pass::Accounting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub declaration: Option<String>,
     pub event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1406,6 +1408,8 @@ fn is_false_ref(value: &bool) -> bool {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationRunEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub run_id: String,
     pub event: crate::model::GateEvent,
     pub revision: String,
@@ -3548,11 +3552,13 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     });
             }
             Payload::VerificationRunStarted {
+                profile,
                 event,
                 revision,
                 mode,
                 skip_green,
                 gates,
+                ..
             } => {
                 let gate_names = gates
                     .iter()
@@ -3565,6 +3571,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     );
                 }
                 state.verification_runs.push(VerificationRunEntry {
+                    profile: profile.clone(),
                     run_id: ev.event_id.clone(),
                     event: *event,
                     revision: revision.clone(),
@@ -3729,6 +3736,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     )?;
                 }
                 state.verifications.push(VerificationEntry {
+                    base_pass: None,
                     declaration: declaration.clone(),
                     event_id: ev.event_id.clone(),
                     delta: None,
@@ -3770,6 +3778,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 qualification,
             } => {
                 state.verifications.push(VerificationEntry {
+                    base_pass: None,
                     declaration: None,
                     event_id: ev.event_id.clone(),
                     delta: None,
@@ -3806,6 +3815,57 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     environment: None,
                     created_at: ev.created_at,
                 });
+            }
+            Payload::VerificationBaseReused {
+                run_id,
+                gate,
+                revision,
+                tree,
+                witness,
+            } => {
+                let run = state
+                    .verification_runs
+                    .iter()
+                    .find(|run| &run.run_id == run_id)
+                    .ok_or_else(|| anyhow::anyhow!("base pass names no verification run"))?;
+                let source_run = &witness
+                    .baseline
+                    .gates
+                    .get(gate)
+                    .ok_or_else(|| anyhow::anyhow!("base pass names no source gate"))?
+                    .run;
+                let Payload::VerificationRunStarted {
+                    profile: Some(profile),
+                    ..
+                } = &source_run.payload
+                else {
+                    bail!("base pass lacks actual profile");
+                };
+                witness.validate(profile)?;
+                if run.event != crate::model::GateEvent::Integration
+                    || run.profile.as_deref() != Some(profile)
+                    || state.profile != *profile
+                    || &witness.gate != gate
+                    || &witness.revision != revision
+                    || &witness.tree != tree
+                {
+                    bail!("base pass destination mismatch");
+                }
+                let derived = crate::base_pass::derive(witness, ev, run_id)?;
+                add_run_terminal(
+                    &mut state.verification_runs,
+                    run_id,
+                    revision,
+                    VerificationRunTerminal::Reused {
+                        gate: gate.clone(),
+                        evidence_event_id: crate::base_pass::execution(witness).event_id.clone(),
+                        reuse_event_id: ev.event_id.clone(),
+                    },
+                )?;
+                state.verifications.push(derived);
+            }
+            Payload::GateBaselineRecorded { baseline } => {
+                baseline.validate()?;
             }
             Payload::VerificationReused {
                 run_id,
@@ -6743,6 +6803,7 @@ mod tests {
         let run = ev(
             change,
             Payload::VerificationRunStarted {
+                profile: None,
                 event: crate::model::GateEvent::Integration,
                 revision: "head".into(),
                 mode: VerificationRunMode::Sequential,
@@ -6795,6 +6856,7 @@ mod tests {
         let reuse_run = ev(
             change,
             Payload::VerificationRunStarted {
+                profile: None,
                 event: crate::model::GateEvent::Integration,
                 revision: "head".into(),
                 mode: VerificationRunMode::Sequential,

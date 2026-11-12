@@ -2195,6 +2195,11 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn adopt_base_passes(&self) -> Result<()> {
+        self.refuse_read_only()?;
+        self.stamp_format(Some(10))
+    }
+
     pub(crate) fn adopt_budgets(&self) -> Result<()> {
         self.refuse_read_only()?;
         self.stamp_format(Some(9))
@@ -2205,6 +2210,9 @@ impl Store {
             self.adopt_budgets()?;
         }
         let introduced_in = match payload {
+            Payload::GateBaselineRecorded { .. } | Payload::VerificationBaseReused { .. } => {
+                Some(9)
+            }
             // An older reader ignores the field and keeps a finding resolved
             // that the event reopens, so it must refuse the store instead.
             Payload::VerdictRecorded { dispositions, .. }
@@ -2298,6 +2306,9 @@ impl Store {
     /// share their classification with typed records.
     #[cfg(test)]
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
+        if value.is_some_and(has_base_pass_semantics) {
+            self.adopt_base_passes()?;
+        }
         if value.is_some_and(has_budget_semantics) {
             self.adopt_budgets()?;
         }
@@ -2636,6 +2647,18 @@ impl Store {
             joined = crate::landing::with_derived(events, derived);
             joined.as_slice()
         };
+        if events
+            .iter()
+            .any(|event| matches!(event.payload, Payload::VerificationBaseReused { .. }))
+        {
+            let cwd = self
+                .operator_policy_path
+                .as_deref()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .context("base-pass replay needs the retained Git object store")?;
+            crate::base_pass::validate_events(cwd, events, repository_events, scope)?;
+        }
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.review_clearance = self.review_clearance;
         state.privilege_scope = Some(Arc::clone(scope));
@@ -3433,6 +3456,14 @@ impl Store {
         {
             self.stamp_format_locked(9)?;
         }
+        if batch
+            .events
+            .iter()
+            .chain(&batch.repository_events)
+            .any(has_base_pass_semantics)
+        {
+            self.stamp_format_locked(10)?;
+        }
         crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
             "import admission publication failed; inspect the published batch before retrying",
         )?;
@@ -3546,6 +3577,13 @@ fn authorization_has_no_verdict(
 /// as open, then closing it a second way. Refusing is the only honest answer,
 /// and it has to hold on every path that opens a store, not just the one that
 /// creates it.
+fn has_base_pass_semantics(value: &serde_json::Value) -> bool {
+    matches!(
+        value["event_type"].as_str(),
+        Some("gate-baseline-recorded" | "verification-base-reused")
+    )
+}
+
 fn has_budget_semantics(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
@@ -4651,6 +4689,33 @@ mod tests {
 #[cfg(test)]
 mod budget_format_tests {
     use super::*;
+
+    /// Claim: base-pass adoption fences all pre-S6 readers, including a writer
+    /// opened before adoption when it rechecks its format under the write lock.
+    /// Rejects reusing S3's format 8 barrier for S6 semantics.
+    #[test]
+    fn base_pass_adoption_fences_budget_aware_and_stale_readers() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("config.json"),
+            serde_json::to_vec(&StoreConfig {
+                schema_version: 9,
+                repository_id: "fixture".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let store = Store::open_at(root.path()).unwrap().unwrap();
+        let stale = Store::open_at(root.path()).unwrap().unwrap();
+        store.adopt_base_passes().unwrap();
+        let _lock = stale.lock_format().unwrap();
+        let config: StoreConfig =
+            serde_json::from_slice(&fs::read(root.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(config.schema_version, 10);
+        assert!(ensure_readable_format_at(config.schema_version, 9).is_err());
+        assert!(ensure_readable_format_at(config.schema_version, 10).is_ok());
+    }
 
     /// Claim: adopting budgets fences every reader through format 8, while a
     /// budget-free ledger keeps its format. Rejects adoption that an executable

@@ -56,11 +56,17 @@ pub struct GatesFile {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PathSelection {
     #[serde(default)]
+    pub base_passes: bool,
+    #[serde(default)]
     pub inert: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Coverage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selection_inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub base_passes: bool,
     pub dangerous: Vec<String>,
     pub inert: Vec<String>,
     pub gates: BTreeMap<String, Vec<String>>,
@@ -83,6 +89,15 @@ impl Coverage {
     }
 
     pub fn affects(&self, name: &str, path: &str) -> bool {
+        if self.base_passes
+            && (crate::base_pass::protected(path)
+                || self
+                    .selection_inputs
+                    .iter()
+                    .any(|command| command.contains(path)))
+        {
+            return true;
+        }
         if self
             .dangerous
             .iter()
@@ -105,7 +120,9 @@ impl Coverage {
     }
 
     pub fn enabled(&self) -> bool {
-        !self.inert.is_empty() || self.gates.values().any(|paths| !paths.is_empty())
+        self.base_passes
+            || !self.inert.is_empty()
+            || self.gates.values().any(|paths| !paths.is_empty())
     }
 }
 
@@ -574,6 +591,9 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
         layer.name_budget_sources(&origin);
         crate::gate_budget::merge_rules(&mut merged.budget, layer.budget.take());
 
+        if source == PROJECT_SOURCE {
+            merged.selection.base_passes = layer.selection.base_passes;
+        }
         merged.selection.inert.extend(layer.selection.inert);
         for (name, mut gate) in layer.gates {
             gate.declared_by.push(source.clone());
@@ -700,8 +720,23 @@ impl GatesFile {
             .iter()
             .map(|(name, gate)| (name.clone(), gate.paths.clone()))
             .collect();
+        let mut selection_inputs = self
+            .gates
+            .values()
+            .flat_map(|gate| {
+                std::iter::once(gate.command.clone())
+                    .chain(gate.environment.clone())
+                    .chain(gate.selector.clone())
+            })
+            .collect::<Vec<_>>();
+        selection_inputs.sort();
+        selection_inputs.dedup();
         for gate in self.gates.values_mut() {
+            if self.selection.base_passes {
+                gate.coverage.selection_inputs = selection_inputs.clone();
+            }
             gate.coverage.gates = coverage.clone();
+            gate.coverage.base_passes = self.selection.base_passes;
         }
     }
 
@@ -786,6 +821,10 @@ impl GatesFile {
 /// Scoped declarations bind the complete coverage map and dangerous patterns,
 /// since they determine the fallback for a path no gate names.
 pub fn declaration_identity(gate: &Gate) -> String {
+    crate::base_pass::digest(&declaration_value(gate))
+}
+
+pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
     let mut value = serde_json::json!({
         "command": gate.command, "environment": gate.environment,
         "profiles": gate.profiles, "events": gate.events,
@@ -798,10 +837,7 @@ pub fn declaration_identity(gate: &Gate) -> String {
     if gate.binds == Binding::Commit {
         value["binds"] = serde_json::json!("commit");
     }
-    format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(value.to_string().as_bytes()))
-    )
+    value
 }
 
 /// Retain structural identity for coverage and budget-raise execution proofs.
@@ -852,10 +888,18 @@ pub fn select_delta(
         "target_tree": target_tree, "paths": paths, "gates": declared_gates,
     });
     let protected = paths.iter().any(|path| {
-        gate.coverage
-            .dangerous
-            .iter()
-            .any(|pattern| crate::policy::glob_match(pattern, path))
+        (gate.coverage.base_passes
+            && (crate::base_pass::protected(path)
+                || gate
+                    .coverage
+                    .selection_inputs
+                    .iter()
+                    .any(|command| command.contains(path))))
+            || gate
+                .coverage
+                .dangerous
+                .iter()
+                .any(|pattern| crate::policy::glob_match(pattern, path))
             || (!gate.coverage.is_inert(path) && !gate.coverage.is_named(path))
     });
     if protected && gate.coverage.enabled() {

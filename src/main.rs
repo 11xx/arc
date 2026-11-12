@@ -4,6 +4,7 @@ mod assessment;
 mod assurance;
 mod assurance_live;
 mod assurance_routing;
+mod base_pass;
 mod blockers;
 mod bundle;
 mod candidate;

@@ -69,6 +69,7 @@ struct History {
     runs: usize,
     reused: usize,
     selected_out: usize,
+    base_passes: usize,
     attested: usize,
     not_admitted: usize,
     ever_failed: bool,
@@ -306,6 +307,11 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                             *legacy += usize::from(timing.run_ms.is_none());
                         }
                     }
+                    Payload::VerificationBaseReused { gate, .. } => {
+                        if let Some((row, _, _)) = rows.get_mut(gate) {
+                            row.history.base_passes += 1;
+                        }
+                    }
                     Payload::VerificationReused { gate, delta, .. } => {
                         if let Some((row, _, _)) = rows.get_mut(gate) {
                             if delta.is_some() {
@@ -403,7 +409,7 @@ pub(super) fn render(report: &GateReport) {
     }
     println!("tracked paths nobody names: {}", report.unclaimed_paths);
     println!(
-        "gate  runs  reused  selected-out  median  p90  worst  ever-failed  last-failed-first"
+        "gate  runs  base-passes  reused  selected-out  median  p90  worst  ever-failed  last-failed-first"
     );
     for gate in &report.gates {
         let h = &gate.history;
@@ -434,9 +440,10 @@ pub(super) fn render(report: &GateReport) {
             |f| format!("{} ({})", f.at.to_rfc3339(), f.change_id),
         );
         println!(
-            "{}  {}  {}  {}  {}  {}  {}  {}  {}",
+            "{}  {}  {}  {}  {}  {}  {}  {}  {}  {}",
             gate.name,
             h.runs,
+            h.base_passes,
             h.reused,
             h.selected_out,
             ms(timing.median_ms),

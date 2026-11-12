@@ -648,6 +648,9 @@ fn exported_objects(
             insert_object(cwd, &mut objects, revision, "retention-commit")?;
             insert_object(cwd, &mut objects, tree, "content-tree")?;
         }
+        for commit in crate::base_pass::cited_commits(&event.payload) {
+            insert_object(cwd, &mut objects, commit, "retention-commit")?;
+        }
         if let Payload::VerificationReused {
             delta: Some(delta), ..
         } = &event.payload

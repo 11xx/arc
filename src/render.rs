@@ -135,7 +135,17 @@ pub fn gate_line(gate: &GateStatus) -> String {
             inheritance_suffix(gate)
         ),
     };
-    format!("{status}{}", gate_declaration_suffix(gate))
+    let base = gate
+        .base_pass
+        .as_ref()
+        .map(|base| {
+            format!(
+                " (base pass from {} at {}; executed {})",
+                base.baseline_event_id, base.revision, base.executed_at
+            )
+        })
+        .unwrap_or_default();
+    format!("{status}{base}{}", gate_declaration_suffix(gate))
 }
 
 /// Which declarations readiness evaluated, and where they disagree with the
@@ -1073,6 +1083,9 @@ pub fn markdown(
                 },
                 v.hostname
             );
+            if let Some(base) = &v.base_pass {
+                let _ = writeln!(w, "  - base pass from {} at {}; execution {} at {}; changed paths {:?}; coverage {}", base.baseline_event_id, base.revision, base.execution_event_id, base.executed_at, base.changed_paths, base.declaration);
+            }
             if v.attested {
                 let _ = writeln!(
                     w,
@@ -2378,6 +2391,8 @@ pub(crate) fn kept_citations(cites: &[String]) -> String {
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::GateBudgetRaised { raise } => ("gate-budget-raised", format!("{}: {}", raise.head, raise.reason)),
+        Payload::GateBaselineRecorded { baseline } => ("gate-baseline-recorded", format!("{} at {}: {} executed gates", baseline.target, baseline.revision, baseline.gates.len())),
+        Payload::VerificationBaseReused { gate, witness, .. } => ("verification-base-reused", format!("{gate}: base pass from {} at {}", witness.baseline_event_id, witness.baseline.revision)),
         Payload::PublicationVerified { target, revision, result, .. } => (
             "publication-verified", format!("{target} at {revision}: {result:?}"),
         ),

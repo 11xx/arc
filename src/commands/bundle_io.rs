@@ -460,6 +460,17 @@ fn import_events(
             println!("warning: provenance-only import is missing Git objects:\n{report}");
         }
     }
+    for event in &validated.events {
+        if let Some(Event {
+            payload: Payload::VerificationBaseReused { witness, .. },
+            ..
+        }) = &event.typed
+        {
+            witness.validate(&witness.baseline.profile)?;
+            crate::base_pass::validate_git(&ctx.cwd, witness)
+                .context("invalid imported base-pass witness; nothing was imported")?;
+        }
+    }
     let root = Store::resolve_root(&ctx.cwd)?;
     if sidecar.is_some() {
         crate::custody::Custody::at(&root)

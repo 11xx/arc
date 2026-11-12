@@ -5467,7 +5467,7 @@ GATES
   lock. Gate rows include budget_ms, sources, command-time budget share and the
   last measured over-budget run. The report includes the declared total and
   the unqualified integration sum; profile violations are listed separately.
-  Runs, exact-tree reuses and selector skips are counted separately; attested
+  Runs, base passes, exact-tree reuses and selector skips are counted separately; attested
   evidence and not-admitted attempts are separate from runs and timings.
   History groups gates by name across declarations. Median (lower middle),
   p90 (nearest rank) and worst use command `run_ms`; only older events without
@@ -5671,8 +5671,8 @@ GATES
   paths. The inventory includes gates from every profile and event.
 
   Integration selection needs an earlier pass in the same change, with the
-  same declaration and environment. A new change runs its required gates even
-  for an inert-only delta. Publication and commit-bound gates do not select
+  same declaration and environment. Project adoption of base passes permits
+  cross-change reuse under `arc guide base-passes`. Commit-bound gates do not select
   across trees. Arc emits `arc-gate-selection/1` as selector `arc:paths` when
   paths prove the gate unaffected. It asks a declared script only when the
   gate remains affected; unnamed and dangerous paths cannot be cleared by a
@@ -5799,6 +5799,80 @@ GATE RAISES
   store format 9 before publishing evidence; executables through format 8 refuse.
   Change bundles require the exporter's store-format capability; import checks
   the reader's supported store format. Export does not adopt the local ledger.
+BASE PASSES
+  `[selection] base_passes = true` in committed .arc/gates.toml opts a project
+  into cross-change path selection. The destination must already declare it;
+  a change cannot enable it for itself. Without an eligible baseline, gates run.
+  An opted-in documentation change can integrate with zero executions on its
+  final content. This relies on the declared coverage being correct. Status,
+  check, show and explain name each base pass, baseline, original execution
+  time, changed paths, declaration and environment assumptions. `verify --rerun`
+  executes every selected gate. `arc gates` counts base passes beside executions.
+
+  After authoritative integration applies, a gate-baseline-recorded completion
+  snapshot embeds the project/replica, successful integration event, target, installed
+  revision/tree, actual profile and each eligible execution. Publication stays
+  inside the destination transition guard; competing integrations serialize.
+  Missing snapshots after interruption are cache misses. Only clean, stable,
+  locally executed integration passes at the installed tree enter a baseline.
+  Each entry retains its full structural declaration and complete coverage
+  context, original event/run, command, timeout, environment, binding and timing.
+  Reused, bypassed, attested, untimed, over-budget and dirty-waived evidence
+  cannot establish an entry. An empty baseline establishes no gate pass.
+
+  The first verification of a change may use its target's newest eligible local
+  baseline in both the actual target's and evaluated head's first-parent history.
+  Selection chooses the baseline before considering individual gate entries or
+  current budgets. Missing entries run; an older faster receipt is never sought.
+  Later failures, not-admitted attempts and budget refusals cannot be rescued
+  by a baseline. Rewrites do not advance baseline coordinates. Missing objects,
+  nonancestor or force-moved history, changed declaration/coverage context,
+  different actual profiles/events or mismatching/failed environment probes
+  prevent reuse. Commit-bound gates execute at their required commit.
+
+  Coverage is the destination's complete gate map and dangerous patterns.
+  Endpoint-tree diffs disable rename detection and retain NUL-delimited names,
+  including deletions, both rename endpoints, modes, types, symlinks and gitlinks.
+  Unreadable, invalidly encoded or oversized deltas run the gates. Dangerous and
+  unnamed paths affect every gate. In opted-in projects .arc/ is protected even
+  under inert patterns. Declaration and selection-input edits cannot waive their
+  own checks. A declared selector does not grant cross-change reuse.
+
+  A verification-base-reused witness embeds the baseline completion, producing
+  store, original execution and run, full declaration/selection context, actual
+  profile/event, destination revision/tree and target revision, complete paths,
+  algorithm version and baseline digest. Replay checks structural equality,
+  direct clean execution provenance, source/destination coordinates and coverage
+  classification. It compares the embedded facts with the ledger's immutable
+  baseline and requires its integration authority. Retained Git objects prove
+  the complete diff, committed adoption and first-parent ancestry. Hashes and
+  asserted path lists alone are insufficient. Replay reads neither current
+  budgets nor the source change's ledger; current acceptance judges original
+  command timing against the budget in force. Export and retention include the
+  cited objects. Imported facts cannot seed local baseline authority; imported
+  reuse requires admitted integration authority for its recorded baseline.
+  Witnesses are bounded to 1 MiB. Store format 10 is stamped before baseline or
+  reuse publication and import; executables supporting formats through 9 refuse
+  reads and writes, including writers opened before adoption.
+
+  Stack and composed land may consume base passes against the complete final
+  content and combined obligations. They record one baseline for the installed
+  final revision, never for a member's intermediate revision. Candidate checks
+  and promotion consume no base pass and create no target baseline. Provisional
+  integration may consume canonical evidence while owing staging declarations;
+  it creates no canonical baseline. Accept forces executions. Publication
+  creates no integration baseline.
+
+  Publication executes in full every gate that participated in a base pass in
+  integrations since the last successful publication of this target/profile,
+  including integration-only gates. Integration completion IDs delimit this
+  obligation, so evidence recorded before publication and integrated afterwards
+  remains owed. The ledger's per-change base-pass receipts name the originating
+  baseline/declaration even when a gate is absent from the publication tier.
+  `--skip-green` cannot reuse those gates' publication receipts. Publication
+  holds the destination guard through its check and confirms the target and
+  declarations before recording success. Full runs can discover dependencies
+  omitted from coverage; path declarations themselves do not prove completeness.
 
 SLOTS
   `[slots]` in `.arc/worktrees.toml` declares a pool of fixed-path checkouts
@@ -6098,6 +6172,7 @@ SCHEMAS
 
   Internal:
     store format 9                   .git/arc/config.json and the change ledger
+    store format 10                  base-pass baselines and reuse evidence
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization
@@ -6351,7 +6426,7 @@ GO DEEPER
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files
-  gates slots schemas boundaries
+  gates base-passes slots schemas boundaries
 "#;
 
 pub fn print() {
@@ -6474,6 +6549,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
     Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
     Section { name: "gate-raises", family: "gates", title: "Budget raises and trusted growth counting", start: "GATE RAISES" },
+    Section { name: "base-passes", family: "base-passes", title: "Project adoption, baseline proofs and publication audits", start: "BASE PASSES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },
     Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
     Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },

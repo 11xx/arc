@@ -26,18 +26,47 @@ pub fn publication(
     }
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
+    let _target_lock = store.lock_target(target)?;
+    if gitio::branch_head(&ctx.cwd, target)? != revision {
+        bail!("publication target moved before checks");
+    }
     let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
-    let (gates, authority) = publication_gates(ctx, &store, target, &revision, associated_change)?;
+    let (mut gates, authority) =
+        publication_gates(ctx, &store, target, &revision, associated_change)?;
     if gates.has_budgets() {
         store.adopt_budgets()?;
     }
-    let configuration = configuration_identity(&gates, profile, &authority)?;
-    let required = gates.required_for_event(profile, GateEvent::Publication);
+    let prior_events = store.load_repository_events()?;
+    let audited_through = prior_events.iter().rev().find(|event| matches!(&event.payload,
+        Payload::PublicationVerified { target: previous_target, profile: previous_profile, result: VerifyResult::Pass, budget_accepted, .. }
+        if previous_target == target && previous_profile == profile && budget_accepted.unwrap_or(true)))
+        .map(|event| event.event_id.as_str());
+    let participants = crate::base_pass::publication_participants(
+        &ctx.cwd,
+        &store,
+        target,
+        profile,
+        &revision,
+        audited_through,
+    )?;
+    let audit_names = participants.keys().cloned().collect::<BTreeSet<_>>();
+    for (name, gate) in participants {
+        gates.gates.entry(name).or_insert(gate);
+    }
+    let configuration = configuration_identity(&gates, profile, &authority, &audit_names)?;
+    let required = gates
+        .gates
+        .iter()
+        .filter(|(name, gate)| {
+            audit_names.contains(*name)
+                || (gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile))
+                    && (gate.events.is_empty() || gate.events.contains(&GateEvent::Publication))
+        })
+        .collect::<Vec<_>>();
     if required.is_empty() {
         bail!("no publication gates declared for profile {profile}");
     }
     let declarations = declarations_identity(&required)?;
-    let prior_events = store.load_repository_events()?;
     let previous = prior_events
         .iter()
         .rev()
@@ -104,6 +133,7 @@ pub fn publication(
             eprintln!("publication gate {name}: environment probe yielded no identity; a pass cannot count");
         }
         let reused = skip_green
+            && !audit_names.contains(name)
             && environment_known
             && reusable.is_some_and(|(receipts, result, same_commit)| {
                 *result == VerifyResult::Pass
@@ -193,11 +223,19 @@ pub fn publication(
         );
     }
     match publication_gates(ctx, &store, target, &revision, associated_change).and_then(
-        |(current, authority)| {
+        |(mut current, authority)| {
+            for name in &audit_names {
+                if let Some(gate) = gates.gates.get(name) {
+                    current
+                        .gates
+                        .entry(name.clone())
+                        .or_insert_with(|| gate.clone());
+                }
+            }
             if current.has_budgets() {
                 store.adopt_budgets()?;
             }
-            configuration_identity(&current, profile, &authority)
+            configuration_identity(&current, profile, &authority, &audit_names)
         },
     ) {
         Ok(current) if current == configuration => {}
@@ -210,7 +248,11 @@ pub fn publication(
             eprintln!("publication gate declarations became unavailable: {error:#}");
         }
     }
-    for (name, gate) in gates.required_for_event(profile, GateEvent::Publication) {
+    for (name, gate) in gates.gates.iter().filter(|(name, gate)| {
+        audit_names.contains(*name)
+            || (gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile))
+                && (gate.events.is_empty() || gate.events.contains(&GateEvent::Publication))
+    }) {
         if let Some(probe) = gate.environment.as_deref() {
             let current = gates::environment_probe(&scratch.path, probe, gate.timeout)?.identity;
             if current.is_none()
@@ -400,8 +442,17 @@ fn configuration_identity(
     gates: &gates::GatesFile,
     profile: &str,
     authority: &str,
+    audit_names: &BTreeSet<String>,
 ) -> Result<String> {
-    let required = gates.required_for_event(profile, GateEvent::Publication);
+    let required = gates
+        .gates
+        .iter()
+        .filter(|(name, gate)| {
+            audit_names.contains(*name)
+                || (gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile))
+                    && (gate.events.is_empty() || gate.events.contains(&GateEvent::Publication))
+        })
+        .collect::<Vec<_>>();
     let budgets = required
         .iter()
         .map(|(name, gate)| (name.as_str(), (gate.budget, &gate.budget_sources)))

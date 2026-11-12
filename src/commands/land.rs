@@ -2388,6 +2388,7 @@ fn commit(
     crash_point("applied");
     publish(store, &mut intent)?;
     drop(_repository_events);
+    record_baseline(ctx, store, &intent)?;
     drop(_transitions);
     drop(_graph);
     drop(_target);
@@ -2444,6 +2445,31 @@ fn publish(store: &Store, intent: &mut landing::Intent) -> Result<()> {
     store.publish_reserved_repository_event(completion)?;
     intent.phase = landing::Phase::Published;
     store.write_landing_intent(intent)
+}
+
+fn record_baseline(ctx: &Ctx, store: &Store, intent: &landing::Intent) -> Result<()> {
+    let completion = intent
+        .completion
+        .as_ref()
+        .context("a published landing holds its completion")?;
+    if let Some(member) = intent.members.last() {
+        let state = store.state(&member.change_id)?;
+        if let Err(error) = crate::base_pass::record(ctx, store, completion, &state, || {
+            let mut declarations = ctx.declarations(&state)?.gates;
+            for member in &intent.members {
+                let member_state = store.state(&member.change_id)?;
+                declarations.owe_also(
+                    ctx.declarations(&member_state)?.gates,
+                    "landing destination",
+                    "landing member",
+                );
+            }
+            Ok(declarations)
+        }) {
+            eprintln!("warning: landing recorded; baseline unavailable: {error:#}");
+        }
+    }
+    Ok(())
 }
 
 /// Cleanup after publication: the applied ref, the intent, and each member's
@@ -2584,7 +2610,7 @@ fn finish_attempt(ctx: &Ctx, attempt: &str) -> Result<i32> {
     ctx.ensure_declared_actor(&store)?;
     let _authority = crate::replica::lock(&store)?;
     let (target, before, after, members) = attempt_facts(&store, attempt)?;
-    let locks = attempt_locks(&store, &target, &members)?;
+    let mut locks = attempt_locks(&store, &target, &members)?;
     let landings = Landings::from_events(store.repository_events()?.iter());
     if let Some(completion) = landings.completion(attempt) {
         println!(
@@ -2631,6 +2657,8 @@ fn finish_attempt(ctx: &Ctx, attempt: &str) -> Result<i32> {
                 store.write_landing_intent(&intent)?;
             }
             publish(&store, &mut intent)?;
+            drop(locks.pop());
+            record_baseline(ctx, &store, &intent)?;
             drop(locks);
             finish(ctx, &store, &intent)?;
             Ok(0)

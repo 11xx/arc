@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 pub const SCHEMA_VERSION: u32 = 7;
 
 /// The newest ledger format this build understands.
-pub const STORE_FORMAT: u32 = 9;
+pub const STORE_FORMAT: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1726,6 +1726,8 @@ pub enum Payload {
         declarations: String,
     },
     VerificationRunStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
         #[serde(default, skip_serializing_if = "GateEvent::is_integration")]
         event: GateEvent,
         revision: String,
@@ -1877,6 +1879,17 @@ pub enum Payload {
         evidence_event_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delta: Option<DeltaSelection>,
+    },
+    /// Immutable completion facts, published only after the target effect.
+    GateBaselineRecorded {
+        baseline: Box<crate::base_pass::Baseline>,
+    },
+    VerificationBaseReused {
+        run_id: String,
+        gate: String,
+        revision: String,
+        tree: String,
+        witness: Box<crate::base_pass::Reuse>,
     },
     HoldSet {
         reason: String,
@@ -3009,6 +3022,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::GateBudgetRaised { .. }
         | Payload::VerificationBypassed { .. }
         | Payload::VerificationReused { .. }
+        | Payload::VerificationBaseReused { .. }
         // Waiving dirt excuses a gate, and a closed change has no gate left
         // to excuse.
         | Payload::DirtyTreeWaived { .. }
@@ -3050,6 +3064,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
         Payload::PublicationVerified { .. }
+        | Payload::GateBaselineRecorded { .. }
         | Payload::HistoryRewritten { .. }
         | Payload::HistoryRewriteWithdrawn { .. }
         | Payload::ReviewPassOpened { .. }
