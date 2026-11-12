@@ -2,7 +2,7 @@
 //! version bumped in code without the register being edited leaves it
 //! describing a format nothing writes.
 
-use super::common::{stdout, Repo};
+use super::common::{arc_binary, stdout, Repo};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -117,7 +117,7 @@ fn collect_sources(at: &Path, sources: &mut Vec<PathBuf>) {
 
 #[test]
 fn model_provenance_versions_are_registered() {
-    let output = Command::new(env!("CARGO_BIN_EXE_arc"))
+    let output = Command::new(arc_binary())
         .args(["guide", "schemas"])
         .output()
         .unwrap();

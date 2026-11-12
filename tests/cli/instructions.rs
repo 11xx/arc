@@ -12,7 +12,7 @@ fn instructions_git_prints_the_canonical_spec_outside_a_repository() {
     let home = tmp.path().join("home");
     fs::create_dir_all(&home).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_arc"))
+    let output = Command::new(arc_binary())
         .current_dir(tmp.path())
         .env_clear()
         .env("HOME", &home)

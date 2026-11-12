@@ -10,6 +10,16 @@ pub(crate) use std::thread;
 pub(crate) use std::time::{Duration, Instant};
 pub(crate) use tempfile::TempDir;
 
+/// The executable every fixture launches, selected by the test runner or Cargo.
+pub(crate) fn arc_binary() -> &'static str {
+    static BINARY: OnceLock<String> = OnceLock::new();
+    BINARY.get_or_init(|| {
+        std::env::var_os("ARC_TEST_BIN")
+            .map(|value| value.into_string().expect("ARC_TEST_BIN is UTF-8"))
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_arc").to_owned())
+    })
+}
+
 pub(crate) struct Repo {
     _tmp: TempDir,
     pub(crate) root: PathBuf,
@@ -52,7 +62,7 @@ impl Repo {
     /// `HOME` is set as well because the harness running this suite may export
     /// a session store under its own home, and identity detection reads it.
     pub(crate) fn arc(&self, cwd: &Path) -> AssertCommand {
-        self.fixture_env(AssertCommand::cargo_bin("arc").unwrap(), cwd)
+        self.fixture_env(AssertCommand::new(arc_binary()), cwd)
     }
 
     /// `arc`, run under an explicit umask, so a test about the permissions
@@ -62,7 +72,7 @@ impl Repo {
         sh.args([
             "-c",
             &format!("umask {umask} && exec \"$0\" \"$@\""),
-            env!("CARGO_BIN_EXE_arc"),
+            arc_binary(),
         ]);
         self.fixture_env(sh, cwd)
     }
@@ -75,7 +85,7 @@ impl Repo {
             "-c",
             &format!("arc() {{ \"$ARC_UNDER_TEST\" \"$@\"; }}\n{line}"),
         ])
-        .env("ARC_UNDER_TEST", env!("CARGO_BIN_EXE_arc"));
+        .env("ARC_UNDER_TEST", arc_binary());
         self.fixture_env(sh, cwd)
     }
 
@@ -101,7 +111,7 @@ impl Repo {
         args: &[&str],
         extra: &[(&str, &Path)],
     ) -> Child {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_arc"));
+        let mut cmd = Command::new(arc_binary());
         cmd.current_dir(cwd)
             .args(args)
             .stdin(Stdio::piped())
@@ -645,7 +655,7 @@ fn arc_child(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdi
 }
 
 fn arc_command(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdio) -> Command {
-    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
+    let binary = std::ffi::OsString::from(arc_binary());
     let mut command = Command::new(binary);
     command
         .args(args)

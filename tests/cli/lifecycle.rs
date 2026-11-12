@@ -2726,7 +2726,7 @@ fn piped_output_dies_on_sigpipe_without_panicking() {
         .assert()
         .success();
 
-    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
+    let binary = std::ffi::OsString::from(arc_binary());
     let mut child = Command::new(binary)
         .args(["events"])
         .current_dir(&repo.root)

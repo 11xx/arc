@@ -4914,7 +4914,7 @@ fn journal_position_refuses_a_branch_on_a_todo_before_reading_stdin() {
         .to_string_lossy()
         .to_string();
     let journal = journal_dir(&repo);
-    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
+    let binary = std::ffi::OsString::from(arc_binary());
     let mut child = Command::new(binary)
         .args([
             "journal",
@@ -12897,7 +12897,7 @@ fn journal_reattribute_survives_a_concurrent_writer() {
         .args(["claim", &file])
         .assert()
         .success();
-    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo provides the binary");
+    let binary = std::ffi::OsString::from(arc_binary());
     let arc = || {
         let mut command = Command::new(&binary);
         command
@@ -16818,7 +16818,7 @@ fn transition_short_write_keeps_source_unfiled() {
         "-c",
         "ulimit -f 16; exec \"$@\"",
         "crash-probe",
-        env!("CARGO_BIN_EXE_arc"),
+        arc_binary(),
     ]);
     repo.fixture_env(shell, &repo.root)
         .env("ARC_SESSION", "short-writer")

@@ -20,6 +20,7 @@ FULL = ("full", [], False)
 # module's text reads: guide text is pinned by every module that reads
 # `arc guide` or the map.
 SOURCE_READERS = {"src/guide.rs": r'instruction_topics|"guide"'}
+CLI_RUNNER = [sys.executable, ".arc/test-binary.py"]
 
 
 def readers(pattern):
@@ -169,12 +170,13 @@ def run(plan):
             )
             mode = "full"
     commands = (
-        [[sys.executable, ".arc/test_selection_test.py"], ["cargo", "test"]]
+        [[sys.executable, ".arc/test_selection_test.py"], [*CLI_RUNNER, "cargo", "test"]]
         if mode == "full"
         else (
             ([["cargo", "test", "--bin", "arc"]] if units else [])
             + [
                 [
+                    *CLI_RUNNER,
                     "cargo",
                     "test",
                     "--test",

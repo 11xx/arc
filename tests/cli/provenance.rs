@@ -1151,7 +1151,7 @@ fn claim_from_hook(repo: &Repo, hook: &str, slug: &str) -> PathBuf {
              else echo refused > '{outcome}'\n\
              fi\n\
              exit 0\n",
-            arc = env!("CARGO_BIN_EXE_arc"),
+            arc = arc_binary(),
             outcome = outcome.display(),
         ),
     )

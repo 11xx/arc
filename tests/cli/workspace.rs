@@ -1732,7 +1732,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "PATH",
             format!(
                 "{}:{}",
-                PathBuf::from(env!("CARGO_BIN_EXE_arc"))
+                PathBuf::from(arc_binary())
                     .parent()
                     .and_then(|dir| dir.to_str())
                     .unwrap_or_default(),
@@ -1806,7 +1806,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "PATH",
             format!(
                 "{}:{}",
-                PathBuf::from(env!("CARGO_BIN_EXE_arc"))
+                PathBuf::from(arc_binary())
                     .parent()
                     .and_then(|dir| dir.to_str())
                     .unwrap_or_default(),

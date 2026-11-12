@@ -3,7 +3,7 @@ use crate::common::*;
 /// The directory holding the freshly-built test binary, so an installed hook
 /// script's bare `arc` resolves to it rather than any globally installed arc.
 fn arc_bin_dir() -> PathBuf {
-    let bin = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo provides the arc binary");
+    let bin = std::ffi::OsString::from(arc_binary());
     PathBuf::from(bin).parent().unwrap().to_path_buf()
 }
 

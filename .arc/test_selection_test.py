@@ -166,6 +166,10 @@ class SelectionClaims(unittest.TestCase):
         self.assertNotEqual(*identities)
 
     def test_empty_or_failed_module_inventory_runs_cargo_test(self):
+        """Claim: unusable inventory runs every test through the selected CLI runner.
+
+        Rejects narrowing an unknown inventory or silently using the debug CLI.
+        """
         for result in (
             subprocess.CompletedProcess([], 0, "", ""),
             subprocess.CompletedProcess([], 1, "", "error"),
@@ -180,9 +184,16 @@ class SelectionClaims(unittest.TestCase):
                 ],
             ) as run:
                 self.assertEqual(selection.run(("modules", ["diff"], False)), 0)
-                self.assertEqual(run.call_args.args[0], ["cargo", "test"])
+                self.assertEqual(
+                    run.call_args.args[0],
+                    [sys.executable, ".arc/test-binary.py", "cargo", "test"],
+                )
 
     def test_source_selection_runs_units_and_cli_and_preserves_failure(self):
+        """Claim: sources run units and the selected CLI suite, preserving failures.
+
+        Rejects bypassing the executable runner or swallowing a failed CLI test.
+        """
         results = [
             subprocess.CompletedProcess([], 0, "diff::a: test\n", ""),
             subprocess.CompletedProcess([], 0),
@@ -195,8 +206,19 @@ class SelectionClaims(unittest.TestCase):
             )
             self.assertEqual(
                 run.call_args_list[2].args[0],
-                ["cargo", "test", "--test", "cli", "--", "diff::"],
+                [sys.executable, ".arc/test-binary.py", "cargo", "test", "--test", "cli", "--", "diff::"],
             )
+
+    def test_markdown_selection_launches_no_build_or_test_command(self):
+        """Claim: Markdown selection launches nothing, including binary preparation.
+
+        Rejects building an executable before the selector decides to skip work.
+        """
+        with patch.object(
+            selection.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+        ) as run:
+            self.assertEqual(selection.run(("markdown", [], False)), 0)
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

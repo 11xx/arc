@@ -121,7 +121,7 @@ fn waiting(child: &mut Child) -> thread::JoinHandle<String> {
 }
 
 fn shared_spawn(repo: &Repo, home: &Path, args: &[&str]) -> Child {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_arc"));
+    let mut command = Command::new(arc_binary());
     let fixture = repo.fixture_env(AssertCommand::new("true"), &repo.root);
     command
         .current_dir(&repo.root)

@@ -915,7 +915,7 @@ fn env_detects_opencode2_by_process_ancestry() {
     // assert_cmd execs the binary directly, which would leave the test runner
     // as the parent; spawn through the wrapper so the ancestry is real.
     let mut wrapped = fixture_arc(&repo, &harness);
-    wrapped.arg(assert_cmd::cargo_bin!("arc")).arg("env");
+    wrapped.arg(Path::new(arc_binary())).arg("env");
     let output = output_past_busy_text(&mut wrapped);
     assert!(output.status.success());
     assert_eq!(
@@ -984,7 +984,7 @@ fn fixture_arc(repo: &Repo, program: &Path) -> Command {
 /// a real process that exports its own session variable, as a harness does for
 /// the tool shells it starts; no real harness is needed.
 fn nested_arc(repo: &Repo, chain: &[HarnessLink], args: &[&str]) -> std::process::Output {
-    let mut program = assert_cmd::cargo_bin!("arc").to_path_buf();
+    let mut program = Path::new(arc_binary()).to_path_buf();
     for (name, variable, session) in chain.iter().rev() {
         program = harness_link(repo, name, variable, session, &program);
     }
@@ -1072,7 +1072,7 @@ fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
     )
     .unwrap();
 
-    let mut program = assert_cmd::cargo_bin!("arc").to_path_buf();
+    let mut program = Path::new(arc_binary()).to_path_buf();
     program = harness_link(&repo, "pi", "PI_SESSION_ID", inner_session, &program);
     program = harness_link(
         &repo,
@@ -1120,7 +1120,7 @@ fn nested_detection_records_the_owning_harness_on_an_undeclared_event() {
     )
     .unwrap();
 
-    let mut program = assert_cmd::cargo_bin!("arc").to_path_buf();
+    let mut program = Path::new(arc_binary()).to_path_buf();
     program = harness_link(&repo, "pi", "PI_SESSION_ID", inner_session, &program);
     program = harness_link(
         &repo,
@@ -1495,7 +1495,7 @@ fn env_reports_shell_ambiguity_even_when_the_parent_recording_is_newer() {
 #[test]
 fn env_unsets_the_identity_fields_it_cannot_establish() {
     let repo = Repo::new();
-    let binary = assert_cmd::cargo_bin!("arc");
+    let binary = Path::new(arc_binary());
     let read_after_eval = |extra: &[(&str, &str)]| -> String {
         let mut command = Command::new("sh");
         command

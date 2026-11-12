@@ -970,7 +970,7 @@ fn accept_delivery_never_exposes_shared_or_unsigned_signing_overrides() {
 #[test]
 fn accept_delivery_authority_movement_by_gate_stops_with_retained_effects() {
     let d = Delivery::new();
-    let binary = env!("CARGO_BIN_EXE_arc");
+    let binary = arc_binary();
     d.gates(&format!(
         "'{}' --role lead replica authority offer --to worker",
         binary

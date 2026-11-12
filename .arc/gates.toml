@@ -4,7 +4,7 @@ command = "python3 .arc/test-selection.py --unless-markdown 'cargo build --all-t
 events = ["integration", "publication"]
 
 [gates.test]
-command = "python3 .arc/test_selection_test.py && cargo test"
+command = "python3 .arc/test_selection_test.py && python3 .arc/test-binary.py cargo test"
 events = ["publication"]
 
 [gates.test-integration]

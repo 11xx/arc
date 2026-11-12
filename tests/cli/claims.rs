@@ -1180,7 +1180,7 @@ fn verification_gate_can_mutate_arc_state_without_lock_reentry_deadlock() {
         repo.arc(&repo.root)
             .args(["begin", "verify-reentry", "--no-worktree"]),
     );
-    let binary = std::env::var("CARGO_BIN_EXE_arc").unwrap();
+    let binary = arc_binary().to_owned();
     let gate = format!("\"{binary}\" hold verify-reentry --reason gate-self-mutation");
     let mut verify = spawn_arc(
         &repo,

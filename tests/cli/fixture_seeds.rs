@@ -2,6 +2,69 @@ use super::common::*;
 
 const FORMATS: [&str; 2] = ["sha1", "sha256"];
 
+/// Claim: the runner's executable selection reaches ordinary, shell, piped,
+/// asynchronous and environment-isolated fixture commands. Rejects a launch
+/// that silently uses Cargo's default executable beside the selected CLI.
+#[test]
+fn fixture_commands_use_the_selected_executable() {
+    const CHILD: &str = "ARC_TEST_BINARY_CANARY";
+    const MARKER: &str = "selected fixture executable\n";
+    if std::env::var_os(CHILD).is_some() {
+        let repo = Repo::new();
+        repo.arc(&repo.root)
+            .arg("--version")
+            .assert()
+            .success()
+            .stdout(MARKER);
+        repo.arc_under_umask(&repo.root, "077")
+            .arg("--version")
+            .assert()
+            .success()
+            .stdout(MARKER);
+        repo.arc_shell(&repo.root, "arc --version")
+            .assert()
+            .success()
+            .stdout(MARKER);
+        for child in [
+            repo.spawn_arc_piped(&repo.root, &["--version"]),
+            spawn_arc(&repo, &repo.root, &["--version"]),
+            Command::new(arc_binary())
+                .env_clear()
+                .arg("--version")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ] {
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(output.stdout, MARKER.as_bytes());
+        }
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let canary = repo.home.join("selected-cli");
+    fs::write(&canary, format!("#!/bin/sh\nprintf '{MARKER}'\n")).unwrap();
+    fs::set_permissions(&canary, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fixture_seeds::fixture_commands_use_the_selected_executable",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("ARC_TEST_BIN", canary)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "selected executable was bypassed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Every file under each of `dirs`, by path, with a digest of its bytes.
 fn files(dirs: &[&Path]) -> Vec<(PathBuf, String)> {
     fn walk(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
