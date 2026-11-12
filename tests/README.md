@@ -12,5 +12,8 @@ shell commands and harness wrappers. Debug assertions and integer overflow check
 remain enabled. Test code and unit tests use Cargo's ordinary test profile.
 `cargo test --locked` runs the same assertions against the ordinary debug CLI.
 
+The runner uses two test workers per available CPU, capped at 32, to overlap
+subprocess waits. An explicit `RUST_TEST_THREADS` selects the worker count.
+
 The integration selector runs every test for an unclassified change. Its narrow
 selections and Markdown exclusions are defined in `.arc/test-selection.py`.

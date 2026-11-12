@@ -41,6 +41,8 @@ def main():
         return 1
     env = os.environ.copy()
     env["ARC_TEST_BIN"] = binaries.pop()
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    env.setdefault("RUST_TEST_THREADS", str(min(32, cores * 2)))
     command = sys.argv[1:] or ["cargo", "test", "--locked"]
     os.execvpe(command[0], command, env)
 
