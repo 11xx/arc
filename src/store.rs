@@ -2197,7 +2197,7 @@ impl Store {
 
     pub(crate) fn adopt_budgets(&self) -> Result<()> {
         self.refuse_read_only()?;
-        self.stamp_format(Some(8))
+        self.stamp_format(Some(9))
     }
 
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
@@ -3431,7 +3431,7 @@ impl Store {
             .chain(&batch.repository_events)
             .any(has_budget_semantics)
         {
-            self.stamp_format_locked(8)?;
+            self.stamp_format_locked(9)?;
         }
         crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
             "import admission publication failed; inspect the published batch before retrying",
@@ -3548,13 +3548,20 @@ fn authorization_has_no_verdict(
 /// creates it.
 fn has_budget_semantics(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "budget_at_run" | "budget_rules" | "budget_ms" | "budget_accepted"
-            ) && !value.is_null()
-                || has_budget_semantics(value)
-        }),
+        serde_json::Value::Object(map) => {
+            map.get("event_type").and_then(|v| v.as_str()) == Some("gate-budget-raised")
+                || map.iter().any(|(key, value)| {
+                    matches!(
+                        key.as_str(),
+                        "budget_at_run"
+                            | "budget_rules"
+                            | "budget_ms"
+                            | "budget_accepted"
+                            | "budget_raise_ids"
+                    ) && !value.is_null()
+                        || has_budget_semantics(value)
+                })
+        }
         serde_json::Value::Array(values) => values.iter().any(has_budget_semantics),
         _ => false,
     }
@@ -4645,7 +4652,7 @@ mod tests {
 mod budget_format_tests {
     use super::*;
 
-    /// Claim: adopting budgets fences every reader through format 7, while a
+    /// Claim: adopting budgets fences every reader through format 8, while a
     /// budget-free ledger keeps its format. Rejects adoption that an executable
     /// ignoring budget keys can still open and authorize.
     #[test]
@@ -4672,9 +4679,9 @@ mod budget_format_tests {
             }
             let config: StoreConfig =
                 serde_json::from_slice(&fs::read(root.join("config.json")).unwrap()).unwrap();
-            assert_eq!(config.schema_version, if budgeted { 8 } else { 1 });
+            assert_eq!(config.schema_version, if budgeted { 9 } else { 1 });
             assert_eq!(
-                ensure_readable_format_at(config.schema_version, 7).is_err(),
+                ensure_readable_format_at(config.schema_version, 8).is_err(),
                 budgeted
             );
         }

@@ -671,7 +671,7 @@ fn budget_total_declarations_adopt_even_when_a_gate_budget_is_missing() {
     assert_eq!(fs::read(&config).unwrap(), before);
     verify(&repo, &wt, 1000, 0);
     let after: Value = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
-    assert_eq!(after["schema_version"], 8);
+    assert_eq!(after["schema_version"], 9);
 }
 
 /// Claim: named path-based delta reuse judges its selected receipt without running

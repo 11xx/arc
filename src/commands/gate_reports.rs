@@ -16,6 +16,7 @@ pub(super) struct GateReport {
     integration_budget_sum_ms: Option<u64>,
     integration_budget_sums_ms: BTreeMap<String, Option<u64>>,
     budget_errors: Vec<String>,
+    budget_warning: Option<String>,
     pub(super) gates: Vec<GateRow>,
     pub(super) failures: Vec<ReadFailure>,
 }
@@ -142,6 +143,11 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
             .count()
     } else {
         0
+    };
+    let budget_warning = if repository {
+        crate::gate_raise::ceiling_warning(cwd, &declared)?
+    } else {
+        None
     };
     let budget_declared = declared.has_budgets();
     let budget_rules = declared.budget.clone();
@@ -340,6 +346,7 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         schema: GATES_SCHEMA,
         unclaimed_paths,
         budget_declared,
+        budget_warning,
         budget_rules,
         budget_errors,
         integration_budget_sum_ms,
@@ -387,6 +394,9 @@ pub(super) fn render(report: &GateReport) {
         .filter(|(p, _)| !p.is_empty())
     {
         println!("integration budget sum for {profile}: {}", ms(*sum));
+    }
+    if let Some(warning) = &report.budget_warning {
+        println!("{warning}");
     }
     for error in &report.budget_errors {
         println!("{error}");
@@ -758,12 +768,15 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
         } else {
             gitio::branch_head(&ctx.cwd, &state.branch).ok()
         };
-        if let Some(head) = head {
+        if let Some(head) = &head {
             declared.owe_also(
-                gates::inspect_at(&ctx.cwd, &head)?,
+                gates::inspect_at(&ctx.cwd, head)?,
                 "destination",
                 "change head",
             );
+        }
+        if let Some(head) = head {
+            let _ = crate::gate_raise::advise(&ctx.cwd, &state, &target, &head, &mut declared);
         }
         for entry in &state.verifications {
             let Some(name) = entry

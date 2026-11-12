@@ -385,6 +385,9 @@ fn publication_gates(
             (gates::GatesFile::default(), "operator-only".into())
         }
     };
+    if let Some(baseline) = authority.strip_prefix("accepted:") {
+        crate::gate_raise::require_records(&ctx.cwd, baseline, revision, &mut required)?;
+    }
     required.owe_also(own, "accepted publication baseline", "publication target");
     let errors = required.budget_errors();
     if !errors.is_empty() {

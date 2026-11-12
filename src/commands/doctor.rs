@@ -1111,6 +1111,12 @@ fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
             return;
         }
     };
+    if let Ok(Some(detail)) = crate::gate_raise::ceiling_warning(cwd, &gates) {
+        problems.push(Finding {
+            code: "gate-budget-unbounded",
+            detail,
+        });
+    }
     for detail in gates.budget_errors() {
         problems.push(Finding {
             code: "gate-budget-invalid",

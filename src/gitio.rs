@@ -2691,8 +2691,7 @@ pub fn replay_range(cwd: &Path, base: &str, head: &str, onto: &str) -> Result<Ra
     Ok(RangeReplay::Replayed { tip })
 }
 
-/// A temporary bare repository for one replay, sharing only the project's
-/// object database.
+/// A temporary bare repository sharing only the project's object database.
 ///
 /// A repository configures merge drivers and filters by name in its config,
 /// and `git replay` runs them while it merges. The replay therefore reads its
@@ -2709,6 +2708,15 @@ struct ReplayRepository {
 
 impl ReplayRepository {
     fn create(cwd: &Path) -> Result<Self> {
+        let mut repository = Self::create_in(cwd, &crate::config::temp_dir()?)?;
+        repository.committer_name =
+            git_config_value(cwd, "user.name").unwrap_or_else(|| "arc replay".into());
+        repository.committer_email =
+            git_config_value(cwd, "user.email").unwrap_or_else(|| "arc-replay@invalid".into());
+        Ok(repository)
+    }
+
+    fn create_in(cwd: &Path, parent: &Path) -> Result<Self> {
         let object_format = git(cwd, &["rev-parse", "--show-object-format"])?;
         let objects = PathBuf::from(git(
             cwd,
@@ -2719,8 +2727,7 @@ impl ReplayRepository {
                 "objects",
             ],
         )?);
-        let dir =
-            crate::config::temp_dir()?.join(format!("arc-replay-{}", crate::ids::new_identifier()));
+        let dir = parent.join(format!("arc-replay-{}", crate::ids::new_identifier()));
         fs::create_dir_all(dir.join("objects"))
             .with_context(|| format!("cannot create {}", dir.join("objects").display()))?;
         fs::create_dir_all(dir.join("refs/heads"))
@@ -2739,10 +2746,8 @@ impl ReplayRepository {
         Ok(Self {
             dir,
             objects,
-            committer_name: git_config_value(cwd, "user.name")
-                .unwrap_or_else(|| "arc replay".to_string()),
-            committer_email: git_config_value(cwd, "user.email")
-                .unwrap_or_else(|| "arc-replay@invalid".to_string()),
+            committer_name: String::new(),
+            committer_email: String::new(),
         })
     }
 
@@ -2791,6 +2796,63 @@ impl Drop for ReplayRepository {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Committed diff attributes at either endpoint, without host configuration.
+pub(crate) fn budget_binary_paths(
+    cwd: &Path,
+    target: &str,
+    head: &str,
+    paths: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let cache = match crate::config::sandbox()? {
+        Some(prefix) => prefix.join("cache"),
+        None => std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or(crate::config::real_home()?.join(".cache")),
+    };
+    if !cache.is_absolute() {
+        bail!("budget counting needs an absolute cache directory");
+    }
+    let repository = ReplayRepository::create_in(cwd, &cache.join("arc/budget-attributes"))?;
+    let input = paths
+        .iter()
+        .flat_map(|path| path.as_bytes().iter().copied().chain([0]))
+        .collect::<Vec<_>>();
+    let mut binary = BTreeSet::new();
+    for revision in [target, head] {
+        let args = vec![
+            "check-attr".into(),
+            format!("--source={revision}"),
+            "-z".into(),
+            "--stdin".into(),
+            "diff".into(),
+        ];
+        let mut command = repository.command();
+        command.current_dir(&repository.dir);
+        let output = piped_output_with(command, "git", &args, &input)?;
+        if output.len() > 64 * 1024 * 1024 {
+            bail!("budget attributes exceed 64 MiB");
+        }
+        let mut fields = output.split(|b| *b == 0).collect::<Vec<_>>();
+        if fields.pop() != Some(&[][..]) || fields.len() % 3 != 0 {
+            bail!("incomplete budget attributes");
+        }
+        let mut remaining = paths.clone();
+        for row in fields.chunks_exact(3) {
+            let path = std::str::from_utf8(row[0])?;
+            if row[1] != b"diff" || !remaining.remove(path) {
+                bail!("unexpected budget attribute response");
+            }
+            if row[2] != b"unspecified" && row[2] != b"set" {
+                binary.insert(path.to_string());
+            }
+        }
+        if !remaining.is_empty() {
+            bail!("missing budget attributes");
+        }
+    }
+    Ok(binary)
 }
 
 fn git_config_value(cwd: &Path, key: &str) -> Option<String> {
@@ -3068,6 +3130,32 @@ impl ObjectReader {
             kind: kind.to_string(),
             bytes,
         })
+    }
+}
+
+/// One object stream for a bounded tree comparison.
+pub(crate) struct BlobReader(Option<ObjectReader>);
+
+impl BlobReader {
+    pub fn new(cwd: &Path) -> Result<Self> {
+        Ok(Self(Some(
+            ObjectReader::spawn(cwd).context("cannot start budget blob reader")?,
+        )))
+    }
+
+    pub fn read(&mut self, oid: &str) -> Result<Vec<u8>> {
+        match self.0.as_mut().context("closed blob reader")?.read(oid) {
+            Some(Object::Found { kind, bytes, .. }) if kind == "blob" => Ok(bytes),
+            _ => bail!("budget blob unavailable: {oid}"),
+        }
+    }
+}
+
+impl Drop for BlobReader {
+    fn drop(&mut self) {
+        if let Some(reader) = self.0.take() {
+            reader.close();
+        }
     }
 }
 

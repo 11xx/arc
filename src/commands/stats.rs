@@ -1430,6 +1430,7 @@ mod tests {
                 "1",
                 0,
                 Payload::PatchsetAdded {
+                    budget_raise_ids: Vec::new(),
                     patchset_id: "ps-01".into(),
                     base: "b".into(),
                     head: "h".into(),
@@ -1608,6 +1609,7 @@ mod tests {
             id,
             seconds,
             Payload::PatchsetAdded {
+                budget_raise_ids: Vec::new(),
                 patchset_id: patchset_id.into(),
                 base: base.into(),
                 head: "h".into(),

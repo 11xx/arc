@@ -22,7 +22,9 @@ mod external;
 mod findings;
 mod forge_cmd;
 pub(crate) mod fork;
+mod gate_raise;
 mod gate_reports;
+pub use gate_raise::raise_budget;
 mod gatekeeping;
 mod history;
 mod hooks;
@@ -1653,6 +1655,8 @@ mod tests {
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
+            budget_raises: Vec::new(),
+            direct_executions: BTreeMap::new(),
             provisional_signature_successors: BTreeMap::new(),
             recovered_falsification_revisions: BTreeSet::new(),
             provisional_integrations: Vec::new(),

@@ -49,7 +49,7 @@ pub struct Bundle {
     /// named one with `--since`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<BundlePrefix>,
-    /// The store format the exporting build wrote. An importer that would skip
+    /// The exporting build's required store-format capability. An importer that would skip
     /// event types it does not know refuses instead: skipping a lifecycle
     /// event means reading a closed change as open, and then closing it a
     /// second way.
@@ -330,7 +330,7 @@ impl Bundle {
         let replica = crate::replica::status(store)?;
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
-            store_format: crate::model::SCHEMA_VERSION,
+            store_format: crate::model::STORE_FORMAT,
             source_replica_id: Some(store.repository_id.clone()),
             project_id: replica.project_id,
             repository_id,
@@ -372,12 +372,12 @@ impl Bundle {
                 ids::validate_id_component(id).with_context(|| format!("invalid bundle {key}"))?;
             }
         }
-        if bundle.store_format > crate::model::SCHEMA_VERSION {
+        if bundle.store_format > crate::model::STORE_FORMAT {
             bail!(
                 "bundle was written by a newer arc (store format {}, this build understands \
                  {}); upgrade arc rather than importing history it would not fully read",
                 bundle.store_format,
-                crate::model::SCHEMA_VERSION
+                crate::model::STORE_FORMAT
             );
         }
         if !READABLE_BUNDLE_SCHEMAS.contains(&bundle.schema.as_str()) {

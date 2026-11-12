@@ -25,6 +25,7 @@ mod forge_observation;
 mod forge_round_trip;
 mod forge_view;
 mod gate_budget;
+mod gate_raise;
 mod gates;
 mod gitio;
 mod guide;
@@ -3986,6 +3987,18 @@ enum ExternalCmd {
 
 #[derive(Subcommand)]
 enum GatesCmd {
+    /// Record a patchset-bound budget increase; see arc guide gates
+    Raise {
+        /// Gate whose declared budget increases
+        #[arg(required_unless_present = "total")]
+        gate: Option<String>,
+        /// Explicitly raise the integration total, alone or with the gate
+        #[arg(long)]
+        total: bool,
+        /// What was tried before raising the budget
+        #[arg(long)]
+        reason: String,
+    },
     /// List every tracked path with its affected gates and paths nobody names
     ///
     /// Uses path-policy globs, inert exclusions and dangerous-path overrides.
@@ -6839,6 +6852,15 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Some(GatesCmd::Paths { json: paths_json }) => {
                 commands::gate_paths(&ctx, json || paths_json)
             }
+            Some(GatesCmd::Raise {
+                gate,
+                total,
+                reason,
+            }) => {
+                anyhow::ensure!(!json, "gates raise does not accept --json");
+                let reference = infer(None)?;
+                commands::raise_budget(&ctx, &reference, gate, total, &reason)
+            }
             Some(GatesCmd::Init) => {
                 anyhow::ensure!(!json, "gates init does not accept --json");
                 commands::init_budgets(&ctx)
@@ -8800,6 +8822,7 @@ mod tests {
             "review",
             "external verdict",
             "publication",
+            "gates raise",
             "verify",
             "done",
             "rebase",

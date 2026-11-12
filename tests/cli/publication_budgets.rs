@@ -46,7 +46,8 @@ fn receipt(repo: &Repo) -> Value {
 }
 
 /// Claim: a fresh over-budget publication run keeps its raw pass but refuses
-/// publication without moving the target. Rejects accepting exit zero as cost compliance.
+/// publication without moving the target and fences readers through format 8.
+/// Rejects accepting exit zero as cost compliance or understating the format barrier.
 #[test]
 fn publication_budget_fresh_run_refuses_without_moving_target() {
     let repo = Repo::new();
@@ -63,7 +64,7 @@ fn publication_budget_fresh_run_refuses_without_moving_target() {
     assert_eq!(repo.head(&repo.root), before);
     let config: Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 8);
+    assert_eq!(config["schema_version"], 9);
 }
 
 /// Claim: cached publication rejudges the newest matching receipt after a reduction,
@@ -119,7 +120,7 @@ fn publication_budget_does_not_consume_the_integration_total() {
             serde_json::from_slice(&fs::read(receiver.root.join(".git/arc/config.json")).unwrap())
                 .unwrap();
         assert_eq!(
-            config["schema_version"], 8,
+            config["schema_version"], 9,
             "publication total import did not adopt budgets"
         );
     }
@@ -200,7 +201,8 @@ fn publication_budget_configuration_changes_refuse_acceptance() {
 
 /// Claim: a branch cannot authorize its higher budget; publication reads the
 /// accepted integration baseline or the associated change's destination. Rejects
-/// self-authorized branch budgets and an unrelated explicit change context.
+/// self-authorized higher declarations even for runs inside the old budget,
+/// and an unrelated explicit change context.
 #[test]
 fn publication_budget_authority_comes_from_baseline_or_associated_change() {
     let repo = Repo::new();
@@ -224,24 +226,25 @@ fn publication_budget_authority_comes_from_baseline_or_associated_change() {
     for explicit in [false, true] {
         let mut command = repo.arc(&repo.root);
         command
-            .env("ARC_TEST_COMMAND_RUN_MS", "11300")
+            .env("ARC_TEST_COMMAND_RUN_MS", "9000")
             .args(["publication", "--target", &branch]);
         if explicit {
             command.args(["--change", &id]);
         }
-        command
-            .assert()
-            .code(1)
-            .stderr(predicates::str::contains("ran 11.3s of 10s"));
+        command.assert().code(1).stderr(predicates::str::contains(
+            "requires an applicable accepted raise record",
+        ));
     }
     git(&repo.root, &["branch", "unassociated", &before]);
     git(&repo.root, &["checkout", "unassociated"]);
     repo.arc(&repo.root)
-        .env("ARC_TEST_COMMAND_RUN_MS", "11300")
+        .env("ARC_TEST_COMMAND_RUN_MS", "9000")
         .args(["publication", "--target", "unassociated"])
         .assert()
         .code(1)
-        .stderr(predicates::str::contains("ran 11.3s of 10s"));
+        .stderr(predicates::str::contains(
+            "requires an applicable accepted raise record",
+        ));
     repo.arc(&repo.root)
         .args(["publication", "--target", "master", "--change", &id])
         .assert()
@@ -325,7 +328,8 @@ fn publication_budget_timing_and_absence_survive_export_import() {
 
 /// Claim: publication's accepted baseline follows the destination recorded by an
 /// integrated change, including --into. Rejects using its original, looser target
-/// to authorize publication of an otherwise unassociated branch.
+/// to authorize an unrecorded increase on an otherwise unassociated branch,
+/// including an execution inside the old budget.
 #[test]
 fn publication_budget_baseline_uses_the_recorded_integration_destination() {
     let repo = Repo::new();
@@ -362,9 +366,11 @@ fn publication_budget_baseline_uses_the_recorded_integration_destination() {
     );
     git(&repo.root, &["checkout", "master"]);
     repo.arc(&repo.root)
-        .env("ARC_TEST_COMMAND_RUN_MS", "11300")
+        .env("ARC_TEST_COMMAND_RUN_MS", "9000")
         .args(["publication", "--target", "publication-alias"])
         .assert()
         .code(1)
-        .stderr(predicates::str::contains("ran 11.3s of 10s"));
+        .stderr(predicates::str::contains(
+            "requires an applicable accepted raise record",
+        ));
 }

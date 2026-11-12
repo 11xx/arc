@@ -33,6 +33,12 @@ pub const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
 /// for every profile. This is the local analogue of required CI checks.
 #[derive(Debug, Default, Deserialize)]
 pub struct GatesFile {
+    #[serde(skip)]
+    pub pending_raises: BTreeSet<Option<String>>,
+    #[serde(skip)]
+    pub raise_snapshot_missing: bool,
+    #[serde(skip)]
+    pub raises: Vec<crate::gate_raise::Applicability>,
     #[serde(default)]
     pub selection: PathSelection,
     #[serde(skip)]
@@ -108,6 +114,10 @@ pub struct Gate {
     pub budget: Option<u64>,
     #[serde(skip)]
     pub budget_sources: Vec<crate::gate_budget::BudgetSource>,
+    #[serde(skip)]
+    pub raise_allowance_ms: Option<u64>,
+    #[serde(skip)]
+    pub raise_budget_max_ms: Option<u64>,
     /// A command whose output identifies the environment this gate's evidence
     /// applies to. The identity is a digest of the probe's stdout, and only a
     /// successful run that prints something yields one. `verify` records that
@@ -792,9 +802,9 @@ pub fn declaration_identity(gate: &Gate) -> String {
     )
 }
 
-/// Scoped evidence binds every input to declarative selection.
+/// Retain structural identity for coverage and budget-raise execution proofs.
 pub fn coverage_identity(gate: &Gate) -> Option<String> {
-    gate.coverage.enabled().then(|| declaration_identity(gate))
+    (gate.coverage.enabled() || gate.budget.is_some()).then(|| declaration_identity(gate))
 }
 
 /// Read both sides of renames once for each source and destination tree pair.

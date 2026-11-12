@@ -75,6 +75,7 @@ pub(crate) fn for_change_at(
     let mut required = gates::load_at(cwd, &target_head)?;
     let mut notes = Vec::new();
     if let Some(change_head) = change_head {
+        crate::gate_raise::apply(cwd, state, &target_head, &change_head, &mut required)?;
         let own = gates::inspect_at(cwd, &change_head)?;
         let divergences = required.owe_also(
             own,
@@ -82,6 +83,11 @@ pub(crate) fn for_change_at(
             &format!("{}'s .arc/gates.toml", state.branch),
         );
         notes.extend(divergences.iter().map(gates::GateDivergence::describe));
+        if let Err(error) =
+            crate::gate_raise::advise(cwd, state, &target_head, &change_head, &mut required)
+        {
+            notes.push(format!("raise allowance unavailable: {error:#}"));
+        }
     }
     if !state.is_closed() {
         notes.extend(checkout_notes(cwd, &toplevel, target, &target_head)?);

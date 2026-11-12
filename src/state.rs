@@ -9,6 +9,8 @@ pub const CHANGE_STATE_SCHEMA: &str = "arc-state/3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budget_raise_ids: Vec<String>,
     pub id: String,
     pub actor: String,
     pub model: Option<String>,
@@ -1684,6 +1686,9 @@ impl SlotRecord {
 /// ULID order. The event ledger is authoritative; this is a view.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
+    pub budget_raises: Vec<crate::gate_raise::Record>,
+    #[serde(skip)]
+    pub direct_executions: BTreeMap<String, Option<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_context: Option<crate::review_context::ReviewContext>,
     #[serde(skip)]
@@ -1835,6 +1840,13 @@ impl ChangeState {
             }
         };
         note(&self.base, "base".to_string());
+        for record in &self.budget_raises {
+            note(&record.raise.head, "budget raise head".into());
+            note(
+                &record.raise.target_revision,
+                "budget raise destination".into(),
+            );
+        }
         for patchset in &self.patchsets {
             note(&patchset.head, format!("{} head", patchset.id));
             note(&patchset.base, format!("{} base", patchset.id));
@@ -2406,6 +2418,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 dangerous,
             } => (
                 ChangeState {
+                    budget_raises: Vec::new(),
+                    direct_executions: BTreeMap::new(),
                     provisional_signature_successors: BTreeMap::new(),
                     recovered_falsification_revisions: BTreeSet::new(),
                     provisional_integrations: Vec::new(),
@@ -2713,6 +2727,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::PatchsetAdded {
+                budget_raise_ids,
                 patchset_id,
                 base,
                 head,
@@ -2772,6 +2787,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     committer.as_ref(),
                 );
                 state.patchsets.push(Patchset {
+                    budget_raise_ids: budget_raise_ids.clone(),
                     id: patchset_id.clone(),
                     actor: ev.actor.clone(),
                     model: ev.model.clone(),
@@ -3561,7 +3577,17 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     created_at: ev.created_at,
                 });
             }
+            Payload::GateBudgetRaised { raise } => {
+                if raise.change_id != state.change_id || raise.increases.is_empty() {
+                    bail!("invalid budget raise subject");
+                }
+                state.budget_raises.push(crate::gate_raise::Record {
+                    event_id: ev.event_id.clone(),
+                    raise: raise.clone(),
+                });
+            }
             Payload::VerificationRecorded {
+                exit_code,
                 declaration,
                 gate,
                 command,
@@ -3590,6 +3616,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 falsification_inferred,
                 ..
             } => {
+                state
+                    .direct_executions
+                    .insert(ev.event_id.clone(), *exit_code);
                 let mut falsification = falsification.clone();
                 if let Some(claimed) = &falsification {
                     if let Some(failure) = state

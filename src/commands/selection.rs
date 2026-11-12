@@ -157,6 +157,7 @@ fn patchset_admitted(st: &ChangeState) -> Result<()> {
     super::ensure_append_allowed(
         st,
         &Payload::PatchsetAdded {
+            budget_raise_ids: Vec::new(),
             patchset_id: String::new(),
             base: String::new(),
             head: String::new(),
@@ -197,6 +198,14 @@ fn candidate_declarations(
     tree: &str,
 ) -> Result<crate::declarations::Declarations> {
     let mut declarations = ctx.declarations(st)?;
+    let target = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
+    let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    if gitio::commit_tree(&ctx.cwd, &head)? != tree {
+        declarations.gates.pending_raises.clear();
+        declarations.gates.raise_snapshot_missing = false;
+        declarations.gates.raises.clear();
+        crate::gate_raise::require_records(&ctx.cwd, &target, tree, &mut declarations.gates)?;
+    }
     let own = crate::gates::load_at(&ctx.cwd, tree)?;
     declarations.gates.owe_also(own, "destination", "candidate");
     let errors = declarations.gates.budget_errors();
@@ -601,6 +610,7 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
 
     if let Some(commit) = gitio::ref_value(&ctx.cwd, &reference)? {
         if head == commit {
+            candidate_declarations(ctx, &st, &selection.tree)?;
             println!("completing: {} already points at {reference}", st.branch);
             sync_checkout(ctx, &st, &selection, &commit)?;
             return record_promotion(ctx, store, &events, &st, &selection, &commit);
@@ -805,6 +815,7 @@ fn record_patchset(
     let identity = gitio::commit_identity(&ctx.cwd, commit)?;
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
     let payload = Payload::PatchsetAdded {
+        budget_raise_ids: Vec::new(),
         patchset_id: patchset_id.clone(),
         base,
         head: commit.to_string(),

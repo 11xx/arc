@@ -904,7 +904,8 @@ fn budget_evaluation(repo: &Repo, candidate: &str, run_ms: u64, code: i32) -> St
 }
 
 /// Claim: candidate verification and selection refuse the same over-budget raw
-/// pass without moving either branch. Rejects discarded timing and pass-only selection.
+/// pass without moving either branch and fences readers through format 8.
+/// Rejects discarded timing, pass-only selection and an understated format barrier.
 #[test]
 fn candidate_budget_refuses_execution_and_selection_without_moving_heads() {
     let f = fixture(Some("never"), &[], false);
@@ -940,7 +941,7 @@ fn candidate_budget_refuses_execution_and_selection_without_moving_heads() {
     assert!(repository_events(repo, "candidate-promoted").is_empty());
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 8);
+    assert_eq!(config["schema_version"], 9);
 }
 
 /// Claim: promotion rejudges the selected receipt under a reduced operator budget

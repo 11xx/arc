@@ -69,6 +69,14 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         };
         for event in &events {
+            if let Payload::GateBudgetRaised { raise } = &event.payload {
+                add(&event.event_id, "budget raise head".into(), &raise.head);
+                add(
+                    &event.event_id,
+                    "budget raise destination".into(),
+                    &raise.target_revision,
+                );
+            }
             if let Payload::PatchsetAdded {
                 patchset_id, head, ..
             } = &event.payload

@@ -92,7 +92,7 @@ pub enum EvidenceShortfall {
     EnvironmentOther(String),
     Failed,
     Budget {
-        judgement: crate::gate_budget::BudgetJudgement,
+        judgement: Box<crate::gate_budget::BudgetJudgement>,
         detail: String,
     },
 }
@@ -443,7 +443,10 @@ pub fn evidence_shortfall(
         crate::gate_budget::judge(gate.budget, &gate.budget_sources, evaluation.timing.run_ms);
     judgement
         .reason(&evaluation.timing, &evaluation.hostname)
-        .map(|detail| EvidenceShortfall::Budget { judgement, detail })
+        .map(|detail| EvidenceShortfall::Budget {
+            judgement: Box::new(judgement),
+            detail,
+        })
 }
 
 fn declaration_difference(gate: &RequiredGate, evaluation: &Evaluation) -> Option<String> {

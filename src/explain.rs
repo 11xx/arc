@@ -485,6 +485,7 @@ pub struct Explanation {
     pub historical_budget_authorization: Option<crate::model::AuthorizationBasis>,
     pub current_budget_applicability: Vec<crate::status::GateStatus>,
     pub current_budget_errors: Vec<String>,
+    pub current_budget_raises: Vec<crate::gate_raise::Applicability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge_view: Option<serde_json::Value>,
     pub schema: &'static str,
@@ -677,17 +678,19 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
             Vec::new(),
             None,
         )?;
-        Ok((report.gates, report.budget_errors))
+        Ok((report.gates, report.budget_errors, report.budget_raises))
     })();
-    let (current_budget_applicability, current_budget_errors) = match current_applicability {
-        Ok(report) => report,
-        Err(error) => (
-            Vec::new(),
-            vec![format!(
-                "current budget applicability unavailable: {error:#}"
-            )],
-        ),
-    };
+    let (current_budget_applicability, current_budget_errors, current_budget_raises) =
+        match current_applicability {
+            Ok(report) => report,
+            Err(error) => (
+                Vec::new(),
+                vec![format!(
+                    "current budget applicability unavailable: {error:#}"
+                )],
+                Vec::new(),
+            ),
+        };
     Ok(Explanation {
         historical_budget_authorization: full
             .closure
@@ -695,6 +698,7 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
             .and_then(|c| c.authorization.clone()),
         current_budget_applicability,
         current_budget_errors,
+        current_budget_raises,
         forge_view: if crate::forge_round_trip::applies(&subject_state) {
             Some(crate::forge_view::build(
                 &store,

@@ -145,6 +145,30 @@ fn declaration_notes(report: &StatusReport) -> String {
     for error in &report.budget_errors {
         let _ = writeln!(out, "{error}");
     }
+    for entry in &report.budget_raises {
+        let _ = writeln!(
+            out,
+            "budget raise {}: {}",
+            entry.record.event_id,
+            entry
+                .reason
+                .as_deref()
+                .unwrap_or("applicable; review or recorded debt governs acceptance")
+        );
+        for increase in &entry.record.raise.increases {
+            let _ = writeln!(
+                out,
+                "  {}: {} -> {}; {} eligible lines; allowance {}; execution {:?}; {}",
+                increase.gate.as_deref().unwrap_or("total"),
+                crate::gate_budget::duration(increase.old_ms),
+                crate::gate_budget::duration(increase.new_ms),
+                increase.added,
+                crate::gate_budget::duration(increase.allowance_ms),
+                increase.execution,
+                entry.record.raise.reason
+            );
+        }
+    }
     if !report.declaration_notes.is_empty() {
         let _ = writeln!(out, "Declarations differ:");
         for note in &report.declaration_notes {
@@ -2353,6 +2377,7 @@ pub(crate) fn kept_citations(cites: &[String]) -> String {
 /// Stable kebab event type plus a type-specific one-line summary.
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
+        Payload::GateBudgetRaised { raise } => ("gate-budget-raised", format!("{}: {}", raise.head, raise.reason)),
         Payload::PublicationVerified { target, revision, result, .. } => (
             "publication-verified", format!("{target} at {revision}: {result:?}"),
         ),

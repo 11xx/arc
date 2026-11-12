@@ -5503,7 +5503,8 @@ GATES
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
   the applicable budget, its history sources, host observations and output
   artifact. Investigate the slow checks, make them faster, remove checks worth
-  less, and consider a declared raise only after that work.
+  less, then use `arc gates raise` within this change's allowance.
+  `arc guide gate-raises` defines raising and its trusted counting rules.
 
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
   this tree, five times by default, honoring timeouts. Each round follows the
@@ -5560,9 +5561,11 @@ GATES
 
   The budget in force is the minimum of every applicable selected destination,
   committed change-head, operator and provisional staging declaration. Absence
-  never loosens a budget or total. A change may add or tighten an obligation;
-  it cannot raise one through a declaration alone. These constraints and their
-  sources enter the authorization basis and are confirmed before integration.
+  never loosens a budget or total. Every higher repository declaration needs an
+  applicable raise record even when execution fits the old budget. An accepted
+  raise substitutes only its named destination constraint; independent operator,
+  staging and other-member minima remain binding. These constraints, raise IDs
+  and basis digests are confirmed before integration. See `arc guide gate-raises`.
   Budgets are outside execution identity. Reuse selects the same structurally
   eligible receipt and then judges its command time, with no search for an
   older faster receipt and no implicit rerun. An over-budget selected receipt
@@ -5594,16 +5597,18 @@ GATES
   up to 20 matching command-time observations in this change exceeds 80% of
   its budget; legacy total durations are excluded.
 
-  Refusals name command time, effective budget and sources, excess, host,
+  Refusals include this change's per-change increment and maximum from its
+  destination budget, including the first observed refusal. They name command
+  time, effective budget and sources, excess, host,
   start load averages and online cores, CPU where recorded, and excluded wait
   and preparation. Missing observations stay missing. Load above the core count
   may indicate possible host contention; it never changes the judgement.
 
-  A ledger adopts store format 8 before gate verification or reuse under any
+  A ledger adopts store format 9 before gate verification or reuse under any
   budget declaration, including a total with missing individual budgets,
   before writing budget-bearing evidence or authorization, or when an
   import consumes budget declarations, evidence or authorization. Older
-  executables supporting formats through 7 refuse that ledger. Reads alone do
+  executables supporting formats through 8 refuse that ledger. Reads alone do
   not adopt it; budget-free writes retain the ordinary event envelope and
   ledger format.
   Every path that accepts gate evidence judges it against the budget in force:
@@ -5694,6 +5699,92 @@ GATES
   publication checks every required gate on a changed tree. Reuse receipts
   retain the passing source tree, target tree, selector and declarations;
   they grant no result to another event or environment.
+
+GATE RAISES
+  `arc gates raise GATE --reason TEXT` records a proposed gate increase.
+  `arc gates raise --total --reason TEXT` raises only the integration total;
+  GATE with --total requests both transitions atomically. A reason says what
+  was tried first. Higher numbers must be committed in .arc/gates.toml at the
+  clean change head. Removing a finite budget cannot establish a raise.
+
+  The newest direct execution of that gate at the exact head must pass, be
+  observed clean and stable on that head's tree, match the destination check
+  and current environment, exceed the destination budget and fit the proposed
+  one. Reuse, rewritten execution coordinates, attestation, bypass and measurement
+  output cannot establish this need. Later evidence remains subject to ordinary
+  newest-evidence judgement; a raise never masks a failure.
+
+  The allowed increment is old_budget * raise * min(1, added / raise_per),
+  rounded down to milliseconds with checked integer arithmetic. [budget] raise
+  defaults to "20%" and raise_per to 500; raise_per must be positive. Percentages
+  accept up to four decimal places. JSON budget_rules.raise uses millionths;
+  raise_per uses lines. Destination and operator rules supply the
+  trusted allowance; head rules may tighten it. Repeated requests spend from
+  the same destination budget and final delta, without compounding.
+
+  Counting requires the destination revision to be an ancestor of the head
+  and to contain the change's declared base. Unintegrated prerequisites provide
+  no credit to another member.
+  arc-budget-growth/1 compares those endpoint trees once per subject, with
+  pinned 50% rename/copy detection, unlimited rename candidates, NUL-delimited
+  UTF-8 paths, no external diff or text conversion. Each logical regular text
+  file earns its positive net nonblank line growth. Whitespace-only changes,
+  pure moves, copies without growth, deletions, binary and non-UTF-8 content,
+  symlinks and gitlinks earn nothing. Binary/custom diff attributes from either
+  committed endpoint exclude a file; isolated Git metadata prevents host attributes
+  or driver configuration from granting credit. Uncertain input refuses a raise.
+  Cross-scope moves earn nothing; modified moves inside scope earn only growth.
+  Overlapping patterns count a file once; intermediate commit churn earns nothing.
+
+  A gate's destination paths bound counting; operator and head paths may narrow
+  credit. A gate without paths and the total count every path outside inert.
+  Destination, operator and head inert exclusions all restrict credit. Selection's
+  unnamed-path fallback grants no extra allowance. [budget] exclude in operator
+  policy names generated/vendor paths, independently of inert and gate selection.
+  A repository's exclude list cannot authorize counting exclusions. Administration
+  of operator policy is trusted authority; raise never edits that file.
+
+  This allowance is a per-change brake, not a cumulative growth bound or a
+  judgement of whether added text is valuable. Operator [budget] total is the
+  fixed ceiling for repeated raises. Doctor and gates warn when budgets have no
+  operator ceiling. Review must still assess padding, relevance and the reason.
+
+  Every raised total needs its own explicit transition and allowance, counting
+  all qualifying files. Its required declaration sum, across every profile and
+  the unqualified case, must exceed the old total and fit the new one and the
+  operator ceiling. A new gate can justify a total-only raise without an old
+  gate exceeding its budget. All other effective total rules remain binding.
+
+  The immutable gate-budget-raised event records change, destination revision,
+  exact head/tree, counting algorithm and rule digest, per-file counts, old/new
+  budgets, allowance, cited direct execution or total declaration sum, and reason.
+  Every head or destination change requires re-establishing the record, including
+  amend, rebase, squash and signature/trailer-only rewrites. No rewrite equivalence
+  is assumed. Current applicability is rederived from retained objects and receiver
+  policy; missing objects or changed counting, execution or policy inputs refuse it.
+
+  Snapshot captures the complete immutable raise set. Appending a record requires
+  a fresh snapshot even at the same Git head, and fresh review or recorded debt
+  under the ordinary policy. Status and check expose budget_raises; show JSON
+  retains budget_raises as facts and adds budget_raise_status. Show's budget review
+  checklist names old/new values, scope, allowance, execution, reason, total and
+  ceiling. A debt-backed raise is evidence with review owed, never reviewed.
+
+  Integrate, accept, both landing forms, candidate selection/promotion and fresh
+  or cached publication refuse an unrecorded or stale declaration increase even
+  when every run fits the old budgets. Each landing member owns its allowance;
+  records and line credit are never pooled. An associated publication change uses
+  its validated record; an arbitrary branch cannot authorize its own increase.
+  After integration the destination declaration supplies the higher ordinary
+  budget for later changes. The record and authorization remain historical facts.
+
+  Export/import and replicas transport raises as factual evidence with cited
+  executions and retained head/destination objects. Receiver constraints decide
+  applicability; a producer's acceptance grants no receiver authority. Historical
+  replay does not consult current budgets. Budget-bearing writes/imports adopt
+  store format 9 before publishing evidence; executables through format 8 refuse.
+  Change bundles require the exporter's store-format capability; import checks
+  the reader's supported store format. Export does not adopt the local ledger.
 
 SLOTS
   `[slots]` in `.arc/worktrees.toml` declares a pool of fixed-path checkouts
@@ -5992,7 +6083,7 @@ SCHEMAS
   are recovery evidence, separate from versioned journal events.
 
   Internal:
-    store format 8                   .git/arc/config.json and the change ledger
+    store format 9                   .git/arc/config.json and the change ledger
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization
@@ -6368,6 +6459,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
     Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
     Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
+    Section { name: "gate-raises", family: "gates", title: "Budget raises and trusted growth counting", start: "GATE RAISES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },
     Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
     Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },

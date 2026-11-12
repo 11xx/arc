@@ -37,6 +37,7 @@ pub fn squash(
     super::ensure_append_allowed(
         &st,
         &Payload::PatchsetAdded {
+            budget_raise_ids: Vec::new(),
             patchset_id: String::new(),
             base: String::new(),
             head: String::new(),

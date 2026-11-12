@@ -1653,6 +1653,7 @@ fn show(
         } {
             Ok(report) => {
                 value["gate_status"] = serde_json::to_value(&report.gates)?;
+                value["budget_raise_status"] = serde_json::to_value(&report.budget_raises)?;
                 value["budget_errors"] = serde_json::to_value(&report.budget_errors)?;
                 value["budget_rules"] = serde_json::to_value(&report.budget_rules)?;
             }
@@ -1682,6 +1683,22 @@ fn show(
             Vec::new()
         };
         print!("{}", render::markdown(&st, &report, &alternatives));
+        if !report.budget_raises.is_empty() {
+            println!("\n## Budget raises\n");
+            for entry in &report.budget_raises {
+                println!(
+                    "{}: {}\n{}",
+                    entry.record.event_id,
+                    if entry.applicable {
+                        "applicable; subject to review or recorded debt"
+                    } else {
+                        "stale"
+                    },
+                    serde_json::to_string_pretty(&entry.record.raise)?
+                );
+            }
+            println!("\n## Budget review checklist\n\n- [ ] Assess each budget raise: old/new values, eligible growth, allowance, execution, reason, total and operator ceiling. Recorded debt leaves that review owed.");
+        }
         if !matches!(role, ExecutionRole::Implementer) {
             let declarations = crate::declarations::for_change(&ctx.cwd, &st)?;
             let policy = declarations.policy;
@@ -1724,6 +1741,7 @@ fn show_tagged(ctx: &Ctx, tags: Vec<String>, json: bool) -> Result<()> {
                 match ctx.report(&store, state) {
                     Ok(report) => {
                         value["gate_status"] = serde_json::to_value(&report.gates)?;
+                        value["budget_raise_status"] = serde_json::to_value(&report.budget_raises)?;
                         value["budget_errors"] = serde_json::to_value(&report.budget_errors)?;
                         value["budget_rules"] = serde_json::to_value(&report.budget_rules)?;
                     }

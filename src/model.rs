@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 pub const SCHEMA_VERSION: u32 = 7;
 
 /// The newest ledger format this build understands.
-pub const STORE_FORMAT: u32 = 8;
+pub const STORE_FORMAT: u32 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1316,6 +1316,8 @@ pub enum Payload {
         no_entry_reason: Option<String>,
     },
     PatchsetAdded {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        budget_raise_ids: Vec<String>,
         patchset_id: String,
         base: String,
         head: String,
@@ -1730,6 +1732,9 @@ pub enum Payload {
         mode: VerificationRunMode,
         skip_green: bool,
         gates: Vec<VerificationRunGate>,
+    },
+    GateBudgetRaised {
+        raise: crate::gate_raise::Raise,
     },
     VerificationRecorded {
         /// Identity of a declaration with path coverage. Absence answers only
@@ -3001,6 +3006,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ExternalVerdictRecorded { .. }
         | Payload::VerificationRunStarted { .. }
         | Payload::VerificationRecorded { .. }
+        | Payload::GateBudgetRaised { .. }
         | Payload::VerificationBypassed { .. }
         | Payload::VerificationReused { .. }
         // Waiving dirt excuses a gate, and a closed change has no gate left

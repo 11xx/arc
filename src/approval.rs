@@ -579,6 +579,7 @@ mod tests {
 
     fn patchset() -> Patchset {
         Patchset {
+            budget_raise_ids: Vec::new(),
             id: "ps-2".into(),
             actor: "author".into(),
             model: None,

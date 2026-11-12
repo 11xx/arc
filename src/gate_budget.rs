@@ -12,6 +12,13 @@ pub struct BudgetSource {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetRules {
+    #[serde(default, deserialize_with = "crate::gate_raise::percentage")]
+    pub raise: Option<u64>,
+    #[serde(default, deserialize_with = "crate::gate_raise::positive")]
+    pub raise_per: Option<u64>,
+    /// Generated and vendored paths excluded from allowance counting.
+    #[serde(default)]
+    pub exclude: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_ms")]
     pub total: Option<u64>,
     #[serde(default)]
@@ -71,6 +78,10 @@ pub fn budgeted_payload(payload: &crate::model::Payload) -> bool {
         Payload::LandingCompleted { members, .. } => members
             .iter()
             .any(|m| budgeted_authorization(&m.authorization)),
+        Payload::GateBudgetRaised { .. } => true,
+        Payload::PatchsetAdded {
+            budget_raise_ids, ..
+        } => !budget_raise_ids.is_empty(),
         _ => false,
     }
 }
@@ -86,6 +97,11 @@ pub fn merge_rules(into: &mut Option<BudgetRules>, other: Option<BudgetRules>) {
     if let Some(other) = other {
         let current = into.get_or_insert_with(BudgetRules::default);
         current.total = minimum(current.total, other.total);
+        current.raise = minimum(current.raise, other.raise);
+        current.raise_per = current.raise_per.into_iter().chain(other.raise_per).max();
+        current.exclude.extend(other.exclude);
+        current.exclude.sort();
+        current.exclude.dedup();
         current.sources.extend(other.sources);
         current
             .sources
@@ -104,7 +120,10 @@ impl Gate {
     }
 
     pub fn budget_judgement(&self, run_ms: Option<u64>) -> BudgetJudgement {
-        judge(self.budget, &self.budget_sources, run_ms)
+        let mut judgement = judge(self.budget, &self.budget_sources, run_ms);
+        judgement.raise_allowance_ms = self.raise_allowance_ms;
+        judgement.raise_budget_max_ms = self.raise_budget_max_ms;
+        judgement
     }
 
     pub fn execution_limit(&self) -> Result<(Option<u64>, Option<String>)> {
@@ -159,12 +178,19 @@ impl GatesFile {
 
     /// Validate the complete effective suite, including profiles other than the active one.
     pub fn budget_errors(&self) -> Vec<String> {
+        let mut errors = self.pending_raises.iter().map(|gate| {
+            let name = gate.as_deref().unwrap_or("total");
+            format!("budget: {name} declaration increase or removal requires an applicable accepted raise record")
+        }).collect::<Vec<_>>();
+        if self.raise_snapshot_missing {
+            errors
+                .push("budget raise set needs a fresh snapshot and review or recorded debt".into());
+        }
         let Some(rules) = &self.budget else {
-            return Vec::new();
+            return errors;
         };
         let mut profiles = std::collections::BTreeSet::from([String::new()]);
         profiles.extend(self.gates.values().flat_map(|g| g.profiles.clone()));
-        let mut errors = Vec::new();
         for profile in profiles {
             let label = if profile.is_empty() {
                 "unqualified"
@@ -206,6 +232,10 @@ pub enum BudgetVerdict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetJudgement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raise_allowance_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raise_budget_max_ms: Option<u64>,
     pub verdict: BudgetVerdict,
     pub budget_ms: Option<u64>,
     pub run_ms: Option<u64>,
@@ -225,6 +255,8 @@ pub fn judge(
         _ => BudgetVerdict::WithinBudget,
     };
     BudgetJudgement {
+        raise_allowance_ms: None,
+        raise_budget_max_ms: None,
         verdict,
         budget_ms,
         run_ms,
@@ -266,7 +298,16 @@ impl BudgetJudgement {
         {
             reason.push_str("; possible host contention");
         }
-        reason.push_str("; inspect arc gates over, make it faster, remove checks worth less, then consider a declared raise");
+        reason.push_str("; inspect arc gates over, make it faster, remove checks worth less, then arc gates raise GATE; allowance ");
+        reason.push_str(
+            &self
+                .raise_allowance_ms
+                .map(duration)
+                .unwrap_or_else(|| "unavailable for this subject".into()),
+        );
+        if let Some(maximum) = self.raise_budget_max_ms {
+            reason.push_str(&format!("; maximum {}", duration(maximum)));
+        }
         Some(reason)
     }
 }

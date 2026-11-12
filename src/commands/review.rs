@@ -732,6 +732,7 @@ pub(super) fn snapshot_holding(
         .latest_patchset()
         .filter(|p| {
             p.head == head
+                && p.budget_raise_ids == st.budget_raises.iter().map(|r|r.event_id.clone()).collect::<Vec<_>>()
                 && p.approved_head == head
                 && p.base == base_rev
                 && p.brief_ref == brief_ref
@@ -803,6 +804,11 @@ pub(super) fn snapshot_holding(
         warn_fewer_contributors_than_hands(ctx, &base_rev, &head, contributors);
     }
     let payload = Payload::PatchsetAdded {
+        budget_raise_ids: st
+            .budget_raises
+            .iter()
+            .map(|r| r.event_id.clone())
+            .collect(),
         patchset_id: patchset_id.clone(),
         base: base_rev,
         head: head.clone(),

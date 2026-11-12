@@ -1201,7 +1201,7 @@ pub fn check_provisional(
         println!(
             "{}",
             serde_json::to_string_pretty(
-                &serde_json::json!({ "schema":"arc-check/4", "change_id": state.change_id, "mode":"provisional", "ready":code==0, "exit_code":code, "refusal":refusal, "blockers":report.as_ref().map(|r| r.blockers()), "gates":report.as_ref().map(|r| &r.gates), "budget_errors":report.as_ref().map(|r| &r.budget_errors), "budget_rules":report.as_ref().map(|r| &r.budget_rules), "provisional_prerequisites":report.as_ref().map(|r| &r.provisional_prerequisites) })
+                &serde_json::json!({ "schema":"arc-check/4", "change_id": state.change_id, "mode":"provisional", "ready":code==0, "exit_code":code, "refusal":refusal, "blockers":report.as_ref().map(|r| r.blockers()), "gates":report.as_ref().map(|r| &r.gates), "budget_raises":report.as_ref().map(|r| &r.budget_raises), "budget_errors":report.as_ref().map(|r| &r.budget_errors), "budget_rules":report.as_ref().map(|r| &r.budget_rules), "provisional_prerequisites":report.as_ref().map(|r| &r.provisional_prerequisites) })
             )?
         );
     } else if let Some(refusal) = refusal {

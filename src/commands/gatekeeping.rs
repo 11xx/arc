@@ -33,6 +33,7 @@ pub fn check_selection(
 #[derive(serde::Serialize)]
 struct CheckOutput<'a> {
     gates: &'a [crate::status::GateStatus],
+    budget_raises: &'a [crate::gate_raise::Applicability],
     budget_errors: &'a [String],
     budget_rules: &'a Option<crate::gate_budget::BudgetRules>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2601,7 +2602,8 @@ fn verify_all_parallel(
         item.worktree_dirty = None;
         item.tree_moved = tree_moved;
     }
-    let current = ctx.declarations(&store.state(change_id)?)?;
+    let current_state = store.state(change_id)?;
+    let current = ctx.declarations(&current_state)?;
     if current.gates.has_budgets() {
         store.adopt_budgets()?;
     }
@@ -2612,7 +2614,16 @@ fn verify_all_parallel(
                 .gate
                 .as_ref()
                 .and_then(|name| current.gates.gates.get(name))
-                .map(|g| g.budget_judgement(item.timing.run_ms));
+                .map(|g| {
+                    let mut judgement = g.budget_judgement(item.timing.run_ms);
+                    let _ = crate::gate_raise::fill_advice(
+                        &ctx.cwd,
+                        &current_state,
+                        item.gate.as_deref().unwrap(),
+                        &mut judgement,
+                    );
+                    judgement
+                });
             let budget = judged.as_ref().or(item.timing.budget_at_run.as_ref());
             if let Some(reason) = budget.and_then(|b| b.reason(&item.timing, &item.hostname)) {
                 println!(
@@ -2912,12 +2923,16 @@ fn record_verification_at(
     let mut budget = completed.timing.budget_at_run.clone();
     if completed.landing.is_none() {
         if let Some(name) = completed.gate.as_deref() {
-            let current = ctx.declarations(&store.state(change_id)?)?;
+            let current_state = store.state(change_id)?;
+            let current = ctx.declarations(&current_state)?;
             if current.gates.has_budgets() {
                 store.adopt_budgets()?;
             }
             if let Some(gate) = current.gates.gates.get(name) {
-                budget = Some(gate.budget_judgement(completed.timing.run_ms));
+                let mut judgement = gate.budget_judgement(completed.timing.run_ms);
+                let _ =
+                    crate::gate_raise::fill_advice(&ctx.cwd, &current_state, name, &mut judgement);
+                budget = Some(judgement);
             }
         }
     }
@@ -6309,6 +6324,7 @@ fn check(
         let output = CheckOutput {
             gates: &report.gates,
             budget_errors: &report.budget_errors,
+            budget_raises: &report.budget_raises,
             budget_rules: &report.budget_rules,
             review_context: report.review_context.as_ref(),
             schema: "arc-check/4",

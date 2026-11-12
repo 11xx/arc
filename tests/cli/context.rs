@@ -698,6 +698,9 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
     assert!(!partial.contains("gpt-fixture"), "{partial}");
 }
 
+/// Claim: ambiguous native identity remains unresolved through events and transport,
+/// whose reader capability is format 9. Rejects invented model attribution,
+/// changing the ordinary event envelope, or understating the bundle's reader fence.
 #[test]
 fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     let repo = Repo::new();
@@ -754,7 +757,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
         .success();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     assert_eq!(exported["schema"], "arc-bundle/6", "{exported}");
-    assert_eq!(exported["store_format"], 7, "{exported}");
+    assert_eq!(exported["store_format"], 9, "{exported}");
 
     let recipient = Repo::new();
     deliver_git_objects(&repo, &recipient);
