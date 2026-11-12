@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const ALGORITHM: &str = "arc-budget-growth/1";
+const ALGORITHM: &str = "arc-budget-growth/2";
 const PROJECT: &str = ".arc/gates.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,7 +202,7 @@ fn raw(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// Net nonblank growth of each logical file; rename/copy detection is pinned.
+/// Nonblank deltas of logical files; rename/copy detection is pinned.
 fn growth(
     cwd: &Path,
     target: &str,
@@ -275,7 +275,9 @@ fn growth(
         } else {
             first
         };
-        if !parts[1].starts_with("100")
+        let regular_before = parts[0].starts_with("100");
+        let regular_after = parts[1].starts_with("100");
+        if (!regular_before && !regular_after)
             || (!paths.is_empty() && !matches(paths, path))
             || matches(inert, path)
             || matches(excluded, path)
@@ -290,8 +292,12 @@ fn growth(
             blobs = Some(gitio::BlobReader::new(cwd)?);
         }
         let blobs = blobs.as_mut().unwrap();
-        let after = blobs.read(parts[3])?;
-        let before = if parts[0].starts_with("100") {
+        let after = if regular_after {
+            blobs.read(parts[3])?
+        } else {
+            Vec::new()
+        };
+        let before = if regular_before {
             blobs.read(parts[2])?
         } else {
             Vec::new()
@@ -312,13 +318,13 @@ fn growth(
         }
         let count = |text: &str| text.lines().filter(|s| !s.trim().is_empty()).count() as u64;
         let (old, new) = (count(before), count(after));
-        if new > old {
+        if new != old && (!parts[4].starts_with('C') || new > old) {
             files.push(CountedFile {
                 source: (parts[0] != "000000").then(|| first.into()),
                 path: path.into(),
                 before: old,
                 after: new,
-                added: new - old,
+                added: new.saturating_sub(old),
             });
         }
     }
@@ -347,6 +353,18 @@ fn growth(
         cache.insert(key, files.clone());
     }
     Ok(files)
+}
+
+fn net_growth<'a>(mut files: impl Iterator<Item = &'a CountedFile>) -> Result<u64> {
+    let (growth, shrinkage) = files
+        .try_fold((0_u64, 0_u64), |(growth, shrinkage), file| {
+            Some((
+                growth.checked_add(file.after.saturating_sub(file.before))?,
+                shrinkage.checked_add(file.before.saturating_sub(file.after))?,
+            ))
+        })
+        .context("line count overflow")?;
+    Ok(growth.saturating_sub(shrinkage))
 }
 
 fn scope(
@@ -481,10 +499,7 @@ pub fn propose(
                 files.retain(|f| matches(&gate.paths, &f.path));
             }
         }
-        let added = files
-            .iter()
-            .try_fold(0_u64, |n, f| n.checked_add(f.added))
-            .context("line count overflow")?;
+        let added = net_growth(files.iter())?;
         let allowance_ms = allowance(*old, added, percent, per)?;
         if new - old > allowance_ms {
             bail!(
@@ -738,19 +753,13 @@ fn advice(
     };
     let (paths, inert, excluded) = scope(&target, &own, &op, Some(name));
     let files = growth(cwd, target_revision, head, &paths, &inert, &excluded)?;
-    let added = files
-        .iter()
-        .filter(|file| {
-            [own.gates.get(name), op.gates.get(name)]
-                .iter()
-                .all(|gate| {
-                    gate.is_none_or(|gate| {
-                        gate.paths.is_empty() || matches(&gate.paths, &file.path)
-                    })
-                })
-        })
-        .try_fold(0_u64, |sum, file| sum.checked_add(file.added))
-        .context("line count overflow")?;
+    let added = net_growth(files.iter().filter(|file| {
+        [own.gates.get(name), op.gates.get(name)]
+            .iter()
+            .all(|gate| {
+                gate.is_none_or(|gate| gate.paths.is_empty() || matches(&gate.paths, &file.path))
+            })
+    }))?;
     let (percent, per) = entitlement(&target, &own, &op);
     let increment = allowance(old, added, percent, per)?;
     Ok(Some((

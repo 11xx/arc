@@ -5725,11 +5725,14 @@ GATE RAISES
   Counting requires the destination revision to be an ancestor of the head
   and to contain the change's declared base. Unintegrated prerequisites provide
   no credit to another member.
-  arc-budget-growth/1 compares those endpoint trees once per subject, with
+  arc-budget-growth/2 compares those endpoint trees once per subject, with
   pinned 50% rename/copy detection, unlimited rename candidates, NUL-delimited
-  UTF-8 paths, no external diff or text conversion. Each logical regular text
-  file earns its positive net nonblank line growth. Whitespace-only changes,
-  pure moves, copies without growth, deletions, binary and non-UTF-8 content,
+  UTF-8 paths, no external diff or text conversion. Eligible nonblank growth
+  is the sum of logical-file growth minus shrinkage and deletions in the same
+  counted scope, floored at zero. Records retain growing and shrinking files
+  with their before/after counts. Moves between files and file splits earn
+  nothing without net scope growth. Whitespace-only changes, pure moves,
+  copies without growth, binary and non-UTF-8 content,
   symlinks and gitlinks earn nothing. Binary/custom diff attributes from either
   committed endpoint exclude a file; isolated Git metadata prevents host attributes
   or driver configuration from granting credit. Uncertain input refuses a raise.

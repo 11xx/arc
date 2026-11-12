@@ -1220,3 +1220,170 @@ printf fixture"#;
         .unwrap()
         .is_empty());
 }
+
+fn scope_net_growth(mode: &str) {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    repo.commit(
+        &repo.root,
+        "src/original.rs",
+        &lines_text(1000),
+        "test: source",
+    );
+    let total = if mode == "total" { 10000 } else { 20000 };
+    let base = declaration(10000, total).replace("inert=['.arc/']", "inert=['.arc/','src/inert/']");
+    repo.redeclare_gates(&base);
+    repo.declare_gates_locally("[budget]\nexclude=['src/excluded/']\n");
+    let ignored = match mode {
+        "outside" => Some("outside.rs"),
+        "inert" => Some("src/inert/deleted.rs"),
+        "excluded" => Some("src/excluded/deleted.rs"),
+        _ => None,
+    };
+    if !matches!(mode, "move" | "split") {
+        repo.commit(
+            &repo.root,
+            "src/shrink.rs",
+            &lines_text(300).replace("value", "shrinking"),
+            "test: shrinking file",
+        );
+    }
+    if let Some(path) = ignored {
+        fs::create_dir_all(repo.root.join(path).parent().unwrap()).unwrap();
+        repo.commit(
+            &repo.root,
+            path,
+            &lines_text(700).replace("value", "ignored"),
+            "test: ignored source",
+        );
+    }
+    let id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", mode])));
+    let wt = repo.home.join(".worktrees").join(format!("repo-{mode}"));
+    let content = lines_text(1000);
+    let lines = content.lines().collect::<Vec<_>>();
+    let expected = if matches!(mode, "move" | "split") {
+        0
+    } else {
+        200
+    };
+    match mode {
+        "move" => {
+            fs::write(
+                wt.join("src/original.rs"),
+                format!("{}\n", lines[..600].join("\n")),
+            )
+            .unwrap();
+            fs::write(
+                wt.join("src/moved.rs"),
+                format!("{}\n", lines[600..].join("\n")),
+            )
+            .unwrap();
+        }
+        "split" => {
+            git(&wt, &["rm", "src/original.rs"]);
+            fs::create_dir_all(wt.join("src")).unwrap();
+            for (index, chunk) in lines.chunks(250).enumerate() {
+                fs::write(
+                    wt.join(format!("src/part-{index}.rs")),
+                    format!("{}\n", chunk.join("\n")),
+                )
+                .unwrap();
+            }
+        }
+        _ => {
+            git(&wt, &["rm", "src/shrink.rs"]);
+            fs::write(
+                wt.join("src/added.rs"),
+                lines_text(500).replace("value", "added"),
+            )
+            .unwrap();
+            if let Some(path) = ignored {
+                git(&wt, &["rm", path]);
+            }
+        }
+    }
+    let new_budget = if expected == 0 { 10001 } else { 10800 };
+    let new_total = if mode == "total" { new_budget } else { total };
+    fs::write(
+        wt.join(".arc/gates.toml"),
+        declaration(new_budget, new_total)
+            .replace("inert=['.arc/']", "inert=['.arc/','src/inert/']"),
+    )
+    .unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-m", "test: scope delta"]);
+    snapshot(&repo, &wt);
+    verify(&repo, &wt, if expected == 0 { 10001 } else { 10300 }, 1);
+    if expected == 0 {
+        refusal(&mut raise(&repo, &wt), "0 eligible lines");
+    } else {
+        let mut command = raise(&repo, &wt);
+        if mode == "total" {
+            command.arg("--total");
+        }
+        command.assert().success();
+        let state = shown(&repo, &wt, &id);
+        for increase in state["budget_raises"][0]["raise"]["increases"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(increase["added"], expected, "{mode}: {increase}");
+            assert_eq!(increase["allowance_ms"], 800, "{mode}: {increase}");
+            let files = increase["files"].as_array().unwrap();
+            assert_eq!(files.len(), 2, "{mode}: {files:?}");
+            let shrink = files.iter().find(|f| f["path"] == "src/shrink.rs").unwrap();
+            assert_eq!(shrink["before"], 300);
+            assert_eq!(shrink["after"], 0);
+            assert_eq!(shrink["added"], 0);
+        }
+    }
+}
+
+/// Claim: moving 400 lines between counted files earns zero allowance.
+/// Rejects destination growth without the matching source shrinkage.
+#[test]
+fn raise_scope_net_move() {
+    scope_net_growth("move");
+}
+
+/// Claim: splitting one counted file into smaller files earns zero allowance.
+/// Rejects additions below Git's rename threshold without the deleted source.
+#[test]
+fn raise_scope_net_split() {
+    scope_net_growth("split");
+}
+
+/// Claim: adding 500 counted lines and deleting 300 earns 200 lines of credit.
+/// Rejects positive-only growth and omission of shrinking files from the record.
+#[test]
+fn raise_scope_net_add_and_delete() {
+    scope_net_growth("net");
+}
+
+/// Claim: gate and total raises both count 500 additions minus 300 deletions.
+/// Rejects either subject retaining positive-only growth.
+#[test]
+fn raise_scope_net_total() {
+    scope_net_growth("total");
+}
+
+/// Claim: out-of-path deletion cannot debit the gate's net 200 eligible lines.
+/// Rejects positive-only counting or subtracting shrinkage outside the gate scope.
+#[test]
+fn raise_scope_net_outside_deletion() {
+    scope_net_growth("outside");
+}
+
+/// Claim: inert deletion cannot debit the gate's net 200 eligible lines.
+/// Rejects positive-only counting or subtracting inert shrinkage.
+#[test]
+fn raise_scope_net_inert_deletion() {
+    scope_net_growth("inert");
+}
+
+/// Claim: trusted excluded deletion cannot debit the gate's net 200 eligible lines.
+/// Rejects positive-only counting or subtracting generated/vendor shrinkage.
+#[test]
+fn raise_scope_net_excluded_deletion() {
+    scope_net_growth("excluded");
+}
