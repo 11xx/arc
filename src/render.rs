@@ -2392,7 +2392,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::GateBudgetRaised { raise } => ("gate-budget-raised", format!("{}: {}", raise.head, raise.reason)),
         Payload::GateBaselineRecorded { baseline } => ("gate-baseline-recorded", format!("{} at {}: {} executed gates", baseline.target, baseline.revision, baseline.gates.len())),
-        Payload::VerificationBaseReused { gate, witness, .. } => ("verification-base-reused", format!("{gate}: base pass from {} at {}", witness.baseline_event_id, witness.baseline.revision)),
+        Payload::VerificationBaseReused { gate, witness, .. } => ("verification-base-reused", format!("{gate}: base pass from {}", witness.baseline_event_id)),
         Payload::PublicationVerified { target, revision, result, .. } => (
             "publication-verified", format!("{target} at {revision}: {result:?}"),
         ),

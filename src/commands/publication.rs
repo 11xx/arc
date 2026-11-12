@@ -31,7 +31,7 @@ pub fn publication(
         bail!("publication target moved before checks");
     }
     let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
-    let (mut gates, authority) =
+    let (mut gates, authority, states) =
         publication_gates(ctx, &store, target, &revision, associated_change)?;
     if gates.has_budgets() {
         store.adopt_budgets()?;
@@ -44,6 +44,7 @@ pub fn publication(
     let participants = crate::base_pass::publication_participants(
         &ctx.cwd,
         &store,
+        &states,
         target,
         profile,
         &revision,
@@ -223,7 +224,7 @@ pub fn publication(
         );
     }
     match publication_gates(ctx, &store, target, &revision, associated_change).and_then(
-        |(mut current, authority)| {
+        |(mut current, authority, _)| {
             for name in &audit_names {
                 if let Some(gate) = gates.gates.get(name) {
                     current
@@ -346,7 +347,7 @@ fn publication_gates(
     target: &str,
     revision: &str,
     associated_change: Option<&str>,
-) -> Result<(gates::GatesFile, String)> {
+) -> Result<(gates::GatesFile, String, BTreeMap<String, ChangeState>)> {
     let own = gates::load_at(&ctx.cwd, revision)?;
     let states = ctx.load_all_states(store)?;
     let associated = if let Some(reference) = associated_change {
@@ -435,7 +436,7 @@ fn publication_gates(
     if !errors.is_empty() {
         bail!("invalid publication budgets: {}", errors.join("; "));
     }
-    Ok((required, authority))
+    Ok((required, authority, states))
 }
 
 fn configuration_identity(

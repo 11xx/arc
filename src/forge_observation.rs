@@ -793,6 +793,7 @@ pub fn replay_observation(
 /// declaration that merged history makes current.
 pub fn validate_import_admission(
     events: &[crate::model::Event],
+    repository: &[crate::model::Event],
     introduced: &BTreeSet<&String>,
     rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<()> {
@@ -839,7 +840,7 @@ pub fn validate_import_admission(
         let prefix: Vec<_> = events[..index].iter().filter(|e| {
             !matches!((&e.payload, source), (Payload::ForgeObservationRecorded { observation: old }, Some(doc)) if old.read_id == doc.read_id && old != doc)
         }).cloned().collect();
-        let state = crate::state::reduce_with_rewrites(&prefix, rewrites)?;
+        let state = crate::state::reduce_with_repository(&prefix, rewrites, repository)?;
         match &event.payload {
             Payload::ForgeObservationRecorded { observation } => {
                 observation.validate(&state.forge.observations)?

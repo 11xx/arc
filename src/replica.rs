@@ -997,6 +997,7 @@ pub fn live_claim_contest(
     store: &Store,
     change_id: &str,
     incoming_events: &[Event],
+    repository: &[Event],
     new_event_ids: &BTreeSet<String>,
     rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<Option<ClaimContest>> {
@@ -1035,7 +1036,8 @@ pub fn live_claim_contest(
 
     let mut incoming_events = incoming_events.to_vec();
     incoming_events.sort_by(|left, right| left.event_id.cmp(&right.event_id));
-    let incoming_state = crate::state::reduce_with_rewrites(&incoming_events, rewrites)?;
+    let incoming_state =
+        crate::state::reduce_with_repository(&incoming_events, rewrites, repository)?;
     let Some(incoming_claim) = incoming_state.claim.as_ref() else {
         return Ok(None);
     };

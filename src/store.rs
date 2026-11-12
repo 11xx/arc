@@ -2659,7 +2659,8 @@ impl Store {
                 .context("base-pass replay needs the retained Git object store")?;
             crate::base_pass::validate_events(cwd, events, repository_events, scope)?;
         }
-        let mut state = crate::state::reduce_following(events, rewrites)?;
+        let mut state =
+            crate::state::reduce_following_with_repository(events, rewrites, repository_events)?;
         state.review_clearance = self.review_clearance;
         state.privilege_scope = Some(Arc::clone(scope));
         if let Some(git_dir) = self

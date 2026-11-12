@@ -112,7 +112,7 @@ impl SourceGeneration {
             .filter(|e| e.change_id == self.change_id)
             .cloned()
             .collect();
-        let projected = crate::state::reduce_with_rewrites(&source_history, rewrites)?;
+        let projected = crate::state::reduce_with_repository(&source_history, rewrites, events)?;
         let resolved =
             crate::forge_observation::find_observation(&projected.forge, &self.observation)?;
         ensure!(
@@ -1075,7 +1075,7 @@ pub fn source_view(
         .cloned()
         .collect();
     let rewrites = held_rewrites(events);
-    let projected = crate::state::reduce_with_rewrites(&history, &rewrites);
+    let projected = crate::state::reduce_with_repository(&history, &rewrites, events);
     let record = projected.as_ref().ok().and_then(|state| {
         crate::forge_observation::find_observation(&state.forge, &source.observation).ok()
     });

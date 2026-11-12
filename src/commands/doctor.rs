@@ -600,7 +600,11 @@ fn inspect_change(
     // A landed member reads as the landing closed it; the raw events stay
     // what the remaining checks inspect.
     let joined = crate::landing::joined(&events, &inspection.repository_events);
-    let mut state = match state::reduce_with_rewrites(&joined, &inspection.rewrites) {
+    let mut state = match state::reduce_with_repository(
+        &joined,
+        &inspection.rewrites,
+        &inspection.repository_events,
+    ) {
         Ok(state) => state,
         Err(error) => {
             problems.push(Finding {

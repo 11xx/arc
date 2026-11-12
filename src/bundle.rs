@@ -231,6 +231,15 @@ impl Bundle {
         }
         // A landing attempt still pending is local: it travels once a
         // completion or an abandonment finishes it.
+        let cited_baselines: std::collections::BTreeSet<_> = raw
+            .iter()
+            .filter_map(|(_, value)| {
+                (value["event_type"] == "verification-base-reused")
+                    .then(|| value["witness"]["baseline_event_id"].as_str())
+                    .flatten()
+                    .map(str::to_owned)
+            })
+            .collect();
         let finished: std::collections::BTreeSet<String> = repository_events
             .iter()
             .filter(|value| {
@@ -243,6 +252,12 @@ impl Bundle {
             .collect();
         let repository_events: Vec<Value> = repository_events
             .into_iter()
+            .filter(|value| {
+                value["event_type"] != "gate-baseline-recorded"
+                    || value["event_id"]
+                        .as_str()
+                        .is_some_and(|id| cited_baselines.contains(id))
+            })
             .filter(|value| {
                 value["event_type"] != "landing-prepared"
                     || value["attempt"]
@@ -891,7 +906,13 @@ impl ValidatedBundle {
                 .iter()
                 .filter_map(|event| event.typed.clone())
                 .collect::<Vec<_>>();
-            state::reduce_with_rewrites(&events, rewrites)
+            let repository = self
+                .bundle
+                .repository_events
+                .iter()
+                .filter_map(|value| parse_typed_event(value).transpose())
+                .collect::<Result<Vec<_>>>()?;
+            state::reduce_with_repository(&events, rewrites, &repository)
                 .context("bundled known events are not replayable")?;
         }
         Ok(())

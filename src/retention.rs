@@ -19,7 +19,7 @@ use crate::gitio::{self, RefUpdate};
 use crate::model::Payload;
 use crate::rewrite::RefMove;
 use crate::store::Store;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -54,6 +54,16 @@ impl Cited {
 /// cites the commit.
 pub fn cited(store: &Store) -> Result<Vec<Cited>> {
     let mut found = Vec::new();
+    let repository_events = store.repository_events()?;
+    let baselines: BTreeMap<_, _> = repository_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            Payload::GateBaselineRecorded { baseline } => {
+                Some((event.event_id.as_str(), baseline.as_ref()))
+            }
+            _ => None,
+        })
+        .collect();
     let read = store.read()?;
     for change_id in read.change_ids()? {
         let events = read.events(&change_id)?;
@@ -96,6 +106,23 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         }
         for event in &events {
+            if let Payload::VerificationBaseReused { witness, .. } = &event.payload {
+                let baseline = baselines
+                    .get(witness.baseline_event_id.as_str())
+                    .context("base pass has no retained baseline")?;
+                add(
+                    &event.event_id,
+                    "base-pass baseline".into(),
+                    &baseline.revision,
+                );
+                for entry in baseline.gates.values() {
+                    add(
+                        &event.event_id,
+                        "base-pass execution".into(),
+                        &entry.execution.revision,
+                    );
+                }
+            }
             for commit in crate::base_pass::cited_commits(&event.payload) {
                 add(&event.event_id, "base-pass Git witness".into(), commit);
             }
@@ -111,7 +138,6 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         }
     }
-    let repository_events = store.load_repository_events()?;
     let registrations: BTreeMap<_, _> = repository_events
         .iter()
         .filter_map(|event| {
@@ -127,8 +153,11 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         })
         .collect();
-    for event in &repository_events {
-        for commit in crate::base_pass::cited_commits(&event.payload) {
+    for event in repository_events.iter() {
+        for commit in crate::base_pass::cited_commits(&event.payload)
+            .into_iter()
+            .filter(|_| !matches!(event.payload, Payload::GateBaselineRecorded { .. }))
+        {
             found.push(Cited {
                 change_id: Store::REPOSITORY_SCOPE.into(),
                 subject: event.event_id.clone(),
@@ -163,7 +192,7 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
     }
     let mut cited_commits: BTreeSet<String> =
         found.iter().map(|cited| cited.commit.clone()).collect();
-    for event in &repository_events {
+    for event in repository_events.iter() {
         for (what, commit) in checkpoint_commits(&event.payload) {
             if crate::bundle::valid_object_id(commit) && cited_commits.insert(commit.to_string()) {
                 found.push(Cited {

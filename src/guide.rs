@@ -5810,18 +5810,24 @@ BASE PASSES
   executes every selected gate. `arc gates` counts base passes beside executions.
 
   After authoritative integration applies, a gate-baseline-recorded completion
-  snapshot embeds the project/replica, successful integration event, target, installed
-  revision/tree, actual profile and each eligible execution. Publication stays
+  snapshot retains the project/replica, successful completion ID/digest, target,
+  installed revision/tree, actual profile and each eligible execution's facts. Publication stays
   inside the destination transition guard; competing integrations serialize.
   Missing snapshots after interruption are cache misses. Only clean, stable,
   locally executed integration passes at the installed tree enter a baseline.
   Each entry retains its full structural declaration and complete coverage
-  context, original event/run, command, timeout, environment, binding and timing.
+  context, execution/run IDs and digests, coordinates, command, timeout,
+  environment identity, binding and timing. Output tails and artifacts stay in
+  the original execution ledger.
   Reused, bypassed, attested, untimed, over-budget and dirty-waived evidence
   cannot establish an entry. An empty baseline establishes no gate pass.
 
-  The first verification of a change may use its target's newest eligible local
-  baseline in both the actual target's and evaluated head's first-parent history.
+  Each gate's first observation on a change may use its target's newest eligible
+  local baseline in both the actual target's and evaluated head's first-parent
+  history. Other gates' observations do not consume that eligibility. Any earlier
+  observation of the same gate, at any head, prevents a baseline answer, including
+  a pass, failure, not-admitted attempt or budget refusal. Concurrent verifiers
+  recheck the gate under its change transition lock before publishing an answer.
   Selection chooses the baseline before considering individual gate entries or
   current budgets. Missing entries run; an older faster receipt is never sought.
   Later failures, not-admitted attempts and budget refusals cannot be rescued
@@ -5829,6 +5835,13 @@ BASE PASSES
   nonancestor or force-moved history, changed declaration/coverage context,
   different actual profiles/events or mismatching/failed environment probes
   prevent reuse. Commit-bound gates execute at their required commit.
+  Ancestry walks stop beyond the candidate's parents and at 256 first-parent
+  commits; an inconclusive walk is a cache miss. Verified immutable ancestry
+  facts are shared within the command. Each target/profile retains eight newest
+  baseline ref sets. Older baselines lose their refs and cannot be selected,
+  even while another branch keeps their objects reachable. Existing reuse
+  receipts retain their proof objects independently of this cache. One ref
+  retains the target and each distinct execution revision needs at most one more.
 
   Coverage is the destination's complete gate map and dangerous patterns.
   Endpoint-tree diffs disable rename detection and retain NUL-delimited names,
@@ -5838,18 +5851,19 @@ BASE PASSES
   under inert patterns. Declaration and selection-input edits cannot waive their
   own checks. A declared selector does not grant cross-change reuse.
 
-  A verification-base-reused witness embeds the baseline completion, producing
-  store, original execution and run, full declaration/selection context, actual
-  profile/event, destination revision/tree and target revision, complete paths,
-  algorithm version and baseline digest. Replay checks structural equality,
-  direct clean execution provenance, source/destination coordinates and coverage
-  classification. It compares the embedded facts with the ledger's immutable
-  baseline and requires its integration authority. Retained Git objects prove
+  A verification-base-reused witness cites a baseline event ID and digest and
+  carries its gate, destination revision/tree, target revision, merge target,
+  complete paths and algorithm version. Replay resolves the ledger's immutable
+  baseline, checks its digest and integration authority, then checks direct clean
+  execution provenance, source/destination coordinates, actual profile/event,
+  declarations, environment and coverage classification. Retained Git objects prove
   the complete diff, committed adoption and first-parent ancestry. Hashes and
   asserted path lists alone are insufficient. Replay reads neither current
   budgets nor the source change's ledger; current acceptance judges original
   command timing against the budget in force. Export and retention include the
-  cited objects. Imported facts cannot seed local baseline authority; imported
+  cited objects. Standalone transport includes only the cited compact baseline
+  records beside the change history; it embeds no execution output. Imported
+  facts cannot seed local baseline authority; imported
   reuse requires admitted integration authority for its recorded baseline.
   Witnesses are bounded to 1 MiB. Store format 10 is stamped before baseline or
   reuse publication and import; executables supporting formats through 9 refuse
@@ -5868,8 +5882,11 @@ BASE PASSES
   integrations since the last successful publication of this target/profile,
   including integration-only gates. Integration completion IDs delimit this
   obligation, so evidence recorded before publication and integrated afterwards
-  remains owed. The ledger's per-change base-pass receipts name the originating
-  baseline/declaration even when a gate is absent from the publication tier.
+  remains owed. Participant discovery shares the states already read for
+  publication authority and inspects integrations since the previous audit;
+  it does not reduce change ledgers again. Per-change base-pass receipts name
+  the source declarations, including gates absent from the publication tier.
+  A missing post-integration cache snapshot does not erase the audit obligation.
   `--skip-green` cannot reuse those gates' publication receipts. Publication
   holds the destination guard through its check and confirms the target and
   declarations before recording success. Full runs can discover dependencies

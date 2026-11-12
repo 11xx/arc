@@ -1660,7 +1660,7 @@ fn range_targets(
         let change_events =
             crate::landing::with_derived(&read.events(id), landings.derived_events(id));
         let tagged = !query.tags.is_empty()
-            && match crate::state::reduce_with_rewrites(&change_events, &rewrites) {
+            && match crate::state::reduce_with_repository(&change_events, &rewrites, events) {
                 Ok(state) => query.tags.iter().all(|tag| state.tags.contains(tag)),
                 Err(_) => {
                     gaps.push(json!({"record": id, "reason": "change state unreadable, so its tags are unknown", "work": []}));

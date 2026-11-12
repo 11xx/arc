@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::rewrite::RewriteMap;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2375,8 +2375,17 @@ pub fn resolve_unique_id<'a>(
 /// head does not match its own patchset, whose gates ran somewhere else, and
 /// whose waiver covers a commit nobody can name — all of it derived from a
 /// rewrite that changed no content.
+#[cfg(test)]
 pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<ChangeState> {
-    let mut state = reduce_with_rewrites(events, rewrites)?;
+    reduce_following_with_repository(events, rewrites, &[])
+}
+
+pub fn reduce_following_with_repository(
+    events: &[Event],
+    rewrites: &RewriteMap,
+    repository: &[Event],
+) -> Result<ChangeState> {
+    let mut state = reduce_with_repository(events, rewrites, repository)?;
     state.follow_rewrites(rewrites)?;
     Ok(state)
 }
@@ -2385,7 +2394,7 @@ pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<Chang
 /// this receiver. Eligibility belongs to `apply_privilege_scope`; changing
 /// receiver trust cannot invalidate recorded references or later facts.
 /// Without a rewrite map, a change that needs one does not replay, so every
-/// reader outside tests replays through `reduce_with_rewrites`.
+/// production reader supplies repository facts to resolve baseline references.
 #[cfg(test)]
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     reduce_with_rewrites(events, &RewriteMap::default())
@@ -2393,7 +2402,32 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
 
 /// Replay at recorded revisions, using active rewrites only to establish a
 /// falsification reference's identity. The failure event remains authoritative.
+#[cfg(test)]
 pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<ChangeState> {
+    reduce_with_repository(events, rewrites, &[])
+}
+
+pub fn reduce_with_repository(
+    events: &[Event],
+    rewrites: &RewriteMap,
+    repository: &[Event],
+) -> Result<ChangeState> {
+    let baselines: BTreeMap<_, _> = if events
+        .iter()
+        .any(|event| matches!(event.payload, Payload::VerificationBaseReused { .. }))
+    {
+        repository
+            .iter()
+            .filter_map(|event| match &event.payload {
+                Payload::GateBaselineRecorded { baseline } => {
+                    Some((event.event_id.as_str(), baseline.as_ref()))
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
     let replies = events
         .iter()
         .filter(|event| matches!(event.payload, Payload::ReplyAdded { .. }))
@@ -3823,7 +3857,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 tree,
                 witness,
             } => {
-                if !crate::base_pass::first_run(&state, run_id) {
+                if !crate::base_pass::unobserved(&state, gate) {
                     bail!("base pass cannot displace another verification observation");
                 }
                 let run = state
@@ -3831,20 +3865,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     .iter()
                     .find(|run| &run.run_id == run_id)
                     .ok_or_else(|| anyhow::anyhow!("base pass names no verification run"))?;
-                let source_run = &witness
-                    .baseline
-                    .gates
-                    .get(gate)
-                    .ok_or_else(|| anyhow::anyhow!("base pass names no source gate"))?
-                    .run;
-                let Payload::VerificationRunStarted {
-                    profile: Some(profile),
-                    ..
-                } = &source_run.payload
-                else {
-                    bail!("base pass lacks actual profile");
-                };
-                witness.validate(profile)?;
+                let baseline = baselines
+                    .get(witness.baseline_event_id.as_str())
+                    .context("base pass has no authenticated integration baseline")?;
+                let profile = &baseline.profile;
+                witness.validate(baseline, profile)?;
                 if run.event != crate::model::GateEvent::Integration
                     || run.profile.as_deref() != Some(profile)
                     || state.profile != *profile
@@ -3854,7 +3879,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 {
                     bail!("base pass destination mismatch");
                 }
-                let derived = crate::base_pass::derive(witness, ev, run_id)?;
+                let derived = crate::base_pass::derive(witness, baseline, ev, run_id)?;
                 if !run.gates.iter().any(|declared| {
                     declared.name == *gate
                         && declared.command == derived.command
@@ -3868,7 +3893,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     revision,
                     VerificationRunTerminal::Reused {
                         gate: gate.clone(),
-                        evidence_event_id: crate::base_pass::execution(witness).event_id.clone(),
+                        evidence_event_id: baseline.gates[gate].execution.event_id.clone(),
                         reuse_event_id: ev.event_id.clone(),
                     },
                 )?;

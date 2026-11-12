@@ -460,15 +460,39 @@ fn import_events(
             println!("warning: provenance-only import is missing Git objects:\n{report}");
         }
     }
+    let baselines = validated
+        .bundle
+        .repository_events
+        .iter()
+        .filter_map(|value| crate::bundle::parse_typed_event(value).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let mut checked = BTreeSet::new();
     for event in &validated.events {
         if let Some(Event {
             payload: Payload::VerificationBaseReused { witness, .. },
             ..
         }) = &event.typed
         {
-            witness.validate(&witness.baseline.profile)?;
-            crate::base_pass::validate_git(&ctx.cwd, witness)
-                .context("invalid imported base-pass witness; nothing was imported")?;
+            let baseline = baselines
+                .iter()
+                .find_map(|event| match &event.payload {
+                    Payload::GateBaselineRecorded { baseline }
+                        if event.event_id == witness.baseline_event_id =>
+                    {
+                        Some(baseline.as_ref())
+                    }
+                    _ => None,
+                })
+                .context("imported base pass has no authenticated integration baseline")?;
+            witness.validate(baseline, &baseline.profile)?;
+            if checked.insert((
+                &witness.baseline_event_id,
+                &witness.revision,
+                &witness.target_revision,
+            )) {
+                crate::base_pass::validate_git(&ctx.cwd, witness, baseline)
+                    .context("invalid imported base-pass witness; nothing was imported")?;
+            }
         }
     }
     let root = Store::resolve_root(&ctx.cwd)?;
@@ -1186,10 +1210,22 @@ fn claim_contest_for_import(
         }
     }
     let new_event_ids = new_event_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut repository = store.load_repository_events()?;
+    for value in &validated.bundle.repository_events {
+        if let Some(event) = crate::bundle::parse_typed_event(value)? {
+            if !repository
+                .iter()
+                .any(|held| held.event_id == event.event_id)
+            {
+                repository.push(event);
+            }
+        }
+    }
     crate::replica::live_claim_contest(
         store,
         &validated.bundle.change_id,
         &incoming,
+        &repository,
         &new_event_ids,
         rewrites,
     )
@@ -1557,7 +1593,12 @@ fn validate_import_candidate(
     } else {
         candidate.clone()
     };
-    crate::forge_observation::validate_import_admission(&admission_history, &new_events, rewrites)?;
+    crate::forge_observation::validate_import_admission(
+        &admission_history,
+        &combined_repository_events(store, repository)?,
+        &new_events,
+        rewrites,
+    )?;
     let mut round_trip_history = store
         .map(crate::forge_round_trip::held_events)
         .transpose()?
@@ -1587,7 +1628,7 @@ fn validate_import_candidate(
     // of its history: what follows them is judged as following a closure.
     let repository_events = combined_repository_events(store, repository)?;
     let candidate = crate::landing::joined(&candidate, &repository_events);
-    let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
+    let mut projected = state::reduce_with_repository(&candidate, rewrites, &repository_events)
         .context("combined local and bundled known events are not replayable")?;
     let combined_rewrites = crate::rewrite::RewriteMap::from_events(repository_events.iter())?;
     projected.follow_rewrites(&combined_rewrites)?;
@@ -1617,9 +1658,13 @@ fn validate_import_candidate(
                         &repository_events,
                     );
                     let mut partner =
-                        state::reduce_with_rewrites(&events, rewrites).with_context(|| {
-                            format!("held landing member {} is not replayable", member.change_id)
-                        })?;
+                        state::reduce_with_repository(&events, rewrites, &repository_events)
+                            .with_context(|| {
+                                format!(
+                                    "held landing member {} is not replayable",
+                                    member.change_id
+                                )
+                            })?;
                     partner.follow_rewrites(&combined_rewrites)?;
                     landings.require_held_patchsets(&partner)?;
                 }

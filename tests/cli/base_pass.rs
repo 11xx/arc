@@ -456,8 +456,8 @@ fn replay_refuses_fabricated_diff_and_ancestry() {
     }
 }
 
-/// Claim: a reuse carries its integration and execution facts without the
-/// producing change's ledger. Rejects a hidden dependency on that ledger.
+/// Claim: a reuse resolves authenticated compact facts without the producing
+/// change's ledger. Rejects a hidden dependency on that ledger.
 #[test]
 fn reuse_replays_and_exports_without_the_source_change() {
     let repo = seed(GATES);
@@ -632,10 +632,7 @@ fn racing_integrations_record_exact_successful_baselines() {
     for file in &baselines {
         let record: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
         let baseline = &record["baseline"];
-        assert_eq!(
-            baseline["revision"],
-            baseline["completion"]["integrated_commit"]
-        );
+        assert_eq!(baseline["revision"], baseline["completion"]["revision"]);
         assert_eq!(
             baseline["tree"],
             git_out(
@@ -840,32 +837,32 @@ fn replay_refuses_corrupted_witness_coordinates() {
         let original = fs::read(&file).unwrap();
         let mut event: Value = serde_json::from_slice(&original).unwrap();
         let mut restored_run = None;
+        let baseline_file = baseline_files(&repo).pop().unwrap();
+        let baseline_bytes = fs::read(&baseline_file).unwrap();
+        let mut baseline: Value = serde_json::from_slice(&baseline_bytes).unwrap();
         match *field {
             "baseline-event" => event["witness"]["baseline_event_id"] = "missing".into(),
             "digest" => event["witness"]["baseline_digest"] = "sha256:bad".into(),
             "algorithm" => event["witness"]["algorithm"] = "arc-base-paths/0".into(),
             "gate" => event["witness"]["gate"] = "missing".into(),
-            "tree" => event["witness"]["tree"] = event["witness"]["baseline"]["tree"].clone(),
+            "tree" => event["witness"]["tree"] = baseline["baseline"]["tree"].clone(),
             "merge-target" => {
-                event["witness"]["against_target"] =
-                    event["witness"]["baseline"]["revision"].clone()
+                event["witness"]["against_target"] = baseline["baseline"]["revision"].clone()
             }
             "target-revision" => {
                 event["witness"]["target_revision"] =
                     git_out(&repo.root, &["rev-parse", "master^1"]).into()
             }
             "origin" => event["repository_id"] = "foreign".into(),
-            "source-profile" => event["witness"]["baseline"]["profile"] = "direct".into(),
+            "source-profile" => baseline["baseline"]["profile"] = "direct".into(),
             "source-command" => {
-                event["witness"]["baseline"]["gates"]["unit"]["declaration"]["command"] =
-                    "false".into()
+                baseline["baseline"]["gates"]["unit"]["declaration"]["command"] = "false".into()
             }
             "source-receipt" => {
-                event["witness"]["baseline"]["gates"]["unit"]["execution"]["event_id"] =
-                    "forged".into()
+                baseline["baseline"]["gates"]["unit"]["execution"]["event_id"] = "forged".into()
             }
             "source-context" => {
-                event["witness"]["baseline"]["gates"]["unit"]["declaration"]["coverage"]["inert"] =
+                baseline["baseline"]["gates"]["unit"]["declaration"]["coverage"]["inert"] =
                     serde_json::json!(["**"])
             }
             "run" => event["run_id"] = "missing".into(),
@@ -886,6 +883,11 @@ fn replay_refuses_corrupted_witness_coordinates() {
             }
             _ => unreachable!(),
         }
+        fs::write(
+            &baseline_file,
+            serde_json::to_vec_pretty(&baseline).unwrap(),
+        )
+        .unwrap();
         fs::write(&file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
         let output = repo.arc(&wt).args(["show", "--json"]).output().unwrap();
         assert!(
@@ -893,6 +895,7 @@ fn replay_refuses_corrupted_witness_coordinates() {
             "{field} must refuse replay: {output:?}"
         );
         fs::write(file, original).unwrap();
+        fs::write(baseline_file, baseline_bytes).unwrap();
         if let Some((run_file, bytes)) = restored_run {
             fs::write(run_file, bytes).unwrap();
         }
@@ -1269,9 +1272,9 @@ fn concurrent_verifiers_cannot_rescue_a_later_local_failure() {
         .all(|entry| entry["result"] == "fail"));
 }
 
-/// Claim: replay enforces the first-run boundary even if an invalid reuse is
+/// Claim: replay enforces the per-gate observation boundary even if an invalid reuse is
 /// delivered directly. Rejects accepting a base pass after an independent local
-/// observation merely because its Git and coverage witness is otherwise valid.
+/// observation of the same gate merely because its Git and coverage witness is valid.
 #[test]
 fn replay_refuses_base_pass_after_a_local_failure() {
     let repo = seed(GATES);
@@ -1285,8 +1288,27 @@ fn replay_refuses_base_pass_after_a_local_failure() {
         })
         .unwrap();
     let event: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    let gate = event["gate"].as_str().unwrap();
-    let mut failure = event["witness"]["baseline"]["gates"][gate]["execution"].clone();
+    let later: Value = event_files(&repo, &id)
+        .iter()
+        .filter_map(|path| {
+            let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            (value["event_type"] == "verification-base-reused"
+                && value["event_id"] != event["event_id"])
+                .then_some(value)
+        })
+        .next()
+        .unwrap();
+    let gate = later["gate"].as_str().unwrap();
+    let baseline: Value =
+        serde_json::from_slice(&fs::read(baseline_files(&repo).pop().unwrap()).unwrap()).unwrap();
+    let source = &baseline["baseline"]["gates"][gate]["execution"];
+    let source_file = repo
+        .root
+        .join(".git/arc/changes")
+        .join(source["change_id"].as_str().unwrap())
+        .join("events")
+        .join(format!("{}.json", source["event_id"].as_str().unwrap()));
+    let mut failure: Value = serde_json::from_slice(&fs::read(source_file).unwrap()).unwrap();
     failure["event_id"] = event["event_id"].clone();
     failure["change_id"] = id.into();
     failure["revision"] = event["revision"].clone();

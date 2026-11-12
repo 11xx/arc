@@ -884,6 +884,7 @@ fn reuse_named_gate(
             .is_empty();
             if let Some(witness) = paths.filter(|_| clean).and_then(|paths| {
                 crate::base_pass::select(
+                    st,
                     &source,
                     name,
                     gate,
@@ -894,12 +895,9 @@ fn reuse_named_gate(
                     &paths,
                 )
             }) {
-                let Payload::VerificationRecorded {
-                    timing, hostname, ..
-                } = &crate::base_pass::execution(&witness).payload
-                else {
-                    unreachable!()
-                };
+                let source_execution = crate::base_pass::execution(&witness);
+                let timing = &source_execution.timing;
+                let hostname = &source_execution.hostname;
                 let judgement = gate.budget_judgement(timing.run_ms);
                 if let Some(reason) = judgement.reason(timing, hostname) {
                     println!("gate {name}: {reason}; rerun explicitly with --rerun");
@@ -1800,7 +1798,7 @@ struct Partition<'a> {
     budget_refused: usize,
     reused: Vec<(String, String)>,
     delta_reuses: Vec<(String, String, DeltaSelection)>,
-    base_reuses: Vec<(String, crate::base_pass::Reuse)>,
+    base_reuses: Vec<(String, crate::base_pass::Selected)>,
     to_run: Vec<(&'a String, &'a gates::Gate)>,
 }
 
@@ -1918,6 +1916,7 @@ fn partition<'a>(
             .filter(|_| clean)
             .and_then(|(baseline, paths)| {
                 crate::base_pass::select(
+                    st,
                     baseline,
                     name,
                     gate,
@@ -1929,12 +1928,9 @@ fn partition<'a>(
                 )
             })
         {
-            let Payload::VerificationRecorded {
-                timing, hostname, ..
-            } = &crate::base_pass::execution(&witness).payload
-            else {
-                unreachable!()
-            };
+            let source_execution = crate::base_pass::execution(&witness);
+            let timing = &source_execution.timing;
+            let hostname = &source_execution.hostname;
             if let Some(reason) = gate
                 .budget_judgement(timing.run_ms)
                 .reason(timing, hostname)
@@ -2070,7 +2066,7 @@ fn append_base_reuses(
     run: &str,
     revision: &str,
     tree: &str,
-    reuses: &[(String, crate::base_pass::Reuse)],
+    reuses: &[(String, crate::base_pass::Selected)],
 ) -> Result<()> {
     if reuses.is_empty() {
         return Ok(());
@@ -2080,10 +2076,14 @@ fn append_base_reuses(
     crate::import_authorization::test_rendezvous("base-pass-before-append")?;
     let _transition = store.lock_transition(change)?;
     let state = store.state(change)?;
-    if !crate::base_pass::first_run(&state, run) {
-        bail!("base pass requires the first verification run without another observation; run gates with --rerun");
+    if reuses
+        .iter()
+        .any(|(gate, _)| !crate::base_pass::unobserved(&state, gate))
+    {
+        bail!("base pass cannot displace another verification observation; run gates with --rerun");
     }
     let mut checked = BTreeSet::new();
+    let mut pinned = BTreeSet::new();
     for (gate, witness) in reuses {
         let subject = crate::base_pass::digest(&(
             &witness.baseline_digest,
@@ -2093,14 +2093,29 @@ fn append_base_reuses(
             &witness.changed_paths,
         ));
         if checked.insert(subject) {
-            crate::base_pass::validate_git(&ctx.cwd, witness)?;
+            crate::base_pass::validate_git(&ctx.cwd, witness, &witness.baseline)?;
+        }
+        for commit in std::iter::once(witness.baseline.revision.as_str()).chain(
+            witness
+                .baseline
+                .gates
+                .values()
+                .map(|entry| entry.execution.revision.as_str()),
+        ) {
+            if pinned.insert((witness.baseline_event_id.clone(), commit)) {
+                gitio::update_ref(
+                    &ctx.cwd,
+                    &gitio::retained_ref(change, &witness.baseline_event_id, commit),
+                    commit,
+                )?;
+            }
         }
         let payload = Payload::VerificationBaseReused {
             run_id: run.into(),
             gate: gate.clone(),
             revision: revision.into(),
             tree: tree.into(),
-            witness: Box::new(witness.clone()),
+            witness: Box::new(witness.witness.clone()),
         };
         let mut event = ctx.event(store, change, payload)?;
         store.append_local_event(&mut event)?;
@@ -2898,7 +2913,11 @@ fn resolve_falsification(
     let Some((event_id, predicted_reason)) = falsified_by else {
         return Ok(None);
     };
-    let state = state::reduce_with_rewrites(&store.load_events(change_id)?, &store.rewrites()?)?;
+    let state = state::reduce_with_repository(
+        &store.load_events(change_id)?,
+        &store.rewrites()?,
+        &store.repository_events()?,
+    )?;
     let revision = state
         .verifications
         .iter()
@@ -6916,9 +6935,10 @@ fn verify_after_integration(
     }
     // The receipt names the commit the integration recorded, which no
     // withdrawal can strand; views follow it forward like every revision.
-    let recorded = state::reduce_with_rewrites(
+    let recorded = state::reduce_with_repository(
         &store.load_events_with_landings(change_id)?,
         &store.rewrites()?,
+        &store.repository_events()?,
     )?;
     let payload = Payload::PostIntegrationVerificationRecorded {
         gate: receipt.gate.clone(),
