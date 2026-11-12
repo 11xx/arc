@@ -5853,7 +5853,8 @@ BASE PASSES
   reuse requires admitted integration authority for its recorded baseline.
   Witnesses are bounded to 1 MiB. Store format 10 is stamped before baseline or
   reuse publication and import; executables supporting formats through 9 refuse
-  reads and writes, including writers opened before adoption.
+  reads and writes, including writers opened before adoption. Bundles advertise
+  the writer's store format; an importer with a lower maximum refuses them.
 
   Stack and composed land may consume base passes against the complete final
   content and combined obligations. They record one baseline for the installed

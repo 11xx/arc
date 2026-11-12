@@ -3432,7 +3432,7 @@ fn copy_objects(from: &Path, to: &Path) {
     }
 }
 
-/// Claim: replica deltas retain withdrawals and candidate pins with a format-9
+/// Claim: replica deltas retain withdrawals and candidate pins with a format-10
 /// reader fence. Rejects phantom rewrites, lost candidates and an understated
 /// compatibility requirement during transport.
 #[test]
@@ -3510,7 +3510,7 @@ fn an_importing_replica_honours_withdrawals_and_pins_candidates() {
         .success();
     let delta: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     assert_eq!(delta["schema"], "arc-bundle/6");
-    assert_eq!(delta["store_format"], 9);
+    assert_eq!(delta["store_format"], 10);
     assert!(delta["repository_events"]
         .as_array()
         .unwrap()

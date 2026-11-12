@@ -901,7 +901,8 @@ fn replay_refuses_corrupted_witness_coordinates() {
 
 /// Claim: standalone transport retains baseline authority separately from
 /// verification facts and carries every Git witness object. Rejects facts-only
-/// import minting integration authority, or needing the producing change ledger.
+/// import minting integration authority, needing the producing change ledger,
+/// or older importers silently skipping the advertised writer format.
 #[test]
 fn standalone_import_requires_baseline_integration_authority() {
     let source = seed(GATES);
@@ -914,6 +915,10 @@ fn standalone_import_requires_baseline_integration_authority() {
         .assert()
         .success();
     let original: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    assert_eq!(
+        original["store_format"], 10,
+        "exports must fence pre-S6 importers"
+    );
     let origin = original["repository_id"].as_str().unwrap();
     for integration in [false, true] {
         let receiver = Repo::new();

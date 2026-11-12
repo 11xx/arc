@@ -1148,9 +1148,9 @@ fn raise_repeating_identical_inputs_keeps_the_record_set() {
     assert_eq!(shown(&repo, &wt, &id)["budget_raises"], before);
 }
 
-/// Claim: an exported raise advertises the adopted store format so an older
-/// importer refuses the evidence. Rejects exporting the ordinary event envelope
-/// number as the compatibility barrier for budget-raise records.
+/// Claim: an exported raise advertises the writer's format-10 capability while
+/// its budget-only ledger retains format 9. Rejects understating the bundle's
+/// reader fence or export adopting base-pass semantics in the source ledger.
 #[test]
 fn raise_export_advertises_the_adopted_store_format() {
     let (repo, id, wt) = setup("wire-barrier", 10400, 100);
@@ -1163,7 +1163,13 @@ fn raise_export_advertises_the_adopted_store_format() {
         .assert()
         .success();
     let value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert_eq!(value["store_format"], 9);
+    assert_eq!(value["store_format"], 10);
+    let config: Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["schema_version"], 9,
+        "export must not adopt format 10"
+    );
     let receiver = Repo::new();
     deliver_git_objects(&repo, &receiver);
     receiver
