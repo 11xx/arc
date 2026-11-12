@@ -354,6 +354,18 @@ pub fn validate_events(
     Ok(())
 }
 
+/// Other observations cannot be displaced by a delayed baseline answer.
+pub fn first_run(state: &ChangeState, run_id: &str) -> bool {
+    state
+        .verification_runs
+        .first()
+        .is_some_and(|run| run.run_id == run_id)
+        && state
+            .verifications
+            .iter()
+            .all(|entry| entry.run_id.as_deref() == Some(run_id))
+}
+
 /// Select one newest eligible target baseline before considering individual gates.
 pub struct Source {
     pub event_id: String,
@@ -500,6 +512,14 @@ pub fn record(
     }
     if crate::gitio::branch_head(&ctx.cwd, target)? != *revision {
         bail!("baseline target moved after integration");
+    }
+    let published = match &completion.payload {
+        Payload::ChangeIntegrated { .. } => store.event_is_published(completion)?,
+        Payload::LandingCompleted { .. } => store.repository_event_is_published(completion)?,
+        _ => false,
+    };
+    if !published {
+        bail!("baseline completion has not been published");
     }
     let tree = crate::gitio::commit_tree(&ctx.cwd, revision)?;
     let declarations = build_declarations()?;

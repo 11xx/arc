@@ -2076,7 +2076,13 @@ fn append_base_reuses(
         return Ok(());
     }
     store.adopt_base_passes()?;
+    #[cfg(debug_assertions)]
+    crate::import_authorization::test_rendezvous("base-pass-before-append")?;
     let _transition = store.lock_transition(change)?;
+    let state = store.state(change)?;
+    if !crate::base_pass::first_run(&state, run) {
+        bail!("base pass requires the first verification run without another observation; run gates with --rerun");
+    }
     let mut checked = BTreeSet::new();
     for (gate, witness) in reuses {
         let subject = crate::base_pass::digest(&(

@@ -4692,7 +4692,7 @@ mod budget_format_tests {
 
     /// Claim: base-pass adoption fences all pre-S6 readers, including a writer
     /// opened before adoption when it rechecks its format under the write lock.
-    /// Rejects reusing S3's format 8 barrier for S6 semantics.
+    /// Rejects reusing format 9 with executables that do not understand base passes.
     #[test]
     fn base_pass_adoption_fences_budget_aware_and_stale_readers() {
         let root = tempfile::tempdir().unwrap();

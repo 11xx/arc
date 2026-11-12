@@ -3823,6 +3823,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 tree,
                 witness,
             } => {
+                if !crate::base_pass::first_run(&state, run_id) {
+                    bail!("base pass cannot displace another verification observation");
+                }
                 let run = state
                     .verification_runs
                     .iter()
@@ -3852,6 +3855,13 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     bail!("base pass destination mismatch");
                 }
                 let derived = crate::base_pass::derive(witness, ev, run_id)?;
+                if !run.gates.iter().any(|declared| {
+                    declared.name == *gate
+                        && declared.command == derived.command
+                        && declared.timeout_seconds == derived.timeout_seconds
+                }) {
+                    bail!("base pass does not match its destination run declaration");
+                }
                 add_run_terminal(
                     &mut state.verification_runs,
                     run_id,
