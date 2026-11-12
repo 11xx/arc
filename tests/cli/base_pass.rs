@@ -1326,3 +1326,271 @@ fn replay_refuses_base_pass_after_a_local_failure() {
             "base pass cannot displace another verification observation",
         ));
 }
+
+/// Claim: named verification answers each previously unobserved gate from the
+/// target baseline. Rejects another gate's observation exhausting eligibility,
+/// or a failed gate gaining a baseline answer after its head changes.
+#[test]
+fn named_gates_keep_independent_baseline_eligibility() {
+    let repo = seed(&GATES.replace("command='true'", "command='exit \"${ARC_GATE_RESULT:-0}\"'"));
+    let (_, wt) = begin(&repo, "one-at-a-time", "notes.md");
+    for gate in ["unit", "other"] {
+        repo.arc(&wt)
+            .args(["verify", "--gate", gate])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("base pass from"));
+    }
+    assert_eq!(bases(&state(&repo, &wt)), 2);
+    assert_eq!(executed(&state(&repo, &wt)), 0);
+
+    let (_, wt) = begin(&repo, "failed-first", "notes.md");
+    repo.arc(&wt)
+        .env("ARC_GATE_RESULT", "1")
+        .args(["verify", "--gate", "unit", "--rerun"])
+        .assert()
+        .code(1);
+    repo.commit(&wt, "later.md", "later\n", "test: later head");
+    repo.arc(&wt)
+        .args(["verify", "--gate", "other"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["verify", "--gate", "unit"])
+        .assert()
+        .success();
+    let state = state(&repo, &wt);
+    assert_eq!(
+        bases(&state),
+        1,
+        "only the unobserved other gate reuses: {state}"
+    );
+    assert_eq!(executed(&state), 2, "unit must execute again: {state}");
+}
+
+/// Claim: two named verifiers racing on one unobserved gate append one baseline
+/// answer. Rejects two stale snapshots publishing duplicate gate observations.
+#[test]
+fn racing_named_verifiers_append_one_baseline_answer() {
+    use std::io::Write;
+    let repo = seed(GATES);
+    let (_, wt) = begin(&repo, "racing-named", "notes.md");
+    let template = repo.arc(&wt);
+    let mut command = Command::new(template.get_program());
+    command
+        .args(["verify", "--gate", "unit"])
+        .current_dir(&wt)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in template.get_envs() {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    command.env("ARC_TEST_IMPORT_RENDEZVOUS", "base-pass-before-append");
+    let mut child = command.spawn().unwrap();
+    let mut reader = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == "arc test: import base-pass-before-append\n" {
+            break;
+        }
+    }
+    repo.arc(&wt)
+        .args(["verify", "--gate", "unit"])
+        .assert()
+        .success();
+    child.stdin.take().unwrap().write_all(b"+").unwrap();
+    assert_eq!(child.wait_with_output().unwrap().status.code(), Some(1));
+    assert_eq!(bases(&state(&repo, &wt)), 1);
+    assert_eq!(executed(&state(&repo, &wt)), 0);
+}
+
+/// Claim: baseline storage excludes command output and reuse storage is linear
+/// in gate count. Rejects replicated output tails or a whole baseline per gate.
+#[test]
+fn noisy_executions_produce_compact_baselines_and_references() {
+    let gates = GATES.replace("command='true'", "command='python3 -c \"print(chr(120)*20000)\"'")
+        + "[gates.third]\ncommand='python3 -c \"print(chr(120)*20000)\"'\npaths=['third/']\nevents=['integration']\n";
+    let repo = seed(&gates);
+    let file = baseline_files(&repo).pop().unwrap();
+    let bytes = fs::read(file).unwrap();
+    let baseline: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        bytes.len() < 18_000,
+        "baseline weighs {} bytes",
+        bytes.len()
+    );
+    for entry in baseline["baseline"]["gates"].as_object().unwrap().values() {
+        assert!(entry["execution"].get("output_tail").is_none());
+        assert!(entry["execution"].get("output_artifact").is_none());
+        assert!(entry["execution"]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(entry["run"]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+    }
+    let (id, wt) = begin(&repo, "compact", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let mut bytes = 0;
+    for file in event_files(&repo, &id) {
+        let body = fs::read(file).unwrap();
+        let event: Value = serde_json::from_slice(&body).unwrap();
+        if event["event_type"] == "verification-base-reused" {
+            assert!(event["witness"].get("baseline").is_none());
+            bytes += body.len();
+        }
+    }
+    assert!(bytes < 6000, "three reuse receipts weigh {bytes} bytes");
+    assert_eq!(bases(&state(&repo, &wt)), 3);
+}
+
+/// Claim: publication obtains owed gates through the authority check's shared
+/// states. Rejects an additional whole-ledger reduction for participant discovery.
+#[test]
+fn publication_does_not_reduce_unrelated_changes() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "indexed-publication", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    begin(&repo, "unrelated", "unrelated.md");
+    let output = repo
+        .arc(&repo.root)
+        .env("ARC_TRACE", "1")
+        .args(["publication", "--target", "master", "--skip-green"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("publication gate unit: pass"));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let trace: Value = serde_json::from_str(
+        stderr
+            .lines()
+            .find(|line| line.contains("arc-perf/1"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        trace["counts"]["changes_reduced"].as_u64().unwrap_or(0) <= 6,
+        "participant discovery must not add another reduction of the three changes: {trace}"
+    );
+}
+
+/// Claim: the eight-baseline cache expires old refs without invalidating an
+/// accepted receipt. Rejects unbounded refs or selecting an evicted baseline
+/// merely because its Git objects remain reachable through an open branch.
+#[test]
+fn retention_bounds_refs_and_preserves_existing_receipts() {
+    let repo = seed(GATES);
+    let (_, used) = begin(&repo, "old-used", "old-used.md");
+    repo.arc(&used).args(["verify", "--all"]).assert().success();
+    let (_, unused) = begin(&repo, "old-unused", "old-unused.md");
+    for index in 0..10 {
+        let (id, wt) = begin(
+            &repo,
+            &format!("integration-{index}"),
+            &format!("src/file-{index}.rs"),
+        );
+        repo.arc(&wt)
+            .args(["verify", "--all", "--rerun"])
+            .assert()
+            .success();
+        repo.arc(&wt)
+            .args(["review", "--verdict", "approved"])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["integrate", &id])
+            .assert()
+            .success();
+    }
+    let refs = git_out(
+        &repo.root,
+        &["for-each-ref", "--format=%(refname)", "refs/arc/baselines/"],
+    );
+    assert_eq!(refs.lines().count(), 8, "{refs}");
+    assert_eq!(bases(&state(&repo, &used)), 2);
+    repo.arc(&unused)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!(bases(&state(&repo, &unused)), 0);
+    assert_eq!(executed(&state(&repo, &unused)), 2);
+}
+
+/// Claim: a first verify checks first-parent ancestry once for the shared gate
+/// subject and visits only the baseline range. Rejects full-history walks or
+/// repeating the same immutable ancestry proof for each gate and append.
+#[test]
+fn first_verify_bounds_and_shares_ancestry_walks() {
+    let repo = Repo::new();
+    repo.redeclare_gates(GATES);
+    let mut parent = repo.head(&repo.root);
+    let tree = git_out(&repo.root, &["rev-parse", "HEAD^{tree}"]);
+    for _ in 0..40 {
+        parent = git_out(
+            &repo.root,
+            &["commit-tree", &tree, "-p", &parent, "-m", "test: history"],
+        );
+    }
+    git(&repo.root, &["reset", "--hard", &parent]);
+    warm(&repo);
+    let (_, wt) = begin(&repo, "bounded-history", "notes.md");
+    let output = repo
+        .arc(&wt)
+        .env("ARC_TRACE", "1")
+        .args(["verify", "--all"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let trace: Value = serde_json::from_str(
+        stderr
+            .lines()
+            .find(|line| line.contains("arc-perf/1"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trace["counts"]["base_ancestry_walks"], 1, "{trace}");
+    assert_eq!(trace["counts"]["base_ancestry_commits"], 2, "{trace}");
+}
+
+/// Claim: publication audits base-pass participants even when the integrating
+/// completion has no cache snapshot. Rejects making the publication backstop
+/// depend on an optional post-completion baseline record.
+#[test]
+fn publication_audits_without_the_integrating_cache_snapshot() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "missing-cache-snapshot", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    fs::remove_file(baseline_files(&repo).pop().unwrap()).unwrap();
+    repo.arc(&repo.root)
+        .args(["publication", "--target", "master", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("publication gate unit: pass"))
+        .stdout(predicates::str::contains("publication gate other: pass"));
+}
