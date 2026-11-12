@@ -50,6 +50,7 @@ pub fn publication(
         &revision,
         audited_through,
     )?;
+    drop(states);
     let audit_names = participants.keys().cloned().collect::<BTreeSet<_>>();
     for (name, gate) in participants {
         gates.gates.entry(name).or_insert(gate);

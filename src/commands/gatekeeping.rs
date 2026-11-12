@@ -874,7 +874,7 @@ fn reuse_named_gate(
     };
     let head = gitio::head(&run_ctx.cwd)?;
     let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
-    if gate.coverage.base_passes {
+    if gate.coverage.base_passes && crate::base_pass::unobserved(st, name) {
         if let Some(source) = crate::base_pass::source(&run_ctx.cwd, store, st, &head) {
             let paths = gates::delta_paths(&run_ctx.cwd, &source.baseline.tree, &tree);
             let clean = gitio::git(
@@ -1836,7 +1836,9 @@ fn partition<'a>(
         .collect::<Vec<_>>();
     let mut deltas = BTreeMap::new();
     let baseline = (event == GateEvent::Integration
-        && gates.iter().any(|(_, gate)| gate.coverage.base_passes))
+        && gates.iter().any(|(name, gate)| {
+            gate.coverage.base_passes && crate::base_pass::unobserved(st, name)
+        }))
     .then(|| ctx.store().ok())
     .flatten()
     .and_then(|store| crate::base_pass::source(&ctx.cwd, &store, st, answering.head));
