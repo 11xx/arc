@@ -798,7 +798,8 @@ fn named_verification_reuses_and_records_profiled_executions() {
 
 /// Claim: every frozen witness coordinate is checked at isolated replay,
 /// including the originating ledger authority. Rejects treating an embedded
-/// integration, a digest or a merge-target claim as its own authority.
+/// integration, a digest or a merge-target claim as its own authority, including
+/// a later witness sharing the earlier witness's Git coordinates.
 #[test]
 fn replay_refuses_corrupted_witness_coordinates() {
     let repo = seed(GATES);
@@ -809,6 +810,7 @@ fn replay_refuses_corrupted_witness_coordinates() {
         "gate",
         "tree",
         "merge-target",
+        "later-merge-target",
         "target-revision",
         "origin",
         "source-profile",
@@ -827,13 +829,20 @@ fn replay_refuses_corrupted_witness_coordinates() {
             &format!("notes-{index}.md"),
         );
         repo.arc(&wt).args(["verify", "--all"]).assert().success();
-        let file = event_files(&repo, &id)
+        let files = event_files(&repo, &id)
             .into_iter()
-            .find(|file| {
+            .filter(|file| {
                 serde_json::from_slice::<Value>(&fs::read(file).unwrap()).unwrap()["event_type"]
                     == "verification-base-reused"
             })
-            .unwrap();
+            .collect::<Vec<_>>();
+        let file = if *field == "later-merge-target" {
+            files.last()
+        } else {
+            files.first()
+        }
+        .unwrap()
+        .clone();
         let original = fs::read(&file).unwrap();
         let mut event: Value = serde_json::from_slice(&original).unwrap();
         let mut restored_run = None;
@@ -846,7 +855,7 @@ fn replay_refuses_corrupted_witness_coordinates() {
             "algorithm" => event["witness"]["algorithm"] = "arc-base-paths/0".into(),
             "gate" => event["witness"]["gate"] = "missing".into(),
             "tree" => event["witness"]["tree"] = baseline["baseline"]["tree"].clone(),
-            "merge-target" => {
+            "merge-target" | "later-merge-target" => {
                 event["witness"]["against_target"] = baseline["baseline"]["revision"].clone()
             }
             "target-revision" => {

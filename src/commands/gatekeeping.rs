@@ -2087,14 +2087,7 @@ fn append_base_reuses(
     let mut checked = BTreeSet::new();
     let mut pinned = BTreeSet::new();
     for (gate, witness) in reuses {
-        let subject = crate::base_pass::digest(&(
-            &witness.baseline_digest,
-            &witness.revision,
-            &witness.tree,
-            &witness.target_revision,
-            &witness.changed_paths,
-        ));
-        if checked.insert(subject) {
+        if checked.insert(witness.git_subject()) {
             crate::base_pass::validate_git(&ctx.cwd, witness, &witness.baseline)?;
         }
         for commit in std::iter::once(witness.baseline.revision.as_str()).chain(

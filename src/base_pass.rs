@@ -136,6 +136,19 @@ pub struct Accounting {
 }
 
 impl Reuse {
+    pub fn git_subject(&self) -> String {
+        digest(&(
+            &self.baseline_event_id,
+            &self.baseline_digest,
+            &self.revision,
+            &self.tree,
+            &self.target_revision,
+            &self.against_target,
+            &self.changed_paths,
+            &self.algorithm,
+        ))
+    }
+
     pub fn accounting(&self, baseline: &Baseline) -> Accounting {
         let execution = &baseline.gates[&self.gate].execution;
         let environment = execution.environment.clone();
@@ -394,14 +407,7 @@ pub fn validate_events(
                 bail!("base pass baseline lacks integration authority");
             }
             witness.validate(baseline, &baseline.profile)?;
-            let subject = digest(&(
-                &witness.baseline_digest,
-                &witness.revision,
-                &witness.tree,
-                &witness.target_revision,
-                &witness.changed_paths,
-            ));
-            if checked.insert(subject) {
+            if checked.insert(witness.git_subject()) {
                 validate_git(cwd, witness, baseline)?;
             }
         }

@@ -485,11 +485,7 @@ fn import_events(
                 })
                 .context("imported base pass has no authenticated integration baseline")?;
             witness.validate(baseline, &baseline.profile)?;
-            if checked.insert((
-                &witness.baseline_event_id,
-                &witness.revision,
-                &witness.target_revision,
-            )) {
+            if checked.insert(witness.git_subject()) {
                 crate::base_pass::validate_git(&ctx.cwd, witness, baseline)
                     .context("invalid imported base-pass witness; nothing was imported")?;
             }
