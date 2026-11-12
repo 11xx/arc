@@ -8,17 +8,32 @@ use crate::perf::Counted;
 /// Thirty seconds keeps idle reads to two per minute while bounding recovery.
 const FEED_RECHECK: Duration = Duration::from_secs(30);
 
+fn recovery_period(test_millis: Option<&str>) -> Duration {
+    test_millis
+        .and_then(|millis| millis.parse().ok())
+        .map(Duration::from_millis)
+        .filter(|period| !period.is_zero() && *period <= FEED_RECHECK)
+        .unwrap_or(FEED_RECHECK)
+}
+
 struct Follower {
     feed: Option<crate::feed::Feed>,
     recheck: Instant,
+    recovery_period: Duration,
     poll_interval: Duration,
 }
 
 impl Follower {
     fn open() -> Self {
+        #[cfg(debug_assertions)]
+        let test_millis = std::env::var("ARC_TEST_FEED_RECHECK_MS").ok();
+        #[cfg(not(debug_assertions))]
+        let test_millis: Option<String> = None;
+        let recovery_period = recovery_period(test_millis.as_deref());
         Self {
             feed: crate::feed::Feed::open().ok(),
-            recheck: Instant::now() + FEED_RECHECK,
+            recheck: Instant::now() + recovery_period,
+            recovery_period,
             poll_interval: POLL_MIN,
         }
     }
@@ -35,7 +50,7 @@ impl Follower {
                     relevant_notice = lost || lines.iter().any(|line| relevant(line));
                 }
                 if relevant_notice || now >= self.recheck {
-                    self.recheck = now + FEED_RECHECK;
+                    self.recheck = now + self.recovery_period;
                     return Ok(true);
                 }
                 if due.is_some_and(|due| now >= due) {
@@ -975,6 +990,19 @@ fn watch_reached(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claim: followers default to thirty-second silent-write recovery, and
+    /// debug fixture periods can only shorten it. Rejects a changed default
+    /// or an invalid override that changes the idle read rate or recovery bound.
+    #[test]
+    fn recovery_period_preserves_the_default_and_bounds_debug_overrides() {
+        let default = Duration::from_secs(30);
+        assert_eq!(recovery_period(None), default);
+        for invalid in ["", "0", "-1", "invalid", "30001", "18446744073709551615"] {
+            assert_eq!(recovery_period(Some(invalid)), default, "{invalid}");
+        }
+        assert_eq!(recovery_period(Some("200")), Duration::from_millis(200));
+    }
 
     /// An event hook that exits without reading its payload is reported by
     /// its own exit status, and arc keeps running. Rejects the payload write

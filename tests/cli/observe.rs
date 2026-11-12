@@ -1,5 +1,9 @@
 use super::common::*;
 
+fn recovery_wait_bound() -> Duration {
+    Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 45 })
+}
+
 /// Claim: an idle ledger watch reads history once, then sleeps until its
 /// timeout. Rejects periodic ledger re-reads even when output stays quiet.
 #[test]
@@ -98,6 +102,8 @@ fn watch_feed_filters_notices_and_answers_a_write_promptly() {
 /// is discovered within the slow fallback bound; an unavailable feed retains
 /// polling. Rejects missing recovery wakes, an absent fallback, and dependence
 /// on a usable feed for correctness.
+/// Debug fixtures select a short recovery period; the default period has a
+/// separate policy check.
 #[test]
 fn watch_feed_recovers_missing_or_unreadable_notices() {
     use std::io::Write;
@@ -120,7 +126,8 @@ fn watch_feed_recovers_missing_or_unreadable_notices() {
             fs::rename(&feed_dir, repo.home.join("disabled-feed")).unwrap();
             fs::write(&feed_dir, b"not a directory").unwrap();
         }
-        let (child, evaluated) = spawn_watch(
+        let evaluated = repo.home.join("watch-evaluated");
+        let child = spawn_arc_keeping_stderr_with_env(
             &repo,
             &repo.root,
             &[
@@ -129,7 +136,15 @@ fn watch_feed_recovers_missing_or_unreadable_notices() {
                 "--until",
                 "brief-recorded",
                 "--timeout",
-                if stimulus == "fallback" { "40" } else { "10" },
+                if stimulus == "fallback" && !cfg!(debug_assertions) {
+                    "40"
+                } else {
+                    "10"
+                },
+            ],
+            &[
+                ("ARC_WATCH_EVALUATED", evaluated.to_str().unwrap()),
+                ("ARC_TEST_FEED_RECHECK_MS", "200"),
             ],
         );
         let mut child = Killed(child);
@@ -192,7 +207,11 @@ fn watch_feed_recovers_missing_or_unreadable_notices() {
             "reached: brief-recorded",
             "{stimulus}"
         );
-        let bound = if stimulus == "fallback" { 35 } else { 3 };
+        let bound = if stimulus == "fallback" && !cfg!(debug_assertions) {
+            35
+        } else {
+            3
+        };
         assert!(
             started.elapsed() < Duration::from_secs(bound),
             "{stimulus}: slow recovery"
@@ -203,6 +222,7 @@ fn watch_feed_recovers_missing_or_unreadable_notices() {
 /// Claim: file-published reserved history is eventually emitted in ID order
 /// without crossing an unresolved cursor reservation. Rejects a follower
 /// dependent on notices for copied history or one that crosses the reservation.
+/// Debug fixtures select a short recovery period without publishing a notice.
 #[test]
 fn events_cursor_waits_for_a_reservation_published_after_a_later_event() {
     let repo = Repo::new();
@@ -266,10 +286,11 @@ fn events_cursor_waits_for_a_reservation_published_after_a_later_event() {
         .unwrap()
         .iter()
         .all(|event| event["event_id"].as_str().unwrap() < reserved.to_string().as_str()));
-    let mut follower = Killed(spawn_arc(
+    let mut follower = Killed(spawn_arc_keeping_stderr_with_env(
         &repo,
         &repo.root,
         &["events", "--follow", "--since", &cursor],
+        &[("ARC_TEST_FEED_RECHECK_MS", "200")],
     ));
     let lines = follower.0.stdout.take().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -299,7 +320,9 @@ fn events_cursor_waits_for_a_reservation_published_after_a_later_event() {
         vec![event["event_id"].clone(), later["event_id"].clone()]
     );
     for expected in [&event, &later] {
-        let line = receiver.recv_timeout(Duration::from_secs(45)).unwrap();
+        let line = receiver
+            .recv_timeout(recovery_wait_bound())
+            .expect("follower did not recover reserved history");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&line).unwrap()["event_id"],
             expected["event_id"]
@@ -468,6 +491,7 @@ impl Drop for Killed {
 /// Claim: follow discovers file-copied imports below its initial cursor within
 /// the slow fallback bound. Rejects a feed-only stream and cursor filtering
 /// that hides imports arriving below already emitted IDs.
+/// Debug fixtures select a short recovery period without publishing a notice.
 #[test]
 fn events_follow_discovers_an_import_below_its_initial_cursor() {
     let repo = Repo::new();
@@ -478,10 +502,11 @@ fn events_follow_discovers_an_import_below_its_initial_cursor() {
     let history = stdout(repo.arc(&repo.root).args(["events"]));
     let opening: serde_json::Value = serde_json::from_str(history.lines().next().unwrap()).unwrap();
     let cursor = opening["event_id"].as_str().unwrap();
-    let mut follower = Killed(spawn_arc(
+    let mut follower = Killed(spawn_arc_keeping_stderr_with_env(
         &repo,
         &repo.root,
         &["events", "--follow", "--since", cursor],
+        &[("ARC_TEST_FEED_RECHECK_MS", "200")],
     ));
     let lines = follower.0.stdout.take().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -513,7 +538,9 @@ fn events_follow_discovers_an_import_below_its_initial_cursor() {
     let temporary = imports.join("late.tmp");
     fs::write(&temporary, serde_json::to_vec(&batch).unwrap()).unwrap();
     fs::rename(temporary, imports.join("late.json")).unwrap();
-    let line = receiver.recv_timeout(Duration::from_secs(45)).unwrap();
+    let line = receiver
+        .recv_timeout(recovery_wait_bound())
+        .expect("follower did not discover imported history without a feed notice");
     let event: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(event["event_id"], id);
     assert_eq!(event["repository_id"], "origin");
