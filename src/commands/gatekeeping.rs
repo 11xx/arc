@@ -169,20 +169,7 @@ pub(crate) fn verify_landing_stack(
     target: &str,
     gates: &[(String, gates::Gate)],
 ) -> Result<i32> {
-    let gates = landing_execution_gates(gates);
-    verify_with_landing(ctx, reference, args, Some((target, &gates)))
-}
-
-fn landing_execution_gates(gates: &[(String, gates::Gate)]) -> Vec<(String, gates::Gate)> {
-    gates
-        .iter()
-        .cloned()
-        .map(|(name, mut gate)| {
-            gate.budget = None;
-            gate.budget_sources.clear();
-            (name, gate)
-        })
-        .collect()
+    verify_with_landing(ctx, reference, args, Some((target, gates)))
 }
 
 fn verify_with_landing(
@@ -1326,9 +1313,8 @@ pub(crate) fn verify_landing_head(
     run: LandingGateRun<'_>,
 ) -> Result<(i32, BTreeMap<String, String>)> {
     let event = GateEvent::Integration;
-    let gates = landing_execution_gates(run.gates);
     let required: Vec<(&String, &gates::Gate)> =
-        gates.iter().map(|(name, gate)| (name, gate)).collect();
+        run.gates.iter().map(|(name, gate)| (name, gate)).collect();
     let checkout_ctx = ctx.with_cwd(run.checkout.to_path_buf());
     // The evidence about to be recorded cites the composed head, which a
     // failed attempt leaves on no branch: without a pin the record would

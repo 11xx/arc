@@ -77,6 +77,7 @@ mod journal_pins;
 mod journal_staging;
 mod ladder_clearance;
 mod landing;
+mod landing_budgets;
 mod landing_reads;
 mod lifecycle;
 mod lock_waits;

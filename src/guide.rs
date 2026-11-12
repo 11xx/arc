@@ -1511,8 +1511,9 @@ RUN A CHANGE
   prints the plan, as `arc-landing-plan/1` with `--json`: the shape, the
   members and their pins (patchset, base, head, whether it is replayed and
   the approval a replay outruns, brief digest, approval or debt basis,
-  holds, findings, component, prerequisites, gates, policy, danger scope),
-  the components, and the gate union, each gate with its binding and the
+  holds, findings, component, prerequisites, gates and budget constraints,
+  policy, danger scope), the combined total, the components, and the gate
+  union, each gate with its binding and the
   members requiring it. A composed plan names no head: the replay that
   makes it runs only once the attempt is under way.
 
@@ -1538,6 +1539,20 @@ RUN A CHANGE
   follows each gate's binding: a tree-bound pass by tree, a commit-bound
   pass only at the gated head's own commit. A failed gate abandons the
   attempt, closes nothing and drops the pin.
+
+  Both landing forms fold the minimum gate budgets and total across every
+  member's effective destination, head and operator obligations. Budget-only
+  differences do not conflict in execution identity. The combined suite must
+  satisfy the strictest total, even when each member's gate rows are green.
+  Every gate in that suite counts once regardless of its requiring profile.
+  Gates run sequentially, so this total bounds their summed command budgets
+  within one attempt; preparation, admission, replay and additional split
+  attempts are outside that bound. Before authorization, every shared receipt
+  is judged against every requiring member's budget. Missing run_ms or an
+  over-budget pass refuses with the member, gate, run time and budget, leaves
+  the target unmoved and does not trigger splitting or an implicit retry.
+  Effective budgets, totals and sources are pinned, confirmed and retained in
+  each member's authorization.
 
   Commit takes replica authority, the target, the graph, each member's
   transition lock in change-ID order, then repository events, and reads
@@ -5535,7 +5550,7 @@ GATES
   The total is the sum of all required gate budgets, without a concurrency
   discount. The effective suite is validated after layering for every declared
   profile and the unqualified case. A missing budget or excessive sum is a
-  doctor finding and independently blocks check, accept and integrate, even
+  doctor finding and independently blocks check, accept, integrate and land, even
   when every gate row is green or the active profile requires no gate.
 
   The budget in force is the minimum of every applicable selected destination,
@@ -5586,7 +5601,7 @@ GATES
   executables supporting formats through 7 refuse that ledger. Reads alone do
   not adopt it; budget-free writes retain the ordinary event envelope and
   ledger format.
-  Land, candidate selection and promotion, and arc publication do not judge
+  Candidate selection and promotion, and arc publication do not judge
   budgets. Their acceptance contracts do not provide budget enforcement.
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc

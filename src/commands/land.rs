@@ -266,6 +266,8 @@ struct MemberPin {
     prerequisites: Vec<PrerequisitePin>,
     /// The member's required gates and their declaration identities.
     gates: BTreeMap<String, String>,
+    gate_budgets: BTreeMap<String, BudgetConstraint>,
+    budget_rules: Option<crate::gate_budget::BudgetRules>,
     policy: serde_json::Value,
     danger: crate::model::DangerScope,
     iterating: bool,
@@ -296,6 +298,12 @@ struct PrerequisitePin {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct BudgetConstraint {
+    budget_ms: Option<u64>,
+    sources: Vec<crate::gate_budget::BudgetSource>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct GateUnion {
     identity: String,
     binds: &'static str,
@@ -319,6 +327,7 @@ struct Plan {
     members: Vec<MemberPin>,
     components: Vec<Vec<String>>,
     gates: BTreeMap<String, GateUnion>,
+    budget_rules: Option<crate::gate_budget::BudgetRules>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -621,6 +630,7 @@ fn plan(
     let mut declarations_used = Vec::new();
     let mut union: BTreeMap<String, GateUnion> = BTreeMap::new();
     let mut gate_declarations: BTreeMap<String, crate::gates::Gate> = BTreeMap::new();
+    let mut budget_rules = None;
     let top_index = members.len() - 1;
     let mut top_gates: BTreeMap<String, String> = BTreeMap::new();
     for (index, member) in members.iter().enumerate() {
@@ -766,6 +776,14 @@ fn plan(
             });
         }
         let declarations = ctx.declarations(&selected)?;
+        let errors = declarations.gates.budget_errors();
+        if !errors.is_empty() {
+            return refuse(
+                Blocker::GatesNotGreen.exit_code(),
+                format!("{}: {}", member.change_id, errors.join("; ")),
+            );
+        }
+        crate::gate_budget::merge_rules(&mut budget_rules, declarations.gates.budget.clone());
         let required: Vec<(String, String, bool, String, crate::gates::Gate)> = declarations
             .gates
             .required_for_event(&selected.profile, crate::model::GateEvent::Integration)
@@ -795,7 +813,13 @@ fn plan(
                         ),
                     );
                 }
-                Some(existing) => existing.required_by.push(member.change_id.clone()),
+                Some(existing) => {
+                    existing.required_by.push(member.change_id.clone());
+                    gate_declarations
+                        .get_mut(name)
+                        .expect("a union gate has a declaration")
+                        .absorb_budget(&declared);
+                }
                 None => {
                     gate_declarations.insert(name.clone(), declared);
                     union.insert(
@@ -854,6 +878,20 @@ fn plan(
             lands_with: member.lands_with.clone(),
             prerequisites,
             gates,
+            gate_budgets: normalized
+                .gates
+                .iter()
+                .map(|(name, gate)| {
+                    (
+                        name.clone(),
+                        BudgetConstraint {
+                            budget_ms: gate.budget_ms,
+                            sources: gate.budget_sources.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            budget_rules: normalized.budget_rules.clone(),
             policy: serde_json::to_value(&normalized.policy)?,
             danger: report.danger.clone(),
             iterating: member.iterating,
@@ -861,6 +899,31 @@ fn plan(
         reports.push(report);
         projected_states.push(selected);
         declarations_used.push(normalized);
+    }
+    // Every gate in the union runs in this attempt, whatever member profile
+    // required it. The strictest total bounds that complete sequential suite.
+    let combined = crate::gates::GatesFile {
+        budget: budget_rules.clone(),
+        gates: gate_declarations
+            .iter()
+            .map(|(name, gate)| {
+                let mut gate = gate.clone();
+                gate.profiles.clear();
+                (name.clone(), gate)
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let errors = combined.budget_errors();
+    if !errors.is_empty() {
+        return refuse(
+            Blocker::GatesNotGreen.exit_code(),
+            format!(
+                "combined suite for {}: {}",
+                ids.join(", "),
+                errors.join("; ")
+            ),
+        );
     }
     if union.is_empty() {
         return refuse(
@@ -895,6 +958,7 @@ fn plan(
             members: pins,
             components,
             gates: union,
+            budget_rules,
         },
         states: projected_states,
         reports,
@@ -996,6 +1060,7 @@ fn moved_field(pinned: &Plan, fresh: &Plan) -> Result<Option<String>> {
         "tree",
         "components",
         "gates",
+        "budget_rules",
     ] {
         if pinned[key] != fresh[key] {
             return Ok(Some(key.to_string()));
@@ -1098,6 +1163,42 @@ fn crash_point(phase: &str) {
         std::process::exit(86);
     }
     let _ = phase;
+}
+
+/// Judge the shared receipts against each member's effective obligations.
+fn budget_refusal(
+    plan: &Plan,
+    top: &ChangeState,
+    evidence: &BTreeMap<String, String>,
+) -> Option<String> {
+    for member in &plan.members {
+        for (name, gate) in &member.gate_budgets {
+            let receipt = evidence.get(name).and_then(|id| {
+                top.verifications
+                    .iter()
+                    .find(|receipt| &receipt.event_id == id)
+            });
+            let Some(receipt) = receipt else { continue };
+            let judgement =
+                crate::gate_budget::judge(gate.budget_ms, &gate.sources, receipt.timing.run_ms);
+            if let Some(reason) = judgement.reason(&receipt.timing, &receipt.hostname) {
+                return Some(format!("{}: gate {name}: {reason}", member.change_id));
+            }
+        }
+    }
+    None
+}
+
+fn reported_evidence(report: &crate::status::StatusReport) -> BTreeMap<String, String> {
+    report
+        .gates
+        .iter()
+        .filter_map(|gate| {
+            gate.evidence_event_id
+                .as_ref()
+                .map(|id| (gate.name.clone(), id.clone()))
+        })
+        .collect()
 }
 
 /// Run `arc land`.
@@ -1494,7 +1595,12 @@ fn run_attempt(
         let gated = gate_composed(ctx, store, &pinned, &gate_declarations, &top, &attempt);
         match gated {
             Ok((0, evidence)) => Some(evidence),
-            Ok(_) => {
+            Ok((_, evidence)) => {
+                if let Some(reason) = budget_refusal(&pinned, &store.state(&top)?, &evidence) {
+                    abandon(ctx, store, &attempt, &reason)?;
+                    eprintln!("Cannot land: {reason}; nothing closed");
+                    return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+                }
                 report.gate_failed = true;
                 abandon(
                     ctx,
@@ -1564,6 +1670,19 @@ fn run_attempt(
             }
         };
         if gate_code != 0 {
+            let mut state = store.state(&top)?;
+            state.target_branch = pinned.target_branch.clone();
+            let top_report = ctx.report_for_integration(
+                store,
+                &state,
+                &pinned.target_branch,
+                crate::integration::Shape::FfOnly,
+            )?;
+            if let Some(reason) = budget_refusal(&pinned, &state, &reported_evidence(&top_report)) {
+                abandon(ctx, store, &attempt, &reason)?;
+                eprintln!("Cannot land: {reason}; nothing closed");
+                return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+            }
             report.gate_failed = true;
             abandon(
                 ctx,
@@ -1577,6 +1696,8 @@ fn run_attempt(
         None
     };
     crash_point("gated");
+    #[cfg(debug_assertions)]
+    crate::import_authorization::test_rendezvous("landing-gated")?;
     super::pause_until_released("ARC_LAND_PAUSE")?;
 
     commit(
@@ -1859,6 +1980,15 @@ fn commit(
     let plan = fresh.plan;
     let top_index = plan.members.len() - 1;
     let top_report = &fresh.reports[top_index];
+    let top_state = &fresh.states[top_index];
+    let selected_evidence = composed_evidence
+        .clone()
+        .unwrap_or_else(|| reported_evidence(top_report));
+    if let Some(reason) = budget_refusal(&plan, top_state, &selected_evidence) {
+        abandon_locked(ctx, store, &attempt, &reason)?;
+        eprintln!("Cannot land: {reason}; nothing closed");
+        return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+    }
     let mut gate_evidence = composed_evidence.clone().unwrap_or_default();
     for gate in top_report
         .gates
@@ -2096,7 +2226,7 @@ fn commit(
                 range_base,
                 integrated_commit,
                 authorization: crate::model::AuthorizationBasis {
-                    budget_rules: None,
+                    budget_rules: declarations.budget_rules,
                     selected_verdict_provenance,
                     verdict_event_id: approval.verdict_event_id,
                     external_verdict: approval.external_verdict,
