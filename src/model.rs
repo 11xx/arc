@@ -2364,6 +2364,8 @@ pub enum Payload {
         /// declares no probe or the probe yielded no identity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<EnvironmentEvidence>,
+        #[serde(flatten)]
+        timing: crate::verification_timing::VerificationTiming,
         result: VerifyResult,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,

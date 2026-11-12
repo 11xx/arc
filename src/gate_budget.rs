@@ -44,7 +44,8 @@ fn budgeted_authorization(basis: &crate::model::AuthorizationBasis) -> bool {
 pub fn budgeted_payload(payload: &crate::model::Payload) -> bool {
     use crate::model::Payload;
     match payload {
-        Payload::VerificationRecorded { timing, .. } => timing.budget_at_run.is_some(),
+        Payload::VerificationRecorded { timing, .. }
+        | Payload::CandidateVerified { timing, .. } => timing.budget_at_run.is_some(),
         Payload::ChangeIntegrated {
             authorization: Some(basis),
             ..

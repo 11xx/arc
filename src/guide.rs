@@ -4114,7 +4114,9 @@ CANDIDATES
   declares them, in a scratch checkout of the candidate's tree, removed
   afterwards. It records `candidate-verified` keyed by the tree, with the
   gate's command, timeout, and environment probe as consumed, the identity the
-  probe yielded there, and the result.
+  probe yielded there, the result, and command timing. Required declarations
+  include the candidate tree's additions and tightened budgets. Execution and
+  selection judge timing against the effective budgets in `arc guide gates`.
 
   Selection is validation, never choice. The caller names the registration,
   the destination (the change whose brief it answers), the target head it
@@ -4152,7 +4154,8 @@ CANDIDATES
   Permission is not effect. The promotion holds the destination's transition
   lock and the repository-events lock, never the target's, and in order:
   refuses `basis-moved`, recording nothing, when the destination head or the
-  target differs from the basis; refuses a checkout of the destination with
+  target differs from the basis; rejudges the selected evaluations against
+  current budgets, refusing over-budget or unmeasured evidence; refuses a checkout of the destination with
   tracked modifications or untracked paths in the way; commits the shipped
   tree onto the destination head with the selector as committer and keeps it
   at `refs/arc/candidate-promotion/<candidate>/<selection>`; moves the branch
@@ -5603,8 +5606,10 @@ GATES
   executables supporting formats through 7 refuse that ledger. Reads alone do
   not adopt it; budget-free writes retain the ordinary event envelope and
   ledger format.
-  Candidate selection and promotion, and arc publication do not judge
-  budgets. Their acceptance contracts do not provide budget enforcement.
+  Every path that accepts gate evidence judges it against the budget in force:
+  verify, status, integrate, accept, land, candidate selection and promotion,
+  and publication.
+
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
@@ -5921,6 +5926,11 @@ SCHEMAS
   RFC 3339 `judged_at`; its bounds and reply precedence are defined by
   `arc guide debt-clearance`. These optional input fields leave older records
   valid under store format 7.
+
+  Candidate evaluations carry optional command timing in events and candidate
+  views. Missing timing remains absent through replay and transport; current
+  budget acceptance is separate from the recorded outcome. These optional
+  receipt fields retain the stored-input versions.
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import

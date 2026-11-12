@@ -12,7 +12,7 @@
 use super::candidate::load_ledger;
 use super::gatekeeping::{
     checkout_tracked_dirt, checkout_writes, declared_environment, gate_environments,
-    run_gate_admitted, ScratchWorktree,
+    run_gate_budgeted, ScratchWorktree,
 };
 use super::relations::repository_relations;
 use super::Ctx;
@@ -190,6 +190,22 @@ fn scratch_checkout(ctx: &Ctx, tree: &str, name: &str) -> Result<ScratchWorktree
     ScratchWorktree::create(&ctx.cwd, path, &commit)
 }
 
+/// The destination's obligations plus those added or tightened by the shipped tree.
+fn candidate_declarations(
+    ctx: &Ctx,
+    st: &ChangeState,
+    tree: &str,
+) -> Result<crate::declarations::Declarations> {
+    let mut declarations = ctx.declarations(st)?;
+    let own = crate::gates::load_at(&ctx.cwd, tree)?;
+    declarations.gates.owe_also(own, "destination", "candidate");
+    let errors = declarations.gates.budget_errors();
+    if !errors.is_empty() {
+        bail!("invalid candidate budgets: {}", errors.join("; "));
+    }
+    Ok(declarations)
+}
+
 pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> {
     let store = ctx.store()?;
     let ledger = load_ledger(&store)?;
@@ -197,13 +213,16 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         bail!("unknown-candidate: no candidate {candidate_id} is registered");
     };
     let st = contract_state(ctx, &store, &registration.brief.change_id)?;
-    let declarations = ctx.declarations(&st)?;
+    let declarations = candidate_declarations(ctx, &st, &registration.tree)?;
     if declarations.target_unreadable {
         bail!(
             "target-unreadable: {} cannot be resolved, so nothing says which gates {} owes",
             st.target_branch,
             st.change_id
         );
+    }
+    if declarations.gates.has_budgets() {
+        store.adopt_budgets()?;
     }
     let required = declarations.gates.required_for(&st.profile);
     let selected: Vec<_> = match only {
@@ -239,10 +258,11 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
     for (name, gate) in selected {
         eprintln!("running: {}", gate.command);
         let started = std::time::Instant::now();
-        let run = run_gate_admitted(
+        let (limit, origin) = gate.execution_limit()?;
+        let mut run = run_gate_budgeted(
             &gate.command,
             &scratch.path,
-            gate.timeout,
+            limit.map(std::time::Duration::from_millis),
             &store.root,
             &store.repository_id,
             crate::exclusive::Request::for_gate(gate)
@@ -250,6 +270,25 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
                 .map(|request| (request, st.change_id.as_str(), name.as_str())),
         )?;
         let duration_ms = started.elapsed().as_millis() as u64;
+        run.timing.execution_limit_ms = limit;
+        run.timing.execution_limit_origin = origin;
+        run.timing.budget_at_run = gate
+            .budget
+            .map(|_| gate.budget_judgement(run.timing.run_ms));
+        let current = candidate_declarations(ctx, &st, &tree)?;
+        if current.gates.has_budgets() {
+            store.adopt_budgets()?;
+        }
+        let judgement = current
+            .gates
+            .gates
+            .get(name)
+            .context("candidate gate declaration disappeared while checks ran")?
+            .budget_judgement(run.timing.run_ms);
+        if let Some(reason) = judgement.reason(&run.timing, &hostname) {
+            eprintln!("gate {name}: {reason}");
+        }
+        let accepted = judgement.accepted();
         let result = VerifyResult::observed(run.status.success(), run.status.code(), run.timed_out);
         let payload = Payload::CandidateVerified {
             candidate_id: candidate_id.to_string(),
@@ -267,6 +306,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
             result,
             exit_code: (!run.admission_expired).then(|| run.status.code().unwrap_or(-1)),
             duration_ms: Some(duration_ms),
+            timing: run.timing,
             output_tail: run.output_tail,
             output_artifact: run.output_artifact,
             timed_out: run.timed_out,
@@ -282,7 +322,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         store.append_local_repository_event(&mut event)?;
         println!("gate {name}: {}", result.as_str());
         println!("evaluation: {}", event.event_id);
-        if result == VerifyResult::Pass {
+        if result == VerifyResult::Pass && accepted {
             passed += 1;
         }
     }
@@ -349,7 +389,10 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
         );
         return Ok(1);
     };
-    let declarations = ctx.declarations(&st)?;
+    let declarations = candidate_declarations(ctx, &st, &chosen.tree)?;
+    if declarations.gates.has_budgets() {
+        store.adopt_budgets()?;
+    }
     if declarations.target_unreadable {
         bail!(
             "target-unreadable: {} cannot be resolved, so nothing says what {} owes",
@@ -382,6 +425,8 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
             name: (*name).clone(),
             command: gate.command.clone(),
             timeout: gate.timeout,
+            budget: gate.budget,
+            budget_sources: gate.budget_sources.clone(),
             environment_probe: gate.environment.clone(),
             environment: declared_environment(&environments, gate).map(str::to_string),
         })
@@ -593,6 +638,29 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
              select again (`arc candidate select`) to validate afresh"
         );
         return Ok(1);
+    }
+    let declarations = candidate_declarations(ctx, &st, &selection.tree)?;
+    if declarations.gates.has_budgets() {
+        store.adopt_budgets()?;
+    }
+    for (name, gate) in declarations.gates.required_for(&st.profile) {
+        let evaluation = selection
+            .evaluations
+            .iter()
+            .find(|selected| &selected.gate == name)
+            .and_then(|selected| ledger.evaluation(&selected.event_id));
+        let judgement = gate.budget_judgement(evaluation.and_then(|e| e.timing.run_ms));
+        if !judgement.accepted() {
+            let timing = evaluation.map(|e| e.timing.clone()).unwrap_or_default();
+            let host = evaluation
+                .map(|e| e.hostname.as_str())
+                .unwrap_or("unrecorded");
+            eprintln!(
+                "promotion refused: gate {name}: {}",
+                judgement.reason(&timing, host).unwrap()
+            );
+            return Ok(1);
+        }
     }
     if recover {
         println!("promoting selection {selection_id} from its basis");

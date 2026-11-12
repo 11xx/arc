@@ -25,6 +25,8 @@ pub struct RequiredGate {
     pub name: String,
     pub command: String,
     pub timeout: Option<u64>,
+    pub budget: Option<u64>,
+    pub budget_sources: Vec<crate::gate_budget::BudgetSource>,
     pub environment_probe: Option<String>,
     /// What the probe yielded. `None` for a gate declaring no probe, and for
     /// a probe that yielded no identity.
@@ -89,6 +91,10 @@ pub enum EvidenceShortfall {
     EnvironmentUnrecorded,
     EnvironmentOther(String),
     Failed,
+    Budget {
+        judgement: crate::gate_budget::BudgetJudgement,
+        detail: String,
+    },
 }
 
 impl EvidenceShortfall {
@@ -101,6 +107,10 @@ impl EvidenceShortfall {
             Self::EnvironmentUnrecorded => "environment-unrecorded",
             Self::EnvironmentOther(_) => "environment-other",
             Self::Failed => "failed",
+            Self::Budget { judgement, .. } => match judgement.verdict {
+                crate::gate_budget::BudgetVerdict::Unmeasured => "unmeasured",
+                _ => "over-budget",
+            },
         }
     }
 }
@@ -235,6 +245,7 @@ impl fmt::Display for Refusal {
                         write!(f, "ran in environment {identity}, not the one observed now")
                     }
                     EvidenceShortfall::Failed => write!(f, "did not pass"),
+                    EvidenceShortfall::Budget { detail, .. } => write!(f, "{detail}"),
                 }
             }
             Self::Read {
@@ -425,7 +436,14 @@ pub fn evidence_shortfall(
             Some(_) => {}
         }
     }
-    (evaluation.result != VerifyResult::Pass).then_some(EvidenceShortfall::Failed)
+    if evaluation.result != VerifyResult::Pass {
+        return Some(EvidenceShortfall::Failed);
+    }
+    let judgement =
+        crate::gate_budget::judge(gate.budget, &gate.budget_sources, evaluation.timing.run_ms);
+    judgement
+        .reason(&evaluation.timing, &evaluation.hostname)
+        .map(|detail| EvidenceShortfall::Budget { judgement, detail })
 }
 
 fn declaration_difference(gate: &RequiredGate, evaluation: &Evaluation) -> Option<String> {

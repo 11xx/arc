@@ -565,6 +565,8 @@ struct ReceiptView {
 
 #[derive(Serialize)]
 struct EvaluationView {
+    #[serde(flatten)]
+    timing: crate::verification_timing::VerificationTiming,
     event_id: String,
     gate: String,
     command: String,
@@ -829,6 +831,7 @@ fn view(
             .evaluations_of(id)
             .into_iter()
             .map(|evaluation| EvaluationView {
+                timing: evaluation.timing.clone(),
                 event_id: evaluation.event_id.clone(),
                 gate: evaluation.gate.clone(),
                 command: evaluation.command.clone(),

@@ -886,3 +886,255 @@ fn a_candidate_gate_exiting_75_records_not_admitted() {
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["result"], "not-admitted");
 }
+
+fn budget_declaration(repo: &Repo, budget: &str) {
+    declare(repo, &format!("{GATES}budget='{budget}'\n"), Some("never"));
+}
+
+fn budget_evaluation(repo: &Repo, candidate: &str, run_ms: u64, code: i32) -> String {
+    repo.arc(&repo.root)
+        .env("ARC_TEST_COMMAND_RUN_MS", run_ms.to_string())
+        .args(["candidate", "verify", candidate])
+        .assert()
+        .code(code);
+    repository_events(repo, "candidate-verified").pop().unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Claim: candidate verification and selection refuse the same over-budget raw
+/// pass without moving either branch. Rejects discarded timing and pass-only selection.
+#[test]
+fn candidate_budget_refuses_execution_and_selection_without_moving_heads() {
+    let f = fixture(Some("never"), &[], false);
+    let repo = &f.repo;
+    budget_declaration(repo, "10s");
+    let head = branch_head(repo, &f.change);
+    let target = target(repo);
+    let evaluation = budget_evaluation(repo, "alice", 11300, 1);
+    let raw = repository_events(repo, "candidate-verified").pop().unwrap();
+    assert_eq!(raw["result"], "pass");
+    assert_eq!(raw["run_ms"], 11300);
+    assert_eq!(raw["execution_limit_ms"], 100000);
+    assert!(raw["timeout_seconds"].is_null());
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["candidate", "show", "alice", "--json"]),
+    );
+    assert_eq!(shown["candidates"][0]["evaluations"][0]["run_ms"], 11300);
+    let refusal = refused(&mut select(
+        repo,
+        &f.change,
+        "alice",
+        &target,
+        &[&evaluation],
+    ));
+    assert!(
+        refusal.contains("over-budget") && refusal.contains("ran 11.3s of 10s"),
+        "{refusal}"
+    );
+    assert_eq!(branch_head(repo, &f.change), head);
+    assert_eq!(self::target(repo), target);
+    assert!(repository_events(repo, "candidate-selected").is_empty());
+    assert!(repository_events(repo, "candidate-promoted").is_empty());
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 8);
+}
+
+/// Claim: promotion rejudges the selected receipt under a reduced operator budget
+/// even when neither coordinate moved. Rejects treating a recorded selection as cost authority.
+#[test]
+fn candidate_budget_reduction_between_selection_and_promotion_refuses_the_effect() {
+    let f = fixture(Some("never"), &[], false);
+    let repo = &f.repo;
+    budget_declaration(repo, "20s");
+    let evaluation = budget_evaluation(repo, "alice", 11300, 0);
+    let head = branch_head(repo, &f.change);
+    let target = target(repo);
+    let release = repo.home.join("promotion-budget-release");
+    let mut child = repo.spawn_arc_piped_with_env(
+        &repo.root,
+        &[
+            "candidate",
+            "select",
+            "--chosen",
+            "alice",
+            "--into",
+            &f.change,
+            "--target",
+            &target,
+            "--evaluation",
+            &evaluation,
+            "--rationale",
+            "answer",
+        ],
+        &[("ARC_SELECT_PAUSE", &release)],
+    );
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let selection = loop {
+        let mut line = String::new();
+        assert!(
+            output.read_line(&mut line).unwrap() > 0,
+            "selection was not recorded"
+        );
+        if let Some(id) = line.trim().strip_prefix("selection: ") {
+            break id.to_string();
+        }
+    };
+    budget_declaration(repo, "10s");
+    fs::write(&release, "").unwrap();
+    let result = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("promotion refused") && stderr.contains("ran 11.3s of 10s"),
+        "{stderr}"
+    );
+    assert_eq!(branch_head(repo, &f.change), head);
+    assert_eq!(self::target(repo), target);
+    assert!(repository_events(repo, "candidate-promoted").is_empty());
+    repo.arc(&repo.root)
+        .args(["candidate", "promote", &selection])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("promotion refused"));
+}
+
+/// Claim: the candidate tree's tighter and added budget obligations bind execution
+/// and selection. Rejects consulting only the destination head's declaration.
+#[test]
+fn candidate_own_tighter_budget_is_required() {
+    let f = fixture(Some("never"), &[], false);
+    let repo = &f.repo;
+    budget_declaration(repo, "20s");
+    let gates = piped(
+        repo,
+        &["hash-object", "-w", "--stdin"],
+        &format!("{GATES}budget='10s'\n[gates.extra]\ncommand='true'\nbudget='10s'\n"),
+    );
+    let arc_tree = piped(
+        repo,
+        &["mktree"],
+        &format!("100644 blob {gates}\tgates.toml\n"),
+    );
+    let answer = piped(repo, &["hash-object", "-w", "--stdin"], "answer\n");
+    let tree = piped(
+        repo,
+        &["mktree"],
+        &format!("040000 tree {arc_tree}\t.arc\n100644 blob {answer}\tanswer.txt\n"),
+    );
+    register(repo, &f.change, "tight", &tree, "alice", &[]);
+    let head = branch_head(repo, &f.change);
+    let target = target(repo);
+    budget_evaluation(repo, "tight", 11300, 1);
+    let evaluations = repository_events(repo, "candidate-verified");
+    assert_eq!(evaluations.len(), 2);
+    let ids = evaluations
+        .iter()
+        .map(|e| e["event_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let refusal = refused(&mut select(repo, &f.change, "tight", &target, &ids));
+    assert!(
+        refusal.contains("gate build") && refusal.contains("ran 11.3s of 10s"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("gate extra"), "{refusal}");
+    assert_eq!(branch_head(repo, &f.change), head);
+    assert_eq!(self::target(repo), target);
+}
+
+/// Claim: legacy untimed evaluations remain readable but cannot meet a budget.
+/// Rejects treating duration_ms or an absent command observation as measured evidence.
+#[test]
+fn candidate_untimed_evaluation_is_readable_and_unmeasured() {
+    let f = fixture(Some("never"), &[], false);
+    let repo = &f.repo;
+    let evaluation = evaluated(repo, "alice");
+    let directory = repo.root.join(".git/arc/repository/events");
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if value["event_id"] == evaluation {
+            value.as_object_mut().unwrap().remove("run_ms");
+            value["duration_ms"] = serde_json::json!(1);
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+    }
+    budget_declaration(repo, "10s");
+    let refusal = refused(&mut select(
+        repo,
+        &f.change,
+        "alice",
+        &target(repo),
+        &[&evaluation],
+    ));
+    assert!(
+        refusal.contains("unmeasured") && refusal.contains("run_ms is missing"),
+        "{refusal}"
+    );
+}
+
+/// Claim: exported candidate evidence retains command timing and its absence
+/// through import and reduction. Rejects transport losing measurements or inventing legacy ones.
+#[test]
+fn candidate_timing_and_absence_survive_export_import() {
+    for timed in [true, false] {
+        let f = fixture(Some("never"), &[], false);
+        let source = &f.repo;
+        budget_evaluation(source, "alice", 11300, 0);
+        if !timed {
+            for entry in fs::read_dir(source.root.join(".git/arc/repository/events")).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+                let mut event: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                if event["event_type"] == "candidate-verified" {
+                    event.as_object_mut().unwrap().remove("run_ms");
+                    fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+                }
+            }
+        }
+        let bundle = source.home.join("candidate-timing.json");
+        source
+            .arc(&source.root)
+            .args(["export", &f.change, "--output", bundle.to_str().unwrap()])
+            .assert()
+            .success();
+        let receiver = Repo::new();
+        deliver_git_objects(source, &receiver);
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()])
+            .assert()
+            .success();
+        let exported: serde_json::Value =
+            serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+        let raw = exported["repository_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["event_type"] == "candidate-verified")
+            .unwrap();
+        let shown = json_stdout(receiver.arc(&receiver.root).args([
+            "candidate",
+            "show",
+            "alice",
+            "--json",
+        ]));
+        let expected = if timed {
+            serde_json::json!(11300)
+        } else {
+            serde_json::Value::Null
+        };
+        assert_eq!(raw["run_ms"], expected);
+        assert_eq!(shown["candidates"][0]["evaluations"][0]["run_ms"], expected);
+    }
+}

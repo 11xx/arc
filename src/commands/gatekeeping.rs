@@ -3364,7 +3364,7 @@ pub(super) fn run_gate_admitted(
     )
 }
 
-fn run_gate_budgeted(
+pub(super) fn run_gate_budgeted(
     cmd: &str,
     cwd: &Path,
     timeout: Option<Duration>,

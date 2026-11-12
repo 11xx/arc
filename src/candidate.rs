@@ -103,6 +103,8 @@ pub struct Evaluation {
     pub environment_probe: Option<String>,
     pub environment: Option<EnvironmentEvidence>,
     pub result: VerifyResult,
+    pub timing: crate::verification_timing::VerificationTiming,
+    pub hostname: String,
     pub declarant: String,
     pub recorded_at: DateTime<Utc>,
 }
@@ -421,6 +423,8 @@ impl Ledger {
                 environment_probe,
                 environment,
                 result,
+                timing,
+                hostname,
                 ..
             } => {
                 let registration = self.known(candidate_id)?;
@@ -446,6 +450,8 @@ impl Ledger {
                         environment_probe: environment_probe.clone(),
                         environment: environment.clone(),
                         result: *result,
+                        timing: timing.clone(),
+                        hostname: hostname.clone(),
                         declarant,
                         recorded_at: event.created_at,
                     },

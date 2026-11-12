@@ -92,6 +92,15 @@ impl Repo {
     /// `arc` as a child process under the fixture's environment, for a test
     /// that talks to a command while it runs. Every stream is piped.
     pub(crate) fn spawn_arc_piped(&self, cwd: &Path, args: &[&str]) -> Child {
+        self.spawn_arc_piped_with_env(cwd, args, &[])
+    }
+
+    pub(crate) fn spawn_arc_piped_with_env(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        extra: &[(&str, &Path)],
+    ) -> Child {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_arc"));
         cmd.current_dir(cwd)
             .args(args)
@@ -103,6 +112,7 @@ impl Repo {
         for name in removes {
             cmd.env_remove(name);
         }
+        cmd.envs(extra.iter().copied());
         cmd.spawn().unwrap()
     }
 
