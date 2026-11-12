@@ -5705,7 +5705,15 @@ GATE RAISES
   `arc gates raise --total --reason TEXT` raises only the integration total;
   GATE with --total requests both transitions atomically. A reason says what
   was tried first. Higher numbers must be committed in .arc/gates.toml at the
-  clean change head. Removing a finite budget cannot establish a raise.
+  clean change head.
+
+  Removing a gate is reviewed like any diff and needs no raise record. The
+  change still owes the destination's gate under its destination budget.
+  Keeping a gate while removing only its budget is refused; restore its budget
+  or remove the gate. Removing [budget] total or its table while budgeted gates
+  remain is refused; restore the total or remove every budgeted gate. Removing
+  every budgeted gate and the table together needs no raise. Lowering a gate
+  budget or the total needs no raise.
 
   The newest direct execution of that gate at the exact head must pass, be
   observed clean and stable on that head's tree, match the destination check
@@ -5739,11 +5747,14 @@ GATE RAISES
   Cross-scope moves earn nothing; modified moves inside scope earn only growth.
   Overlapping patterns count a file once; intermediate commit churn earns nothing.
 
-  A gate's destination paths bound counting; operator and head paths may narrow
-  credit. A gate without paths and the total count every path outside inert.
-  Destination, operator and head inert exclusions all restrict credit. Selection's
-  unnamed-path fallback grants no extra allowance. [budget] exclude in operator
-  policy names generated/vendor paths, independently of inert and gate selection.
+  A gate's destination paths bound counting; operator paths may narrow the scope.
+  A gate without paths and the total count every path outside trusted inert.
+  Destination and operator inert exclusions restrict growth and shrinkage.
+  Head paths and inert exclusions may remove growth credit; trusted shrinkage
+  remains a debit. Moving a file out of scope debits its counted source.
+  Selection's unnamed-path fallback grants no extra allowance. [budget] exclude
+  in operator policy names generated/vendor paths, independently of inert and
+  gate selection.
   A repository's exclude list cannot authorize counting exclusions. Administration
   of operator policy is trusted authority; raise never edits that file.
 

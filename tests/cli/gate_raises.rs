@@ -1291,7 +1291,11 @@ fn scope_net_growth(mode: &str) {
             }
         }
         _ => {
-            git(&wt, &["rm", "src/shrink.rs"]);
+            if mode == "outbound" {
+                git(&wt, &["mv", "src/shrink.rs", "outside-moved.rs"]);
+            } else {
+                git(&wt, &["rm", "src/shrink.rs"]);
+            }
             fs::write(
                 wt.join("src/added.rs"),
                 lines_text(500).replace("value", "added"),
@@ -1304,12 +1308,18 @@ fn scope_net_growth(mode: &str) {
     }
     let new_budget = if expected == 0 { 10001 } else { 10800 };
     let new_total = if mode == "total" { new_budget } else { total };
-    fs::write(
-        wt.join(".arc/gates.toml"),
-        declaration(new_budget, new_total)
-            .replace("inert=['.arc/']", "inert=['.arc/','src/inert/']"),
-    )
-    .unwrap();
+    let mut own = declaration(new_budget, new_total)
+        .replace("inert=['.arc/']", "inert=['.arc/','src/inert/']");
+    if mode == "head-inert" {
+        own = own.replace(
+            "inert=['.arc/','src/inert/']",
+            "inert=['.arc/','src/inert/','src/shrink.rs']",
+        );
+    }
+    if mode == "head-paths" {
+        own = own.replace("paths=['src/']", "paths=['src/added.rs']");
+    }
+    fs::write(wt.join(".arc/gates.toml"), own).unwrap();
     git(&wt, &["add", "."]);
     git(&wt, &["commit", "-m", "test: scope delta"]);
     snapshot(&repo, &wt);
@@ -1386,4 +1396,261 @@ fn raise_scope_net_inert_deletion() {
 #[test]
 fn raise_scope_net_excluded_deletion() {
     scope_net_growth("excluded");
+}
+
+fn removal_rules(route: &str, accepted: bool) {
+    let mut mismatches = Vec::new();
+    for mode in [
+        "remove-gate",
+        "remove-budget",
+        "remove-total",
+        "remove-table",
+        "remove-all",
+        "lower-gate",
+        "lower-total",
+    ] {
+        let allowed = !matches!(mode, "remove-budget" | "remove-total" | "remove-table");
+        if allowed != accepted {
+            continue;
+        }
+        let repo = Repo::new();
+        let base = declaration(10000, 20000);
+        repo.redeclare_gates(&base);
+        let (id, wt, _) = change_with_patchset(&repo, mode);
+        let own = match mode {
+            "remove-gate" => base.split("[gates.unit]").next().unwrap().to_string(),
+            "remove-budget" => base.replace("budget='10000ms'\n", ""),
+            "remove-total" => base.replace("total='20000ms'\n", ""),
+            "remove-table" => base.replace("[budget]\ntotal='20000ms'\n", ""),
+            "remove-all" => "[selection]\ninert=['.arc/']\n".into(),
+            "lower-gate" => declaration(9000, 20000),
+            _ => declaration(10000, 15000),
+        };
+        repo.commit(&wt, ".arc/gates.toml", &own, "test: declaration decision");
+        snapshot(&repo, &wt);
+        approve(&repo, &wt);
+        verify(&repo, &wt, 8000, 0);
+        let expected = if mode == "remove-budget" {
+            "removes its budget; restore the budget or remove the gate"
+        } else {
+            "cannot remove [budget] total while budgeted gates remain"
+        };
+        let status = json_stdout(repo.arc(&wt).args(["status", &id]));
+        let errors = status["budget_errors"].as_array().unwrap();
+        if allowed {
+            if !errors.is_empty() {
+                mismatches.push(format!("{mode} status blocked: {errors:?}"));
+            }
+            assert_eq!(
+                status["gates"][0]["budget"]["budget_ms"],
+                if mode == "lower-gate" { 9000 } else { 10000 }
+            );
+            assert!(status["budget_raises"].as_array().unwrap().is_empty());
+        } else {
+            let text = errors
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !text.contains(expected) || text.contains("arc gates raise") {
+                mismatches.push(format!("{mode} diagnostic: {text}"));
+            }
+        }
+        let mut observe = |label: &str, command: &mut AssertCommand| {
+            let output = command.output().unwrap();
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if output.status.success() != allowed || (!allowed && !text.contains(expected)) {
+                mismatches.push(format!("{mode} {label}: {}: {text}", output.status));
+            }
+        };
+        let before = repo.head(&repo.root);
+        match route {
+            "integrate" => {
+                observe("check", repo.arc(&wt).args(["check", &id]));
+                observe("integrate", repo.arc(&repo.root).args(["integrate", &id]));
+                if allowed && repo.head(&repo.root) != before {
+                    let committed = git_out(&repo.root, &["show", "HEAD:.arc/gates.toml"]);
+                    assert_eq!(committed.trim(), own.trim());
+                }
+            }
+            "land" => {
+                let (other, _, _) = change_with_patchset(&repo, "other-removal-member");
+                observe(
+                    "land",
+                    repo.arc(&repo.root)
+                        .env("ARC_TEST_COMMAND_RUN_MS", "8000")
+                        .args(["land", &id, &other, "--debt", "combined review owed"]),
+                );
+            }
+            "candidate" => {
+                register(&repo, &id, &wt, "removal-candidate");
+                observe(
+                    "candidate verify",
+                    repo.arc(&wt).env("ARC_TEST_COMMAND_RUN_MS", "8000").args([
+                        "candidate",
+                        "verify",
+                        "removal-candidate",
+                    ]),
+                );
+                let evaluation = fs::read_dir(repo.root.join(".git/arc/repository/events"))
+                    .unwrap()
+                    .map(|e| {
+                        serde_json::from_slice::<Value>(&fs::read(e.unwrap().path()).unwrap())
+                            .unwrap()
+                    })
+                    .find(|e| e["event_type"] == "candidate-verified")
+                    .map(|e| e["event_id"].as_str().unwrap().to_string());
+                let mut selection = repo.arc(&wt);
+                selection.args([
+                    "candidate",
+                    "select",
+                    "--chosen",
+                    "removal-candidate",
+                    "--into",
+                    &id,
+                    "--target",
+                    &before,
+                    "--rationale",
+                    "review the candidate",
+                ]);
+                if let Some(evaluation) = evaluation {
+                    selection.args(["--evaluation", &evaluation]);
+                }
+                observe("candidate select and promote", &mut selection);
+            }
+            _ => {
+                let branch = git_out(&wt, &["branch", "--show-current"]);
+                for cached in [false, true] {
+                    let mut command = repo.arc(&wt);
+                    command.env("ARC_TEST_COMMAND_RUN_MS", "8000").args([
+                        "publication",
+                        "--target",
+                        &branch,
+                        "--change",
+                        &id,
+                    ]);
+                    if cached {
+                        command.arg("--skip-green");
+                    }
+                    observe("publication", &mut command);
+                }
+            }
+        }
+        if !allowed || matches!(route, "candidate" | "publication") {
+            assert_eq!(repo.head(&repo.root), before);
+        }
+    }
+    assert!(mismatches.is_empty(), "{route}: {mismatches:#?}");
+}
+
+/// Claim: removing gates, removing all budgeted gates with the table, and lowering
+/// bounds need no raise; the change still owes target gates. Rejects blocking
+/// these declaration diffs or dropping the target obligation before integration.
+#[test]
+fn raise_removal_accepts_check_and_integrate() {
+    removal_rules("integrate", true);
+}
+
+/// Claim: a kept gate cannot lose its budget and a retained budgeted suite cannot
+/// lose its total. Rejects accepting either removal or directing it to raise.
+#[test]
+fn raise_removal_refuses_check_and_integrate() {
+    removal_rules("integrate", false);
+}
+
+/// Claim: landing permits gate removal and lower bounds under target obligations.
+/// Rejects treating removal of a whole gate as an unauthorized increase.
+#[test]
+fn raise_removal_accepts_land() {
+    removal_rules("land", true);
+}
+
+/// Claim: landing refuses missing bounds on retained declarations with specific
+/// remedies. Rejects generic raise advice or a combined landing bypass.
+#[test]
+fn raise_removal_refuses_land() {
+    removal_rules("land", false);
+}
+
+/// Claim: candidate execution and promotion permit gate removal and lower bounds.
+/// Rejects blocking these diffs or dropping the target obligation.
+#[test]
+fn raise_removal_accepts_candidates() {
+    removal_rules("candidate", true);
+}
+
+/// Claim: candidate execution and selection refuse removing retained bounds.
+/// Rejects a candidate bypass or misleading raise-record diagnostics.
+#[test]
+fn raise_removal_refuses_candidates() {
+    removal_rules("candidate", false);
+}
+
+/// Claim: fresh and cached publication permit gate removal and lower bounds
+/// against the associated destination. Rejects treating these as raises.
+#[test]
+fn raise_removal_accepts_publication() {
+    removal_rules("publication", true);
+}
+
+/// Claim: fresh and cached publication refuse losing retained bounds with specific
+/// remedies. Rejects a publication bypass or misleading raise-record diagnostics.
+#[test]
+fn raise_removal_refuses_publication() {
+    removal_rules("publication", false);
+}
+
+/// Claim: an operator-only total caps the effective suite after a gate raise.
+/// Rejects treating absent project totals as absence of the operator ceiling.
+#[test]
+fn raise_operator_total_without_project_total() {
+    let repo = Repo::new();
+    let without_total =
+        |budget| declaration(budget, 20000).replace("[budget]\ntotal='20000ms'\n", "");
+    repo.redeclare_gates(&without_total(10000));
+    repo.declare_gates_locally("[budget]\ntotal='10399ms'\n");
+    let (id, wt, _) = change_with_patchset(&repo, "operator-only-total");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    repo.commit(&wt, "src/module.rs", &lines_text(100), "test: module");
+    repo.commit(
+        &wt,
+        ".arc/gates.toml",
+        &without_total(10400),
+        "test: higher gate",
+    );
+    snapshot(&repo, &wt);
+    verify(&repo, &wt, 10300, 1);
+    refusal(
+        &mut raise(&repo, &wt),
+        "integration sum 10.4s exceeds total 10.399s",
+    );
+    assert!(shown(&repo, &wt, &id)["budget_raises"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+/// Claim: head inert exclusions cannot hide trusted shrinkage to enlarge a raise.
+/// Rejects turning a head-controlled exclusion into extra net credit.
+#[test]
+fn raise_scope_net_head_inert_preserves_debits() {
+    scope_net_growth("head-inert");
+}
+
+/// Claim: head path narrowing cannot hide trusted shrinkage to enlarge a raise.
+/// Rejects granting more net credit by excluding the shrinking source.
+#[test]
+fn raise_scope_net_head_paths_preserve_debits() {
+    scope_net_growth("head-paths");
+}
+
+/// Claim: a file moved out of counted scope still debits its counted source.
+/// Rejects ignoring the source loss beside eligible additions.
+#[test]
+fn raise_scope_net_outbound_move_debits_source() {
+    scope_net_growth("outbound");
 }

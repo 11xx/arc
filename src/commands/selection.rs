@@ -201,6 +201,7 @@ fn candidate_declarations(
     let target = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     if gitio::commit_tree(&ctx.cwd, &head)? != tree {
+        declarations.gates.invalid_budget_removals.clear();
         declarations.gates.pending_raises.clear();
         declarations.gates.raise_snapshot_missing = false;
         declarations.gates.raises.clear();

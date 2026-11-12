@@ -34,6 +34,8 @@ pub const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
 #[derive(Debug, Default, Deserialize)]
 pub struct GatesFile {
     #[serde(skip)]
+    pub invalid_budget_removals: BTreeSet<Option<String>>,
+    #[serde(skip)]
     pub pending_raises: BTreeSet<Option<String>>,
     #[serde(skip)]
     pub raise_snapshot_missing: bool,

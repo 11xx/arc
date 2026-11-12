@@ -208,6 +208,7 @@ fn growth(
     target: &str,
     head: &str,
     paths: &[String],
+    operator_paths: &[String],
     inert: &[String],
     excluded: &[String],
 ) -> Result<Vec<CountedFile>> {
@@ -216,7 +217,7 @@ fn growth(
     if !crate::bundle::valid_object_id(target) || !crate::bundle::valid_object_id(head) {
         bail!("budget counting needs immutable object IDs");
     }
-    let key = digest(&(cwd, target, head, paths, inert, excluded))?;
+    let key = digest(&(cwd, target, head, paths, operator_paths, inert, excluded))?;
     let cache = COUNTS.get_or_init(Default::default);
     if let Some(files) = cache
         .lock()
@@ -255,6 +256,13 @@ fn growth(
     let mut fields = output.split(|b| *b == 0).peekable();
     let mut files = Vec::new();
     let mut blobs = None;
+    let eligible = |path: &str| {
+        [paths, operator_paths]
+            .into_iter()
+            .all(|rules| rules.is_empty() || matches(rules, path))
+            && !matches(inert, path)
+            && !matches(excluded, path)
+    };
     while let Some(header) = fields.next().filter(|v| !v.is_empty()) {
         let header = std::str::from_utf8(header)?;
         let parts = header
@@ -266,7 +274,7 @@ fn growth(
         }
         let first = std::str::from_utf8(fields.next().context("missing budget counting path")?)?;
         let moved = parts[4].starts_with(['R', 'C']);
-        let path = if moved {
+        let destination = if moved {
             std::str::from_utf8(
                 fields
                     .next()
@@ -275,17 +283,11 @@ fn growth(
         } else {
             first
         };
+        let departure = parts[4].starts_with('R') && eligible(first) && !eligible(destination);
+        let path = if departure { first } else { destination };
         let regular_before = parts[0].starts_with("100");
-        let regular_after = parts[1].starts_with("100");
-        if (!regular_before && !regular_after)
-            || (!paths.is_empty() && !matches(paths, path))
-            || matches(inert, path)
-            || matches(excluded, path)
-            || (moved
-                && (matches(excluded, first)
-                    || matches(inert, first)
-                    || (!paths.is_empty() && !matches(paths, first))))
-        {
+        let regular_after = !departure && parts[1].starts_with("100");
+        if (!regular_before && !regular_after) || !eligible(path) || (moved && !eligible(first)) {
             continue;
         }
         if blobs.is_none() {
@@ -369,13 +371,11 @@ fn net_growth<'a>(mut files: impl Iterator<Item = &'a CountedFile>) -> Result<u6
 
 fn scope(
     target: &gates::GatesFile,
-    own: &gates::GatesFile,
     op: &gates::GatesFile,
     gate: Option<&str>,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut inert = target.selection.inert.clone();
     inert.extend(op.selection.inert.clone());
-    inert.extend(own.selection.inert.clone());
     inert.sort();
     inert.dedup();
     let paths = gate
@@ -392,6 +392,19 @@ fn scope(
     )
 }
 
+fn gate_paths<'a>(file: &'a gates::GatesFile, gate: Option<&str>) -> &'a [String] {
+    gate.and_then(|name| file.gates.get(name))
+        .map(|gate| gate.paths.as_slice())
+        .unwrap_or_default()
+}
+
+fn head_credits(file: &CountedFile, own: &gates::GatesFile, gate: Option<&str>) -> bool {
+    let paths = gate_paths(own, gate);
+    file.after < file.before
+        || (!matches(&own.selection.inert, &file.path)
+            && (paths.is_empty() || matches(paths, &file.path)))
+}
+
 fn total(file: &gates::GatesFile) -> Option<u64> {
     file.budget.as_ref().and_then(|b| b.total)
 }
@@ -399,23 +412,45 @@ fn total(file: &gates::GatesFile) -> Option<u64> {
 fn transitions(
     target: &gates::GatesFile,
     own: &gates::GatesFile,
-) -> Vec<(Option<String>, u64, Option<u64>)> {
+) -> Vec<(Option<String>, u64, u64)> {
     let mut found = Vec::new();
     for (name, gate) in &target.gates {
         if let Some(old) = gate.budget {
             let new = own.gates.get(name).and_then(|g| g.budget);
-            if new.is_none_or(|new| new > old) {
+            if let Some(new) = new.filter(|new| *new > old) {
                 found.push((Some(name.clone()), old, new));
             }
         }
     }
     if let Some(old) = total(target) {
         let new = total(own);
-        if new.is_none_or(|new| new > old) {
+        if let Some(new) = new.filter(|new| *new > old) {
             found.push((None, old, new));
         }
     }
     found
+}
+
+fn invalid_removals(target: &gates::GatesFile, own: &gates::GatesFile) -> BTreeSet<Option<String>> {
+    let mut removed = target
+        .gates
+        .iter()
+        .filter(|&(name, gate)| {
+            gate.budget.is_some()
+                && own
+                    .gates
+                    .get(name)
+                    .is_some_and(|gate| gate.budget.is_none())
+        })
+        .map(|(name, _)| Some(name.clone()))
+        .collect::<BTreeSet<_>>();
+    if total(target).is_some()
+        && total(own).is_none()
+        && own.gates.values().any(|gate| gate.budget.is_some())
+    {
+        removed.insert(None);
+    }
+    removed
 }
 
 fn rules_digest(
@@ -426,7 +461,7 @@ fn rules_digest(
     let scopes = target
         .gates
         .keys()
-        .map(|name| (name.clone(), scope(target, own, op, Some(name))))
+        .map(|name| (name.clone(), scope(target, op, Some(name))))
         .collect::<BTreeMap<_, _>>();
     let structural = target
         .gates
@@ -437,7 +472,8 @@ fn rules_digest(
         ALGORITHM,
         entitlement(target, own, op),
         scopes,
-        scope(target, own, op, None),
+        scope(target, op, None),
+        &own.selection.inert,
         structural,
         total(op),
     ))
@@ -463,6 +499,9 @@ pub fn propose(
     }
     let target = project(cwd, target_revision)?;
     let own = project(cwd, head)?;
+    if let Some(gate) = invalid_removals(&target, &own).iter().next() {
+        bail!("{}", gate_budget::removal_error(gate.as_deref()));
+    }
     let op = operator(cwd)?;
     if let Some(ceiling) = total(&op) {
         if total(&target)
@@ -487,18 +526,18 @@ pub fn propose(
             .iter()
             .find(|(gate, _, _)| gate == subject)
             .with_context(|| format!("{label}: head must declare a higher existing budget"))?;
-        let new = new.context("removing a budget cannot establish a finite raise")?;
-        let (paths, inert, excluded) = scope(&target, &own, &op, subject.as_deref());
-        let mut files = growth(cwd, target_revision, head, &paths, &inert, &excluded)?;
-        // Head scope can restrict credit, never widen destination/operator scope.
-        if let Some(name) = subject {
-            if let Some(gate) = own.gates.get(name).filter(|g| !g.paths.is_empty()) {
-                files.retain(|f| matches(&gate.paths, &f.path));
-            }
-            if let Some(gate) = op.gates.get(name).filter(|g| !g.paths.is_empty()) {
-                files.retain(|f| matches(&gate.paths, &f.path));
-            }
-        }
+        let new = *new;
+        let (paths, inert, excluded) = scope(&target, &op, subject.as_deref());
+        let mut files = growth(
+            cwd,
+            target_revision,
+            head,
+            &paths,
+            gate_paths(&op, subject.as_deref()),
+            &inert,
+            &excluded,
+        )?;
+        files.retain(|file| head_credits(file, &own, subject.as_deref()));
         let added = net_growth(files.iter())?;
         let allowance_ms = allowance(*old, added, percent, per)?;
         if new - old > allowance_ms {
@@ -662,6 +701,9 @@ pub fn apply(
 ) -> Result<()> {
     let target = project(cwd, target_revision)?;
     let own = project(cwd, head)?;
+    required
+        .invalid_budget_removals
+        .extend(invalid_removals(&target, &own));
     let changes = transitions(&target, &own);
     if changes.is_empty() && st.budget_raises.is_empty() {
         return Ok(());
@@ -751,15 +793,21 @@ fn advice(
     let Some(old) = target.gates.get(name).and_then(|g| g.budget) else {
         return Ok(None);
     };
-    let (paths, inert, excluded) = scope(&target, &own, &op, Some(name));
-    let files = growth(cwd, target_revision, head, &paths, &inert, &excluded)?;
-    let added = net_growth(files.iter().filter(|file| {
-        [own.gates.get(name), op.gates.get(name)]
+    let (paths, inert, excluded) = scope(&target, &op, Some(name));
+    let files = growth(
+        cwd,
+        target_revision,
+        head,
+        &paths,
+        gate_paths(&op, Some(name)),
+        &inert,
+        &excluded,
+    )?;
+    let added = net_growth(
+        files
             .iter()
-            .all(|gate| {
-                gate.is_none_or(|gate| gate.paths.is_empty() || matches(&gate.paths, &file.path))
-            })
-    }))?;
+            .filter(|file| head_credits(file, &own, Some(name))),
+    )?;
     let (percent, per) = entitlement(&target, &own, &op);
     let increment = allowance(old, added, percent, per)?;
     Ok(Some((
@@ -829,8 +877,13 @@ pub fn require_records(
     head: &str,
     required: &mut gates::GatesFile,
 ) -> Result<()> {
+    let target = project(cwd, target_revision)?;
+    let own = project(cwd, head)?;
+    required
+        .invalid_budget_removals
+        .extend(invalid_removals(&target, &own));
     required.pending_raises.extend(
-        transitions(&project(cwd, target_revision)?, &project(cwd, head)?)
+        transitions(&target, &own)
             .into_iter()
             .map(|(gate, _, _)| gate),
     );

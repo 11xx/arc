@@ -93,6 +93,13 @@ fn minimum(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
+pub fn removal_error(gate: Option<&str>) -> String {
+    match gate {
+        Some(name) => format!("budget: gate {name} keeps its declaration but removes its budget; restore the budget or remove the gate"),
+        None => "budget: cannot remove [budget] total while budgeted gates remain; restore the total or remove every budgeted gate".into(),
+    }
+}
+
 pub fn merge_rules(into: &mut Option<BudgetRules>, other: Option<BudgetRules>) {
     if let Some(other) = other {
         let current = into.get_or_insert_with(BudgetRules::default);
@@ -180,8 +187,13 @@ impl GatesFile {
     pub fn budget_errors(&self) -> Vec<String> {
         let mut errors = self.pending_raises.iter().map(|gate| {
             let name = gate.as_deref().unwrap_or("total");
-            format!("budget: {name} declaration increase or removal requires an applicable accepted raise record")
+            format!("budget: {name} declaration increase requires an applicable accepted raise record")
         }).collect::<Vec<_>>();
+        errors.extend(
+            self.invalid_budget_removals
+                .iter()
+                .map(|gate| removal_error(gate.as_deref())),
+        );
         if self.raise_snapshot_missing {
             errors
                 .push("budget raise set needs a fresh snapshot and review or recorded debt".into());
