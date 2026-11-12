@@ -4,6 +4,7 @@ mod accept;
 mod assurance;
 mod audit;
 mod audit_discharge;
+mod base_pass;
 mod briefs;
 mod bundle;
 mod candidate;

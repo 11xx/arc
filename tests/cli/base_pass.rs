@@ -1,0 +1,1301 @@
+use crate::common::*;
+use serde_json::Value;
+
+const GATES: &str = "[selection]\nbase_passes=true\ninert=['**/*.md']\n[gates.unit]\ncommand='true'\npaths=['src/']\nevents=['integration']\n[gates.other]\ncommand='true'\npaths=['other/']\nevents=['integration']\n";
+
+fn begin(repo: &Repo, slug: &str, file: &str) -> (String, PathBuf) {
+    begin_profile(repo, slug, file, "local")
+}
+fn begin_profile(repo: &Repo, slug: &str, file: &str, profile: &str) -> (String, PathBuf) {
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", slug, "--profile", profile]),
+    );
+    let id = out
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_owned();
+    let wt = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    fs::create_dir_all(wt.join(file).parent().unwrap()).unwrap();
+    repo.commit(&wt, file, "content\n", "test: content");
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    (id, wt)
+}
+
+fn seed(text: &str) -> Repo {
+    let repo = Repo::new();
+    repo.redeclare_gates(text);
+    warm(&repo);
+    repo
+}
+
+fn warm(repo: &Repo) {
+    let (id, wt) = begin(repo, "warm", "src/code.rs");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+}
+
+fn state(repo: &Repo, wt: &Path) -> Value {
+    json_stdout(repo.arc(wt).args(["show", "--json"]))
+}
+fn bases(state: &Value) -> usize {
+    state["verifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["base_pass"].is_object())
+        .count()
+}
+fn executed(state: &Value) -> usize {
+    state["verifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| !entry["base_pass"].is_object() && !entry["delta"].is_object())
+        .count()
+}
+
+/// Claim: an opted-in, warmed documentation change integrates with zero gate
+/// executions and exposes its source in every explanation. Rejects a cold run
+/// disguised as reuse, or a reuse accepted without a complete proof.
+#[test]
+fn warmed_documentation_integrates_without_execution() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "docs", "docs/notes.md");
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "100")
+        .args(["verify", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("base pass from"));
+    let s = state(&repo, &wt);
+    assert_eq!(
+        bases(&s),
+        2,
+        "both gates must carry base-pass receipts: {s}"
+    );
+    assert_eq!(executed(&s), 0, "documentation must execute no gate: {s}");
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    for args in [
+        vec!["status"],
+        vec!["check"],
+        vec!["show"],
+        vec!["explain", &id],
+    ] {
+        repo.arc(&wt)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicates::str::is_match("base pass|base_pass").unwrap());
+    }
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    assert!(
+        report["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["history"]["base_passes"] == 1),
+        "{report}"
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    let s = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+    assert_eq!(s["closure"]["outcome"], "integrated");
+}
+
+/// Claim: adoption and --rerun execute the entire required suite. Rejects a
+/// change enabling base passes for itself or --rerun keeping a base pass.
+#[test]
+fn cold_adoption_and_explicit_rerun_execute() {
+    let repo = Repo::new();
+    repo.redeclare_gates(GATES);
+    let (_, cold) = begin(&repo, "cold", "notes.md");
+    repo.arc(&cold).args(["verify", "--all"]).assert().success();
+    assert_eq!(executed(&state(&repo, &cold)), 2);
+    let repo = seed(GATES);
+    let (_, wt) = begin(&repo, "rerun", "notes.md");
+    repo.arc(&wt)
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success();
+    assert_eq!(bases(&state(&repo, &wt)), 0);
+    assert_eq!(executed(&state(&repo, &wt)), 2);
+}
+
+/// Claim: unnamed paths and selection configuration execute every gate even
+/// when an inert rule overlaps them. Rejects a declaration waiving itself.
+#[test]
+fn unnamed_and_selection_inputs_execute_every_gate() {
+    for (slug, file, declaration) in [
+        ("unknown", "unknown.xyz", GATES.to_owned()),
+        (
+            "config",
+            ".arc/helper.md",
+            GATES.replace("['**/*.md']", "['**/*.md','.arc/']"),
+        ),
+        ("coverage", ".arc/gates.toml", GATES.to_owned()),
+    ] {
+        let repo = seed(&declaration);
+        let (_, wt) = begin(
+            &repo,
+            slug,
+            if file == ".arc/gates.toml" {
+                "notes.md"
+            } else {
+                file
+            },
+        );
+        if file == ".arc/gates.toml" {
+            repo.commit(
+                &wt,
+                file,
+                &format!("{declaration}\n# selection input\n"),
+                "test: selection",
+            );
+        }
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        assert_eq!(bases(&state(&repo, &wt)), 0, "{slug}");
+        assert_eq!(executed(&state(&repo, &wt)), 2, "{slug}");
+    }
+}
+
+/// Claim: publication audits integration-only gates used by a base pass,
+/// even with --skip-green. Rejects an empty publication tier escaping the audit.
+#[test]
+fn publication_runs_every_participating_gate() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "publish", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    assert_eq!(bases(&state(&repo, &wt)), 2);
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    let baseline_count = baseline_files(&repo).len();
+    repo.arc(&repo.root)
+        .args([
+            "publication",
+            "--target",
+            "master",
+            "--profile",
+            "local",
+            "--skip-green",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("publication gate unit: pass"))
+        .stdout(predicates::str::contains("publication gate other: pass"));
+    assert_eq!(baseline_files(&repo).len(), baseline_count);
+}
+
+fn event_files(repo: &Repo, id: &str) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(repo.root.join(".git/arc/changes").join(id).join("events"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+fn baseline_files(repo: &Repo) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(repo.root.join(".git/arc/repository/events"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap()["event_type"]
+                == "gate-baseline-recorded"
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+/// Claim: a baseline outside the head's first-parent history or outside the
+/// actual target history is unavailable. Rejects branch-name ancestry or a
+/// force move relabelling a baseline as current content.
+#[test]
+fn nonancestor_and_force_moved_targets_miss() {
+    for move_target in [false, true] {
+        let repo = seed(GATES);
+        let old = git_out(&repo.root, &["rev-parse", "master^1"]);
+        if move_target {
+            git(&repo.root, &["reset", "--hard", &old]);
+        }
+        let (_, wt) = begin(&repo, "nonancestor", "notes.md");
+        if !move_target {
+            git(&wt, &["rebase", "--onto", &old, "master"]);
+        }
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        assert_eq!(bases(&state(&repo, &wt)), 0);
+        assert_eq!(executed(&state(&repo, &wt)), 2);
+    }
+}
+
+/// Claim: source event, profile, environment and commit binding remain binding.
+/// Rejects inferring a profile/event from applicability or trusting a failed probe.
+#[test]
+fn profiles_events_environments_and_commit_bindings_do_not_cross() {
+    for case in ["profile", "event", "environment", "probe-failed", "commit"] {
+        let declaration = match case {
+            "event" => GATES.replace("events=['integration']\n", ""),
+            "environment" | "probe-failed" => GATES.replace("command='true'", "command='true'\nenvironment='printf %s \"${BASE_ENV:-base}\"; test \"${BASE_FAIL:-no}\" = no'"),
+            "commit" => GATES.replace("paths=['src/']", "paths=['src/']\nbinds='commit'"),
+            _ => GATES.to_owned(),
+        };
+        let repo = seed(&declaration);
+        let (_, wt) = begin_profile(
+            &repo,
+            case,
+            "notes.md",
+            if case == "profile" { "direct" } else { "local" },
+        );
+        let mut verify = repo.arc(&wt);
+        verify.args(["verify", "--all"]);
+        match case {
+            "event" => {
+                verify.args(["--event", "publication"]);
+            }
+            "environment" => {
+                verify.env("BASE_ENV", "different");
+            }
+            "probe-failed" => {
+                verify.env("BASE_FAIL", "yes");
+            }
+            _ => {}
+        }
+        verify.assert().success();
+        let s = state(&repo, &wt);
+        assert_eq!(bases(&s), usize::from(case == "commit"), "{case}: {s}");
+        assert_eq!(
+            executed(&s),
+            if case == "commit" { 1 } else { 2 },
+            "{case}: {s}"
+        );
+    }
+}
+
+/// Claim: dangerous paths cannot be cleared by inert declarations or selectors.
+/// Rejects a script's empty answer overriding the destination's danger policy.
+#[test]
+fn dangerous_inert_paths_execute_the_entire_suite() {
+    let repo = Repo::new();
+    repo.redeclare_gates(&GATES.replace("command='true'", "command='true'\nselector='exit 0'"));
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[danger]\npaths=['**/risk.md']\n",
+        "test: danger",
+    );
+    warm(&repo);
+    let (_, wt) = begin(&repo, "danger", "docs/risk.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    assert_eq!(bases(&state(&repo, &wt)), 0);
+    assert_eq!(executed(&state(&repo, &wt)), 2);
+}
+
+/// Claim: complete endpoint diffs include rename sources, deletions, mode and
+/// type changes, gitlinks and unusual names. Rejects a rename-to-inert escape
+/// or incomplete paths silently declaring a gate unaffected.
+#[test]
+fn structural_paths_and_unusual_names_are_complete() {
+    for case in [
+        "rename",
+        "delete",
+        "mode",
+        "symlink",
+        "gitlink",
+        "newline",
+        "invalid-utf8",
+    ] {
+        let repo = seed(GATES);
+        let (_, wt) = begin(&repo, case, "notes.md");
+        git(&wt, &["config", "diff.renames", "true"]);
+        match case {
+            "rename" => {
+                fs::create_dir_all(wt.join("docs")).unwrap();
+                git(&wt, &["mv", "src/code.rs", "docs/code.md"]);
+            }
+            "delete" => git(&wt, &["rm", "src/code.rs"]),
+            "mode" => {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(wt.join("src/code.rs"), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                git(&wt, &["update-index", "--chmod=+x", "src/code.rs"]);
+            }
+            "symlink" => {
+                fs::remove_file(wt.join("src/code.rs")).unwrap();
+                std::os::unix::fs::symlink("../notes.md", wt.join("src/code.rs")).unwrap();
+                git(&wt, &["add", "src/code.rs"]);
+            }
+            "gitlink" => {
+                fs::create_dir_all(wt.join("src/submodule")).unwrap();
+                let head = repo.head(&wt);
+                git(
+                    &wt,
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("160000,{head},src/submodule"),
+                    ],
+                );
+            }
+            "newline" => {
+                fs::write(wt.join("src/line\nbreak.rs"), "code").unwrap();
+                git(&wt, &["add", "."]);
+            }
+            "invalid-utf8" => {
+                use std::os::unix::ffi::OsStringExt;
+                fs::write(
+                    wt.join(std::ffi::OsString::from_vec(b"src/bad\xff.rs".to_vec())),
+                    "code",
+                )
+                .unwrap();
+                git(&wt, &["add", "."]);
+            }
+            _ => unreachable!(),
+        }
+        git(&wt, &["commit", "-m", "test: structural change"]);
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        let s = state(&repo, &wt);
+        assert_eq!(
+            bases(&s),
+            usize::from(case != "invalid-utf8"),
+            "{case}: {s}"
+        );
+        assert_eq!(
+            executed(&s),
+            if case == "invalid-utf8" { 2 } else { 1 },
+            "{case}: {s}"
+        );
+    }
+}
+
+/// Claim: budget reductions preserve source selection and historical replay,
+/// while refusing current acceptance without an implicit retry or fallback.
+#[test]
+fn budget_reduction_refuses_the_selected_base_pass_without_execution() {
+    let declaration = GATES.replace("command='true'", "command='true'\nbudget='1s'");
+    let repo = seed(&declaration);
+    repo.declare_gates_locally(
+        "[gates.unit]\ncommand='true'\npaths=['src/']\nevents=['integration']\nbudget='1ms'\n",
+    );
+    let (_, wt) = begin(&repo, "budget", "notes.md");
+    repo.arc(&wt)
+        .args(["verify", "--all"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("over budget"));
+    let s = state(&repo, &wt);
+    assert_eq!(bases(&s), 2);
+    assert_eq!(executed(&s), 0);
+    repo.arc(&wt).args(["verify", "--all"]).assert().code(1);
+    assert_eq!(executed(&state(&repo, &wt)), 0);
+}
+
+/// Claim: isolated replay rejects fabricated paths and ancestry even when the
+/// frozen path classification itself would permit reuse. Rejects trusting a
+/// path list, digest or ancestry boolean without checking retained Git objects.
+#[test]
+fn replay_refuses_fabricated_diff_and_ancestry() {
+    for ancestry in [false, true] {
+        let repo = seed(GATES);
+        let (id, wt) = begin(&repo, "fabricated", "notes.md");
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        let orphan = if ancestry {
+            let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+            Some(git_out(
+                &wt,
+                &["commit-tree", &tree, "-m", "test: unrelated root"],
+            ))
+        } else {
+            None
+        };
+        for file in event_files(&repo, &id) {
+            let mut event: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            if event["event_type"] == "verification-run-started" {
+                if let Some(orphan) = &orphan {
+                    event["revision"] = orphan.clone().into();
+                    fs::write(&file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
+                }
+            }
+            if event["event_type"] != "verification-base-reused" {
+                continue;
+            }
+            if let Some(orphan) = &orphan {
+                event["revision"] = orphan.clone().into();
+                event["witness"]["revision"] = orphan.clone().into();
+            } else {
+                event["witness"]["changed_paths"] = serde_json::json!([]);
+            }
+            fs::write(file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
+        }
+        repo.arc(&wt)
+            .args(["show", "--json"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "Git diff or first-parent ancestry mismatch",
+            ));
+    }
+}
+
+/// Claim: a reuse carries its integration and execution facts without the
+/// producing change's ledger. Rejects a hidden dependency on that ledger.
+#[test]
+fn reuse_replays_and_exports_without_the_source_change() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "portable", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let source = fs::read_dir(repo.root.join(".git/arc/changes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("warm-")
+        })
+        .unwrap();
+    fs::remove_dir_all(source).unwrap();
+    assert_eq!(bases(&state(&repo, &wt)), 2);
+    let bundle = repo.home.join("portable.json");
+    repo.arc(&wt)
+        .args(["export", &id, "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let bundle: Value = serde_json::from_slice(&fs::read(bundle).unwrap()).unwrap();
+    assert!(bundle["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "gate-baseline-recorded"));
+    assert!(bundle["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|object| object["role"] == "retention-commit"));
+}
+
+/// Claim: missing entries and ineligible source receipts do not mint executions
+/// in a new baseline. Rejects inherited passes, dirty waivers and unknown facts
+/// becoming independent execution authority.
+#[test]
+fn reused_integration_records_no_fictitious_execution() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "derived", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    let files = baseline_files(&repo);
+    assert_eq!(files.len(), 2);
+    let baseline: Value =
+        serde_json::from_slice(&fs::read(files.last().unwrap()).unwrap()).unwrap();
+    assert!(
+        baseline["baseline"]["gates"]
+            .as_object()
+            .unwrap()
+            .is_empty(),
+        "{baseline}"
+    );
+    assert_eq!(baseline["baseline"]["revision"], repo.head(&repo.root));
+}
+
+/// Claim: a directly named command/probe input remains protected under inert
+/// patterns. Rejects a script body changing while its declaration string and
+/// all gate path mappings remain the same.
+#[test]
+fn executable_selection_inputs_cannot_be_inert() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join("scripts")).unwrap();
+    repo.commit(&repo.root, "scripts/check.sh", "true\n", "test: gate input");
+    repo.redeclare_gates(
+        &GATES
+            .replace("['**/*.md']", "['**/*.md','scripts/']")
+            .replace("command='true'", "command='sh scripts/check.sh'"),
+    );
+    warm(&repo);
+    let (_, wt) = begin(&repo, "input", "scripts/check.sh");
+    repo.commit(
+        &wt,
+        "scripts/check.sh",
+        "true\n# command input\n",
+        "test: gate input change",
+    );
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    assert_eq!(bases(&state(&repo, &wt)), 0);
+    assert_eq!(executed(&state(&repo, &wt)), 2);
+}
+
+/// Claim: malformed, duration-free, dirty, attested or mismatched baseline
+/// execution facts cannot seed a new pass. Rejects provenance laundering.
+#[test]
+fn ineligible_baseline_execution_facts_miss() {
+    for field in [
+        "attested",
+        "worktree_dirty",
+        "tree_moved",
+        "run_ms",
+        "declaration",
+        "profile",
+        "event",
+        "environment",
+        "unknown-cleanliness",
+        "over-budget",
+        "bypass",
+    ] {
+        let repo = seed(&GATES.replace("command='true'", "command='true'\nbudget='1h'"));
+        let file = baseline_files(&repo).pop().unwrap();
+        let mut record: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        for entry in record["baseline"]["gates"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            match field {
+                "attested" | "worktree_dirty" | "tree_moved" => {
+                    entry["execution"][field] = true.into()
+                }
+                "unknown-cleanliness" => entry["execution"]["worktree_dirty"] = Value::Null,
+                "over-budget" => entry["execution"]["run_ms"] = 3_600_001.into(),
+                "bypass" => entry["execution"]["result"] = "bypassed".into(),
+                "run_ms" => {
+                    entry["execution"].as_object_mut().unwrap().remove("run_ms");
+                }
+                "declaration" => entry["execution"]["declaration"] = "sha256:wrong".into(),
+                "profile" => entry["run"]["profile"] = "direct".into(),
+                "event" => entry["run"]["event"] = "publication".into(),
+                "environment" => {
+                    entry["execution"]["environment"] =
+                        serde_json::json!({"identity":"different","producing_store":"foreign"})
+                }
+                _ => unreachable!(),
+            }
+        }
+        fs::write(file, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        let (_, wt) = begin(&repo, &field.replace('_', "-"), "notes.md");
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        assert_eq!(bases(&state(&repo, &wt)), 0, "{field}");
+        assert_eq!(executed(&state(&repo, &wt)), 2, "{field}");
+    }
+}
+
+/// Claim: concurrent integrations expose only exact successful final revisions.
+/// Rejects a baseline read after releasing the target guard or a baseline for
+/// a refused transition. No timer determines which integration wins.
+#[test]
+fn racing_integrations_record_exact_successful_baselines() {
+    let repo = seed(GATES);
+    let mut ids = Vec::new();
+    for slug in ["race-a", "race-b"] {
+        let (id, wt) = begin(&repo, slug, &format!("{slug}.md"));
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        repo.arc(&wt)
+            .args(["review", "--verdict", "approved"])
+            .assert()
+            .success();
+        ids.push(id);
+    }
+    let a = repo.spawn_arc_piped(&repo.root, &["integrate", &ids[0]]);
+    let b = repo.spawn_arc_piped(&repo.root, &["integrate", &ids[1]]);
+    let outcomes = [a.wait_with_output().unwrap(), b.wait_with_output().unwrap()];
+    let successes = outcomes
+        .iter()
+        .filter(|output| output.status.success())
+        .count();
+    assert!(successes >= 1, "{outcomes:?}");
+    let baselines = baseline_files(&repo);
+    assert_eq!(baselines.len(), 1 + successes);
+    for file in &baselines {
+        let record: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+        let baseline = &record["baseline"];
+        assert_eq!(
+            baseline["revision"],
+            baseline["completion"]["integrated_commit"]
+        );
+        assert_eq!(
+            baseline["tree"],
+            git_out(
+                &repo.root,
+                &[
+                    "rev-parse",
+                    &format!("{}^{{tree}}", baseline["revision"].as_str().unwrap())
+                ]
+            )
+        );
+    }
+    let last: Value =
+        serde_json::from_slice(&fs::read(baselines.last().unwrap()).unwrap()).unwrap();
+    assert_eq!(last["baseline"]["revision"], repo.head(&repo.root));
+}
+
+/// Claim: stacks include lower content, and stack/composed land mint one
+/// final-tree baseline. Rejects gating only the top patch or manufacturing
+/// passes for intermediate member revisions.
+#[test]
+fn both_landing_forms_record_only_the_final_tree() {
+    for composed in [false, true] {
+        let repo = seed(GATES);
+        let (lower, lower_wt) = begin(&repo, "lower", "src/lower.rs");
+        let lower_head = repo.head(&lower_wt);
+        let (upper, upper_wt) = if composed {
+            begin(&repo, "upper", "upper.md")
+        } else {
+            let out = stdout(
+                repo.arc(&repo.root)
+                    .args(["begin", "upper", "--base", &lower_head]),
+            );
+            let id = opened_change_id(&out);
+            let wt = repo.home.join(".worktrees/repo-upper");
+            repo.commit(&wt, "upper.md", "docs\n", "test: upper docs");
+            repo.arc(&wt).args(["snapshot"]).assert().success();
+            (id, wt)
+        };
+        if !composed {
+            repo.arc(&upper_wt)
+                .args(["verify", "--all"])
+                .assert()
+                .success();
+            let s = state(&repo, &upper_wt);
+            assert_eq!(bases(&s), 1, "lower source affects unit: {s}");
+            assert_eq!(executed(&s), 1);
+        }
+        for wt in [&lower_wt, &upper_wt] {
+            repo.arc(wt)
+                .args(["review", "--verdict", "approved"])
+                .assert()
+                .success();
+        }
+        repo.arc(&repo.root)
+            .args([
+                "land",
+                &lower,
+                &upper,
+                "--debt",
+                "combined content awaits review",
+            ])
+            .assert()
+            .success();
+        let files = baseline_files(&repo);
+        assert_eq!(files.len(), 2, "one baseline for the entire landing");
+        let record: Value =
+            serde_json::from_slice(&fs::read(files.last().unwrap()).unwrap()).unwrap();
+        assert_eq!(
+            record["baseline"]["completion"]["event_type"],
+            "landing-completed"
+        );
+        assert_eq!(record["baseline"]["revision"], repo.head(&repo.root));
+        assert_eq!(
+            record["baseline"]["tree"],
+            git_out(&repo.root, &["rev-parse", "HEAD^{tree}"])
+        );
+    }
+}
+
+/// Claim: a prepared or unapplied landing never publishes a baseline; recovery
+/// may publish only the installed final subject. Rejects phantom baselines
+/// surviving rollback, authorization-only state or interrupted application.
+#[test]
+fn landing_crash_and_recovery_do_not_publish_prepared_baselines() {
+    for point in ["authorized", "moved", "applied"] {
+        let repo = seed(GATES);
+        let (lower, _) = begin(&repo, "lower", "lower.md");
+        let (upper, _) = begin(&repo, "upper", "upper.md");
+        let before = repo.head(&repo.root);
+        let output = repo
+            .arc(&repo.root)
+            .env("ARC_TEST_LANDING_CRASH", point)
+            .args([
+                "land",
+                &lower,
+                &upper,
+                "--debt",
+                "combined content awaits review",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(86), "{point}: {output:?}");
+        assert_eq!(
+            baseline_files(&repo).len(),
+            1,
+            "{point}: no pre-completion baseline"
+        );
+        let out = String::from_utf8_lossy(&output.stdout);
+        let attempt = out
+            .lines()
+            .find_map(|line| line.strip_prefix("landing: "))
+            .unwrap();
+        repo.arc(&repo.root)
+            .args(["land", "--recover", attempt])
+            .assert()
+            .success();
+        if point == "authorized" {
+            assert_eq!(repo.head(&repo.root), before);
+            assert_eq!(baseline_files(&repo).len(), 1);
+        } else {
+            let files = baseline_files(&repo);
+            assert_eq!(files.len(), 2);
+            let last: Value =
+                serde_json::from_slice(&fs::read(files.last().unwrap()).unwrap()).unwrap();
+            assert_eq!(last["baseline"]["revision"], repo.head(&repo.root));
+        }
+    }
+}
+
+/// Claim: named verification consumes a base pass and --rerun creates an actual
+/// profiled execution usable by a later integration baseline. Rejects limiting
+/// base passes to --all or presenting a named reuse as execution.
+#[test]
+fn named_verification_reuses_and_records_profiled_executions() {
+    let repo = seed(GATES.split("[gates.other]").next().unwrap());
+    let (id, wt) = begin(&repo, "named", "notes.md");
+    repo.arc(&wt)
+        .args(["verify", "--gate", "unit"])
+        .assert()
+        .success();
+    assert_eq!(bases(&state(&repo, &wt)), 1);
+    assert_eq!(executed(&state(&repo, &wt)), 0);
+    repo.arc(&wt)
+        .args(["verify", "--gate", "unit", "--rerun"])
+        .assert()
+        .success();
+    assert_eq!(executed(&state(&repo, &wt)), 1);
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    let file = baseline_files(&repo).pop().unwrap();
+    let baseline: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(
+        baseline["baseline"]["gates"]["unit"]["run"]["profile"],
+        "local"
+    );
+}
+
+/// Claim: every frozen witness coordinate is checked at isolated replay,
+/// including the originating ledger authority. Rejects treating an embedded
+/// integration, a digest or a merge-target claim as its own authority.
+#[test]
+fn replay_refuses_corrupted_witness_coordinates() {
+    let repo = seed(GATES);
+    for (index, field) in [
+        "baseline-event",
+        "digest",
+        "algorithm",
+        "gate",
+        "tree",
+        "merge-target",
+        "target-revision",
+        "origin",
+        "source-profile",
+        "source-command",
+        "source-receipt",
+        "source-context",
+        "run",
+        "run-command",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (id, wt) = begin(
+            &repo,
+            &format!("coordinate-{index}"),
+            &format!("notes-{index}.md"),
+        );
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        let file = event_files(&repo, &id)
+            .into_iter()
+            .find(|file| {
+                serde_json::from_slice::<Value>(&fs::read(file).unwrap()).unwrap()["event_type"]
+                    == "verification-base-reused"
+            })
+            .unwrap();
+        let original = fs::read(&file).unwrap();
+        let mut event: Value = serde_json::from_slice(&original).unwrap();
+        let mut restored_run = None;
+        match *field {
+            "baseline-event" => event["witness"]["baseline_event_id"] = "missing".into(),
+            "digest" => event["witness"]["baseline_digest"] = "sha256:bad".into(),
+            "algorithm" => event["witness"]["algorithm"] = "arc-base-paths/0".into(),
+            "gate" => event["witness"]["gate"] = "missing".into(),
+            "tree" => event["witness"]["tree"] = event["witness"]["baseline"]["tree"].clone(),
+            "merge-target" => {
+                event["witness"]["against_target"] =
+                    event["witness"]["baseline"]["revision"].clone()
+            }
+            "target-revision" => {
+                event["witness"]["target_revision"] =
+                    git_out(&repo.root, &["rev-parse", "master^1"]).into()
+            }
+            "origin" => event["repository_id"] = "foreign".into(),
+            "source-profile" => event["witness"]["baseline"]["profile"] = "direct".into(),
+            "source-command" => {
+                event["witness"]["baseline"]["gates"]["unit"]["declaration"]["command"] =
+                    "false".into()
+            }
+            "source-receipt" => {
+                event["witness"]["baseline"]["gates"]["unit"]["execution"]["event_id"] =
+                    "forged".into()
+            }
+            "source-context" => {
+                event["witness"]["baseline"]["gates"]["unit"]["declaration"]["coverage"]["inert"] =
+                    serde_json::json!(["**"])
+            }
+            "run" => event["run_id"] = "missing".into(),
+            "run-command" => {
+                let run_file = repo
+                    .root
+                    .join(".git/arc/changes")
+                    .join(&id)
+                    .join("events")
+                    .join(format!("{}.json", event["run_id"].as_str().unwrap()));
+                let bytes = fs::read(&run_file).unwrap();
+                let mut run: Value = serde_json::from_slice(&bytes).unwrap();
+                for declared in run["gates"].as_array_mut().unwrap() {
+                    declared["command"] = "false".into();
+                }
+                fs::write(&run_file, serde_json::to_vec_pretty(&run).unwrap()).unwrap();
+                restored_run = Some((run_file, bytes));
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
+        let output = repo.arc(&wt).args(["show", "--json"]).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{field} must refuse replay: {output:?}"
+        );
+        fs::write(file, original).unwrap();
+        if let Some((run_file, bytes)) = restored_run {
+            fs::write(run_file, bytes).unwrap();
+        }
+    }
+}
+
+/// Claim: standalone transport retains baseline authority separately from
+/// verification facts and carries every Git witness object. Rejects facts-only
+/// import minting integration authority, or needing the producing change ledger.
+#[test]
+fn standalone_import_requires_baseline_integration_authority() {
+    let source = seed(GATES);
+    let (id, wt) = begin(&source, "transport", "notes.md");
+    source.arc(&wt).args(["verify", "--all"]).assert().success();
+    let input = source.home.join("transport.json");
+    source
+        .arc(&wt)
+        .args(["export", &id, "--output", input.to_str().unwrap()])
+        .assert()
+        .success();
+    let original: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    let origin = original["repository_id"].as_str().unwrap();
+    for integration in [false, true] {
+        let receiver = Repo::new();
+        receiver
+            .arc(&receiver.root)
+            .args(["replica", "init", "authority"])
+            .assert()
+            .success();
+        receiver
+            .arc(&receiver.root)
+            .args(["replica", "pair", "producer", "--repository-id", origin])
+            .assert()
+            .success();
+        let replica = json_stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["replica", "status", "--json"]),
+        );
+        let mut bundle = original.clone();
+        bundle["project_id"] = replica["project_id"].clone();
+        deliver_git_objects(&source, &receiver);
+        git(
+            &receiver.root,
+            &["reset", "--hard", "refs/delivered/heads/master"],
+        );
+        git(
+            &receiver.root,
+            &[
+                "branch",
+                "arc/transport",
+                "refs/delivered/heads/arc/transport",
+            ],
+        );
+        let roles = if integration {
+            "['facts','integration']"
+        } else {
+            "['facts']"
+        };
+        receiver.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{origin}'\n[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles={roles}\nactors=['tester']\n"));
+        fs::write(&input, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+        let digest = hex::encode(Sha256::digest(fs::read(&input).unwrap()));
+        let output = receiver
+            .arc(&receiver.root)
+            .args([
+                "import",
+                input.to_str().unwrap(),
+                "--publisher",
+                "channel",
+                "--received-sha256",
+                &digest,
+            ])
+            .output()
+            .unwrap();
+        if integration {
+            assert!(output.status.success(), "{output:?}");
+            let state = json_stdout(receiver.arc(&receiver.root).args(["show", &id, "--json"]));
+            assert_eq!(bases(&state), 2);
+            let config: Value = serde_json::from_slice(
+                &fs::read(receiver.root.join(".git/arc/config.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(config["schema_version"], 10);
+        } else {
+            assert!(
+                !output.status.success(),
+                "facts-only baseline must be refused"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Integration"),
+                "{output:?}"
+            );
+        }
+    }
+}
+
+/// Claim: candidates execute their required gates and promotion moves only the
+/// change branch. Rejects consuming target base passes or minting a target
+/// baseline during evaluation, selection or promotion.
+#[test]
+fn candidates_execute_and_never_record_a_target_baseline() {
+    let repo = seed(GATES.split("[gates.other]").next().unwrap());
+    repo.declare_gates_locally("[candidates]\nevaluation_reuse='matching-coordinates'\n");
+    let (id, wt) = begin(&repo, "candidate", "notes.md");
+    repo.arc(&wt).args(["claim", &id]).assert().success();
+    repo.arc(&wt)
+        .args(["brief", &id, "--body-file", "-"])
+        .write_stdin("Evaluate the complete candidate.\n")
+        .assert()
+        .success();
+    let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    repo.arc(&wt)
+        .args([
+            "candidate",
+            "register",
+            "--tree",
+            &tree,
+            "--brief",
+            &id,
+            "--producer",
+            "tester",
+            "--id",
+            "proposal",
+        ])
+        .assert()
+        .success();
+    let before = repo.head(&repo.root);
+    let output = stdout(repo.arc(&wt).args(["candidate", "verify", "proposal"]));
+    let evaluation = output
+        .lines()
+        .find_map(|line| line.strip_prefix("evaluation: "))
+        .unwrap();
+    assert!(output.contains("gate unit: pass"), "{output}");
+    repo.arc(&wt)
+        .args([
+            "candidate",
+            "select",
+            "--chosen",
+            "proposal",
+            "--into",
+            &id,
+            "--target",
+            &before,
+            "--rationale",
+            "complete candidate",
+            "--evaluation",
+            evaluation,
+        ])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), before);
+    assert_eq!(baseline_files(&repo).len(), 1);
+    let s = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+    assert_eq!(bases(&s), 0);
+    assert_eq!(
+        executed(&s),
+        0,
+        "candidate checks remain separate from integration evidence"
+    );
+}
+
+/// Claim: second-parent reachability does not satisfy the first-parent baseline
+/// policy. Rejects replacing the declared ancestry boundary with merge-base
+/// reachability even when the endpoint trees differ only in documentation.
+#[test]
+fn second_parent_baselines_execute_every_gate() {
+    let repo = seed(GATES);
+    let old = git_out(&repo.root, &["rev-parse", "master^1"]);
+    let (_, wt) = begin(&repo, "second-parent", "notes.md");
+    git(&wt, &["rebase", "--onto", &old, "master"]);
+    git(
+        &wt,
+        &["merge", "--no-ff", "master", "-m", "test: second parent"],
+    );
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    assert_eq!(bases(&state(&repo, &wt)), 0);
+    assert_eq!(executed(&state(&repo, &wt)), 2);
+}
+
+/// Claim: unavailable original execution objects cause a baseline miss and full
+/// execution. Rejects replaying claimed execution coordinates from hashes alone.
+#[test]
+fn missing_execution_objects_cause_full_execution() {
+    let repo = Repo::new();
+    repo.redeclare_gates(GATES);
+    let (id, wt) = begin(&repo, "warm", "src/code.rs");
+    repo.arc(&wt)
+        .args(["verify", "--against", "master"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .success();
+    let file = baseline_files(&repo).pop().unwrap();
+    let record: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    let revision = record["baseline"]["gates"]["unit"]["execution"]["revision"]
+        .as_str()
+        .unwrap();
+    assert_ne!(revision, repo.head(&repo.root));
+    fs::remove_file(
+        repo.root
+            .join(".git/objects")
+            .join(&revision[..2])
+            .join(&revision[2..]),
+    )
+    .unwrap();
+    let (_, wt) = begin(&repo, "missing-object", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    assert_eq!(bases(&state(&repo, &wt)), 0);
+    assert_eq!(executed(&state(&repo, &wt)), 2);
+}
+
+/// Claim: a later local failure or not-admitted attempt cannot be rescued by
+/// a baseline. Rejects fallback to another change's earlier successful execution.
+#[test]
+fn local_refusals_cannot_be_rescued_by_a_baseline() {
+    for exit in ["1", "75"] {
+        let repo =
+            seed(&GATES.replace("command='true'", "command='exit \"${ARC_GATE_RESULT:-0}\"'"));
+        let (_, wt) = begin(&repo, &format!("refusal-{exit}"), "notes.md");
+        repo.arc(&wt)
+            .env("ARC_GATE_RESULT", exit)
+            .args(["verify", "--all", "--rerun"])
+            .assert()
+            .code(1);
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        let s = state(&repo, &wt);
+        assert_eq!(
+            bases(&s),
+            0,
+            "{exit}: a local refusal forbids baseline fallback"
+        );
+        assert_eq!(executed(&s), 4);
+    }
+}
+
+/// Claim: provisional integration can consume already canonical evidence but
+/// cannot publish a canonical target baseline. Rejects staging movement being
+/// reported as an authoritative integration or as new gate execution.
+#[test]
+fn provisional_integration_consumes_evidence_without_a_baseline() {
+    let worker = seed(GATES.split("[gates.other]").next().unwrap());
+    let (id, wt) = begin(&worker, "staged-docs", "notes.md");
+    worker.arc(&wt).args(["verify", "--all"]).assert().success();
+    worker
+        .arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    let worker_id = json_stdout(worker.arc(&worker.root).args(["replica", "id", "--json"]));
+    let authority = Repo::new();
+    deliver_git_objects(&worker, &authority);
+    git(
+        &authority.root,
+        &["reset", "--hard", "refs/delivered/heads/master"],
+    );
+    authority
+        .arc(&authority.root)
+        .args(["replica", "init", "authority"])
+        .assert()
+        .success();
+    authority
+        .arc(&authority.root)
+        .args([
+            "replica",
+            "pair",
+            "worker",
+            "--repository-id",
+            worker_id["repository_id"].as_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let pairing = authority.home.join("pairing.json");
+    authority
+        .arc(&authority.root)
+        .args(["replica", "export", "--output", pairing.to_str().unwrap()])
+        .assert()
+        .success();
+    let bytes = fs::read(&pairing).unwrap();
+    let pairing_value: Value = serde_json::from_slice(&bytes).unwrap();
+    let origin = pairing_value["source_replica_id"].as_str().unwrap();
+    worker.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{origin}'\n[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['authority']\nactors=['tester']\n"));
+    worker
+        .arc(&worker.root)
+        .args([
+            "replica",
+            "import",
+            pairing.to_str().unwrap(),
+            "--publisher",
+            "channel",
+            "--received-sha256",
+            &hex::encode(Sha256::digest(&bytes)),
+        ])
+        .assert()
+        .success();
+    let before = worker.head(&worker.root);
+    worker
+        .arc(&wt)
+        .args(["integrate", &id, "--provisional"])
+        .assert()
+        .success();
+    assert_eq!(worker.head(&worker.root), before);
+    assert_eq!(baseline_files(&worker).len(), 1);
+    let s = state(&worker, &wt);
+    assert!(s["closure"].is_null());
+    assert_eq!(s["provisional_integrations"].as_array().unwrap().len(), 1);
+    assert_eq!(bases(&s), 1);
+    assert_eq!(executed(&s), 0);
+}
+
+/// Claim: a verifier that captured empty state cannot publish a base pass after
+/// another verifier records a refusal. Rejects a later reuse masking that actual
+/// observation through a stale first-verification snapshot.
+#[test]
+fn concurrent_verifiers_cannot_rescue_a_later_local_failure() {
+    use std::io::Write;
+    let repo = seed(&GATES.replace("command='true'", "command='exit \"${ARC_GATE_RESULT:-0}\"'"));
+    let (_, wt) = begin(&repo, "concurrent-verifiers", "notes.md");
+    let template = repo.arc(&wt);
+    let mut command = Command::new(template.get_program());
+    command
+        .args(["verify", "--all"])
+        .current_dir(&wt)
+        .env("ARC_TEST_IMPORT_RENDEZVOUS", "base-pass-before-append")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in template.get_envs() {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    let mut child = command.spawn().unwrap();
+    let mut reader = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == "arc test: import base-pass-before-append\n" {
+            break;
+        }
+    }
+    repo.arc(&wt)
+        .env("ARC_GATE_RESULT", "1")
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .code(1);
+    child.stdin.take().unwrap().write_all(b"+").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stale verifier must refuse reuse: {output:?}"
+    );
+    let s = state(&repo, &wt);
+    assert_eq!(bases(&s), 0);
+    assert_eq!(executed(&s), 2);
+    assert!(s["verifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["result"] == "fail"));
+}
+
+/// Claim: replay enforces the first-run boundary even if an invalid reuse is
+/// delivered directly. Rejects accepting a base pass after an independent local
+/// observation merely because its Git and coverage witness is otherwise valid.
+#[test]
+fn replay_refuses_base_pass_after_a_local_failure() {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "later-observation", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let file = event_files(&repo, &id)
+        .into_iter()
+        .find(|file| {
+            serde_json::from_slice::<Value>(&fs::read(file).unwrap()).unwrap()["event_type"]
+                == "verification-base-reused"
+        })
+        .unwrap();
+    let event: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let gate = event["gate"].as_str().unwrap();
+    let mut failure = event["witness"]["baseline"]["gates"][gate]["execution"].clone();
+    failure["event_id"] = event["event_id"].clone();
+    failure["change_id"] = id.into();
+    failure["revision"] = event["revision"].clone();
+    failure["tree"] = event["tree"].clone();
+    failure["tested_tree"] = event["tree"].clone();
+    failure["result"] = "fail".into();
+    failure["exit_code"] = 1.into();
+    failure["run_id"] = Value::Null;
+    fs::write(file, serde_json::to_vec_pretty(&failure).unwrap()).unwrap();
+    repo.arc(&wt)
+        .args(["show", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "base pass cannot displace another verification observation",
+        ));
+}
