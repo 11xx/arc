@@ -10,6 +10,7 @@ pub fn publication(
     profile: &str,
     skip_green: bool,
     expected_revision: Option<&str>,
+    associated_change: Option<&str>,
 ) -> Result<i32> {
     let revision = gitio::branch_head(&ctx.cwd, target)
         .with_context(|| format!("cannot resolve publication target {target:?}"))?;
@@ -26,7 +27,11 @@ pub fn publication(
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
     let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
-    let gates = gates::load_at(&ctx.cwd, &revision)?;
+    let (gates, authority) = publication_gates(ctx, &store, target, &revision, associated_change)?;
+    if gates.has_budgets() {
+        store.adopt_budgets()?;
+    }
+    let configuration = configuration_identity(&gates, profile, &authority)?;
     let required = gates.required_for_event(profile, GateEvent::Publication);
     if required.is_empty() {
         bail!("no publication gates declared for profile {profile}");
@@ -42,8 +47,14 @@ pub fn publication(
                 revision,
                 profile: previous_profile,
                 result: VerifyResult::Pass,
+                budget_accepted,
                 ..
-            } if previous_target == target && previous_profile == profile => Some(revision.clone()),
+            } if previous_target == target
+                && previous_profile == profile
+                && budget_accepted.unwrap_or(true) =>
+            {
+                Some(revision.clone())
+            }
             _ => None,
         });
     let reusable = prior_events
@@ -79,6 +90,7 @@ pub fn publication(
     // it is a failure only if some gate that did run failed.
     let mut not_admitted = false;
     let mut failed = false;
+    let mut budget_refused = false;
     println!("publication target: {target} at {revision}");
     for (name, gate) in required {
         let environment = match gate.environment.as_deref() {
@@ -108,21 +120,32 @@ pub fn publication(
             &["status", "--porcelain=v1", "--untracked-files=normal"],
         )?
         .is_empty();
-        let mut output_artifact = None;
+        let output_artifact;
+        let mut timing;
+        let mut hostname = Some(super::local_hostname());
         let result = if reused && clean_before {
+            let receipt = &reusable.expect("reusable publication").0[name];
+            timing = receipt.timing.clone();
+            hostname = receipt.hostname.clone();
+            output_artifact = receipt.output_artifact.clone();
             println!("gate {name}: skipped (publication pass at target tree)");
             VerifyResult::Pass
         } else {
-            let run = super::gatekeeping::run_gate_admitted(
+            let (limit, origin) = gate.execution_limit()?;
+            let run = super::gatekeeping::run_gate_budgeted(
                 &gate.command,
                 &scratch.path,
-                gate.timeout,
+                limit.map(Duration::from_millis),
                 &store.root,
                 &store.repository_id,
                 crate::exclusive::Request::for_gate(gate)
                     .as_ref()
                     .map(|request| (request, "publication", name.as_str())),
             )?;
+            timing = run.timing;
+            timing.execution_limit_ms = limit;
+            timing.execution_limit_origin = origin;
+            timing.budget_at_run = gate.budget.map(|_| gate.budget_judgement(timing.run_ms));
             output_artifact = run.output_artifact;
             if let Some(tail) = run.output_tail {
                 if !tail.is_empty() {
@@ -146,6 +169,12 @@ pub fn publication(
                 observed => observed,
             }
         };
+        let judgement = gate.budget_judgement(timing.run_ms);
+        if let Some(reason) = judgement.reason(&timing, hostname.as_deref().unwrap_or("unrecorded"))
+        {
+            eprintln!("publication gate {name}: {reason}");
+            budget_refused = true;
+        }
         println!("publication gate {name}: {}", result.as_str());
         passed &= result == VerifyResult::Pass;
         not_admitted |= result == VerifyResult::NotAdmitted;
@@ -153,6 +182,8 @@ pub fn publication(
         results.insert(
             name.clone(),
             PublicationGateResult {
+                timing,
+                hostname,
                 output_artifact,
                 command: gate.command.clone(),
                 timeout_seconds: gate.timeout,
@@ -161,10 +192,15 @@ pub fn publication(
             },
         );
     }
-    match gates::load_at(&ctx.cwd, &revision).and_then(|current| {
-        declarations_identity(&current.required_for_event(profile, GateEvent::Publication))
-    }) {
-        Ok(current) if current == declarations => {}
+    match publication_gates(ctx, &store, target, &revision, associated_change).and_then(
+        |(current, authority)| {
+            if current.has_budgets() {
+                store.adopt_budgets()?;
+            }
+            configuration_identity(&current, profile, &authority)
+        },
+    ) {
+        Ok(current) if current == configuration => {}
         Ok(_) => {
             failed = true;
             eprintln!("publication gate declarations changed while checks ran; rerun the guard");
@@ -209,6 +245,7 @@ pub fn publication(
             VerifyResult::Pass
         },
         declarations,
+        budget_accepted: gates.has_budgets().then_some(!budget_refused),
     };
     {
         let _events = store.lock_repository_events()?;
@@ -216,7 +253,7 @@ pub fn publication(
         store.append_local_repository_event(&mut event)?;
         println!("publication event: {}", event.event_id);
     }
-    if failed {
+    if failed || budget_refused {
         println!("integrations since last successful publication pass:");
         for (id, state) in store.readable_states()? {
             let Some(closure) = state.closure else {
@@ -239,7 +276,11 @@ pub fn publication(
             }
         }
     }
-    Ok(if passed && !failed { 0 } else { 1 })
+    Ok(if passed && !failed && !budget_refused {
+        0
+    } else {
+        1
+    })
 }
 
 fn declarations_identity(required: &[(&String, &gates::Gate)]) -> Result<String> {
@@ -253,4 +294,120 @@ fn declarations_identity(required: &[(&String, &gates::Gate)]) -> Result<String>
         "sha256:{}",
         hex::encode(Sha256::digest(declarations))
     ))
+}
+
+/// Read budgets from an integration baseline or the destination of an associated
+/// open change. An unaccepted branch cannot authorize its own budget declarations.
+fn publication_gates(
+    ctx: &Ctx,
+    store: &Store,
+    target: &str,
+    revision: &str,
+    associated_change: Option<&str>,
+) -> Result<(gates::GatesFile, String)> {
+    let own = gates::load_at(&ctx.cwd, revision)?;
+    let states = ctx.load_all_states(store)?;
+    let associated = if let Some(reference) = associated_change {
+        let id = store.resolve_change(reference)?;
+        Some(
+            states
+                .get(&id)
+                .context("associated publication change is unavailable")?
+                .clone(),
+        )
+    } else {
+        let matching = states
+            .values()
+            .filter(|state| !state.is_closed() && state.branch == target)
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            bail!("publication target has multiple associated changes; select one with --change");
+        }
+        matching.first().map(|state| (*state).clone())
+    };
+    let (mut required, authority) = if let Some(state) = associated {
+        if state.is_closed()
+            || state.branch != target
+            || gitio::branch_head(&ctx.cwd, &state.branch)? != revision
+        {
+            bail!("publication --change must name the open change owning the target branch at this revision");
+        }
+        let declarations = ctx.declarations(&state)?;
+        (declarations.gates, format!("change:{}", state.change_id))
+    } else {
+        let work_branches = states
+            .values()
+            .map(|state| state.branch.as_str())
+            .collect::<BTreeSet<_>>();
+        let destinations = states
+            .values()
+            .map(crate::declarations::accepted_target)
+            .filter(|branch| !work_branches.contains(branch))
+            .collect::<BTreeSet<_>>();
+        let branch = if destinations.contains(target) {
+            Some(target.to_string())
+        } else {
+            gitio::default_branch(&ctx.cwd)
+                .filter(|branch| destinations.contains(branch.as_str()))
+                .or_else(|| {
+                    (destinations.len() == 1).then(|| destinations.first().unwrap().to_string())
+                })
+        };
+        let default_head = branch
+            .map(|branch| gitio::branch_head(&ctx.cwd, &branch))
+            .transpose()?;
+        let baseline = default_head.or_else(|| {
+            states.values().find_map(|state| {
+                state
+                    .closure
+                    .as_ref()
+                    .filter(|closure| closure.outcome == Closure::Integrated)
+                    .and_then(|closure| closure.integrated_commit.as_ref())
+                    .filter(|commit| commit.as_str() == revision)
+                    .cloned()
+            })
+        });
+        if let Some(baseline) = baseline {
+            (
+                gates::load_at(&ctx.cwd, &baseline)?,
+                format!("accepted:{baseline}"),
+            )
+        } else {
+            let repository_budget = own
+                .gates
+                .values()
+                .flat_map(|gate| &gate.budget_sources)
+                .chain(own.budget.iter().flat_map(|rules| &rules.sources))
+                .any(|source| source.source.starts_with(".arc/gates.toml at "));
+            if repository_budget {
+                bail!("publication budget authority is unavailable: target needs a recorded integration destination or an associated open change (--change)");
+            }
+            (gates::GatesFile::default(), "operator-only".into())
+        }
+    };
+    required.owe_also(own, "accepted publication baseline", "publication target");
+    let errors = required.budget_errors();
+    if !errors.is_empty() {
+        bail!("invalid publication budgets: {}", errors.join("; "));
+    }
+    Ok((required, authority))
+}
+
+fn configuration_identity(
+    gates: &gates::GatesFile,
+    profile: &str,
+    authority: &str,
+) -> Result<String> {
+    let required = gates.required_for_event(profile, GateEvent::Publication);
+    let budgets = required
+        .iter()
+        .map(|(name, gate)| (name.as_str(), (gate.budget, &gate.budget_sources)))
+        .collect::<BTreeMap<_, _>>();
+    let bytes = serde_json::to_vec(&(
+        authority,
+        declarations_identity(&required)?,
+        &gates.budget,
+        budgets,
+    ))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
 }

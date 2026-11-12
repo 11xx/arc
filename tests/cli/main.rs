@@ -98,6 +98,7 @@ mod policy;
 mod post_integration_verification;
 mod provenance;
 mod provisional;
+mod publication_budgets;
 mod queue;
 mod rebase;
 mod receipts;

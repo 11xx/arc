@@ -3345,25 +3345,6 @@ impl GateRun {
     }
 }
 
-/// Execute a declared admission contract wherever a gate is evaluated.
-pub(super) fn run_gate_admitted(
-    cmd: &str,
-    cwd: &Path,
-    timeout_seconds: Option<u64>,
-    output_root: &Path,
-    producing_store: &str,
-    admission: Option<(&crate::exclusive::Request, &str, &str)>,
-) -> Result<GateRun> {
-    run_gate_budgeted(
-        cmd,
-        cwd,
-        timeout_seconds.map(Duration::from_secs),
-        output_root,
-        producing_store,
-        admission,
-    )
-}
-
 pub(super) fn run_gate_budgeted(
     cmd: &str,
     cwd: &Path,

@@ -46,6 +46,16 @@ pub fn budgeted_payload(payload: &crate::model::Payload) -> bool {
     match payload {
         Payload::VerificationRecorded { timing, .. }
         | Payload::CandidateVerified { timing, .. } => timing.budget_at_run.is_some(),
+        Payload::PublicationVerified {
+            gates,
+            budget_accepted,
+            ..
+        } => {
+            budget_accepted.is_some()
+                || gates
+                    .values()
+                    .any(|receipt| receipt.timing.budget_at_run.is_some())
+        }
         Payload::ChangeIntegrated {
             authorization: Some(basis),
             ..

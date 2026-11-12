@@ -1718,6 +1718,9 @@ pub enum Payload {
         profile: String,
         gates: std::collections::BTreeMap<String, PublicationGateResult>,
         result: VerifyResult,
+        /// Historical cost acceptance; current publication rejudges the receipts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_accepted: Option<bool>,
         declarations: String,
     },
     VerificationRunStarted {
@@ -4404,6 +4407,10 @@ pub struct DeltaSelection {
 pub struct PublicationGateResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_artifact: Option<crate::verification_output::OutputArtifact>,
+    #[serde(flatten)]
+    pub timing: crate::verification_timing::VerificationTiming,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     pub command: String,
     pub timeout_seconds: Option<u64>,
     pub environment: Option<String>,

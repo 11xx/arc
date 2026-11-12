@@ -2157,9 +2157,11 @@ enum Cmd {
     ///
     /// Use this guard from push and release tooling before publishing that revision.
     /// Scratch checkout preparation and build leases follow .arc/worktrees.toml; stable
-    /// storage never substitutes for complete publication evidence.
+    /// storage never substitutes for complete publication evidence. Fresh and cached
+    /// receipts must meet current budgets; --skip-green never retries a budget refusal.
     Publication {
-        /// Local target branch whose committed gate declarations apply
+        /// Local branch to check; budget authority comes from accepted integration
+        /// history or its associated change (--change selects that change)
         #[arg(long)]
         target: String,
         /// Require the full commit ID queued by the caller's push or release
@@ -7634,7 +7636,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             revision,
             profile,
             skip_green,
-        } => commands::publication(&ctx, &target, &profile, skip_green, revision.as_deref()),
+        } => commands::publication(
+            &ctx,
+            &target,
+            &profile,
+            skip_green,
+            revision.as_deref(),
+            flag_change.as_deref(),
+        ),
         Cmd::Verify {
             change,
             all,

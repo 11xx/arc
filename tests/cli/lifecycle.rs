@@ -2536,7 +2536,8 @@ fn closed_change_append_policy_matches_command_families() {
 }
 
 /// Claim: append refusals have one authority while read-only lifecycle filters
-/// remain explicit. Rejects a new unclassified closure check or a local append guard.
+/// and publication budget-context checks remain explicit. Rejects a new
+/// unclassified closure check or a local append guard.
 #[test]
 fn append_policy_has_a_single_authority() {
     let commands = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
@@ -2554,6 +2555,9 @@ fn append_policy_has_a_single_authority() {
         "gatekeeping.rs::integration_history_with_policy::ifst.is_closed(){",
         "gatekeeping.rs::close::ifst.is_closed(){",
         "provisional.rs::integrate_provisionally_inner::ifstate.is_closed(){",
+        // Publication selects the open change supplying budget authority.
+        "publication.rs::publication_gates::.filter(|state|!state.is_closed()&&state.branch==target)",
+        "publication.rs::publication_gates::ifstate.is_closed()",
         "gatekeeping.rs::integrate_one::ifst.is_closed()&&matches!(closed_behavior,ClosedBehavior::SkipTagged){",
         "gatekeeping.rs::queue_dry_run::ifst.is_closed(){",
         "gatekeeping.rs::queue_step::ifst.is_closed(){",
@@ -2638,7 +2642,10 @@ fn append_policy_has_a_single_authority() {
                         .collect::<String>();
                     let lifecycle_close = site == "gatekeeping.rs::close::ifst.is_closed(){"
                         && compact_block.contains(r#"bail!("change{change_id}isalreadyclosed");"#);
-                    if compact_block.contains("bail!(") && !lifecycle_close {
+                    let publication_context = site == "publication.rs::publication_gates::ifstate.is_closed()"
+                        && compact_block.contains(r#"bail!("publication--changemustnametheopenchangeowningthetargetbranchatthisrevision");"#);
+                    if compact_block.contains("bail!(") && !lifecycle_close && !publication_context
+                    {
                         bailing.push(site);
                     }
                 }

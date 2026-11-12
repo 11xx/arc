@@ -5475,7 +5475,7 @@ GATES
   how many such samples it uses. `ever_failed` describes observed runs;
   `last_failed_first` is the latest change whose first observed verification
   failure was this gate, with its time and event. Dedicated publication
-  receipts carry no timing and are outside this per-change history.
+  receipts are outside this per-change history.
   Each declaration includes `paths` and its effective `inert` exclusions.
   `unclaimed_paths` counts tracked paths outside inert exclusions that no
   explicit gate pattern names; a gate with no paths does not name a path.
@@ -5610,7 +5610,6 @@ GATES
   verify, status, integrate, accept, land, candidate selection and promotion,
   and publication.
 
-
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
 
@@ -5637,7 +5636,18 @@ GATES
   Historical verification evidence with no recorded event is integration
   evidence. An omitted event on a gate declaration applies to both events.
   `arc publication --target <branch> --profile <profile>` runs the complete
-  publication tier at that branch's head. Push and release tooling can use
+  publication tier at that branch's head. Fresh and cached publication receipts
+  must satisfy current budgets; publication-only gates are outside the
+  integration total. --skip-green keeps the newest structurally matching
+  receipt and its command timing, refusing a budget failure without executing
+  it again. Publication confirms effective budgets, total rules and sources
+  after checking the content. Repository budgets come from a recorded integration
+  destination or the associated open change's destination, plus the publication
+  tree's additions and tightenings and current operator policy. --change selects
+  the open change owning the publication branch; otherwise a unique matching
+  change is inferred. Without a recorded destination or associated change,
+  repository budget authority is unavailable; operator-only budgets still bind.
+  Push and release tooling can use
   `--revision <full-commit-id>` to require the exact revision queued by the
   caller and use its exit status as a local guard. Arc makes no network
   request and installs no hook implicitly. A failed publication names the integrations since the
@@ -5927,10 +5937,12 @@ SCHEMAS
   `arc guide debt-clearance`. These optional input fields leave older records
   valid under store format 7.
 
-  Candidate evaluations carry optional command timing in events and candidate
-  views. Missing timing remains absent through replay and transport; current
+  Candidate evaluations and publication receipts carry optional command timing;
+  candidate views expose the evaluations' timing. Missing timing remains absent through replay and transport; current
   budget acceptance is separate from the recorded outcome. These optional
-  receipt fields retain the stored-input versions.
+  receipt fields retain the stored-input versions. Publication's optional
+  budget_accepted records historical cost acceptance separately from raw
+  results; current acceptance rejudges timing.
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import

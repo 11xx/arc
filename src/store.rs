@@ -3549,8 +3549,10 @@ fn authorization_has_no_verdict(
 fn has_budget_semantics(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
-            matches!(key.as_str(), "budget_at_run" | "budget_rules" | "budget_ms")
-                && !value.is_null()
+            matches!(
+                key.as_str(),
+                "budget_at_run" | "budget_rules" | "budget_ms" | "budget_accepted"
+            ) && !value.is_null()
                 || has_budget_semantics(value)
         }),
         serde_json::Value::Array(values) => values.iter().any(has_budget_semantics),
