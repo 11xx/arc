@@ -2,6 +2,43 @@ use super::common::*;
 
 const FORMATS: [&str; 2] = ["sha1", "sha256"];
 
+/// Claim: subprocess waits return the actual exit status and kill and reap a
+/// hung child before reporting the deadline. Rejects fabricated success,
+/// returning before exit and leaving a live process or zombie after a timeout.
+#[test]
+fn subprocess_waits_preserve_status_and_reap_timed_out_children() {
+    let mut child = Command::new("sh").args(["-c", "exit 23"]).spawn().unwrap();
+    let status = wait_for_exit_within(&mut child, Duration::from_secs(5));
+    let actual = child.wait().unwrap();
+    assert_eq!(status.code(), Some(23), "wait fabricated the exit status");
+    assert_eq!(status, actual);
+    assert_eq!(wait_for_exit(&mut child), actual, "cached exit status");
+
+    let mut child = Command::new("sleep").arg("240").spawn().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_exit_within(&mut child, Duration::from_millis(20))
+    }));
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+    // SAFETY: info provides writable storage; WNOWAIT leaves cleanup to Child.
+    let waited = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    let reaped =
+        waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+    if !reaped {
+        let _ = child.kill();
+        child.wait().unwrap();
+    }
+    assert!(result.is_err(), "hung child did not report its deadline");
+    assert!(reaped, "timed-out child was not reaped");
+    assert_eq!(HANG_BOUND, Duration::from_secs(120));
+}
+
 /// Claim: the runner's executable selection reaches ordinary, shell, piped,
 /// asynchronous and environment-isolated fixture commands. Rejects a launch
 /// that silently uses Cargo's default executable beside the selected CLI.

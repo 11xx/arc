@@ -14,6 +14,8 @@ remain enabled. Test code and unit tests use Cargo's ordinary test profile.
 
 The runner uses four test workers per available logical CPU, capped at 64, to overlap
 subprocess waits. An explicit `RUST_TEST_THREADS` selects the worker count.
+Asynchronous child waits use Linux process descriptors to wake on exit, with
+a 120-second hang bound that kills and reaps an unfinished child.
 
 Silent-write recovery probes select a short debug-only period with
 `ARC_TEST_FEED_RECHECK_MS`. A separate policy check fixes the default at thirty

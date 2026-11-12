@@ -864,18 +864,52 @@ pub(crate) fn assert_waiting_on_transition_lock(children: &mut [&mut Child]) {
 /// process that never finishes reaches it, however loaded the machine is.
 pub(crate) const HANG_BOUND: Duration = Duration::from_secs(120);
 
-/// The child's exit status, killing it as hung after `HANG_BOUND`.
+/// The child's exit status, killing and reaping it as hung after `HANG_BOUND`.
 pub(crate) fn wait_for_exit(child: &mut Child) -> ExitStatus {
-    let deadline = Instant::now() + HANG_BOUND;
+    if let Some(status) = child.try_wait().unwrap() {
+        return status;
+    }
+    wait_for_exit_within(child, HANG_BOUND)
+}
+
+pub(crate) fn wait_for_exit_within(child: &mut Child, bound: Duration) -> ExitStatus {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let deadline = Instant::now() + bound;
+    // SAFETY: pidfd_open accepts the live child's PID and no flags.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+    assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+    // SAFETY: the successful syscall returned a fresh descriptor.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        if Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             child.kill().unwrap();
-            panic!("arc subprocess did not exit within {HANG_BOUND:?}");
+            child.wait().unwrap();
+            panic!("arc subprocess did not exit within {bound:?}");
         }
-        thread::sleep(Duration::from_millis(10));
+        let mut event = libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = remaining
+            .as_millis()
+            .saturating_add(1)
+            .min(i32::MAX as u128) as i32;
+        // SAFETY: event is one initialized pollfd, valid for this call.
+        let ready = unsafe { libc::poll(&mut event, 1, millis) };
+        if ready > 0 {
+            return child.wait().unwrap();
+        }
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted,
+                "poll: {error}"
+            );
+        }
     }
 }
 
