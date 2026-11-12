@@ -1727,19 +1727,17 @@ fn partition<'a>(
             environment,
             event,
         ) {
+            let judgement = gate.budget_judgement(evidence.timing.run_ms);
             println!(
                 "gate {name}: skipped ({}; declared by {})",
-                if gate.budget_judgement(evidence.timing.run_ms).accepted() {
+                if judgement.accepted() {
                     answering.label
                 } else {
                     "structurally eligible receipt"
                 },
                 gate.declared_by.join(", ")
             );
-            if let Some(reason) = gate
-                .budget_judgement(evidence.timing.run_ms)
-                .reason(&evidence.timing, &evidence.hostname)
-            {
+            if let Some(reason) = judgement.reason(&evidence.timing, &evidence.hostname) {
                 println!("gate {name}: {reason}; rerun explicitly with --rerun");
                 partition.budget_refused += 1;
             }

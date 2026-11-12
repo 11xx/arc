@@ -673,3 +673,44 @@ fn budget_total_declarations_adopt_even_when_a_gate_budget_is_missing() {
     let after: Value = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
     assert_eq!(after["schema_version"], 8);
 }
+
+/// Claim: named path-based delta reuse judges its selected receipt without running
+/// the command again. Rejects a zero exit for an over-budget selected pass and
+/// any retry that was not explicitly requested.
+#[test]
+fn budget_named_path_reuse_refuses_until_explicit_rerun() {
+    let repo = Repo::new();
+    let counter = repo.home.join("unit-runs");
+    let command = format!("echo run >> '{}'", counter.display());
+    let declared = |budget| {
+        format!("[selection]\ninert=['docs/']\n[gates.unit]\ncommand={command:?}\npaths=['src/']\nbudget='{budget}'\n")
+    };
+    repo.declare_gates_locally(&declared("20s"));
+    let (id, wt, _) = change_with_patchset(&repo, "named-path-budget");
+    verify(&repo, &wt, 11000, 0);
+    fs::create_dir_all(wt.join("docs")).unwrap();
+    repo.commit(
+        &wt,
+        "docs/note.md",
+        "inert text\n",
+        "test: advance inert scope",
+    );
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    repo.declare_gates_locally(&declared("10s"));
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1")
+        .args(["verify", "--gate", "unit"])
+        .assert()
+        .code(1);
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+    assert_eq!(
+        status(&repo, &wt, &id)["gates"][0]["budget"]["verdict"],
+        "over-budget"
+    );
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1")
+        .args(["verify", "--gate", "unit", "--rerun"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(counter).unwrap().lines().count(), 2);
+}
