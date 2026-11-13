@@ -6,6 +6,7 @@ mod audit;
 mod audit_discharge;
 mod base_pass;
 mod briefs;
+mod build_metadata;
 mod bundle;
 mod candidate;
 mod catchup_open_change_reads;

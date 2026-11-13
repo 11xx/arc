@@ -2,7 +2,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .output()
+        .ok()?;
     output
         .status
         .success()

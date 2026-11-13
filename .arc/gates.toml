@@ -3,7 +3,7 @@ base_passes = true
 inert = ["*.md", "tests/*.md", "UNLICENSE"]
 
 [gates.build]
-command = "cargo check --locked --all-targets"
+command = "cargo build --locked --all-targets"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
 

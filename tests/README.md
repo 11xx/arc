@@ -5,7 +5,9 @@ invariant and caller-visible claim. The runner validates every full name against
 libtest's inventory before dispatching it with `--exact`; missing, ignored and
 unexecuted witnesses fail. It selects the spawned executable from Cargo's artifact
 receipts. Development artifacts share optimization level 1 with debug symbols
-disabled. Debug assertions and integer overflow checks stay enabled.
+disabled. Debug assertions and integer overflow checks stay enabled. The build
+gate prepares the artifacts the invariant gate consumes. Build metadata reads
+preserve the watched Git index.
 
 Run the invariant gate:
 
@@ -22,7 +24,7 @@ python3 .arc/test-binary.py area cli gate_raises
 Use `area unit store::tests` for a unit module. The module argument names its
 direct tests, not modules sharing a substring. Area suites belong to no gate.
 The runner's own acceptance checks are `python3 .arc/test_binary_test.py`.
-`cargo test --locked` runs the whole remaining Rust tree with the debug CLI.
+`cargo test --locked` runs the whole remaining Rust tree with the development executable.
 
 To add or replace a witness, name the invariant and rejected state in its doc
 comment. First demonstrate failure for that state on the unfixed implementation
