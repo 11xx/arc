@@ -2062,3 +2062,41 @@ fn budget_acceptance_refuses_overruns_and_invalid_green_totals() {
         );
     }
 }
+
+/// Claim: acceptance imports bypass history but still executes and requires its
+/// local gate. Rejects a delivered bypass excusing a failed acceptance gate.
+#[test]
+fn retired_bypass_does_not_authorize_accept() {
+    let d = Delivery::new();
+    crate::verification_outcomes::historical_bypass(
+        &d.source,
+        &d.source.root,
+        &d.change,
+        "acceptance",
+    );
+    d.export();
+    d.gates("false");
+    let policy_path = d.receiver.root.join(".git/arc/operator-policy.toml");
+    let policy = fs::read_to_string(&policy_path).unwrap().replace(
+        "roles=['facts','rewrite','review-input']",
+        "roles=['facts','rewrite','review-input','waiver']",
+    );
+    fs::write(
+        policy_path,
+        format!("{policy}bypass='documentation only'\n"),
+    )
+    .unwrap();
+    let before = d.receiver.head(&d.receiver.root);
+    let result = d.result(5);
+    assert_eq!(result["stopped_at"], "gate:acceptance", "{result}");
+    let events = fixture_events(&d.receiver, &d.change);
+    assert!(events
+        .iter()
+        .any(|event| event["event_type"] == "verification-bypassed"));
+    assert!(events
+        .iter()
+        .any(|event| event["event_type"] == "verification-recorded"
+            && event["gate"] == "acceptance"
+            && event["result"] == "fail"));
+    assert_eq!(d.receiver.head(&d.receiver.root), before);
+}

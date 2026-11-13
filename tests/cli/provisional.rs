@@ -3544,3 +3544,42 @@ fn budget_staging_history_minima_bind_with_green_rows() {
         .assert()
         .code(5);
 }
+
+/// Claim: provisional integration refuses historical bypass evidence on a paired
+/// worker, leaving canonical and staging targets untouched. Rejects staging
+/// preparation treating a historical waiver as an eligible gate pass.
+#[test]
+fn retired_bypass_does_not_authorize_provisional() {
+    let (_authority, worker) = worker();
+    worker
+        .declare_gates_locally("[gates.required]\ncommand='false'\nbypass='documentation only'\n");
+    let (id, wt, _) = change_with_patchset(&worker, "bypass-history");
+    crate::verification_outcomes::historical_bypass(&worker, &wt, &id, "required");
+    let before = worker.head(&worker.root);
+    worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &id,
+            "--provisional",
+            "--debt",
+            "review remains owed",
+        ])
+        .assert()
+        .code(5)
+        .stderr(predicates::str::contains("satisfies no gate requirement"));
+    assert_eq!(worker.head(&worker.root), before);
+    assert!(git_out(
+        &worker.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/arc/provisional/"
+        ]
+    )
+    .is_empty());
+    assert!(status(&worker, &id)["provisional_integrations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}

@@ -1165,24 +1165,7 @@ RUN A CHANGE
   records `not-admitted` and exits 1. A not-admitted attempt cannot answer
   an earlier failure.
 
-  A gate whose declaration names `bypass` may be skipped on a judgement:
-  `arc verify <change> --gate <name> --bypass <reason>` records
-  `verification-bypassed` with the actor, the change's head and tree, the
-  reason and the declared qualification, and no command, exit code or
-  duration. Any other gate refuses, as do an empty or placeholder reason and
-  an unresolved failure recorded at that head. Only a later run green at
-  that head answers the failure; a pass on an unwaived dirty tree or a tree
-  that moved during the run cannot answer it. A change's own declaration
-  cannot add `bypass` to a gate its target declares, and one that omits it
-  withdraws it.
-  The bypass meets that gate's integration requirement at its immutable
-  recorded head alone, while its declaration still names `bypass` and the
-  budget applicability in `arc guide gates` permits it; every new
-  head, including a recorded rewrite holding the same tree, or a merged tree,
-  needs a run or a new bypass. `status`, `check`, `show`, `explain` and their
-  JSON name it `bypassed` with its reason, never `pass`. `verify` never reuses it, no
-  publication guard reads it, it discharges no review debt, and importing one
-  takes the waiver capability.
+  Recorded bypasses are history and satisfy no integration or publication requirement.
 
   `done` moves its caller's live claim to `verifying` before it snapshots,
   and only after every snapshot input is accepted — the attribution,
@@ -5543,11 +5526,11 @@ GATES
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output, run against
                                         the content being evaluated
-    bypass = "<what qualifies>"         omitted: the gate cannot be bypassed;
-                                        every declaration of it must name one
     binds = "commit"                    a pass answers for its commit, not
                                         its tree; omitted: "tree", as an
                                         older arc reads it
+
+  A `bypass` key has no effect: doctor reports it and check warns to remove it.
 
   Budget durations accept positive whole milliseconds with ms, s, m or h
   units, including decimal forms such as 2.5s and 0.001s. Overflow and precision
@@ -5581,9 +5564,8 @@ GATES
   excess_ms and sources. budget_rules.total is milliseconds in JSON.
   Missing run_ms is unmeasured
   and cannot satisfy a budget, including legacy local, imported and attested
-  evidence. duration_ms never substitutes for run_ms. A bypass cannot overrule
-  an observed budget refusal. Explain labels historical authorization apart
-  from applicability under the current destination and operator declarations;
+  evidence. duration_ms never substitutes for run_ms. Explain labels historical
+  authorization apart from applicability under the current destination and operator declarations;
   a later reduction does not rewrite closure or the recorded authorization.
 
   Without a declared timeout, a budgeted command has an execution limit of
@@ -6139,6 +6121,9 @@ SCHEMAS
   RFC 3339 `judged_at`; its bounds and reply precedence are defined by
   `arc guide debt-clearance`. These optional input fields leave older records
   valid under store format 7.
+
+  The bypass fields in state, status, check and explain retain historical
+  judgements, including check.bypassed; gate authorization uses eligible passes.
 
   Candidate evaluations and publication receipts carry optional command timing;
   candidate views expose the evaluations' timing. Missing timing remains absent through replay and transport; current

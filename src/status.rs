@@ -71,12 +71,9 @@ pub struct GateStatus {
     /// `arc-status/23`.
     pub declared_by: Vec<String>,
     pub result: String,
-    /// Whether the gate's integration requirement is met: by a pass, or by a
-    /// bypass at this head while the gate declares `bypass`. `result` says
-    /// which; a bypass is never a pass.
+    /// Whether eligible passing evidence meets the gate's integration requirement.
     pub green_at_head: bool,
-    /// The judgement recorded in place of a run, when the counted evidence
-    /// is a bypass. Additive in `arc-status/27`.
+    /// Historical judgement recorded in place of a run; grants no authority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bypass: Option<crate::state::BypassEntry>,
     /// Passing evidence exists at this head, but for a different command than
@@ -277,28 +274,16 @@ impl GateStatus {
         if self.green_at_head {
             return None;
         }
+        if self.bypass.is_some() {
+            return Some(
+                "recorded bypass is history and satisfies no gate requirement; run the gate".into(),
+            );
+        }
         if let Some(reason) = self.budget.reason(
             &self.timing,
             self.execution_host.as_deref().unwrap_or("unrecorded"),
         ) {
             return Some(reason);
-        }
-        // A bypass is a judgement about one head's diff, so the only question
-        // is why that judgement does not reach what is being evaluated now.
-        if self.bypass.is_some() {
-            return Some(match (&self.evaluated_tree, &self.inherited_from) {
-                (Some(tree), _) => format!(
-                    "the gate was bypassed at the head, which answers for nothing at the merged \
-                     tree {tree}; run the gate"
-                ),
-                (None, Some(revision)) => format!(
-                    "the gate was bypassed at {}, not at this head; run it or bypass it again",
-                    revision.get(..8).unwrap_or(revision)
-                ),
-                (None, None) => "the gate was bypassed at this head, but its declaration no \
-                                 longer names `bypass`; run the gate"
-                    .into(),
-            });
         }
         // Before the provenance checks: this evidence may be perfectly good
         // provenance for a command the gate no longer declares, and saying
@@ -1585,6 +1570,15 @@ fn build_report(
     if !state.is_closed() {
         advisories.extend(missing_changelog_advisory(state, cwd));
     }
+    advisories.extend(
+        gates
+            .retired_bypass_keys()
+            .into_iter()
+            .map(|detail| Advisory {
+                code: "gate-bypass-retired",
+                detail,
+            }),
+    );
     for (event, entry) in state
         .verdicts
         .iter()
@@ -1743,33 +1737,14 @@ fn build_report(
             }
             _ => (None, None, false),
         };
-        // A bypass is a judgement about one head's diff: it answers for that
-        // head only, never for a merged tree, and only while the gate still
-        // declares that it may be bypassed.
-        let observed_over_budget = gate.budget.is_some()
-            && gate.bypass.is_some()
-            && evidence_at(&|e| {
-                e.bypass.is_none()
-                    && matches_declaration(e, gate)
-                    && e.result == VerifyResult::Pass
-                    && !gate.budget_judgement(e.timing.run_ms).accepted()
-            })
-            .is_some();
-        let bypass_counts = |e: &state::VerificationEntry| {
-            e.bypass.is_some()
-                && !observed_over_budget
-                && gate.bypass.is_some()
-                && evaluated_tree.is_none()
-                && current_head.as_deref() == Some(e.recorded_revision.as_str())
-        };
         let evidence = evidence_at(&|e| {
-            bypass_counts(e)
-                || matches_declaration(e, gate)
-                    && if live {
-                        matches_environment(e, gate, current.as_deref())
-                    } else {
-                        gate.environment.is_none() || e.environment.is_some()
-                    }
+            e.bypass.is_none()
+                && matches_declaration(e, gate)
+                && if live {
+                    matches_environment(e, gate, current.as_deref())
+                } else {
+                    gate.environment.is_none() || e.environment.is_some()
+                }
         })
         .or(newest);
         let bypassed = evidence.is_some_and(|e| e.bypass.is_some());
@@ -1860,11 +1835,10 @@ fn build_report(
             // whose declared timeout is unknown cannot be shown to satisfy
             // a declaration that has one.
             green_at_head: evidence.is_some_and(|e| {
-                bypass_counts(e)
-                    || e.green_at_head(state.eligible_dirty_tree_waiver())
-                        && matches_declaration(e, gate)
-                        && environment_applies
-                        && budget_ok
+                e.green_at_head(state.eligible_dirty_tree_waiver())
+                    && matches_declaration(e, gate)
+                    && environment_applies
+                    && budget_ok
             }),
             bypass: evidence.and_then(|e| e.bypass.clone()),
             declaration_changed: evidence.is_some_and(|e| {

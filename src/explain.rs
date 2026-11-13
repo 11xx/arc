@@ -1973,7 +1973,7 @@ fn describe(detail: &Detail) -> String {
             if let Some(bypass) = bypass {
                 return format!(
                     "gate {gate}: bypassed by `{evidence}` at {}, tree {}: judged by {}: {} \
-                     (the gate declares: {}); nothing ran",
+                     (the gate declared: {}); nothing ran; historical bypass satisfies no requirement",
                     opt(revision),
                     tree.as_deref().unwrap_or("unrecorded"),
                     bypass.actor,

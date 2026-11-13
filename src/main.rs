@@ -2200,8 +2200,7 @@ enum Cmd {
     /// supplies no environment identity. Storage reuse never supplies a passing gate
     /// result. A result whose evidence a busy ledger lock kept from being recorded prints
     /// as `not recorded:` and is not evidence; see `arc guide rules-claims`. A command
-    /// exiting 75 within its timeout records `not-admitted`, and `--bypass` records a
-    /// judgement in place of a run; see `arc guide change-gates`.
+    /// exiting 75 within its timeout records `not-admitted`; see `arc guide change-gates`.
     /// Executed receipts separate `wait_ms`, `prepare_ms`, and command `run_ms`;
     /// `duration_ms` spans execution, including slot acquisition and in-run preparation.
     /// `prepare_ms` also includes preparation before environment probes; a batch
@@ -2388,23 +2387,8 @@ enum Cmd {
         /// before any gate runs or evidence is recorded; rebase first.
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
-        /// Record a judgement in place of --gate's run, saying why this head
-        /// qualifies.
-        ///
-        /// Only a gate whose declaration names `bypass = "<what qualifies>"`
-        /// may be bypassed; any other is refused. The reason is required and
-        /// may not be a placeholder. The record names the actor, the head and
-        /// its tree, and the reason, and no command, exit code or duration:
-        /// nothing ran. It meets that gate's integration requirement at this
-        /// recorded head alone, while the declaration still names `bypass`;
-        /// every new head, including a recorded rewrite holding the same tree,
-        /// needs a run or a new bypass. It is shown as `bypassed`, never as a
-        /// pass: it is never reused, it never satisfies a
-        /// publication gate, and it discharges no review debt. A failure
-        /// recorded at this head must be answered by a later run green there
-        /// before a bypass is allowed. Not-admitted attempts and passes on
-        /// unwaived dirty trees or trees that moved during the run leave it
-        /// unresolved.
+        /// Refuse retired gate bypass. Make the gate fit its budget (`arc gates over`),
+        /// or integrate with recorded debt.
         #[arg(long, value_name = "REASON")]
         bypass: Option<String>,
     },
@@ -7693,6 +7677,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             against,
             bypass,
         } => {
+            if bypass.is_some() {
+                bail!("{}", gates::BYPASS_RETIRED);
+            }
             let change = infer(change.as_deref())?;
             commands::verify(
                 &ctx,

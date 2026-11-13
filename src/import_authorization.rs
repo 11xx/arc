@@ -154,7 +154,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
             roles
         }
         DebtDeclared { .. } | AuditDebtDeclared { .. } => vec![vec![DebtInput, Waiver]],
-        // A bypass excuses a gate's run as a waiver excuses its dirt.
+        // Historical bypasses retain their transport capability, without granting authority.
         DirtyTreeWaived { .. } | VerificationBypassed { .. } | HoldReleased { .. } => {
             vec![vec![Waiver]]
         }

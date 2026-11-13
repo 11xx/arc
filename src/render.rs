@@ -104,17 +104,6 @@ fn merged_tree_line(report: &StatusReport) -> Option<String> {
     ))
 }
 
-/// Who bypassed a gate whose requirement a bypass meets, and why. Empty for a
-/// gate that is not bypassed, or whose bypass does not count.
-pub fn bypass_suffix(gate: &GateStatus) -> String {
-    match &gate.bypass {
-        Some(bypass) if gate.green_at_head => {
-            format!(" (bypassed by {}: {})", bypass.actor, bypass.reason)
-        }
-        _ => String::new(),
-    }
-}
-
 /// One gate's line in a human-facing gate list: the raw result, why a passing
 /// result still does not count at head, which run the result came from when it
 /// is not one at this head, and whether a counted pass was ever shown capable
@@ -122,9 +111,8 @@ pub fn bypass_suffix(gate: &GateStatus) -> String {
 pub fn gate_line(gate: &GateStatus) -> String {
     let status = match gate.not_green_reason() {
         None => format!(
-            "{}{}{}{}",
+            "{}{}{}",
             gate.result,
-            bypass_suffix(gate),
             inheritance_suffix(gate),
             discrimination_suffix(gate)
         ),
@@ -896,10 +884,10 @@ pub fn markdown(
                 "- {}: `{}` — {}{}{}{}",
                 g.name,
                 g.command,
-                match (g.green_at_head, g.bypass.is_some()) {
-                    (true, true) => "bypassed at head",
-                    (true, false) => "green at head",
-                    (false, _) => "NOT green at head",
+                if g.green_at_head {
+                    "green at head"
+                } else {
+                    "NOT green at head"
                 },
                 if g.attested {
                     " (attested)"
@@ -916,7 +904,7 @@ pub fn markdown(
             if let Some(bypass) = &g.bypass {
                 let _ = writeln!(
                     w,
-                    "  - bypassed by {}: {} (the gate declares: {})",
+                    "  - historical bypass by {}: {} (the gate declared: {}); satisfies no requirement",
                     bypass.actor, bypass.reason, bypass.qualification
                 );
             }
@@ -2013,7 +2001,6 @@ pub fn gates_owed(report: &StatusReport) -> String {
         .collect();
     if owed.is_empty() {
         let _ = writeln!(out, "gates: every required gate is green at head");
-        out.push_str(&bypassed_gates(report));
         return out;
     }
     let _ = writeln!(out, "gates owed:");
@@ -2026,22 +2013,6 @@ pub fn gates_owed(report: &StatusReport) -> String {
             gate.not_green_reason().unwrap_or_default(),
             gate_declaration_suffix(gate)
         );
-    }
-    out
-}
-
-/// One line per gate whose requirement a bypass meets, so a ready report never
-/// reads as though every gate ran.
-pub fn bypassed_gates(report: &StatusReport) -> String {
-    let mut out = String::new();
-    for gate in report.gates.iter().filter(|gate| gate.green_at_head) {
-        if let Some(bypass) = &gate.bypass {
-            let _ = writeln!(
-                out,
-                "  - `{}` bypassed by {}: {}",
-                gate.name, bypass.actor, bypass.reason
-            );
-        }
     }
     out
 }
@@ -3360,8 +3331,7 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
     // code, so the checklist is the only place a reader meets them.
     for gate in &report.gates {
         let suffix = format!(
-            "{}{}{}",
-            bypass_suffix(gate),
+            "{}{}",
             inheritance_suffix(gate),
             discrimination_suffix(gate)
         );

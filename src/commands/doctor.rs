@@ -1121,6 +1121,12 @@ fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
             detail,
         });
     }
+    for detail in gates.retired_bypass_keys() {
+        problems.push(Finding {
+            code: "gate-bypass-retired",
+            detail,
+        });
+    }
     for detail in gates.budget_errors() {
         problems.push(Finding {
             code: "gate-budget-invalid",

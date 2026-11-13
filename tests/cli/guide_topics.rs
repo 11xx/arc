@@ -1,11 +1,21 @@
 use super::common::*;
 
-/// Gate declarations have one discoverable topic; rejects missing keys or declarations in files.
+/// Claim: gate declarations have one discoverable home that labels bypass inert.
+/// Rejects missing keys, duplicate declarations, or an advertised bypass permission.
 #[test]
 fn gate_declarations_have_one_discoverable_guide_home() {
     let repo = Repo::new();
     let gates = stdout(repo.arc(&repo.home).args(["guide", "gates"]));
     let files = stdout(repo.arc(&repo.home).args(["guide", "files"]));
+    assert!(gates.contains("A `bypass` key has no effect"));
+    assert!(!gates.contains("bypass = \"<what qualifies>\""));
+    let history = stdout(repo.arc(&repo.home).args(["guide", "change-gates"]));
+    assert!(history.contains(
+        "Recorded bypasses are history and satisfy no integration or publication requirement."
+    ));
+    let help = stdout(repo.arc(&repo.home).args(["verify", "--help"]));
+    assert!(help.contains("Refuse retired gate bypass"));
+    assert!(!help.contains("may be bypassed"));
     assert!(
         files.contains("arc guide gates"),
         "missing files cross-reference"
@@ -17,7 +27,6 @@ fn gate_declarations_have_one_discoverable_guide_home() {
         "events = [\"integration\"]",
         "timeout = \"10m\"",
         "environment = \"<probe command>\"",
-        "bypass = \"<what qualifies>\"",
         "binds = \"commit\"",
         "A gate's `selector` reads `arc-gate-delta/1`",
     ] {

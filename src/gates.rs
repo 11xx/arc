@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 /// timeout, which bounds the probe too.
 pub const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
 
+pub const BYPASS_RETIRED: &str = "--bypass is retired; make the gate fit its budget (`arc gates over`), or integrate with recorded debt";
+
 /// Declared verification gates. A gate with no `profiles` list is required
 /// for every profile. This is the local analogue of required CI checks.
 #[derive(Debug, Default, Deserialize)]
@@ -161,11 +163,8 @@ pub struct Gate {
     pub exclusive: Option<String>,
     #[serde(default, deserialize_with = "deserialize_admission")]
     pub admission: Option<Duration>,
-    /// What qualifies a change to skip this gate on an agent's judgement, as
-    /// `arc verify --bypass <reason>` records. Absent, the gate cannot be
-    /// bypassed. It decides nothing about what the command checks, so it is
-    /// no part of the declaration's identity.
-    #[serde(default, deserialize_with = "deserialize_bypass")]
+    /// An inert legacy key retained for declaration diagnostics.
+    #[serde(default)]
     pub bypass: Option<String>,
     /// What one pass answers for. It changes what a pass means, so it is
     /// part of the declaration's identity.
@@ -313,18 +312,6 @@ pub fn parse_gate_duration(raw: &str) -> Result<Duration> {
         bail!("duration must be positive");
     }
     Ok(duration)
-}
-
-fn deserialize_bypass<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    match Option::<String>::deserialize(deserializer)? {
-        Some(qualification) if qualification.trim().is_empty() => Err(D::Error::custom(
-            "bypass must name what qualifies a change to skip the gate",
-        )),
-        qualification => Ok(qualification.map(|text| text.trim().to_owned())),
-    }
 }
 
 /// The result of running one declared environment probe.
@@ -603,6 +590,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                 }
                 // Layers must agree on the check and any required lock name.
                 Some(current) if !current.same_check(&gate) => {
+                    current.bypass = current.bypass.take().or_else(|| gate.bypass.clone());
                     merged.conflicts.push(GateConflict {
                         name,
                         declarations: vec![
@@ -659,8 +647,7 @@ impl Gate {
 
     /// Fold another declaration of the same check into this one. Profiles
     /// and events widen and the stricter timeout and budget win, so one declaration cannot loosen
-    /// a gate the other bounds. The gate may be bypassed only if both allow it,
-    /// on this declaration's terms, and binds to commits if either says so. Either
+    /// a gate the other bounds. It binds to commits if either says so. Either
     /// declaration may require a lock; the shortest admission limit applies.
     fn absorb(&mut self, other: Gate) {
         self.absorb_budget(&other);
@@ -677,9 +664,7 @@ impl Gate {
         if self.exclusive.is_none() {
             self.exclusive = other.exclusive;
         }
-        if other.bypass.is_none() {
-            self.bypass = None;
-        }
+        self.bypass = self.bypass.take().or(other.bypass);
         if other.binds == Binding::Commit {
             self.binds = Binding::Commit;
         }
@@ -708,6 +693,14 @@ impl Gate {
 }
 
 impl GatesFile {
+    pub fn retired_bypass_keys(&self) -> Vec<String> {
+        self.gates
+            .iter()
+            .filter(|(_, gate)| gate.bypass.is_some())
+            .map(|(name, _)| format!("gate {name}: `bypass` has no effect; remove the key"))
+            .collect()
+    }
+
     fn set_danger(&mut self, paths: Vec<String>) {
         self.dangerous = paths.clone();
         for gate in self.gates.values_mut() {
@@ -761,6 +754,7 @@ impl GatesFile {
                 }
                 Some(current) if current.same_check(&gate) => current.absorb(gate),
                 Some(current) => {
+                    current.bypass = current.bypass.take().or_else(|| gate.bypass.clone());
                     current.absorb_budget(&gate);
                     divergences.push(GateDivergence {
                         target: GateDeclaration::of(current, target_label),
@@ -1117,33 +1111,6 @@ mod tests {
         let unbounded = declared("[gates.unit]\ncommand = \"t\"\n");
         assert!(target.owe_also(unbounded, "master", "change").is_empty());
         assert_eq!(target.gates["unit"].timeout, Some(60));
-    }
-
-    /// A change cannot let itself skip a gate its target runs, and a
-    /// declaration that omits `bypass` withdraws it.
-    #[test]
-    fn a_gate_may_be_bypassed_only_where_both_declarations_allow_it() {
-        let strict = "[gates.docs]\ncommand = \"t\"\n";
-        let lax = "[gates.docs]\ncommand = \"t\"\nbypass = \"docs only\"\n";
-        let mut target = declared(strict);
-        target.owe_also(declared(lax), "master", "change");
-        assert_eq!(target.gates["docs"].bypass, None);
-
-        let mut target = declared(lax);
-        target.owe_also(declared(strict), "master", "change");
-        assert_eq!(target.gates["docs"].bypass, None);
-
-        let mut target = declared(lax);
-        target.owe_also(
-            declared("[gates.docs]\ncommand = \"t\"\nbypass = \"anything\"\n"),
-            "master",
-            "change",
-        );
-        assert_eq!(target.gates["docs"].bypass.as_deref(), Some("docs only"));
-
-        assert!(
-            toml::from_str::<GatesFile>("[gates.docs]\ncommand = \"t\"\nbypass = \" \"\n").is_err()
-        );
     }
 
     /// A change cannot loosen a commit binding its target declares, and a

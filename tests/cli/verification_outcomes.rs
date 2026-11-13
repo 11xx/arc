@@ -92,387 +92,307 @@ fn exit_75_after_a_timeout_is_a_timeout() {
     assert_eq!(gate(&status, "heavy")["timed_out"], true, "{status}");
 }
 
-/// Claim: only a gate that declares `bypass` can be bypassed, and only with a
-/// stated reason. Rejects a bypass on any gate, or one that records nothing.
+/// Construct the stored event an older writer emitted, without invoking the retired flag.
+pub(crate) fn historical_bypass(repo: &Repo, wt: &Path, id: &str, name: &str) {
+    let mut paths = fs::read_dir(event_dir(repo, id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut event: serde_json::Value =
+        serde_json::from_slice(&fs::read(paths.last().unwrap()).unwrap()).unwrap();
+    let next = ulid::Ulid::from(
+        u128::from(ulid::Ulid::from_string(event["event_id"].as_str().unwrap()).unwrap()) + 1,
+    )
+    .to_string();
+    event.as_object_mut().unwrap().retain(|key, _| {
+        [
+            "schema_version",
+            "repository_id",
+            "change_id",
+            "actor",
+            "actor_source",
+            "harness",
+            "session",
+            "created_at",
+        ]
+        .contains(&key.as_str())
+    });
+    event["event_id"] = next.clone().into();
+    event["event_type"] = "verification-bypassed".into();
+    event["gate"] = name.into();
+    event["revision"] = repo.head(wt).into();
+    event["tree"] = git_out(wt, &["rev-parse", "HEAD^{tree}"]).into();
+    event["reason"] = "only README.md changed".into();
+    event["qualification"] = "documentation or comments only".into();
+    fs::write(
+        event_dir(repo, id).join(format!("{next}.json")),
+        serde_json::to_vec(&event).unwrap(),
+    )
+    .unwrap();
+}
+
+fn bypassed_change(repo: &Repo, slug: &str) -> (String, PathBuf, String) {
+    let change = change_with_patchset(repo, slug);
+    historical_bypass(repo, &change.1, &change.0, "docs");
+    change
+}
+
+/// Claim: every --bypass request refuses with the budget/debt remedies and writes
+/// no event. Rejects a declared gate or flag combination re-enabling bypass.
 #[test]
-fn bypass_is_refused_on_an_undeclared_gate_and_without_a_reason() {
-    let repo = declaring(&format!("{BYPASSABLE}[gates.build]\ncommand = \"false\"\n"));
+fn retired_bypass_flag_refuses_without_writes() {
+    let repo = declaring(BYPASSABLE);
     let (id, wt, _) = change_with_patchset(&repo, "refusals");
-    repo.arc(&wt)
-        .args(["verify", "--gate", "build", "--bypass", "README only"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "gate \"build\" does not declare that it may be bypassed",
-        ))
-        .stderr(predicates::str::contains("bypass = \"<what qualifies>\""));
-    for reason in ["", "   ", "n/a"] {
+    let before = event_count(&repo, &id);
+    for args in [
+        vec!["verify", "--gate", "docs", "--bypass", "README only"],
+        vec!["verify", "--bypass", ""],
+        vec!["verify", "--all", "--bypass", "README only"],
+    ] {
         repo.arc(&wt)
-            .args(["verify", "--gate", "docs", "--bypass", reason])
+            .args(args)
             .assert()
             .failure()
-            .stderr(predicates::str::contains("--bypass must say why"));
+            .stderr(predicates::str::contains("--bypass is retired"))
+            .stderr(predicates::str::contains("arc gates over"))
+            .stderr(predicates::str::contains("integrate with recorded debt"));
     }
-    assert!(events(&repo, &wt, &id, "verification-bypassed").is_empty());
-}
-
-/// Claim: a declared bypass meets the gate's integration requirement at the
-/// head it was judged at, and every surface names it as bypassed with its
-/// reason, never as a pass. Rejects a bypass that cannot be integrated on, and
-/// one that reads as a pass in `status`, `check`, `show` or `explain`.
-#[test]
-fn a_declared_bypass_lets_integration_proceed_and_explain_names_it() {
-    let repo = declaring(BYPASSABLE);
-    let (id, wt, head) = change_with_patchset(&repo, "bypassed");
-    let reason = "only README.md changed";
-    let bypassed = stdout(
-        repo.arc(&wt)
-            .args(["verify", "--gate", "docs", "--bypass", reason]),
-    );
-    assert!(
-        bypassed.contains(&format!("verification: bypassed at {head}: {reason}")),
-        "{bypassed}"
-    );
-    let recorded = events(&repo, &wt, &id, "verification-bypassed");
-    assert_eq!(recorded.len(), 1, "{recorded:?}");
-    assert_eq!(recorded[0]["revision"], head.as_str());
-    assert_eq!(
-        recorded[0]["tree"],
-        git_out(&wt, &["rev-parse", "HEAD^{tree}"]).as_str()
-    );
-    assert_eq!(recorded[0]["reason"], reason);
-    assert_eq!(
-        recorded[0]["qualification"],
-        "documentation or comments only"
-    );
-    assert!(recorded[0]["actor"].is_string(), "{recorded:?}");
-    for absent in ["command", "exit_code", "duration_ms", "hostname"] {
-        assert!(recorded[0].get(absent).is_none(), "{absent}: {recorded:?}");
-    }
-
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    let docs = gate(&status, "docs");
-    assert_eq!(docs["result"], "bypassed", "{status}");
-    assert_eq!(docs["green_at_head"], true, "{status}");
-    assert_eq!(docs["bypass"]["reason"], reason, "{status}");
-    let show = stdout(repo.arc(&wt).args(["show"]));
-    assert!(show.contains("bypassed at head"), "{show}");
-    assert!(
-        show.contains(&format!(": {reason} (the gate declares")),
-        "{show}"
-    );
-
-    repo.arc(&wt)
-        .args(["review", "--verdict", "approved"])
-        .assert()
-        .success();
-    let check = stdout(repo.arc(&wt).args(["check"]));
-    assert!(
-        check.contains("ready: every integration gate passes or is bypassed"),
-        "{check}"
-    );
-    assert!(check.contains("`docs` bypassed by"), "{check}");
-    let check = json_stdout(repo.arc(&wt).args(["check", "--json"]));
-    assert_eq!(check["bypassed"]["docs"]["reason"], reason, "{check}");
-
-    repo.arc(&repo.root)
-        .args(["integrate", &id])
-        .assert()
-        .success();
-    let explanation = json_stdout(repo.arc(&repo.root).args(["explain", &id, "--json"]));
-    let rows = explanation["evaluation"]["rows"].as_array().unwrap();
-    let row = rows.iter().find(|row| row["gate"] == "docs").unwrap();
-    assert_eq!(row["result"], "bypassed", "{explanation}");
-    assert_eq!(row["bypass"]["reason"], reason, "{explanation}");
-    assert_eq!(row["evidence_event_id"], recorded[0]["event_id"]);
-    assert!(row.get("falsification").is_none(), "{explanation}");
-    let text = stdout(repo.arc(&repo.root).args(["explain", &id]));
-    assert!(text.contains("gate docs: bypassed by `"), "{text}");
-    assert!(text.contains(reason), "{text}");
-}
-
-/// Claim: a bypass answers for the head it was judged at and nothing else.
-/// `--skip-green` reruns the gate rather than reuse it, a new head owes a run
-/// or a new bypass, and a publication guard runs the gate however the change
-/// that landed was judged. Rejects a bypass that outlives its head, stands in
-/// for a pass, or reaches publication.
-#[test]
-fn a_bypass_stays_at_its_head_and_is_never_a_pass() {
-    let repo = declaring(BYPASSABLE);
-    let (id, wt, first) = change_with_patchset(&repo, "bounded");
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
-
-    let rerun = stdout_any_status(repo.arc(&wt).args(["verify", "--all", "--skip-green"]));
-    assert!(!rerun.contains("skipped"), "{rerun}");
-    assert!(events(&repo, &wt, &id, "verification-reused").is_empty());
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    assert_eq!(gate(&status, "docs")["result"], "fail", "{status}");
-
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+    repo.arc(&repo.home)
+        .args(["verify", "--bypass", "README only"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "a judgement does not overrule a run",
-        ));
-
-    repo.commit(&wt, "second.txt", "second\n", "test: second");
-    repo.arc(&wt).args(["snapshot"]).assert().success();
-    let moved = json_stdout(repo.arc(&wt).args(["status"]));
-    assert_eq!(gate(&moved, "docs")["green_at_head"], false, "{moved}");
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
-    git(&wt, &["commit", "--amend", "-m", "test: reworded"]);
-    repo.arc(&wt).args(["snapshot"]).assert().success();
-    let reworded = json_stdout(repo.arc(&wt).args(["status"]));
-    let docs = gate(&reworded, "docs");
-    assert_eq!(docs["result"], "bypassed", "{reworded}");
-    assert_eq!(docs["green_at_head"], false, "{reworded}");
-    let check = stdout_any_status(repo.arc(&wt).args(["check"]));
-    assert!(check.contains("not at this head"), "{check}");
-    assert_ne!(repo.head(&wt), first);
-
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
-    repo.arc(&repo.root)
-        .args(["integrate", &id, "--debt", "Fixture retains missing review"])
-        .assert()
-        .success();
-    repo.arc(&repo.root)
-        .args(["publication", "--target", "master"])
-        .assert()
-        .code(1)
-        .stdout(predicates::str::contains("publication gate docs: fail"));
+        .stderr(predicates::str::contains("--bypass is retired"));
+    assert_eq!(event_count(&repo, &id), before);
 }
 
-/// Claim: a bypass binds the head where the judgement was recorded, even
-/// across a same-tree recorded trailer rewrite. Rejects a rewrite moving
-/// that judgement to a head nobody bypassed, without running the gate.
+/// Claim: an inert bypass key is a doctor finding and check warning, and leaves
+/// status readable. Rejects silent keys, declaration failure, and key permission.
 #[test]
-fn a_same_tree_trailer_rewrite_requires_a_new_bypass() {
+fn retired_bypass_key_warns_without_bricking_status() {
+    for placement in ["target", "head", "operator", "head-conflict", "empty"] {
+        let repo = declaring(if placement == "target" {
+            BYPASSABLE
+        } else {
+            "[gates.docs]\ncommand='false'\n"
+        });
+        let (id, wt, _) = change_with_patchset(&repo, "legacy-key");
+        match placement {
+            "head-conflict" => {
+                repo.commit(
+                    &wt,
+                    ".arc/gates.toml",
+                    &BYPASSABLE.replace("false", "true"),
+                    "test: conflicting legacy declaration",
+                );
+            }
+            "empty" => {
+                repo.commit(
+                    &wt,
+                    ".arc/gates.toml",
+                    &BYPASSABLE.replace("documentation or comments only", ""),
+                    "test: empty legacy key",
+                );
+            }
+            "head" => {
+                repo.commit(
+                    &wt,
+                    ".arc/gates.toml",
+                    BYPASSABLE,
+                    "test: legacy declaration",
+                );
+            }
+            "operator" => repo.declare_gates_locally(BYPASSABLE),
+            _ => {}
+        }
+        let s = json_stdout(repo.arc(&wt).args(["status", &id]));
+        assert_eq!(gate(&s, "docs")["green_at_head"], false, "{s}");
+        assert!(
+            s["advisories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["code"] == "gate-bypass-retired"),
+            "{s}"
+        );
+        repo.arc(&wt)
+            .args(["doctor", "--json"])
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("gate-bypass-retired"));
+        repo.arc(&wt)
+            .args(["check"])
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("`bypass` has no effect"));
+    }
+}
+
+/// Claim: old bypass events replay and remain visible as history in show/explain;
+/// status refuses to treat that history as green. Rejects lost history or authority.
+#[test]
+fn retired_bypass_history_replays_without_authorizing_status() {
     let repo = declaring(BYPASSABLE);
-    let (id, wt, original) = change_with_patchset(&repo, "rewritten-bypass");
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
+    let (id, wt, _) = bypassed_change(&repo, "history");
+    assert_eq!(events(&repo, &wt, &id, "verification-bypassed").len(), 1);
+    let s = json_stdout(repo.arc(&wt).args(["status"]));
+    assert_eq!(gate(&s, "docs")["result"], "bypassed", "{s}");
+    assert_eq!(gate(&s, "docs")["green_at_head"], false, "{s}");
+    let show = stdout(repo.arc(&wt).args(["show"]));
+    assert!(show.contains("historical bypass by"), "{show}");
+    assert!(show.contains("satisfies no requirement"), "{show}");
+    let raw = json_stdout(repo.arc(&wt).args(["show", "--json"]));
+    assert_eq!(
+        raw["verifications"][0]["bypass"]["reason"], "only README.md changed",
+        "{raw}"
+    );
+    let explain = stdout(repo.arc(&wt).args(["explain"]));
+    assert!(explain.contains("only README.md changed"), "{explain}");
+    assert!(
+        explain.contains("historical bypass satisfies no requirement"),
+        "{explain}"
+    );
+    let explanation = json_stdout(repo.arc(&wt).args(["explain", "--json"]));
+    assert!(explanation["evaluation"]["rows"].as_array().unwrap().iter().any(|r| r["result"] == "bypassed" && r["bypass"]["reason"] == "only README.md changed"), "{explanation}");
+}
+
+/// Claim: check refuses when the only gate answer is a historical bypass, while
+/// retaining check.bypassed for readers. Rejects a historical waiver making ready.
+#[test]
+fn retired_bypass_does_not_authorize_check() {
+    let repo = declaring(BYPASSABLE);
+    let (_, wt, _) = bypassed_change(&repo, "check-history");
     repo.arc(&wt)
         .args(["review", "--verdict", "approved"])
         .assert()
         .success();
-    repo.arc(&wt).args(["check"]).assert().success();
-    let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
-
-    repo.arc(&wt)
-        .args([
-            "rewrite",
-            "trailers",
-            "--from",
-            &original,
-            "--no-sign",
-            "--append",
-            "Planned-by: Planner <planner@example.invalid>",
-        ])
-        .assert()
-        .success();
-    assert_ne!(repo.head(&wt), original);
-    assert_eq!(git_out(&wt, &["rev-parse", "HEAD^{tree}"]), tree);
-
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    let docs = gate(&status, "docs");
-    assert_eq!(docs["result"], "bypassed", "{status}");
-    assert_eq!(
-        docs["green_at_head"], false,
-        "a recorded rewrite must not carry a bypass to its successor: {status}"
-    );
-    assert_eq!(docs["inherited_from"], original, "{status}");
-    repo.arc(&wt)
-        .args(["check"])
+    let output = repo
+        .arc(&wt)
+        .args(["check", "--json"])
         .assert()
         .code(5)
-        .stdout(predicates::str::contains("not at this head"));
+        .get_output()
+        .clone();
+    let check: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(check["ready"], false, "{check}");
+    assert_eq!(
+        check["bypassed"]["docs"]["reason"], "only README.md changed",
+        "{check}"
+    );
+}
+
+/// Claim: integration refuses historical bypass evidence even with review debt
+/// supplied, leaving its destination unmoved. Rejects debt granting gate authority.
+#[test]
+fn retired_bypass_does_not_authorize_integration() {
+    let repo = declaring(BYPASSABLE);
+    let (id, wt, _) = bypassed_change(&repo, "integration-history");
+    let before = repo.head(&repo.root);
     repo.arc(&repo.root)
-        .args(["integrate", &id])
+        .args(["integrate", &id, "--debt", "review remains owed"])
+        .assert()
+        .code(5)
+        .stderr(predicates::str::contains("satisfies no gate requirement"));
+    assert_eq!(repo.head(&repo.root), before);
+    let raw = json_stdout(repo.arc(&wt).args(["show", "--json"]));
+    assert!(raw["closure"].is_null(), "{raw}");
+}
+
+/// Claim: importing a bypass retains the event but confers no gate authority at
+/// the receiver. Rejects transport changing a historical waiver into a green gate.
+#[test]
+fn retired_bypass_import_grants_nothing() {
+    let source = declaring(BYPASSABLE);
+    let (id, wt, head) = bypassed_change(&source, "import-history");
+    let input = source.home.join("bypass.json");
+    source
+        .arc(&wt)
+        .args(["export", &id, "--output", input.to_str().unwrap()])
+        .assert()
+        .success();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    let branch = git_out(&wt, &["branch", "--show-current"]);
+    git(&receiver.root, &["branch", &branch, &head]);
+    receiver.declare_gates_locally(BYPASSABLE);
+    receiver
+        .arc(&receiver.root)
+        .args(["import", input.to_str().unwrap()])
+        .assert()
+        .success();
+    let s = json_stdout(receiver.arc(&receiver.root).args(["status", &id]));
+    assert_eq!(gate(&s, "docs")["green_at_head"], false, "{s}");
+    let raw = json_stdout(receiver.arc(&receiver.root).args(["show", &id, "--json"]));
+    assert_eq!(raw["verifications"][0]["result"], "bypassed", "{raw}");
+    receiver
+        .arc(&receiver.root)
+        .args(["integrate", &id, "--debt", "review remains owed"])
         .assert()
         .code(5);
-    assert!(events(&repo, &wt, &id, "verification-recorded").is_empty());
-    assert_eq!(events(&repo, &wt, &id, "verification-bypassed").len(), 1);
-
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
-    repo.arc(&wt).args(["check"]).assert().success();
 }
 
-/// Claim: only a run green at the head answers its unresolved failure;
-/// not-admitted retries leave bypass refusal and the event ledger intact.
-/// Rejects an unrun attempt making a failed gate eligible for bypass.
-#[test]
-fn not_admitted_retries_do_not_erase_an_unresolved_gate_failure() {
-    let repo = declaring(
-        r#"[gates.docs]
-command = 'exit "$(cat "$HOME/gate-exit")"'
-bypass = "documentation or comments only"
-"#,
+/// Claim: both landing forms execute required gates rather than accept bypass
+/// history, and refuse a failing gate without moving the target. Rejects bypass
+/// reuse or the landing gate union dropping the requirement.
+fn bypass_history_landing(composed: bool) {
+    let repo = declaring(BYPASSABLE);
+    let (lower, _, lower_head) = bypassed_change(&repo, "lower");
+    let mut args = vec!["begin", "upper"];
+    if !composed {
+        args.extend(["--base", &lower_head]);
+    }
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args(args)));
+    let wt = repo.home.join(".worktrees/repo-upper");
+    repo.commit(&wt, "upper.txt", "upper\n", "test: upper");
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    historical_bypass(&repo, &wt, &upper, "docs");
+    let before = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper, "--debt", "review remains owed"])
+        .assert()
+        .code(5);
+    assert_eq!(repo.head(&repo.root), before);
+    let raw = json_stdout(repo.arc(&repo.root).args(["show", &upper, "--json"]));
+    assert!(raw["closure"].is_null(), "{raw}");
+    assert!(
+        raw["verifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["result"] == "fail" && v["gate"] == "docs"),
+        "{raw}"
     );
-    let (id, wt, _) = change_with_patchset(&repo, "unresolved-failure");
-    let outcome = repo.home.join("gate-exit");
-    fs::write(&outcome, "0").unwrap();
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs"])
-        .assert()
-        .success();
-    fs::write(&outcome, "1").unwrap();
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--rerun"])
-        .assert()
-        .code(1);
-    let failed = events(&repo, &wt, &id, "verification-recorded");
-    assert_eq!(failed[1]["result"], "fail");
+}
 
-    fs::write(&outcome, "75").unwrap();
-    for _ in 0..2 {
-        repo.arc(&wt)
-            .args(["verify", "--gate", "docs"])
-            .assert()
+/// Claim: a stack landing refuses a gate answered only by historical bypass.
+/// Rejects bypass reuse authorizing the target move.
+#[test]
+fn retired_bypass_does_not_authorize_land_stack() {
+    bypass_history_landing(false);
+}
+
+/// Claim: a composed landing refuses a gate answered only by historical bypass.
+/// Rejects bypass reuse authorizing the target move.
+#[test]
+fn retired_bypass_does_not_authorize_land_composed() {
+    bypass_history_landing(true);
+}
+
+/// Claim: publication never reuses a change's bypass, including --skip-green;
+/// a failing gate refuses publication. Rejects substituting the change ledger.
+#[test]
+fn retired_bypass_does_not_authorize_publication() {
+    let repo = declaring(BYPASSABLE);
+    let (id, _, _) = bypassed_change(&repo, "publication-history");
+    for cached in [false, true] {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["publication", "--target", "master"]);
+        if cached {
+            cmd.arg("--skip-green");
+        }
+        cmd.assert()
             .code(1)
-            .stdout(predicates::str::contains("verification: NotAdmitted at"));
-        let before = stdout(repo.arc(&wt).args(["events", "--change", &id]));
-        repo.arc(&wt)
-            .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-            .assert()
-            .failure()
-            .stderr(predicates::str::contains(
-                "a judgement does not overrule a run",
-            ))
-            .stderr(predicates::str::contains(
-                failed[1]["event_id"].as_str().unwrap(),
-            ));
-        assert_eq!(
-            stdout(repo.arc(&wt).args(["events", "--change", &id])),
-            before,
-            "refusing the bypass must not append any event"
-        );
+            .stdout(predicates::str::contains("publication gate docs: fail"));
     }
-    assert!(events(&repo, &wt, &id, "verification-bypassed").is_empty());
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    assert_eq!(gate(&status, "docs")["green_at_head"], false, "{status}");
-
-    fs::write(&outcome, "0").unwrap();
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs"])
-        .assert()
-        .success();
-    fs::write(&outcome, "75").unwrap();
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--rerun"])
-        .assert()
-        .code(1);
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
-}
-
-fn a_non_green_pass_cannot_clear_failure_for_bypass(mutate_during_run: bool) {
-    let repo = declaring(
-        r#"[gates.docs]
-command = 'if test -f "$HOME/move-tree"; then touch fix; fi; test -f fix'
-bypass = "documentation or comments only"
-"#,
-    );
-    let (id, wt, head) = change_with_patchset(&repo, "non-green-answer");
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs"])
-        .assert()
-        .code(1);
-    let failed = events(&repo, &wt, &id, "verification-recorded");
-    assert_eq!(failed[0]["result"], "fail");
-    assert_eq!(failed[0]["worktree_dirty"], false);
-
-    if mutate_during_run {
-        fs::write(repo.home.join("move-tree"), "move\n").unwrap();
-    } else {
-        fs::write(wt.join("fix"), "uncommitted fix\n").unwrap();
-    }
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--rerun"])
-        .assert()
-        .success();
-    let recorded = events(&repo, &wt, &id, "verification-recorded");
-    let passed = &recorded[1];
-    assert_eq!(passed["result"], "pass");
-    assert_eq!(passed["revision"], head);
-    if mutate_during_run {
-        assert_eq!(passed["tree_moved"], true, "{passed}");
-        fs::remove_file(repo.home.join("move-tree")).unwrap();
-    } else {
-        assert_eq!(passed["worktree_dirty"], true, "{passed}");
-        assert_ne!(passed["tested_tree"], failed[0]["tested_tree"]);
-    }
-    fs::remove_file(wt.join("fix")).unwrap();
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    assert_eq!(gate(&status, "docs")["result"], "pass", "{status}");
-    assert_eq!(gate(&status, "docs")["green_at_head"], false, "{status}");
-
-    let before = stdout(repo.arc(&wt).args(["events", "--change", &id]));
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "a judgement does not overrule a run",
-        ))
-        .stderr(predicates::str::contains(
-            failed[0]["event_id"].as_str().unwrap(),
-        ));
-    assert_eq!(
-        stdout(repo.arc(&wt).args(["events", "--change", &id])),
-        before,
-        "a non-green pass must not authorize a bypass or append an event"
-    );
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    assert_eq!(gate(&status, "docs")["green_at_head"], false, "{status}");
-
-    fs::write(wt.join("fix"), "uncommitted fix\n").unwrap();
-    repo.arc(&wt)
-        .args([
-            "verify",
-            "--gate",
-            "docs",
-            "--rerun",
-            "--waive-dirty",
-            "the uncommitted fixture is the intended tested content",
-        ])
-        .assert()
-        .success();
-    let status = json_stdout(repo.arc(&wt).args(["status"]));
-    assert_eq!(gate(&status, "docs")["green_at_head"], true, "{status}");
-    fs::remove_file(wt.join("fix")).unwrap();
-    repo.arc(&wt)
-        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
-        .assert()
-        .success();
-}
-
-/// Claim: a pass on an unwaived dirty tree cannot answer a clean failure at
-/// the head. Rejects a bypass that treats uncommitted fixes as committed.
-#[test]
-fn a_dirty_pass_cannot_clear_a_head_failure_for_bypass() {
-    a_non_green_pass_cannot_clear_failure_for_bypass(false);
-}
-
-/// Claim: a pass whose tree moved cannot answer a clean failure at the head.
-/// Rejects a bypass authorized by evidence for no single reproducible tree.
-#[test]
-fn a_tree_moved_pass_cannot_clear_a_head_failure_for_bypass() {
-    a_non_green_pass_cannot_clear_failure_for_bypass(true);
+    assert!(events(&repo, &repo.root, &id, "verification-recorded").is_empty());
 }

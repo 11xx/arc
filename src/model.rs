@@ -1853,14 +1853,8 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         landing: Option<String>,
     },
-    /// A gate judged not to need its run at one head, recorded in place of
-    /// running it.
-    ///
-    /// Only a gate whose declaration names `bypass` may be judged this way.
-    /// The event records who judged, at which head and tree, and why; it
-    /// records no command, exit code or duration, because nothing ran. It
-    /// satisfies that gate's integration requirement at that head alone,
-    /// while the gate still declares `bypass`, and is never a pass.
+    /// Historical judgement recorded in place of a gate run. It records who
+    /// judged, at which head and tree, and why, and satisfies no requirement.
     VerificationBypassed {
         gate: String,
         revision: String,
@@ -4348,9 +4342,7 @@ pub enum VerifyResult {
     /// does. Nothing ran, so it is neither a pass nor a failure.
     #[value(skip)]
     NotAdmitted,
-    /// A judgement stood in for a run: a gate that declares `bypass` was
-    /// judged not to need running at one head. It satisfies that gate's
-    /// integration requirement at that head and nothing else.
+    /// Historical judgement in place of a run; satisfies no gate requirement.
     #[value(skip)]
     Bypassed,
 }

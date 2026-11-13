@@ -1139,3 +1139,39 @@ fn candidate_timing_and_absence_survive_export_import() {
         assert_eq!(shown["candidates"][0]["evaluations"][0]["run_ms"], expected);
     }
 }
+
+/// Claim: candidate selection requires its own passing evaluation even when the
+/// destination carries bypass history. Rejects a bypass replacing a missing or
+/// failing candidate evaluation, or promoting the refused selection.
+#[test]
+fn retired_bypass_does_not_authorize_candidates() {
+    let f = fixture(None, &[], false);
+    let repo = &f.repo;
+    declare(
+        repo,
+        "[gates.build]\ncommand='false'\nbypass='documentation only'\n",
+        Some("never"),
+    );
+    crate::verification_outcomes::historical_bypass(repo, &repo.root, &f.change, "build");
+    let before = branch_head(repo, &f.change);
+    let missing = refused(&mut select(repo, &f.change, "alice", &target(repo), &[]));
+    assert!(missing.contains("no-evaluation"), "{missing}");
+    repo.arc(&repo.root)
+        .args(["candidate", "verify", "alice"])
+        .assert()
+        .code(1);
+    let evaluation = repository_events(repo, "candidate-verified").pop().unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let failed = refused(&mut select(
+        repo,
+        &f.change,
+        "alice",
+        &target(repo),
+        &[&evaluation],
+    ));
+    assert!(failed.contains("failed"), "{failed}");
+    assert_eq!(branch_head(repo, &f.change), before);
+    assert!(repository_events(repo, "candidate-selected").is_empty());
+}
