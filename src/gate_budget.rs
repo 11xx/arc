@@ -96,7 +96,7 @@ fn minimum(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 pub fn removal_error(gate: Option<&str>) -> String {
     match gate {
         Some(name) => format!("budget: gate {name} keeps its declaration but removes its budget; restore the budget or remove the gate"),
-        None => "budget: cannot remove [budget] total while budgeted gates remain; restore the total or remove every budgeted gate".into(),
+        None => "budget: cannot remove [budget] total while gates remain; restore the total or remove every gate".into(),
     }
 }
 

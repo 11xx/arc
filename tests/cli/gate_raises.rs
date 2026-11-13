@@ -1411,11 +1411,20 @@ fn removal_rules(route: &str, accepted: bool) {
         "remove-budget",
         "remove-total",
         "remove-table",
+        "rename-unbudgeted",
+        "publication-unbudgeted",
         "remove-all",
         "lower-gate",
         "lower-total",
     ] {
-        let allowed = !matches!(mode, "remove-budget" | "remove-total" | "remove-table");
+        let allowed = !matches!(
+            mode,
+            "remove-budget"
+                | "remove-total"
+                | "remove-table"
+                | "rename-unbudgeted"
+                | "publication-unbudgeted"
+        );
         if allowed != accepted {
             continue;
         }
@@ -1428,6 +1437,10 @@ fn removal_rules(route: &str, accepted: bool) {
             "remove-budget" => base.replace("budget='10000ms'\n", ""),
             "remove-total" => base.replace("total='20000ms'\n", ""),
             "remove-table" => base.replace("[budget]\ntotal='20000ms'\n", ""),
+            "rename-unbudgeted" => "[gates.renamed]\ncommand='true'\n".into(),
+            "publication-unbudgeted" => {
+                "[gates.release]\ncommand='true'\nevents=['publication']\n".into()
+            }
             "remove-all" => "[selection]\ninert=['.arc/']\n".into(),
             "lower-gate" => declaration(9000, 20000),
             _ => declaration(10000, 15000),
@@ -1439,7 +1452,7 @@ fn removal_rules(route: &str, accepted: bool) {
         let expected = if mode == "remove-budget" {
             "removes its budget; restore the budget or remove the gate"
         } else {
-            "cannot remove [budget] total while budgeted gates remain"
+            "cannot remove [budget] total while gates remain"
         };
         let status = json_stdout(repo.arc(&wt).args(["status", &id]));
         let errors = status["budget_errors"].as_array().unwrap();
@@ -1553,7 +1566,7 @@ fn removal_rules(route: &str, accepted: bool) {
     assert!(mismatches.is_empty(), "{route}: {mismatches:#?}");
 }
 
-/// Claim: removing gates, removing all budgeted gates with the table, and lowering
+/// Claim: removing gates, removing all gates with the table, and lowering
 /// bounds need no raise; the change still owes target gates. Rejects blocking
 /// these declaration diffs or dropping the target obligation before integration.
 #[test]
@@ -1561,7 +1574,7 @@ fn raise_removal_accepts_check_and_integrate() {
     removal_rules("integrate", true);
 }
 
-/// Claim: a kept gate cannot lose its budget and a retained budgeted suite cannot
+/// Claim: a kept gate cannot lose its budget and a retained or renamed suite cannot
 /// lose its total. Rejects accepting either removal or directing it to raise.
 #[test]
 fn raise_removal_refuses_check_and_integrate() {
@@ -1576,7 +1589,7 @@ fn raise_removal_accepts_land() {
 }
 
 /// Claim: landing refuses missing bounds on retained declarations with specific
-/// remedies. Rejects generic raise advice or a combined landing bypass.
+/// remedies, including renamed unbudgeted gates. Rejects generic raise advice or a combined landing bypass.
 #[test]
 fn raise_removal_refuses_land() {
     removal_rules("land", false);
@@ -1590,7 +1603,7 @@ fn raise_removal_accepts_candidates() {
 }
 
 /// Claim: candidate execution and selection refuse removing retained bounds.
-/// Rejects a candidate bypass or misleading raise-record diagnostics.
+/// including renamed unbudgeted gates. Rejects a candidate bypass or misleading raise-record diagnostics.
 #[test]
 fn raise_removal_refuses_candidates() {
     removal_rules("candidate", false);
@@ -1604,7 +1617,7 @@ fn raise_removal_accepts_publication() {
 }
 
 /// Claim: fresh and cached publication refuse losing retained bounds with specific
-/// remedies. Rejects a publication bypass or misleading raise-record diagnostics.
+/// remedies, including renamed unbudgeted gates. Rejects a publication bypass or misleading raise-record diagnostics.
 #[test]
 fn raise_removal_refuses_publication() {
     removal_rules("publication", false);

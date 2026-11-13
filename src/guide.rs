@@ -5692,9 +5692,9 @@ GATE RAISES
   Removing a gate is reviewed like any diff and needs no raise record. The
   change still owes the destination's gate under its destination budget.
   Keeping a gate while removing only its budget is refused; restore its budget
-  or remove the gate. Removing [budget] total or its table while budgeted gates
-  remain is refused; restore the total or remove every budgeted gate. Removing
-  every budgeted gate and the table together needs no raise. Lowering a gate
+  or remove the gate. Removing [budget] total or its table while any gate
+  remains is refused; restore the total or remove every gate. Removing
+  every gate and the table together needs no raise. Lowering a gate
   budget or the total needs no raise.
 
   The newest direct execution of that gate at the exact head must pass, be

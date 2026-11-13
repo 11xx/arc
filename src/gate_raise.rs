@@ -444,10 +444,7 @@ fn invalid_removals(target: &gates::GatesFile, own: &gates::GatesFile) -> BTreeS
         })
         .map(|(name, _)| Some(name.clone()))
         .collect::<BTreeSet<_>>();
-    if total(target).is_some()
-        && total(own).is_none()
-        && own.gates.values().any(|gate| gate.budget.is_some())
-    {
+    if total(target).is_some() && total(own).is_none() && !own.gates.is_empty() {
         removed.insert(None);
     }
     removed
