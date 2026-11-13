@@ -3289,6 +3289,19 @@ fn record_verifications(
         let result = item.result;
         let revision = item.revision.clone();
         let attested = item.attested;
+        let budget_marker = match item.timing.budget_at_run.as_ref() {
+            Some(budget)
+                if result == VerifyResult::Pass
+                    && budget.verdict == crate::gate_budget::BudgetVerdict::OverBudget =>
+            {
+                format!(
+                    " (over budget, ran {} of {})",
+                    crate::gate_budget::duration(budget.run_ms.expect("over-budget run")),
+                    crate::gate_budget::duration(budget.budget_ms.expect("declared budget"))
+                )
+            }
+            _ => String::new(),
+        };
         let captured_tree = item.tested_tree.clone();
         if let Some(budget) = item.timing.budget_at_run.as_ref().and_then(|b| b.budget_ms) {
             let mut recent = std::iter::once(item.timing.run_ms)
@@ -3451,7 +3464,7 @@ fn record_verifications(
             println!("gate: {gate} (declared by {declared_by})");
         }
         let marker = if attested { " (attested)" } else { "" };
-        println!("verification: {result:?}{marker} at {revision}");
+        println!("verification: {result:?}{marker}{budget_marker} at {revision}");
         if result == VerifyResult::NotAdmitted {
             if item.exit_code.is_none() && !attested {
                 println!("not admitted: exclusive admission expired before any check ran; rerun the gate");

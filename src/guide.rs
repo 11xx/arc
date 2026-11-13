@@ -5601,6 +5601,8 @@ GATES
   Every path that accepts gate evidence judges it against the budget in force:
   verify, status, integrate, accept, land, candidate selection and promotion,
   and publication.
+  A verify result line for a passing command over budget says `Pass (over
+  budget, ran ... of ...)`; the recorded command outcome remains a pass.
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.

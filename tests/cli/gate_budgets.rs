@@ -90,6 +90,38 @@ fn ordinary_budget_refusal_preserves_the_pass_and_requires_explicit_rerun() {
     verify(&repo, &wt, 10001, 1);
 }
 
+/// Claim: a passing command over budget labels its verification line with both
+/// run time and budget while retaining the raw pass. Rejects a success-looking
+/// line followed by a nonzero exit, including parallel preflight output.
+#[test]
+fn verification_explains_a_raw_pass_over_budget() {
+    for parallel in [false, true] {
+        let repo = Repo::new();
+        declare(&repo, "10s");
+        let (id, wt, _) = change_with_patchset(&repo, "over-budget-output");
+        let mut command = repo.arc(&wt);
+        command
+            .env("ARC_TEST_COMMAND_RUN_MS", "11300")
+            .args(["verify", "--all"]);
+        if parallel {
+            command.arg("--parallel");
+        }
+        let output = command.assert().code(1).get_output().clone();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("verification:"))
+            .unwrap();
+        assert!(
+            line.contains("Pass (over budget, ran 11.3s of 10s)"),
+            "success-looking line: {line}"
+        );
+        let raw = evidence(&repo, &wt, &id);
+        assert_eq!(raw["result"], "pass");
+        assert_eq!(raw["run_ms"], 11300);
+    }
+}
+
 /// Claim: reducing only a budget retains identity and the newest selected receipt;
 /// replay keeps delta reuse readable. Rejects identity drift, an older faster receipt,
 /// an implicit rerun, and reduction consulting the current budget during replay.
