@@ -5463,7 +5463,8 @@ GATES
   `unclaimed_paths` counts tracked paths outside inert exclusions that no
   explicit gate pattern names; a gate with no paths does not name a path.
   Unreadable changes are named, readable history is retained, and a partial
-  report exits 16. JSON is `arc-gates/1`.
+  report exits 16. JSON is `arc-gates/1`. Cost kinds, check timings and the
+  order of work are defined in `arc guide gate-costs`.
 
   `arc gates paths [--json]` lists every tracked path and its affected gates,
   including paths nobody names. It uses one `git ls-files` inventory and no
@@ -5486,8 +5487,8 @@ GATES
   declarations edited during measurement. It records no verification evidence.
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
   the applicable budget, its history sources, host observations and output
-  artifact. Investigate the slow checks, make them faster, remove checks worth
-  less, then use `arc gates raise` within this change's allowance.
+  artifact, cost kinds and slowest recorded checks, followed by the order of
+  work in `arc guide gate-costs`.
   `arc guide gate-raises` defines raising and its trusted counting rules.
 
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
@@ -5522,6 +5523,7 @@ GATES
     events = ["integration"]           omitted: integration and publication
     timeout = "10m"                     s, m, or h; omitted: no declared timeout
     budget = "2.5s"                     command wall limit for acceptance
+    timings = "checks.tsv"             optional observations; guide gate-costs
     paths = ["src/", "tests/"]           omitted or empty: every non-inert path
     exclusive = "host"                  host-wide lock name; omitted: no lock
     admission = "60s"                   lock wait limit; omitted: 60s
@@ -5683,6 +5685,90 @@ GATES
   publication checks every required gate on a changed tree. Reuse receipts
   retain the passing source tree, target tree, selector and declarations;
   they grant no result to another event or environment.
+
+GATE COSTS
+  `arc gates` in text and JSON and `arc gates over` diagnose command costs
+  from receipts. Indicators can overlap; they suggest what to measure and do
+  not establish a cause or alter gate acceptance. Time distributions use at
+  most the latest 20 executed runs matching the current command and declared
+  timeout, in the newest recorded environment. Medians use the lower middle.
+  Each measure reports its sample count. Missing fields are unmeasured:
+  legacy duration_ms never substitutes for command, CPU, wait or preparation.
+
+  Five cost kinds:
+  - waiting: paired wall/CPU medians have wall >= 100ms and wall >= twice CPU.
+    CPU is observed child user plus system time; I/O and sleeps can both wait.
+  - queueing: median wait_ms >= 100ms and >= 10% of median command wall time.
+  - duplication: executions on integrated changes divided by integrated changes
+    exceed one. The numerator matches the current command and timeout across
+    environments; the denominator is every readable integrated change in the
+    ledger, including changes answered entirely by reuse. Reuse, selection,
+    base passes, attestation and not-admitted attempts contribute no executions.
+    Changes without an execution still count in the denominator; no integrations is
+    unmeasured, not a zero-cost claim.
+  - preparation: median prepare_ms >= 100ms and >= 10% of median command wall.
+  - real-work: paired wall/CPU measurements exist and the waiting threshold
+    is not met. This is an indicator of command work, not proof of useful work.
+  Waiting/real-work needs paired fields; queueing and preparation need their
+  own field and wall. Absence never means zero.
+
+  The order of work, also printed by `arc gates over`:
+  1. Get the number first.
+  2. Measure serially.
+  3. Remove waste.
+  4. Rank checks by what they guard and cut from the bottom, never by cost alone.
+  5. Make what matters fit.
+  6. Lower concurrency until nothing fails.
+  7. Stop at a named floor.
+  8. Raise the budget last, within the change's allowance.
+
+  Levers, in order, are guidance arc states and does not automate:
+  1. Use an optimized binary for spawned tests.
+  2. Skip durability syscalls behind an explicit test-only switch.
+  3. Use cheaper fixtures.
+  4. Use events in place of sleeps.
+  5. Increase harness parallelism or remove a shared serialization point.
+  6. Call in process where no process is needed.
+  7. Split a suite into gates by area with `paths`.
+  8. Cut tests on evidence of what each has ever caught, ranked by what it guards.
+  Cost and failures inform review; they do not choose which check to remove.
+
+  A gate may declare timings = "checks.tsv". Its command writes the relative
+  file inside its worktree on each execution. Separate gates use separate files.
+  Arc never deletes it. A file unchanged since the attempt began is stale.
+  The file must be regular, with no final symlink and no parent outside the
+  worktree. Ignore generated timings in Git to keep execution evidence clean.
+  Missing or inaccessible files, stale files, and malformed or oversized input
+  produce an advisory receipt error, never a gate failure.
+
+  The UTF-8 line format is `arc-check-timings/1` on the first line, followed
+  by one check per line: name<TAB>milliseconds<TAB>pass|fail. Names are unique,
+  nonempty, at most 128 UTF-8 bytes, and contain no control characters.
+  Milliseconds are unsigned whole decimal integers. At least one check is
+  required. Outcomes describe observations; the command's exit status decides
+  the gate outcome. For example, with literal tab characters:
+
+    arc-check-timings/1
+    parse-config	12	pass
+    reject-corruption	230	fail
+
+  Input is bounded to 65,536 bytes and 512 check entries. An exceeded limit or
+  any malformed entry discards the whole file with an error. Each run keeps
+  at most 32 checks, failures first, then slowest within each outcome, with
+  name as the tie break. Its receipt names the number dropped. These optional
+  check_timings fields travel with command timing through replay and reuse;
+  absence stays absent and older receipts remain valid. The path stays outside
+  declaration identity and declaration-conflict checks: it observes a command
+  and changes nothing the command checks or what its existing evidence proves.
+
+  Reports aggregate direct executions of the current command and timeout in
+  the newest environment. They show the ten slowest retained check names by
+  median cost, participation count, and changes on which the check failed.
+  A check with no retained failure prints "never failed in N runs, costs M
+  seconds". N counts only runs retaining that check, not reuses or missing
+  observations. This is recorded history, not proof that a check caught nothing
+  or that it can be cut. Dropped checks and invalid or absent timings are
+  counted explicitly. Arc builds no result store, impact planner or diff judge.
 
 GATE RAISES
   `arc gates raise GATE --reason TEXT` records a proposed gate increase.
@@ -6055,6 +6141,7 @@ SCHEMAS
     `arc-import/1`                   arc import --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-landing-plan/1`             arc land --dry-run --json
+    `arc-check-timings/1`            optional gate timings file; guide gate-costs
     `arc-gate-delta/1`               gate selector stdin
     `arc-gate-selection/1`           gate selector stdout
     `arc-provisional-transition/2`   arc integrate --provisional --json
@@ -6559,6 +6646,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
     Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
     Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
+    Section { name: "gate-costs", family: "gates", title: "Cost diagnosis, check timings and the order of work", start: "GATE COSTS" },
     Section { name: "gate-raises", family: "gates", title: "Budget raises and trusted growth counting", start: "GATE RAISES" },
     Section { name: "base-passes", family: "base-passes", title: "Project adoption, baseline proofs and publication audits", start: "BASE PASSES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },

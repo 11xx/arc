@@ -166,6 +166,7 @@ pub fn publication(
             let (limit, origin) = gate.execution_limit()?;
             let run = super::gatekeeping::run_gate_budgeted(
                 &gate.command,
+                gate.timings.as_deref(),
                 &scratch.path,
                 limit.map(Duration::from_millis),
                 &store.root,

@@ -100,6 +100,7 @@ pub struct VerifyArgs {
 }
 
 struct VerificationInput {
+    timings: Option<String>,
     declaration: Option<String>,
     budget: Option<crate::gate_budget::BudgetJudgement>,
     exclusive: Option<crate::exclusive::Request>,
@@ -522,6 +523,7 @@ fn verify_with_landing(
             &store,
             &change_id,
             VerificationInput {
+                timings: None,
                 declaration: None,
                 budget: None,
                 exclusive: None,
@@ -688,6 +690,7 @@ fn verify_with_landing(
                 &store,
                 &change_id,
                 VerificationInput {
+                    timings: gate.timings.clone(),
                     budget: Some(gate.budget_judgement(None)),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
@@ -798,6 +801,7 @@ fn verify_with_landing(
         &store,
         &change_id,
         VerificationInput {
+            timings: profiled_gate.as_ref().and_then(|g| g.timings.clone()),
             declaration,
             budget,
             exclusive,
@@ -1261,6 +1265,7 @@ fn verify_against(
                 store,
                 change_id,
                 VerificationInput {
+                    timings: gate.timings.clone(),
                     budget: Some(gate.budget_judgement(None)),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
@@ -1399,6 +1404,7 @@ pub(crate) fn verify_landing_head(
             store,
             run.change_id,
             VerificationInput {
+                timings: gate.timings.clone(),
                 budget: Some(gate.budget_judgement(None)),
                 exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: 0,
@@ -2251,6 +2257,7 @@ fn verify_recorded(
                 &store,
                 &change_id,
                 VerificationInput {
+                    timings: gate.timings.clone(),
                     budget: Some(gate.budget_judgement(None)),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: 0,
@@ -2658,6 +2665,7 @@ fn verify_all_parallel(
         .into_iter()
         .enumerate()
         .map(|(index, (name, gate))| VerificationInput {
+            timings: gate.timings.clone(),
             budget: Some(gate.budget_judgement(None)),
             exclusive: crate::exclusive::Request::for_gate(gate),
             preparation_ms: if index == 0 { preparation_ms } else { 0 },
@@ -3111,6 +3119,7 @@ fn execute_verification(
     change_id: &str,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
+        timings,
         declaration,
         budget,
         exclusive,
@@ -3158,6 +3167,7 @@ fn execute_verification(
                 let started = std::time::Instant::now();
                 let observed = run_gate_budgeted(
                     &command,
+                    timings.as_deref(),
                     cwd,
                     execution_limit_ms.map(Duration::from_millis),
                     output_root,
@@ -3511,28 +3521,59 @@ impl GateRun {
 
 pub(super) fn run_gate_budgeted(
     cmd: &str,
+    timings: Option<&str>,
     cwd: &Path,
     timeout: Option<Duration>,
     output_root: &Path,
     producing_store: &str,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
 ) -> Result<GateRun> {
-    run_gate_with_capture(cmd, cwd, timeout, admission, || {
-        crate::verification_output::Capture::new(output_root, producing_store)
+    with_check_timings(timings, cwd, || {
+        run_gate_with_capture(cmd, cwd, timeout, admission, || {
+            crate::verification_output::Capture::new(output_root, producing_store)
+        })
     })
 }
 
 pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result<GateRun> {
     let request = crate::exclusive::Request::for_gate(gate);
-    run_gate_with_capture(
-        &gate.command,
-        cwd,
-        gate.execution_limit()?.0.map(Duration::from_millis),
-        request
-            .as_ref()
-            .map(|request| (request, "measurement", name)),
-        crate::verification_output::Capture::transient,
-    )
+    with_check_timings(gate.timings.as_deref(), cwd, || {
+        run_gate_with_capture(
+            &gate.command,
+            cwd,
+            gate.execution_limit()?.0.map(Duration::from_millis),
+            request
+                .as_ref()
+                .map(|request| (request, "measurement", name)),
+            crate::verification_output::Capture::transient,
+        )
+    })
+}
+
+fn with_check_timings(
+    timings: Option<&str>,
+    cwd: &Path,
+    run: impl FnOnce() -> Result<GateRun>,
+) -> Result<GateRun> {
+    let pending = timings.map(|name| crate::check_timings::Pending::begin(cwd, name));
+    let mut run = run()?;
+    if !run.admission_expired {
+        if let Some((pending, name)) = pending.zip(timings) {
+            let receipt = pending.finish(cwd, name);
+            if let Some(error) = &receipt.error {
+                eprintln!("check timings {name:?}: {error}; gate outcome is unchanged");
+            }
+            if receipt.dropped > 0 {
+                eprintln!(
+                    "check timings {name:?}: retained {} entries; dropped {}",
+                    receipt.checks.len(),
+                    receipt.dropped
+                );
+            }
+            run.timing.check_timings = Some(receipt);
+        }
+    }
+    Ok(run)
 }
 
 fn run_gate_with_capture(

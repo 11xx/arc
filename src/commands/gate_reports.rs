@@ -37,6 +37,8 @@ pub(super) struct GateRow {
     budget_timing: Distribution,
     last_over_budget: Option<OverRun>,
     history: History,
+    diagnosis: crate::gate_diagnostics::Diagnosis,
+    checks: crate::gate_diagnostics::Checks,
 }
 
 #[derive(Serialize)]
@@ -52,6 +54,7 @@ struct OverRun {
 
 #[derive(Serialize)]
 struct Declaration {
+    timings: Option<String>,
     paths: Vec<String>,
     inert: Vec<String>,
     command: String,
@@ -170,6 +173,7 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
             (profile, sum)
         })
         .collect();
+    let mut observations: BTreeMap<String, crate::gate_diagnostics::Observations> = BTreeMap::new();
     let mut budget_samples: BTreeMap<String, Vec<BudgetSample>> = BTreeMap::new();
     let mut rows: BTreeMap<_, _> = declared
         .gates
@@ -183,6 +187,7 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
             let row = GateRow {
                 name: name.clone(),
                 declaration: Declaration {
+                    timings: gate.timings,
                     paths: gate.paths,
                     inert: declared.selection.inert.clone(),
                     command: gate.command,
@@ -204,11 +209,14 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                 budget_timing: Distribution::default(),
                 last_over_budget: None,
                 history: History::default(),
+                diagnosis: Default::default(),
+                checks: Default::default(),
             };
             (name, (row, Vec::new(), 0))
         })
         .collect();
     let mut failures = Vec::new();
+    let mut integrated_changes = 0;
     if let Some(store) = store {
         let read = store.read()?;
         for id in read.change_ids()? {
@@ -222,6 +230,21 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                     continue;
                 }
             };
+            let integrated = events
+                .iter()
+                .chain(read.landings()?.derived_events(&id).iter())
+                .any(|e| {
+                    matches!(
+                        e.payload,
+                        Payload::ChangeIntegrated { .. }
+                            | Payload::IntegrationAsserted { .. }
+                            | Payload::ChangeClosed {
+                                outcome: crate::model::Closure::Integrated,
+                                ..
+                            }
+                    )
+                });
+            integrated_changes += usize::from(integrated);
             let mut failed_first = false;
             for event in events.iter() {
                 match &event.payload {
@@ -272,6 +295,13 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
                         if command == &row.declaration.command
                             && timeout_seconds == &row.declaration.timeout_seconds
                         {
+                            observations.entry(row.name.clone()).or_default().record(
+                                &id,
+                                integrated,
+                                event.created_at,
+                                environment.as_ref().map(|e| e.identity.clone()),
+                                timing,
+                            );
                             if let Some(ms) = timing.run_ms {
                                 budget_samples.entry(row.name.clone()).or_default().push((
                                     event.created_at,
@@ -330,6 +360,10 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
         .into_values()
         .map(|(mut row, mut samples, legacy)| {
             row.history.timing = Distribution::of(&mut samples, legacy);
+            (row.diagnosis, row.checks) = observations
+                .remove(&row.name)
+                .unwrap_or_default()
+                .summarize(integrated_changes);
             let mut observations = budget_samples.remove(&row.name).unwrap_or_default();
             observations.sort_by_key(|s| s.0);
             let environment = observations.last().and_then(|s| s.1.clone());
@@ -452,8 +486,14 @@ pub(super) fn render(report: &GateReport) {
             h.ever_failed,
             failure
         );
+        gate.diagnosis.render(&gate.name);
+        gate.checks.render();
         let d = &gate.declaration;
         println!("  command: {}", d.command);
+        println!(
+            "  timings: {}",
+            d.timings.as_deref().unwrap_or("undeclared")
+        );
         println!(
             "  paths: {}; inert: {}",
             if d.paths.is_empty() {
@@ -859,5 +899,22 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
     } else {
         println!("no over-budget run found");
     }
-    Ok(0)
+    let root = gitio::toplevel(&ctx.cwd)?;
+    let report = collect(&root, Some(&store))?;
+    for row in report
+        .gates
+        .iter()
+        .filter(|row| selected.is_none_or(|name| row.name == name))
+    {
+        row.diagnosis.render(&row.name);
+        row.checks.render();
+    }
+    println!("Order of work: get the number first; measure serially; remove waste; rank checks by what they guard and cut from the bottom, never by cost alone; make what matters fit; lower concurrency until nothing fails; stop at a named floor; raise the budget last. See arc guide gate-costs for the levers.");
+    for failure in &report.failures {
+        eprintln!(
+            "cannot read change {}: {}",
+            failure.change_id, failure.error
+        );
+    }
+    Ok(if report.failures.is_empty() { 0 } else { 16 })
 }

@@ -332,8 +332,9 @@ fn workspace_uses_own_ledgers_scope_and_registration_accounting() {
 }
 
 /// Claim: gate cost reports read imported and local verification history with one
-/// ledger observation and no change-state reduction. Rejects fetching and cloning
-/// the import batches for every change, or reducing states to read gate events.
+/// ledger observation, one repository read for completed landings, and no state
+/// reduction. Rejects ignoring landing outcomes, fetching import batches per
+/// change, or reducing states to read gate events.
 #[test]
 fn reports_hold_one_typed_ledger_read_without_reducing_states() {
     let source = declared("true");
@@ -367,11 +368,11 @@ fn reports_hold_one_typed_ledger_read_without_reducing_states() {
             0,
             "{args:?} fetched held import batches per change: {trace}"
         );
-        for key in [
-            "changes_reduced",
-            "scope_derivations",
-            "repository_materializations",
-        ] {
+        assert_eq!(
+            trace["counts"]["repository_materializations"], 1,
+            "{args:?}: {trace}"
+        );
+        for key in ["changes_reduced", "scope_derivations"] {
             assert_eq!(
                 trace["counts"][key].as_u64().unwrap_or(0),
                 0,
@@ -504,4 +505,194 @@ fn initialization_uses_complete_rounds_and_is_atomic() {
         .args(["gates", "init", "--runs", "0"])
         .assert()
         .code(2);
+}
+
+/// Claim: receipt diagnosis separates waiting, queueing, preparation and duplicate
+/// executions with numbers, and leaves absent fields unmeasured. Rejects treating
+/// reused evidence or legacy duration as observed command/CPU time, or excluding
+/// integrated changes that needed no execution from the duplication denominator.
+#[test]
+fn receipt_cost_kinds_and_missing_fields_are_explicit() {
+    let repo = declared("true");
+    let (id, wt, _) = change_with_patchset(&repo, "diagnose");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        v["run_ms"] = json!(1000);
+        v["cpu_user_ms"] = json!(80);
+        v["cpu_system_ms"] = json!(20);
+        v["wait_ms"] = json!(200);
+        v["prepare_ms"] = json!(150);
+    });
+    copy_event(&repo, &id, "verification-recorded", |v| {
+        v.as_object_mut().unwrap().remove("run_id");
+    });
+    copy_event(&repo, &id, "verification-recorded", |v| {
+        v["event_type"] = json!("change-closed");
+        v["outcome"] = json!("integrated");
+    });
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let diagnosis = &row(&report)["diagnosis"];
+    assert_eq!(
+        diagnosis["kinds"],
+        json!(["waiting", "queueing", "preparation", "duplication"])
+    );
+    assert_eq!(diagnosis["wall"]["median_ms"], 1000);
+    assert_eq!(diagnosis["cpu"]["median_ms"], 100);
+    assert_eq!(diagnosis["wait"]["median_ms"], 200);
+    assert_eq!(diagnosis["preparation"]["median_ms"], 150);
+    assert_eq!(diagnosis["runs_per_integrated_change"], 2.0);
+    let text = stdout(repo.arc(&wt).args(["gates", "over", &id, "--gate", "unit"]));
+    assert!(
+        text.contains("waiting, queueing, preparation, duplication") && text.contains("1000ms"),
+        "{text}"
+    );
+    assert!(text.contains("get the number first; measure serially; remove waste; rank checks by what they guard and cut from the bottom, never by cost alone; make what matters fit; lower concurrency until nothing fails; stop at a named floor; raise the budget last"), "{text}");
+    let (other_id, _, _) = change_with_patchset(&repo, "no-executions");
+    copy_event(&repo, &other_id, "patchset-added", |v| {
+        v["event_type"] = json!("change-closed");
+        v["outcome"] = json!("integrated");
+    });
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    assert_eq!(row(&report)["diagnosis"]["integrated_changes"], 2);
+    assert_eq!(row(&report)["diagnosis"]["runs_per_integrated_change"], 1.0);
+    for event in fs::read_dir(event_dir(&repo, &id)).unwrap() {
+        let path = event.unwrap().path();
+        let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if v["event_type"] != "verification-recorded" {
+            continue;
+        }
+        v["cpu_user_ms"] = json!(700);
+        v["cpu_system_ms"] = json!(300);
+        v["wait_ms"] = json!(99);
+        v["prepare_ms"] = json!(99);
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    }
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    assert_eq!(row(&report)["diagnosis"]["kinds"], json!(["real-work"]));
+    for event in fs::read_dir(event_dir(&repo, &id)).unwrap() {
+        let path = event.unwrap().path();
+        let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if v["event_type"] != "verification-recorded" {
+            continue;
+        }
+        for key in [
+            "run_ms",
+            "cpu_user_ms",
+            "cpu_system_ms",
+            "wait_ms",
+            "prepare_ms",
+        ] {
+            v.as_object_mut().unwrap().remove(key);
+        }
+        v["duration_ms"] = json!(99999);
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    }
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let diagnosis = &row(&report)["diagnosis"];
+    assert!(diagnosis["wall"]["median_ms"].is_null(), "{diagnosis}");
+    assert_eq!(
+        diagnosis["unmeasured"],
+        json!(["waiting/real-work", "queueing", "preparation"])
+    );
+}
+
+/// Claim: timings receipts preserve bounded per-check cost and failed-change history,
+/// and reuse contributes no extra observations. Rejects losing failures, counting
+/// reuses as check executions, or making an advisory timings path change identity.
+#[test]
+fn check_costs_and_catches_are_retained_without_changing_identity() {
+    let repo = Repo::new();
+    let command =
+        "printf 'arc-check-timings/1\\nfast\\t5\\tpass\\nslow\\t1200\\tfail\\n' > checks.tsv";
+    repo.redeclare_gates(&format!(
+        "[gates.unit]\ncommand={command:?}\ntimings='checks.tsv'\npaths=['src/']\n"
+    ));
+    repo.commit(
+        &repo.root,
+        ".gitignore",
+        "checks.tsv\n",
+        "test: ignore telemetry",
+    );
+    let (id, wt, _) = change_with_patchset(&repo, "checks");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let shown = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+    let checks = &shown["verifications"][0]["check_timings"];
+    assert_eq!(checks["checks"].as_array().unwrap().len(), 2, "{shown}");
+    assert_eq!(checks["checks"][0]["name"], "slow");
+    repo.declare_gates_locally(&format!(
+        "[gates.unit]\ncommand={command:?}\npaths=['src/']\ntimings='other.tsv'\n"
+    ));
+    repo.arc(&wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("skipped"));
+    repo.declare_gates_locally(&format!(
+        "[gates.unit]\ncommand={command:?}\npaths=['src/']\ntimings='checks.tsv'\n"
+    ));
+    let (other_id, other_wt, _) = change_with_patchset(&repo, "other-checks");
+    repo.arc(&other_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    rewrite_event(&repo, &other_id, "verification-recorded", |v| {
+        v["check_timings"]["checks"][0]["ms"] = json!(1400);
+        v["check_timings"]["checks"][0]["failed"] = json!(false);
+    });
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let costs = &report["gates"][0]["checks"];
+    assert_eq!(costs["measured_runs"], 2, "{report}");
+    assert_eq!(costs["slowest"][0]["median_ms"], 1200);
+    assert_eq!(costs["slowest"][0]["runs"], 2);
+    assert_eq!(costs["slowest"][0]["failed_on"], json!([id]));
+    let over = stdout(repo.arc(&wt).args(["gates", "over"]));
+    assert!(
+        over.contains("never failed in 2 runs, costs 0.005 seconds"),
+        "{over}"
+    );
+    assert!(
+        over.contains("failed on") && over.contains("1.200 seconds"),
+        "{over}"
+    );
+}
+
+/// Claim: malformed, missing, stale, nonregular, oversized and over-entry-limit
+/// files remain advisory, while compact receipts retain at most 32 checks and name
+/// drops. Rejects failing a passing gate, stale reuse or unbounded receipt storage.
+#[test]
+fn check_timings_are_bounded_fresh_and_advisory() {
+    let repo = Repo::new();
+    let command = "case $(cat mode) in missing) :;; malformed) printf 'arc-check-timings/1\\nbad' > checks.tsv;; oversized) head -c 65537 /dev/zero > checks.tsv;; entries) { printf 'arc-check-timings/1\\n'; seq 1 513 | while read n; do printf 'c%s\\t1\\tpass\\n' \"$n\"; done; } > checks.tsv;; capped) { printf 'arc-check-timings/1\\n'; seq 1 40 | while read n; do printf 'c%s\\t%s\\tpass\\n' \"$n\" \"$n\"; done; printf 'caught\\t1\\tfail\\n'; } > checks.tsv;; stale) :;; fifo) rm -f checks.tsv; mkfifo checks.tsv;; esac";
+    repo.redeclare_gates(&format!(
+        "[gates.unit]\ncommand={command:?}\ntimings='checks.tsv'\n"
+    ));
+    let (id, wt, _) = change_with_patchset(&repo, "bounded");
+    for mode in [
+        "missing",
+        "malformed",
+        "oversized",
+        "entries",
+        "capped",
+        "stale",
+        "fifo",
+    ] {
+        fs::write(wt.join("mode"), mode).unwrap();
+        repo.arc(&wt)
+            .args(["verify", "--all", "--rerun"])
+            .assert()
+            .success();
+        let shown = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+        let checks = &shown["verifications"].as_array().unwrap().last().unwrap()["check_timings"];
+        if mode == "capped" {
+            assert_eq!(checks["checks"].as_array().unwrap().len(), 32, "{checks}");
+            assert_eq!(checks["dropped"], 9);
+            assert_eq!(checks["checks"][0]["name"], "caught");
+        } else {
+            assert!(checks["error"].is_string(), "{mode}: {checks}");
+            assert!(
+                checks["checks"].as_array().unwrap().is_empty(),
+                "{mode}: {checks}"
+            );
+        }
+    }
 }

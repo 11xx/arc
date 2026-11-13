@@ -131,6 +131,8 @@ impl Coverage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Gate {
     pub command: String,
+    #[serde(default)]
+    pub timings: Option<String>,
     #[serde(default, deserialize_with = "crate::gate_budget::deserialize_ms")]
     pub budget: Option<u64>,
     #[serde(skip)]
@@ -651,6 +653,7 @@ impl Gate {
     /// declaration may require a lock; the shortest admission limit applies.
     fn absorb(&mut self, other: Gate) {
         self.absorb_budget(&other);
+        self.timings = other.timings.clone().or(self.timings.take());
         let left = self
             .admission
             .or_else(|| self.exclusive.as_ref().map(|_| Duration::from_secs(60)));

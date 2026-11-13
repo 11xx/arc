@@ -241,7 +241,7 @@ impl LedgerRead<'_> {
     }
 
     /// The landings the repository events record, gathered once per read.
-    fn landings(&self) -> Result<&crate::landing::Landings> {
+    pub(crate) fn landings(&self) -> Result<&crate::landing::Landings> {
         if let Some(held) = self.landings.get() {
             return Ok(held);
         }

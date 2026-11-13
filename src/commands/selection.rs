@@ -271,6 +271,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         let (limit, origin) = gate.execution_limit()?;
         let mut run = run_gate_budgeted(
             &gate.command,
+            gate.timings.as_deref(),
             &scratch.path,
             limit.map(std::time::Duration::from_millis),
             &store.root,

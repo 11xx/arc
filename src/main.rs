@@ -10,6 +10,7 @@ mod bundle;
 mod candidate;
 mod chain;
 mod changelog_render;
+mod check_timings;
 mod commands;
 mod config;
 mod context;
@@ -26,6 +27,7 @@ mod forge_observation;
 mod forge_round_trip;
 mod forge_view;
 mod gate_budget;
+mod gate_diagnostics;
 mod gate_raise;
 mod gates;
 mod gitio;
@@ -712,7 +714,7 @@ enum Cmd {
     /// Lists declarations (arc guide gates), with runs, exact-tree
     /// reuses and selector skips counted separately. Timings prefer run_ms; older
     /// duration_ms samples are identified and excluded from budget shares. Lists budgets,
-    /// totals and the latest over-budget run. Reads record
+    /// totals, the latest over-budget run and receipt cost kinds (arc guide gate-costs). Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
     Gates {
         /// Inspect coverage or measure commands without recording evidence
@@ -3999,7 +4001,7 @@ enum GatesCmd {
         #[arg(long, default_value = "6", value_parser = clap::value_parser!(u32).range(1..))]
         runs: u32,
     },
-    /// Show the newest measured over-budget run and its host observations
+    /// Show the newest over-budget run, cost kinds, checks and the order of work
     Over {
         /// Limit history to this change
         change: Option<String>,
@@ -4009,7 +4011,7 @@ enum GatesCmd {
     },
     /// Run declared gates sequentially on this tree without recording evidence
     ///
-    /// Prints each run's command wall and child CPU time and each gate's spread.
+    /// Prints command wall and child CPU time, spread, and physical/logical host cores.
     /// Wall far above CPU indicates waiting inside the command; spread indicates load sensitivity.
     /// Execution and admission follow arc guide gates. Runs every gate unless --gate selects one.
     /// Writes no ledger events or captured output files. Gate commands may write their
