@@ -94,10 +94,11 @@ fn fixture_commands_use_the_selected_executable() {
         .env("ARC_TEST_BIN", canary)
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success(),
-        "selected executable was bypassed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
+        output.status.success()
+            && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "selected executable was bypassed or the child ran no test: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
