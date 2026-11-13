@@ -354,6 +354,77 @@ fn tracked_inventory_exposes_coverage_and_unknown_paths() {
     assert_eq!(left["declaration"]["inert"], json!(["**/*.md"]));
 }
 
+/// Claim: path reports explain every mandatory full-coverage reason in text and
+/// JSON, overriding inert labels where necessary. Rejects unexplained all-gate
+/// rows, inert protected inputs, and attributing normal scoped paths to fallback.
+#[test]
+fn paths_explains_why_every_gate_is_affected() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[selection]\nbase_passes=true\ninert=['.arc/', 'scripts/', '**/*.md']\n[gates.left]\ncommand='sh scripts/check.sh'\nselector='python3 scripts/select.py'\nenvironment='sh scripts/probe.sh'\npaths=['left/']\n[gates.right]\ncommand='true'\npaths=['right/']\n");
+    let reasons = [
+        ("new.xyz", "unclaimed", "unnamed by any gate"),
+        ("left/risk.md", "dangerous", "matches a dangerous pattern"),
+        (".arc/check.sh", "protected-arc", "under protected .arc/"),
+        (
+            "scripts/check.sh",
+            "selection-input",
+            "named by a gate's command, selector or probe",
+        ),
+        (
+            "scripts/select.py",
+            "selection-input",
+            "named by a gate's command, selector or probe",
+        ),
+        (
+            "scripts/probe.sh",
+            "selection-input",
+            "named by a gate's command, selector or probe",
+        ),
+    ];
+    for file in reasons
+        .iter()
+        .map(|(file, _, _)| *file)
+        .chain(["left/known.rs", "notes.md"])
+    {
+        fs::create_dir_all(repo.root.join(file).parent().unwrap()).unwrap();
+        fs::write(repo.root.join(file), "fixture\n").unwrap();
+    }
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[danger]\npaths=['**/risk.md']\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-m", "test: path explanations"]);
+    let report = json_stdout(repo.arc(&repo.root).args(["gates", "paths", "--json"]));
+    let text = stdout(repo.arc(&repo.root).args(["gates", "paths"]));
+    let row = |name: &str| {
+        report["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["path"] == name)
+            .unwrap()
+    };
+    for (file, reason, explanation) in reasons {
+        assert_eq!(
+            row(file)["all_gates_reason"],
+            reason,
+            "missing reason for {file}"
+        );
+        assert_eq!(row(file)["gates"], json!(["left", "right"]));
+        assert_eq!(row(file)["inert"], false);
+        let prefix = format!("{file:?}:");
+        let line = text.lines().find(|line| line.starts_with(&prefix)).unwrap();
+        assert!(line.contains(explanation), "{line}");
+    }
+    assert!(row("left/known.rs")["all_gates_reason"].is_null());
+    assert_eq!(row("left/known.rs")["gates"], json!(["left"]));
+    assert!(row("notes.md")["all_gates_reason"].is_null());
+    assert_eq!(row("notes.md")["gates"], json!([]));
+    assert_eq!(row("notes.md")["inert"], true);
+}
+
 /// Claim: renaming a file checks the departed and arrived paths. Rejects a
 /// similarity-detected rename letting the gate covering the old path skip.
 #[test]

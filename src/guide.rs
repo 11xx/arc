@@ -5466,12 +5466,13 @@ GATES
   report exits 16. JSON is `arc-gates/1`. Cost kinds, check timings and the
   order of work are defined in `arc guide gate-costs`.
 
-  `arc gates paths [--json]` lists every tracked path and its affected gates,
-  including paths nobody names. It uses one `git ls-files` inventory and no
-  per-path commands or ledger reads. JSON is `arc-gate-paths/1`, with `paths`
-  rows (`path`, `gates`, `inert`, `unclaimed`) and `unclaimed_paths` names.
-  Paths beneath inert exclusions are excluded from the unclaimed count;
-  dangerous inert paths still affect every gate.
+  `arc gates paths [--json]` reports tracked paths, affected gates and why
+  coverage is mandatory, using one `git ls-files` with no ledger reads or
+  per-path commands. JSON `arc-gate-paths/1` has `paths` rows (`path`, `gates`,
+  `inert`, `unclaimed`, `all_gates_reason`) and `unclaimed_paths` names.
+  Reasons are `unclaimed`, `dangerous`, `protected-arc`, `selection-input`,
+  or null; protected inputs follow `arc guide base-passes`.
+  Inert paths are not unclaimed.
 
   Budget shares use at most the latest 20 command-time observations for the
   current command and declared timeout, in the newest observed environment.
@@ -5601,8 +5602,8 @@ GATES
   Every path that accepts gate evidence judges it against the budget in force:
   verify, status, integrate, accept, land, candidate selection and promotion,
   and publication.
-  A verify result line for a passing command over budget says `Pass (over
-  budget, ran ... of ...)`; the recorded command outcome remains a pass.
+  A passing verify line says `Pass (over budget, ran ... of ...)` when over
+  budget; its recorded outcome remains a pass.
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.

@@ -645,6 +645,7 @@ struct PathRow {
     gates: Vec<String>,
     inert: bool,
     unclaimed: bool,
+    all_gates_reason: Option<gates::AllGatesReason>,
 }
 
 #[derive(Serialize)]
@@ -667,10 +668,11 @@ pub fn gate_paths(ctx: &Ctx, json: bool) -> Result<i32> {
             .inert
             .iter()
             .any(|pattern| crate::policy::glob_match(pattern, &path));
-        let dangerous = declared
-            .dangerous
-            .iter()
-            .any(|pattern| crate::policy::glob_match(pattern, &path));
+        let all_gates_reason = declared
+            .gates
+            .values()
+            .next()
+            .and_then(|gate| gate.coverage.all_gates_reason(&path));
         let named = declared.gates.values().any(|gate| {
             gate.paths
                 .iter()
@@ -689,8 +691,9 @@ pub fn gate_paths(ctx: &Ctx, json: bool) -> Result<i32> {
         paths.push(PathRow {
             path,
             gates: affected,
-            inert: inert && !dangerous,
+            inert: inert && all_gates_reason.is_none(),
             unclaimed,
+            all_gates_reason,
         });
     }
     let report = PathsReport {
@@ -710,7 +713,9 @@ pub fn gate_paths(ctx: &Ctx, json: bool) -> Result<i32> {
                 } else {
                     row.gates.join(", ")
                 },
-                if row.unclaimed { " (nobody names)" } else { "" }
+                row.all_gates_reason
+                    .map(|reason| format!(" ({})", reason.description()))
+                    .unwrap_or_default()
             );
         }
         println!(

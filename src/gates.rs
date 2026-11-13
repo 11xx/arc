@@ -76,6 +76,26 @@ pub struct Coverage {
 
 pub const PATH_SELECTOR: &str = "arc:paths";
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AllGatesReason {
+    ProtectedArc,
+    SelectionInput,
+    Dangerous,
+    Unclaimed,
+}
+
+impl AllGatesReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ProtectedArc => "under protected .arc/",
+            Self::SelectionInput => "named by a gate's command, selector or probe",
+            Self::Dangerous => "matches a dangerous pattern",
+            Self::Unclaimed => "unnamed by any gate",
+        }
+    }
+}
+
 impl Coverage {
     pub fn is_inert(&self, path: &str) -> bool {
         self.inert
@@ -90,28 +110,35 @@ impl Coverage {
             .any(|pattern| crate::policy::glob_match(pattern, path))
     }
 
-    pub fn affects(&self, name: &str, path: &str) -> bool {
-        if self.base_passes
-            && (crate::base_pass::protected(path)
-                || self
-                    .selection_inputs
-                    .iter()
-                    .any(|command| command.contains(path)))
-        {
-            return true;
+    pub fn all_gates_reason(&self, path: &str) -> Option<AllGatesReason> {
+        if self.base_passes {
+            if crate::base_pass::protected(path) {
+                return Some(AllGatesReason::ProtectedArc);
+            }
+            if self
+                .selection_inputs
+                .iter()
+                .any(|command| command.contains(path))
+            {
+                return Some(AllGatesReason::SelectionInput);
+            }
         }
         if self
             .dangerous
             .iter()
             .any(|pattern| crate::policy::glob_match(pattern, path))
         {
+            return Some(AllGatesReason::Dangerous);
+        }
+        (!self.is_inert(path) && !self.is_named(path)).then_some(AllGatesReason::Unclaimed)
+    }
+
+    pub fn affects(&self, name: &str, path: &str) -> bool {
+        if self.all_gates_reason(path).is_some() {
             return true;
         }
         if self.is_inert(path) {
             return false;
-        }
-        if !self.is_named(path) {
-            return true;
         }
         self.gates.get(name).is_none_or(|patterns| {
             patterns.is_empty()
