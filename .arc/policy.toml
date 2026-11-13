@@ -82,6 +82,24 @@ paths = [
   "src/gitio/listing/tests.rs",
   "src/chain.rs",
   "src/commands/gatekeeping.rs",
+  # Budgets, raises, base passes and concurrent batches decide whether a
+  # passing run is green, and timing receipts are what a budget judges: a
+  # defect accepts a run that should have been refused, or answers a gate
+  # from an execution that does not cover the change.
+  "src/gate_budget.rs",
+  "src/gate_raise.rs",
+  "src/commands/gate_raise.rs",
+  "src/base_pass.rs",
+  "src/gate_concurrency.rs",
+  "src/commands/gatekeeping/together.rs",
+  "src/commands/gate_reports/concurrent.rs",
+  "src/verification_timing.rs",
+  # Host locks decide that two runs of a gate never overlap; a lock released
+  # early lets a pass stand that a concurrent run disturbed.
+  "src/exclusive.rs",
+  # Derives who wrote a patchset, which is what a reviewer's independence is
+  # judged against.
+  "src/commands/snapshot_attribution.rs",
   "src/commands/publication.rs",
   # Decides whether a merge is authorized and what it must ship.
   "src/integration.rs",
@@ -191,6 +209,14 @@ paths = [
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.
   "src/journal_exchange.rs",
+  # A rendered journal page is published and opened in a browser: the renderer
+  # must never emit active content, and the private-text scan decides what a
+  # published page may carry.
+  "src/journal/page.rs",
+  "src/journal/private_text.rs",
+  # A pin refuses archive and relocation of a standing reference and exempts
+  # it from archive sweeps; a defect moves an artifact its pin protects.
+  "src/journal/pins.rs",
   # Decides which ignored content counts as a disposable build artifact.
   # Integration cleanup removes a checkout on this recognition, so a
   # recognizer that over-matches deletes work nobody meant to discard.
@@ -251,6 +277,15 @@ acknowledged_safe = [
   "src/commands/stats.rs",
   "src/commands/timeline.rs",
   "src/commands/workspace.rs",
+  "src/commands/workspace/gates.rs",
+  "src/commands/workspace/watch.rs",
+  "src/feed.rs",
+  # Gate reports, cost diagnosis and recorded check timings describe runs and
+  # never judge one. `arc gates init` writes budgets into .arc/gates.toml,
+  # which is a dangerous path, so what it writes is reviewed as a diff.
+  "src/commands/gate_reports.rs",
+  "src/gate_diagnostics.rs",
+  "src/check_timings.rs",
   "src/context.rs",
   # `arc explain` projects one change's ledger and journal references; it
   # appends nothing and nothing reads its output to decide a merge.
@@ -260,6 +295,8 @@ acknowledged_safe = [
   # claims, lanes, and messages never gate, and the ledger stays authoritative.
   "src/commands/claims.rs",
   "src/commands/messaging.rs",
+  "src/intake.rs",
+  "src/journal/page.css",
   "src/commands/scaffold.rs",
   "src/commands/scaffolds/*.md",
   # Text `arc instructions git` prints. The checker that judges a message
