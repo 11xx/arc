@@ -4,4 +4,9 @@
 size = 4
 identity = "rustc -vV && cargo -V"
 retain = ["target"]
-warm = "cargo build --all-targets"
+# The warm build is the invariant gate's own build step, so a leased slot
+# starts with the artifacts the gate runs and the gate's budget pays only for
+# what the change edits. A slot is warmed again at the target after each
+# integration.
+warm = "cargo test --locked --profile dev --no-run"
+warm_after_integrate = true
