@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 pub const SCHEMA_VERSION: u32 = 7;
 
 /// The newest ledger format this build understands.
-pub const STORE_FORMAT: u32 = 10;
+pub const STORE_FORMAT: u32 = 11;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1860,7 +1860,7 @@ pub enum Payload {
         revision: String,
         tree: String,
         reason: String,
-        /// What the gate's `bypass` declaration said qualifies, when judged.
+        /// Historical qualification text recorded with the bypass.
         qualification: String,
     },
     VerificationReused {
@@ -2947,6 +2947,10 @@ pub enum DangerRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedGate {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub concurrent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4433,6 +4437,7 @@ pub struct PublicationGateResult {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationRunMode {
+    Declared,
     Sequential,
     Parallel,
 }

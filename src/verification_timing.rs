@@ -7,6 +7,12 @@ pub struct VerificationTiming {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_timings: Option<crate::check_timings::Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrent_batch: Option<crate::gate_concurrency::Receipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_limit_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_limit_origin: Option<String>,

@@ -939,7 +939,7 @@ fn standalone_import_requires_baseline_integration_authority() {
         .success();
     let original: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
     assert_eq!(
-        original["store_format"], 10,
+        original["store_format"], 11,
         "exports must fence pre-S6 importers"
     );
     let origin = original["repository_id"].as_str().unwrap();

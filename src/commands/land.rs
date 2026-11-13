@@ -299,12 +299,15 @@ struct PrerequisitePin {
 
 #[derive(Debug, Clone, Serialize)]
 struct BudgetConstraint {
+    concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
     budget_ms: Option<u64>,
     sources: Vec<crate::gate_budget::BudgetSource>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct GateUnion {
+    exclusive: Option<String>,
+    admission_ms: Option<u128>,
     identity: String,
     binds: &'static str,
     command: String,
@@ -815,16 +818,33 @@ fn plan(
                 }
                 Some(existing) => {
                     existing.required_by.push(member.change_id.clone());
-                    gate_declarations
+                    let combined = gate_declarations
                         .get_mut(name)
-                        .expect("a union gate has a declaration")
-                        .absorb_budget(&declared);
+                        .expect("a union gate has a declaration");
+                    if combined
+                        .exclusive
+                        .as_ref()
+                        .zip(declared.exclusive.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                    {
+                        return refuse(Blocker::GatesNotGreen.exit_code(), format!("gate {name:?} has conflicting exclusive locks across landing members"));
+                    }
+                    combined.absorb_budget(&declared);
+                    combined.absorb_admission(&declared);
+                    existing.exclusive = combined.exclusive.clone();
+                    existing.admission_ms = crate::exclusive::Request::for_gate(combined)
+                        .map(|request| request.admission.as_millis());
                 }
                 None => {
+                    let exclusive = declared.exclusive.clone();
+                    let admission_ms = crate::exclusive::Request::for_gate(&declared)
+                        .map(|request| request.admission.as_millis());
                     gate_declarations.insert(name.clone(), declared);
                     union.insert(
                         name.clone(),
                         GateUnion {
+                            exclusive,
+                            admission_ms,
                             identity: identity.clone(),
                             binds: if binds_tree { "tree" } else { "commit" },
                             command: command.clone(),
@@ -885,6 +905,7 @@ fn plan(
                     (
                         name.clone(),
                         BudgetConstraint {
+                            concurrent_acceptance: gate.concurrent_acceptance.clone(),
                             budget_ms: gate.budget_ms,
                             sources: gate.budget_sources.clone(),
                         },
@@ -901,20 +922,28 @@ fn plan(
         declarations_used.push(normalized);
     }
     // Every gate in the union runs in this attempt, whatever member profile
-    // required it. The strictest total bounds that complete sequential suite.
+    // required it. The strictest total bounds that complete suite.
     let combined = crate::gates::GatesFile {
         budget: budget_rules.clone(),
         gates: gate_declarations
             .iter()
-            .map(|(name, gate)| {
-                let mut gate = gate.clone();
-                gate.profiles.clear();
-                (name.clone(), gate)
-            })
+            .map(|(name, gate)| (name.clone(), gate.clone()))
             .collect(),
         ..Default::default()
     };
-    let errors = combined.budget_errors();
+    let mut errors = combined.budget_errors();
+    let required = combined.gates.iter().collect::<Vec<_>>();
+    if let Some(rules) = &combined.budget {
+        let cost = crate::gate_concurrency::total(&required);
+        match (cost, rules.total) {
+            (Some(cost), Some(total)) if cost > total => errors.push(format!(
+                "budget: integration sum {} exceeds total {} (combined landing suite)",
+                crate::gate_budget::duration(cost), crate::gate_budget::duration(total)
+            )),
+            (None, _) => errors.push("combined integration budget is unavailable; declare every budget and check for overflow".into()),
+            _ => {}
+        }
+    }
     if !errors.is_empty() {
         return refuse(
             Blocker::GatesNotGreen.exit_code(),

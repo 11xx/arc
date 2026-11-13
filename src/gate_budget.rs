@@ -198,6 +198,7 @@ impl GatesFile {
             errors
                 .push("budget raise set needs a fresh snapshot and review or recorded debt".into());
         }
+        errors.extend(crate::gate_concurrency::lock_errors(self.gates.iter()));
         let Some(rules) = &self.budget else {
             return errors;
         };
@@ -209,17 +210,20 @@ impl GatesFile {
             } else {
                 &profile
             };
-            let mut sum = Some(0_u64);
-            for (name, gate) in self.required_for(&profile) {
-                match gate.budget {
-                    None => errors.push(format!(
+            let required = self.required_for(&profile);
+            let sum = crate::gate_concurrency::total(&required);
+            let missing_budget = required.iter().any(|(_, gate)| gate.budget.is_none());
+            for (name, gate) in required {
+                if gate.budget.is_none() {
+                    errors.push(format!(
                         "budget: integration gate {name} needs a budget (profile {label})"
-                    )),
-                    Some(ms) => sum = sum.and_then(|sum| sum.checked_add(ms)),
+                    ));
                 }
             }
             match (sum, rules.total) {
-                (None, _) => errors.push(format!("budget sum overflow (profile {label})")),
+                (None, _) if !missing_budget => {
+                    errors.push(format!("budget sum overflow (profile {label})"))
+                }
                 (Some(sum), Some(total)) if sum > total => errors.push(format!(
                     "budget: integration sum {} exceeds total {} (profile {label}; {})",
                     duration(sum),

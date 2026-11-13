@@ -1,6 +1,7 @@
 //! Gate declarations beside observations from per-change verification events.
 
 use super::*;
+mod concurrent;
 use serde::Serialize;
 
 const GATES_SCHEMA: &str = "arc-gates/1";
@@ -31,6 +32,7 @@ pub(super) struct ReadFailure {
 pub(super) struct GateRow {
     pub(super) name: String,
     declaration: Declaration,
+    concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
     budget_ms: Option<u64>,
     budget_sources: Vec<crate::gate_budget::BudgetSource>,
     budget_share_percent: Option<f64>,
@@ -55,6 +57,7 @@ struct OverRun {
 #[derive(Serialize)]
 struct Declaration {
     timings: Option<String>,
+    concurrent: bool,
     paths: Vec<String>,
     inert: Vec<String>,
     command: String,
@@ -165,20 +168,14 @@ fn collect_declarations(
     let budget_declared = declared.has_budgets();
     let budget_rules = declared.budget.clone();
     let budget_errors = declared.budget_errors();
-    let integration_budget_sum_ms = declared
-        .required_for("")
-        .iter()
-        .try_fold(0_u64, |sum, (_, g)| sum.checked_add(g.budget?));
+    let integration_budget_sum_ms = crate::gate_concurrency::total(&declared.required_for(""));
     let profiles = std::iter::once(String::new())
         .chain(declared.gates.values().flat_map(|g| g.profiles.clone()))
         .collect::<std::collections::BTreeSet<_>>();
     let integration_budget_sums_ms = profiles
         .into_iter()
         .map(|profile| {
-            let sum = declared
-                .required_for(&profile)
-                .iter()
-                .try_fold(0_u64, |sum, (_, g)| sum.checked_add(g.budget?));
+            let sum = crate::gate_concurrency::total(&declared.required_for(&profile));
             (profile, sum)
         })
         .collect();
@@ -195,8 +192,10 @@ fn collect_declarations(
                 .map(|duration| duration.as_millis());
             let row = GateRow {
                 name: name.clone(),
+                concurrent_acceptance: gate.concurrent_acceptance.clone(),
                 declaration: Declaration {
                     timings: gate.timings,
+                    concurrent: gate.concurrent,
                     paths: gate.paths,
                     inert: declared.selection.inert.clone(),
                     command: gate.command,
@@ -455,6 +454,20 @@ pub(super) fn render(report: &GateReport) {
         "gate  runs  base-passes  reused  selected-out  median  p90  worst  ever-failed  last-failed-first"
     );
     for gate in &report.gates {
+        if gate.declaration.concurrent {
+            match &gate.concurrent_acceptance {
+                Some(acceptance) => {
+                    println!(
+                        "  concurrent: accepted {} at {} on host {}",
+                        acceptance.id, acceptance.measured_at, acceptance.host
+                    );
+                    for (name, declaration) in &acceptance.members {
+                        println!("    {name}: {}", crate::base_pass::digest(declaration));
+                    }
+                }
+                None => println!("  concurrent: not accepted on this store and host; runs alone"),
+            }
+        }
         let h = &gate.history;
         if let Some(budget) = gate.budget_ms {
             println!(
@@ -545,7 +558,15 @@ pub(super) fn render(report: &GateReport) {
     }
 }
 
-pub fn measure_gates(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i32> {
+pub fn measure_gates(
+    ctx: &Ctx,
+    runs: u32,
+    selected: Option<&str>,
+    concurrent: bool,
+) -> Result<i32> {
+    if concurrent {
+        return concurrent::measure(ctx, runs, selected);
+    }
     let host = crate::verification_timing::host_at_start();
     println!(
         "host cores: physical {}; logical {}",

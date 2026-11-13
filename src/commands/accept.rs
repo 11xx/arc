@@ -935,12 +935,24 @@ fn execute_acceptance(
         plan.checkout.clone(),
     ));
     let gates = ctx.declarations(&plan.state)?.gates;
-    for (name, _) in gates.required_for(&plan.state.profile) {
+    if gates
+        .required_for(&plan.state.profile)
+        .iter()
+        .any(|(_, gate)| gate.concurrent)
+    {
         operations.push((
-            format!("gate:{name}"),
-            command(["verify", &plan.state.change_id, "--gate", name, "--rerun"]),
+            "head-gates".into(),
+            command(["verify", &plan.state.change_id, "--all", "--rerun"]),
             plan.checkout.clone(),
         ));
+    } else {
+        for (name, _) in gates.required_for(&plan.state.profile) {
+            operations.push((
+                format!("gate:{name}"),
+                command(["verify", &plan.state.change_id, "--gate", name, "--rerun"]),
+                plan.checkout.clone(),
+            ));
+        }
     }
     let target_tree_needed = !gitio::is_ancestor(&ctx.cwd, &plan.target, &plan.head)?;
     if target_tree_needed {
@@ -1264,29 +1276,58 @@ fn execute_acceptance(
             event_ids: Vec::new(),
         });
     }
-    for (name, _) in gates.required_for(&plan.state.profile) {
+    if gates
+        .required_for(&plan.state.profile)
+        .iter()
+        .any(|(_, gate)| gate.concurrent)
+    {
         step(
             result,
             &run,
-            &format!("gate:{name}"),
-            command(["verify", &plan.state.change_id, "--gate", name, "--rerun"]),
+            "head-gates",
+            command(["verify", &plan.state.change_id, "--all", "--rerun"]),
             || {
                 revalidate(&run, plan, &prepared)?;
-                // Acceptance runs each local gate itself, so a pass already
-                // recorded never stands in for it.
-                let mut verify = verify_args();
-                verify.gate = Some(name.clone());
-                verify.rerun = true;
                 let before = event_ids(&plan.store, Some(&plan.state.change_id))?;
+                let mut verify = verify_args();
+                verify.all = true;
+                verify.rerun = true;
                 let code = gatekeeping::verify(&run, &plan.state.change_id, verify)?;
-                check_execution(&plan.store, &plan.state.change_id, &before, name)?;
+                for (name, _) in gates.required_for(&plan.state.profile) {
+                    check_execution(&plan.store, &plan.state.change_id, &before, name)?;
+                }
                 revalidate(&run, plan, &prepared)?;
                 if code != 0 {
-                    return refuse(5, format!("required local gate {name} failed; recorded evidence remains; run arc verify {} --gate {}", crate::context::shell_quote(&plan.state.change_id), crate::context::shell_quote(name)));
+                    return refuse(5, "required local gates failed; recorded evidence remains; run arc verify --all --rerun");
                 }
-                revalidate(&run, plan, &prepared)
+                Ok(())
             },
         )?;
+    } else {
+        for (name, _) in gates.required_for(&plan.state.profile) {
+            step(
+                result,
+                &run,
+                &format!("gate:{name}"),
+                command(["verify", &plan.state.change_id, "--gate", name, "--rerun"]),
+                || {
+                    revalidate(&run, plan, &prepared)?;
+                    // Acceptance runs each local gate itself, so a pass already
+                    // recorded never stands in for it.
+                    let mut verify = verify_args();
+                    verify.gate = Some(name.clone());
+                    verify.rerun = true;
+                    let before = event_ids(&plan.store, Some(&plan.state.change_id))?;
+                    let code = gatekeeping::verify(&run, &plan.state.change_id, verify)?;
+                    check_execution(&plan.store, &plan.state.change_id, &before, name)?;
+                    revalidate(&run, plan, &prepared)?;
+                    if code != 0 {
+                        return refuse(5, format!("required local gate {name} failed; recorded evidence remains; run arc verify {} --gate {}", crate::context::shell_quote(&plan.state.change_id), crate::context::shell_quote(name)));
+                    }
+                    revalidate(&run, plan, &prepared)
+                },
+            )?;
+        }
     }
     if target_tree_needed {
         step(

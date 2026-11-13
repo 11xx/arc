@@ -2100,3 +2100,40 @@ fn retired_bypass_does_not_authorize_accept() {
             && event["result"] == "fail"));
     assert_eq!(d.receiver.head(&d.receiver.root), before);
 }
+
+/// Claim: delivery acceptance forces a fresh execution of every required gate
+/// using its accepted batch. Rejects invoking consenting gates individually,
+/// reusing their earlier passes, or omitting per-gate observed receipts.
+#[test]
+fn accept_delivery_runs_fresh_accepted_concurrent_batch() {
+    let d = Delivery::new();
+    let file = d.receiver.root.join(".git/arc/operator-policy.toml");
+    let original = fs::read_to_string(&file).unwrap();
+    fs::write(&file, format!("{original}\n[gates.a]\ncommand='true'\nconcurrent=true\n[gates.b]\ncommand='true'\nconcurrent=true\n")).unwrap();
+    d.receiver
+        .arc(&d.receiver.root)
+        .args(["gates", "measure", "--concurrent"])
+        .assert()
+        .success();
+    let result = d.result(3);
+    assert_eq!(result["preparation_complete"], true);
+    assert!(
+        result["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["name"] == "head-gates"
+                && step["event_ids"].as_array().unwrap().len() >= 3),
+        "{result}"
+    );
+    let state = json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+    let entries = state["verifications"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{state}");
+    assert!(entries
+        .iter()
+        .all(|entry| entry["concurrent_batch"].is_object() && entry["result"] == "pass"));
+}

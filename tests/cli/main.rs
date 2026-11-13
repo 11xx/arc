@@ -63,6 +63,7 @@ mod gate_raises;
 mod gate_reports;
 mod gate_reuse;
 mod gate_tiers;
+mod gate_together;
 mod guide_topics;
 mod hooks;
 mod implementer_trailers;

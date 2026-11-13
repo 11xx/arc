@@ -133,7 +133,18 @@ pub fn gate_line(gate: &GateStatus) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{status}{base}{}", gate_declaration_suffix(gate))
+    let batch = gate
+        .timing
+        .concurrent_batch
+        .as_ref()
+        .map(|batch| {
+            format!(
+                " (concurrent batch {}; measurement {})",
+                batch.batch_id, batch.acceptance.id
+            )
+        })
+        .unwrap_or_default();
+    format!("{status}{base}{batch}{}", gate_declaration_suffix(gate))
 }
 
 /// Which declarations readiness evaluated, and where they disagree with the
@@ -901,6 +912,18 @@ pub fn markdown(
                 discrimination_suffix(g),
                 gate_declaration_suffix(g)
             );
+            if let Some(batch) = &g.timing.concurrent_batch {
+                let _ = writeln!(
+                    w,
+                    "  - concurrent batch {}; measurement {}",
+                    batch.batch_id, batch.acceptance.id
+                );
+                if g.batch_acceptance_missing {
+                    if let Some(reason) = g.not_green_reason() {
+                        let _ = writeln!(w, "  - {reason}");
+                    }
+                }
+            }
             if let Some(bypass) = &g.bypass {
                 let _ = writeln!(
                     w,
@@ -1071,6 +1094,13 @@ pub fn markdown(
                 },
                 v.hostname
             );
+            if let Some(batch) = &v.timing.concurrent_batch {
+                let _ = writeln!(
+                    w,
+                    "  - concurrent batch {}; measurement {} at {}",
+                    batch.batch_id, batch.acceptance.id, batch.acceptance.measured_at
+                );
+            }
             if let Some(base) = &v.base_pass {
                 let _ = writeln!(w, "  - base pass from {} at {}; execution {} at {}; changed paths {:?}; coverage {}", base.baseline_event_id, base.revision, base.execution_event_id, base.executed_at, base.changed_paths, base.declaration);
             }

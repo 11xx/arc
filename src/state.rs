@@ -1210,7 +1210,7 @@ pub struct VerificationEntry {
 pub struct BypassEntry {
     pub actor: String,
     pub reason: String,
-    /// What the gate's `bypass` declaration said qualifies, when judged.
+    /// Historical qualification text recorded with the bypass.
     pub qualification: String,
 }
 
@@ -1321,6 +1321,15 @@ impl VerificationEntry {
             None => false,
         };
         self.result == VerifyResult::Pass
+            && self.timing.concurrent_batch.as_ref().is_none_or(|batch| {
+                self.worktree_dirty == Some(false)
+                    && !self.attested
+                    && crate::gate_concurrency::receipt_matches(
+                        batch,
+                        self.gate.as_deref(),
+                        self.declaration.as_deref(),
+                    )
+            })
             && !self.tree_moved
             && (self.attested || (self.tested_tree.is_some() && dirt_excused))
     }
@@ -3657,6 +3666,20 @@ pub fn reduce_with_repository(
                 falsification_inferred,
                 ..
             } => {
+                if let Some(batch) = &timing.concurrent_batch {
+                    if batch.acceptance.producing_store != ev.repository_id
+                        || !crate::gate_concurrency::receipt_matches(
+                            batch,
+                            gate.as_deref(),
+                            declaration.as_deref(),
+                        )
+                    {
+                        bail!(
+                            "verification {} has invalid concurrent batch provenance",
+                            ev.event_id
+                        );
+                    }
+                }
                 state
                     .direct_executions
                     .insert(ev.event_id.clone(), *exit_code);

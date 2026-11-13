@@ -824,6 +824,8 @@ mod tests {
         BTreeMap::from([(
             "build".to_string(),
             NormalizedGate {
+                concurrent: false,
+                concurrent_acceptance: None,
                 coverage_identity: None,
                 paths: Vec::new(),
                 inert: Vec::new(),
@@ -1158,6 +1160,8 @@ mod tests {
         changed_gates.insert(
             "lint".to_string(),
             NormalizedGate {
+                concurrent: false,
+                concurrent_acceptance: None,
                 coverage_identity: None,
                 paths: Vec::new(),
                 inert: Vec::new(),

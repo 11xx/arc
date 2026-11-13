@@ -115,9 +115,10 @@ SAY WHO YOU ARE (before the first write)
   checkout when opening a store for a command that can record, including for
   repository-wide events with no change target. Queue integration opens it
   afresh before each member's preparation and landing. An unparseable append
-  policy refuses the command. These commands record nothing, in any form or flag:
+  policy refuses the command. Read-only command paths:
 {READ_ONLY_COMMANDS}
-  They read the ledger through a handle that never parses that policy,
+  `gates measure --concurrent` writes local acceptance under `arc guide gates-together`.
+  Read-only invocations read the ledger through a handle that never parses that policy,
   refuses any append, and leaves ledger files byte-identical. Entries name complete leaf paths. Output files,
   generated manuals, hook commands and writability probes retain their
   declared effects. Policy inspection parses the policy it reports.
@@ -1528,7 +1529,7 @@ RUN A CHANGE
   differences do not conflict in execution identity. The combined suite must
   satisfy the strictest total, even when each member's gate rows are green.
   Every gate in that suite counts once regardless of its requiring profile.
-  Gates run sequentially, so this total bounds their summed command budgets
+  `arc guide gates-together` defines batch scheduling and its total discount
   within one attempt; preparation, admission, replay and additional split
   attempts are outside that bound. Before authorization, every shared receipt
   is judged against every requiring member's budget. A budgeted gate refuses
@@ -5479,20 +5480,19 @@ GATES
   Legacy duration_ms samples remain in the named historical distribution and
   never enter budget shares. A median above 80% is labelled in the report.
 
-  `arc gates init [--runs N]` measures six serial rounds by default. Budgets
-  in .arc/gates.toml are worst run_ms plus spread (max minus min), at least
-  105% of worst, rounded up to two significant digits in whole milliseconds
-  (minimum 1ms). Total sums written budgets. It prints min, worst, spread,
-  written budget and rounds. Budget insertions preserve every other byte.
-  Operator-only gates are copied into the project; operator policy is untouched.
-  Existing budgets, failed or unmeasured rounds, or declaration edits during
-  measurement refuse without writing budgets. No verification evidence is recorded.
+  `arc gates init [--runs N]` measures six serial rounds by default. A budget
+  is worst run_ms plus spread (max minus min), at least 105% of worst, rounded
+  up to two significant digits (minimum 1ms). Total is their sum, with no
+  batch discount. Every other byte of .arc/gates.toml is kept. Operator-only
+  gates are copied into the project. Existing budgets, failed or unmeasured
+  rounds, or declaration edits during measurement refuse without writing.
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
   the applicable budget, its history sources, host observations and output
   artifact, cost kinds and slowest recorded checks, followed by the order of
   work in `arc guide gate-costs`.
   `arc guide gate-raises` defines raising and its trusted counting rules.
 
+  `arc gates measure --concurrent` accepts a batch under `arc guide gates-together`.
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
   this tree, five times by default, honoring timeouts. Each round follows the
   `exclusive` and `admission` contract below. It prints command wall and child
@@ -5527,6 +5527,7 @@ GATES
     budget = "2.5s"                     command wall limit for acceptance
     timings = "checks.tsv"             optional observations; guide gate-costs
     paths = ["src/", "tests/"]           omitted or empty: every non-inert path
+    concurrent = true                   measured batch; arc guide gates-together
     exclusive = "host"                  host-wide lock name; omitted: no lock
     admission = "60s"                   lock wait limit; omitted: 60s
     environment = "<probe command>"     evidence counts only where the probe
@@ -5542,8 +5543,8 @@ GATES
   units, including decimal forms such as 2.5s and 0.001s. Overflow and precision
   below a millisecond are refused. A [budget] table may declare total = "15s".
   Every required integration gate needs a budget when that table exists.
-  The total is the sum of all required gate budgets, without a concurrency
-  discount. The effective suite is validated after layering for every declared
+  `arc guide gates-together` defines the total's profile and batch accounting.
+  The effective suite is validated after layering for every declared
   profile and the unqualified case. A missing budget or excessive sum is a
   doctor finding and independently blocks check, accept, integrate and land, even
   when every gate row is green or the active profile requires no gate.
@@ -5776,6 +5777,76 @@ GATE COSTS
   observations. This is recorded history, not proof that a check caught nothing
   or that it can be cut. Dropped checks and invalid or absent timings are
   counted explicitly. Arc builds no result store, impact planner or diff judge.
+
+GATES TOGETHER
+  A gate declaring concurrent = true may share a batch with other consenting
+  gates. Required-set executions run standalone gates first in name order,
+  then the concurrent set. This includes verify --all, snapshot --verify,
+  done, acceptance, merged-tree verification and both landing forms. Every merged
+  declaration must consent; a stricter standalone declaration wins.
+  Duplicate exclusive lock names among concurrent gates are a declaration
+  error, even before measurement. Locks and admission remain per gate.
+  Landing members sharing a gate must require compatible locks; a lock named
+  by either member and their shortest admission bound apply to its execution.
+
+  `arc gates measure --concurrent` executes every declared concurrent gate
+  together five times on a clean tree, without recording verification evidence.
+  This invocation writes local acceptance and requires a writing identity.
+  At least two gates are required; --runs must be five and --gate is refused.
+  Every command must pass every round, with observed command time, and the
+  worktree and head must remain unchanged. It reports per-command wall, CPU,
+  wait and load, per-command spread, batch wall and physical/logical cores.
+  Budgets judge later verification receipts; measurement acceptance establishes
+  coexistence, not compliance with a budget. Measurement replaces the previous
+  local acceptance before running; a failed measurement leaves no acceptance.
+
+  Acceptance binds every member's complete structural declaration identity and
+  the exact concurrent membership, this store and this host's machine identity.
+  Budget, exclusive and admission values do not change structural identity.
+  Changing a structural identity or membership requires measurement again.
+  The private file under <ledger>/concurrent is local administration, excluded
+  from export and replica exchange. An unavailable host identity or unreadable
+  acceptance disables batching. `arc gates` shows consent, acceptance, date,
+  host and member identities. Acceptance is a measurement, not isolation:
+  ignored state and dependencies omitted from declarations remain assumptions.
+
+  Without exact current acceptance the concurrent gates execute alone in name
+  order and explain the missing measurement. A batch of one is standalone.
+  --gate NAME always runs alone. Reuse and paths selection happen first; if
+  they remove members, only an exactly accepted remaining set may run together.
+  Otherwise the remaining gates run alone. If their standalone budgets exceed
+  the total, execution refuses; --rerun can run the full accepted batch.
+  Verification runs name this scheduler as mode declared; individual batch
+  receipts identify actual concurrent execution. --rerun disables reuse but
+  never bypasses measurement. --parallel remains
+  the separate unqualified preflight probe with unknown cleanliness.
+
+  A batch pass is green only with a retained tested tree, a worktree observed
+  clean before the batch, unchanged worktree and head afterward, and current
+  local acceptance of the batch's identities. Dirty waivers cannot excuse a
+  batch. All members share those boundaries; each retains its own result,
+  command time, CPU, load, timeout, budget judgement, lock and admission wait.
+  Receipts name the acquired exclusive lock and its admission_ms limit.
+  One member's failure does not turn another's result into a failure.
+  status, check, show and explain identify the producing batch.
+
+  A direct clean batch execution may justify a gate raise under the usual
+  newest-execution rule. An eligible batch member may seed a base pass; its
+  witness retains the batch and measurement. Current acceptance is checked
+  before using that witness. Imported batch evidence stays factual and cannot
+  be green on a different store, even after that receiver measures its own
+  batch. A local standalone run or a new local accepted batch supplies evidence.
+  Publication and candidate verification execute their checks alone; publication
+  retains its full checks for gates participating in base passes.
+
+  Per integration profile, total adds standalone budgets and the maximum
+  concurrent budget only when that profile's complete concurrent set exactly
+  matches this store's current acceptance. Otherwise all budgets add. Total
+  raises' declaration_sum_ms uses this same cost across profiles. Authorization
+  snapshots bind consent and the complete local acceptance, so a changed or
+  removed measurement cannot inherit an earlier authorization. Historical
+  replay validates frozen receipts without consulting local measurements.
+  Store format 11 fences readers and writers without these batch semantics.
 
 GATE RAISES
   `arc gates raise GATE --reason TEXT` records a proposed gate increase.
@@ -6278,6 +6349,7 @@ SCHEMAS
   Internal:
     store format 9                   .git/arc/config.json and the change ledger
     store format 10                  base-pass baselines and reuse evidence
+    store format 11                  measured batches and their authorization
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization
@@ -6531,7 +6603,7 @@ GO DEEPER
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files
-  gates base-passes slots schemas boundaries
+  gates gates-together base-passes slots schemas boundaries
 "#;
 
 pub fn print() {
@@ -6654,6 +6726,8 @@ const SECTIONS: &[Section] = &[
     Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
     Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
     Section { name: "gate-costs", family: "gates", title: "Cost diagnosis, check timings and the order of work", start: "GATE COSTS" },
+
+    Section { name: "gates-together", family: "gates-together", title: "Measured concurrent batches and host-local acceptance", start: "GATES TOGETHER" },
     Section { name: "gate-raises", family: "gates", title: "Budget raises and trusted growth counting", start: "GATE RAISES" },
     Section { name: "base-passes", family: "base-passes", title: "Project adoption, baseline proofs and publication audits", start: "BASE PASSES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },

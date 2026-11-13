@@ -57,6 +57,8 @@ pub enum Discrimination {
 
 #[derive(Debug, Serialize)]
 pub struct GateStatus {
+    #[serde(skip_serializing_if = "is_false")]
+    pub batch_acceptance_missing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_pass: Option<crate::base_pass::Accounting>,
     pub budget: crate::gate_budget::BudgetJudgement,
@@ -278,6 +280,9 @@ impl GateStatus {
             return Some(
                 "recorded bypass is history and satisfies no gate requirement; run the gate".into(),
             );
+        }
+        if self.batch_acceptance_missing {
+            return Some("concurrent batch acceptance is not current on this store and host; run the gate alone or measure the current batch".into());
         }
         if let Some(reason) = self.budget.reason(
             &self.timing,
@@ -1801,6 +1806,12 @@ fn build_report(
         let budget = gate.budget_judgement(evidence.and_then(|e| e.timing.run_ms));
         let budget_ok = budget.accepted();
         gate_statuses.push(GateStatus {
+            batch_acceptance_missing: evidence.is_some_and(|entry| {
+                !crate::gate_concurrency::accepted_here(
+                    gate,
+                    entry.timing.concurrent_batch.as_ref(),
+                )
+            }),
             base_pass: evidence.and_then(|entry| entry.base_pass.clone()),
             budget,
             execution_host: evidence.map(|e| e.hostname.clone()),
@@ -2577,9 +2588,10 @@ pub fn matches_declaration(
     gate: &crate::gates::Gate,
 ) -> bool {
     evidence.declaration.as_ref().map_or_else(
-        || !gate.coverage.enabled(),
+        || !gate.coverage.enabled() && !gate.concurrent,
         |identity| identity == &crate::gates::declaration_identity(gate),
-    ) && evidence.command == gate.command
+    ) && crate::gate_concurrency::accepted_here(gate, evidence.timing.concurrent_batch.as_ref())
+        && evidence.command == gate.command
         && evidence.timeout_seconds == gate.timeout
         && evidence.delta.as_ref().is_none_or(|delta| {
             delta.declaration == crate::gates::declaration_identity(gate)

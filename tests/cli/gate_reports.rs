@@ -146,7 +146,8 @@ pub(super) fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 /// Claim: measurement executes exactly the requested rounds on the current tree,
 /// prints wall, CPU, physical/logical cores and spread, and leaves ledger and output artifacts untouched.
-/// Rejects recording verification evidence or measuring a different gate or tree.
+/// Rejects recording verification evidence, measuring a different gate or tree,
+/// or treating concurrent measurement as an unrecognized switch.
 #[test]
 fn measurement_is_transient_and_honors_selection_and_failures() {
     let repo = declared("test -f marker && printf x >> measured");
@@ -204,7 +205,8 @@ fn measurement_is_transient_and_honors_selection_and_failures() {
     repo.arc(&wt)
         .args(["gates", "measure", "--concurrent"])
         .assert()
-        .code(2);
+        .code(1)
+        .stderr(predicates::str::contains("at least two concurrent gates"));
 }
 
 /// Claim: declarations can be reported before a ledger exists and unreadable changes

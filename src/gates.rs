@@ -36,6 +36,8 @@ pub const BYPASS_RETIRED: &str = "--bypass is retired; make the gate fit its bud
 #[derive(Debug, Default, Deserialize)]
 pub struct GatesFile {
     #[serde(skip)]
+    pub concurrent_measurement: Option<crate::gate_concurrency::Acceptance>,
+    #[serde(skip)]
     pub invalid_budget_removals: BTreeSet<Option<String>>,
     #[serde(skip)]
     pub pending_raises: BTreeSet<Option<String>>,
@@ -157,6 +159,10 @@ impl Coverage {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Gate {
+    #[serde(default)]
+    pub concurrent: bool,
+    #[serde(skip)]
+    pub concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
     pub command: String,
     #[serde(default)]
     pub timings: Option<String>,
@@ -657,7 +663,11 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
     for gate in merged.gates.values_mut() {
         gate.coverage.inert = merged.selection.inert.clone();
     }
+    if merged.gates.values().any(|gate| gate.concurrent) {
+        merged.concurrent_measurement = crate::gate_concurrency::load(repo);
+    }
     merged.refresh_coverage();
+    merged.refresh_concurrency();
     Ok(merged)
 }
 
@@ -674,13 +684,8 @@ impl Gate {
                 || self.exclusive == other.exclusive)
     }
 
-    /// Fold another declaration of the same check into this one. Profiles
-    /// and events widen and the stricter timeout and budget win, so one declaration cannot loosen
-    /// a gate the other bounds. It binds to commits if either says so. Either
-    /// declaration may require a lock; the shortest admission limit applies.
-    fn absorb(&mut self, other: Gate) {
-        self.absorb_budget(&other);
-        self.timings = other.timings.clone().or(self.timings.take());
+    /// Fold compatible lock requirements and the shortest admission bound.
+    pub(crate) fn absorb_admission(&mut self, other: &Gate) {
         let left = self
             .admission
             .or_else(|| self.exclusive.as_ref().map(|_| Duration::from_secs(60)));
@@ -692,8 +697,19 @@ impl Gate {
             (left, right) => left.or(right),
         };
         if self.exclusive.is_none() {
-            self.exclusive = other.exclusive;
+            self.exclusive = other.exclusive.clone();
         }
+    }
+
+    /// Fold another declaration of the same check into this one. Profiles
+    /// and events widen and the stricter timeout and budget win, so one declaration cannot loosen
+    /// a gate the other bounds. It binds to commits if either says so. Either
+    /// declaration may require a lock; the shortest admission limit applies.
+    fn absorb(&mut self, other: Gate) {
+        self.concurrent &= other.concurrent;
+        self.absorb_budget(&other);
+        self.absorb_admission(&other);
+        self.timings = other.timings.clone().or(self.timings.take());
         self.bypass = self.bypass.take().or(other.bypass);
         if other.binds == Binding::Commit {
             self.binds = Binding::Commit;
@@ -763,6 +779,21 @@ impl GatesFile {
         }
     }
 
+    pub fn refresh_concurrency(&mut self) {
+        let accepted = self
+            .concurrent_measurement
+            .as_ref()
+            .filter(|acceptance| acceptance.matches(self.gates.iter()))
+            .cloned();
+        for gate in self.gates.values_mut() {
+            gate.concurrent_acceptance = if gate.concurrent {
+                accepted.clone()
+            } else {
+                None
+            };
+        }
+    }
+
     /// Add what a change's own declarations require on top of this set, the
     /// target's. A gate the change adds is owed. A gate the target already
     /// declares stays the target's check: the change can widen its profiles
@@ -775,6 +806,9 @@ impl GatesFile {
         target_label: &str,
         change_label: &str,
     ) -> Vec<GateDivergence> {
+        if self.concurrent_measurement.is_none() {
+            self.concurrent_measurement = own.concurrent_measurement;
+        }
         crate::gate_budget::merge_rules(&mut self.budget, own.budget);
         let mut divergences = Vec::new();
         for (name, gate) in own.gates {
@@ -796,10 +830,15 @@ impl GatesFile {
         }
         self.set_danger(self.dangerous.clone());
         self.refresh_coverage();
+        self.refresh_concurrency();
         divergences
     }
 
     pub fn ensure_unconflicted(&self) -> Result<()> {
+        let errors = crate::gate_concurrency::lock_errors(self.gates.iter());
+        if !errors.is_empty() {
+            bail!("{}", errors.join("; "));
+        }
         if self.conflicts.is_empty() {
             return Ok(());
         }
@@ -854,6 +893,9 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
         "profiles": gate.profiles, "events": gate.events,
         "timeout": gate.timeout, "selector": gate.selector,
     });
+    if gate.concurrent {
+        value["concurrent"] = serde_json::json!(true);
+    }
     if gate.coverage.enabled() {
         value["paths"] = serde_json::json!(gate.paths);
         value["coverage"] = serde_json::json!(gate.coverage);
@@ -866,7 +908,8 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
 
 /// Retain structural identity for coverage and budget-raise execution proofs.
 pub fn coverage_identity(gate: &Gate) -> Option<String> {
-    (gate.coverage.enabled() || gate.budget.is_some()).then(|| declaration_identity(gate))
+    (gate.concurrent || gate.coverage.enabled() || gate.budget.is_some())
+        .then(|| declaration_identity(gate))
 }
 
 /// Read both sides of renames once for each source and destination tree pair.

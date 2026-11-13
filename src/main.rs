@@ -27,6 +27,7 @@ mod forge_observation;
 mod forge_round_trip;
 mod forge_view;
 mod gate_budget;
+mod gate_concurrency;
 mod gate_diagnostics;
 mod gate_raise;
 mod gates;
@@ -3996,6 +3997,9 @@ enum GatesCmd {
         json: bool,
     },
     /// Write budgets with headroom from serial rounds; see `arc guide gates`
+    ///
+    /// Prints each gate's min, worst, spread and written budget. Operator policy
+    /// is untouched and no verification evidence is recorded.
     Init {
         /// Number of measured rounds, greater than zero
         #[arg(long, default_value = "6", value_parser = clap::value_parser!(u32).range(1..))]
@@ -4009,15 +4013,19 @@ enum GatesCmd {
         #[arg(long, value_name = "G")]
         gate: Option<String>,
     },
-    /// Run declared gates sequentially on this tree without recording evidence
+    /// Measure declared gates; accept a concurrent batch after five successful rounds
     ///
     /// Prints command wall and child CPU time, spread, and physical/logical host cores.
     /// Wall far above CPU indicates waiting inside the command; spread indicates load sensitivity.
     /// Execution and admission follow arc guide gates. Runs every gate unless --gate selects one.
+    /// --concurrent follows arc guide gates-together and records local acceptance.
     /// Writes no ledger events or captured output files. Gate commands may write their
     /// own build outputs. Exits 1 if any run fails or is not measured.
     Measure {
-        /// Number of runs per gate, greater than zero
+        /// Measure the complete concurrent set five times and record host-local acceptance
+        #[arg(long, conflicts_with = "gate")]
+        concurrent: bool,
+        /// Number of runs per gate; concurrent acceptance requires five
         #[arg(long, default_value = "5", value_parser = clap::value_parser!(u32).range(1..))]
         runs: u32,
         /// Measure only this declared gate
@@ -6260,7 +6268,12 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
     refuse_change_role_values(&matches)?;
     let path = command_path(&matches);
     perf::command(&path);
-    let reads_only = commands::READ_ONLY_COMMANDS.contains(&path.as_str());
+    let concurrent_measurement = matches
+        .subcommand_matches("gates")
+        .and_then(|gates| gates.subcommand_matches("measure"))
+        .is_some_and(|measure| measure.get_flag("concurrent"));
+    let reads_only =
+        commands::READ_ONLY_COMMANDS.contains(&path.as_str()) && !concurrent_measurement;
     if reads_only && commands::SHARED_READ_COMMANDS.contains(&path.as_str()) {
         store::share_reads();
     }
@@ -6860,9 +6873,13 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 anyhow::ensure!(!json, "gates over does not accept --json");
                 commands::over_budgets(&ctx, change.as_deref(), gate.as_deref())
             }
-            Some(GatesCmd::Measure { runs, gate }) => {
+            Some(GatesCmd::Measure {
+                runs,
+                gate,
+                concurrent,
+            }) => {
                 anyhow::ensure!(!json, "gates measure does not accept --json");
-                commands::measure_gates(&ctx, runs, gate.as_deref())
+                commands::measure_gates(&ctx, runs, gate.as_deref(), concurrent)
             }
         },
         Cmd::Stats {

@@ -2195,6 +2195,11 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn adopt_concurrency(&self) -> Result<()> {
+        self.refuse_read_only()?;
+        self.stamp_format(Some(11))
+    }
+
     pub(crate) fn adopt_base_passes(&self) -> Result<()> {
         self.refuse_read_only()?;
         self.stamp_format(Some(10))
@@ -2206,6 +2211,9 @@ impl Store {
     }
 
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
+        if crate::gate_concurrency::payload_uses_concurrency(payload) {
+            self.adopt_concurrency()?;
+        }
         if crate::gate_budget::budgeted_payload(payload) {
             self.adopt_budgets()?;
         }
@@ -2306,6 +2314,9 @@ impl Store {
     /// share their classification with typed records.
     #[cfg(test)]
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
+        if value.is_some_and(has_concurrent_semantics) {
+            self.adopt_concurrency()?;
+        }
         if value.is_some_and(has_base_pass_semantics) {
             self.adopt_base_passes()?;
         }
@@ -3443,6 +3454,14 @@ impl Store {
         {
             self.advance_event_id(newest)?;
         }
+        if batch
+            .events
+            .iter()
+            .chain(&batch.repository_events)
+            .any(has_concurrent_semantics)
+        {
+            self.stamp_format_locked(11)?;
+        }
         let dir = self.root.join("imports");
         create_private_dir_all(&dir).map_err(|error| crate::model::OperationFailure {
             published: false,
@@ -3578,6 +3597,24 @@ fn authorization_has_no_verdict(
 /// as open, then closing it a second way. Refusing is the only honest answer,
 /// and it has to hold on every path that opens a store, not just the one that
 /// creates it.
+fn has_concurrent_semantics(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            (map.get("event_type").and_then(|value| value.as_str())
+                == Some("verification-run-started")
+                && map.get("mode").and_then(|value| value.as_str()) == Some("declared"))
+                || map.iter().any(|(key, value)| {
+                    (matches!(key.as_str(), "concurrent_batch" | "concurrent_acceptance")
+                        && !value.is_null())
+                        || (key == "concurrent" && value == true)
+                        || has_concurrent_semantics(value)
+                })
+        }
+        serde_json::Value::Array(values) => values.iter().any(has_concurrent_semantics),
+        _ => false,
+    }
+}
+
 fn has_base_pass_semantics(value: &serde_json::Value) -> bool {
     matches!(
         value["event_type"].as_str(),
@@ -4690,6 +4727,40 @@ mod tests {
 #[cfg(test)]
 mod budget_format_tests {
     use super::*;
+
+    /// Claim: batch adoption and imported batch fields fence readers and stale
+    /// writers through format 10. Rejects a pre-batch binary accepting receipts
+    /// or authorization whose safety depends on measured concurrency.
+    #[test]
+    fn concurrency_adoption_fences_pre_batch_readers_and_importers() {
+        for imported in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(
+                root.path().join("config.json"),
+                serde_json::to_vec(&StoreConfig {
+                    schema_version: 10,
+                    repository_id: "fixture".into(),
+                    created_at: chrono::Utc::now(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let store = Store::open_at(root.path()).unwrap().unwrap();
+            let stale = Store::open_at(root.path()).unwrap().unwrap();
+            if imported {
+                store.stamp_format_for_value(Some(&serde_json::json!({"authorization": {"gates": {"a": {"concurrent": true}}}}))).unwrap();
+            } else {
+                store.adopt_concurrency().unwrap();
+            }
+            let _lock = stale.lock_format().unwrap();
+            let config: StoreConfig =
+                serde_json::from_slice(&fs::read(root.path().join("config.json")).unwrap())
+                    .unwrap();
+            assert_eq!(config.schema_version, 11);
+            assert!(ensure_readable_format_at(config.schema_version, 10).is_err());
+            assert!(ensure_readable_format_at(config.schema_version, 11).is_ok());
+        }
+    }
 
     /// Claim: base-pass adoption fences all pre-S6 readers, including a writer
     /// opened before adoption when it rechecks its format under the write lock.

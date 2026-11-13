@@ -273,6 +273,18 @@ impl Baseline {
                 || execution.attested
                 || execution.timed_out
                 || execution.tree_moved
+                || execution
+                    .timing
+                    .concurrent_batch
+                    .as_ref()
+                    .is_some_and(|batch| {
+                        batch.acceptance.producing_store != execution.repository_id
+                            || !crate::gate_concurrency::receipt_matches(
+                                batch,
+                                execution.gate.as_deref(),
+                                execution.declaration.as_deref(),
+                            )
+                    })
                 || execution.worktree_dirty != Some(false)
                 || execution.timing.run_ms.is_none()
                 || !crate::gate_budget::judge(entry.budget_ms, &[], execution.timing.run_ms)
@@ -517,7 +529,10 @@ pub fn select(
         return None;
     }
     let entry = source.baseline.gates.get(name)?;
-    if entry.identity != gates::declaration_identity(gate)
+    if !crate::gate_concurrency::accepted_here(
+        gate,
+        entry.execution.timing.concurrent_batch.as_ref(),
+    ) || entry.identity != gates::declaration_identity(gate)
         || !gate
             .budget_judgement(entry.execution.timing.run_ms)
             .accepted()
@@ -629,6 +644,7 @@ pub fn record(
             continue;
         };
         if declaration.as_deref() != Some(gates::declaration_identity(gate).as_str())
+            || !crate::gate_concurrency::accepted_here(gate, timing.concurrent_batch.as_ref())
             || !gate.budget_judgement(timing.run_ms).accepted()
         {
             continue;

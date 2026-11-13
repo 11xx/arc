@@ -1085,7 +1085,7 @@ fn reports_over_many_changes_read_past_a_broken_policy() {
     repo.arc(&repo.root).args(["inbox"]).assert().success();
 }
 
-/// The guide's read-only list is the contract: every command on it, in each
+/// Claim: the guide's read-only list is the contract: every command on it, in each
 /// form that reads something different, runs from a target checkout whose
 /// committed policy cannot be parsed. Rejects an inspection blocked by append policy.
 /// A command added to the list without a
@@ -1143,7 +1143,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     let guide = crate::common::instruction_topics(&repo, &["identity-events"]);
     let listed: std::collections::BTreeSet<String> = guide
         .lines()
-        .skip_while(|line| !line.ends_with("These commands record nothing, in any form or flag:"))
+        .skip_while(|line| !line.ends_with("Read-only command paths:"))
         .skip(1)
         .take_while(|line| line.starts_with("    "))
         .flat_map(|line| line.trim().split("  ").map(str::to_string))

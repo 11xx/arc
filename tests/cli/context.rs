@@ -699,7 +699,7 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
 }
 
 /// Claim: ambiguous native identity remains unresolved through events and transport,
-/// whose reader capability is format 10. Rejects invented model attribution,
+/// whose reader capability is format 11. Rejects invented model attribution,
 /// changing the ordinary event envelope, or understating the bundle's reader fence.
 #[test]
 fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
@@ -757,7 +757,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
         .success();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     assert_eq!(exported["schema"], "arc-bundle/6", "{exported}");
-    assert_eq!(exported["store_format"], 10, "{exported}");
+    assert_eq!(exported["store_format"], 11, "{exported}");
 
     let recipient = Repo::new();
     deliver_git_objects(&repo, &recipient);

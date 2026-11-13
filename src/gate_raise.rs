@@ -600,12 +600,7 @@ pub fn propose(
                 .collect::<BTreeSet<_>>();
             let max = profiles
                 .iter()
-                .map(|p| {
-                    suite
-                        .required_for(p)
-                        .iter()
-                        .try_fold(0_u64, |sum, (_, g)| sum.checked_add(g.budget?))
-                })
+                .map(|p| crate::gate_concurrency::total(&suite.required_for(p)))
                 .collect::<Option<Vec<_>>>()
                 .context("total raise needs budgets on the complete integration suite")?
                 .into_iter()

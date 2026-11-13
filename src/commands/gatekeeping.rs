@@ -5,6 +5,7 @@
 //! evidence is appended afterward in deterministic gate-name order.
 
 use super::*;
+mod together;
 use crate::integration::{
     self, Decision, IntegrationFacts, IntegrationPlan, Refusal, TargetCheckout,
 };
@@ -601,7 +602,7 @@ fn verify_with_landing(
         let mode = if parallel {
             VerificationRunMode::Parallel
         } else {
-            VerificationRunMode::Sequential
+            together::mode(&required)
         };
         let run_id = start_verification_run_for_event(
             run_ctx, &store, &change_id, &head, mode, reuse, &required, event,
@@ -683,12 +684,8 @@ fn verify_with_landing(
                 landing,
             );
         }
-        let mut passed = reused.len() - budget_refused;
-        for (name, gate) in to_run {
-            let result = record_verification(
-                run_ctx,
-                &store,
-                &change_id,
+        let passed = reused.len() - budget_refused
+            + together::run_required(run_ctx, &store, &change_id, to_run, |name, gate| {
                 VerificationInput {
                     timings: gate.timings.clone(),
                     budget: Some(gate.budget_judgement(None)),
@@ -710,12 +707,8 @@ fn verify_with_landing(
                     falsification: None,
                     against_target: None,
                     landing: landing.clone(),
-                },
-            )?;
-            if result == 0 {
-                passed += 1;
-            }
-        }
+                }
+            })?;
         println!("gates: {passed}/{total} pass");
         return Ok(if passed == total { 0 } else { 1 });
     }
@@ -732,6 +725,15 @@ fn verify_with_landing(
     } = declared_check(ctx, &st, gate.as_deref(), command)?;
     if adopt_budget_format {
         store.adopt_budgets()?;
+    }
+    if ctx
+        .declarations(&st)?
+        .gates
+        .gates
+        .values()
+        .any(|gate| gate.concurrent)
+    {
+        store.adopt_concurrency()?;
     }
     let preparing = Instant::now();
     if !attest {
@@ -1142,7 +1144,7 @@ fn verify_against(
         store,
         change_id,
         &synthesized,
-        VerificationRunMode::Sequential,
+        together::mode(&required),
         reuse,
         &required,
         event,
@@ -1260,38 +1262,29 @@ fn verify_against(
         let scratch_ctx = scratch_ctx
             .as_ref()
             .context("a gate is left to run but its checkout was not created")?;
-        for (name, gate) in to_run {
-            let code = record_verification(
-                scratch_ctx,
-                store,
-                change_id,
-                VerificationInput {
-                    timings: gate.timings.clone(),
-                    budget: Some(gate.budget_judgement(None)),
-                    exclusive: crate::exclusive::Request::for_gate(gate),
-                    preparation_ms: std::mem::take(&mut preparation_ms),
-                    run_id: Some(run_id.clone()),
-                    probe: None,
-                    gate: Some(name.clone()),
-                    command: gate.command.clone(),
-                    timeout_seconds: gate.timeout,
-                    declaration: gates::coverage_identity(gate),
-                    attested_result: None,
-                    tested_revision: Some(synthesized.clone()),
-                    execution_host: None,
-                    runner: None,
-                    environment_identity: declared_environment(&environments, gate)
-                        .map(str::to_owned),
-                    note: note.clone(),
-                    falsification: None,
-                    against_target: Some(target_head.clone()),
-                    landing: None,
-                },
-            )?;
-            if code == 0 {
-                passed += 1;
+        passed += together::run_required(scratch_ctx, store, change_id, to_run, |name, gate| {
+            VerificationInput {
+                timings: gate.timings.clone(),
+                budget: Some(gate.budget_judgement(None)),
+                exclusive: crate::exclusive::Request::for_gate(gate),
+                preparation_ms: std::mem::take(&mut preparation_ms),
+                run_id: Some(run_id.clone()),
+                probe: None,
+                gate: Some(name.clone()),
+                command: gate.command.clone(),
+                timeout_seconds: gate.timeout,
+                declaration: gates::coverage_identity(gate),
+                attested_result: None,
+                tested_revision: Some(synthesized.clone()),
+                execution_host: None,
+                runner: None,
+                environment_identity: declared_environment(&environments, gate).map(str::to_owned),
+                note: note.clone(),
+                falsification: None,
+                against_target: Some(target_head.clone()),
+                landing: None,
             }
-        }
+        })?;
     }
     println!("gates: {passed}/{total} pass at the merged tree");
     Ok(if passed == total { 0 } else { 1 })
@@ -1341,7 +1334,7 @@ pub(crate) fn verify_landing_head(
         store,
         run.change_id,
         run.commit,
-        VerificationRunMode::Sequential,
+        together::mode(&required),
         true,
         &required,
         event,
@@ -1398,12 +1391,9 @@ pub(crate) fn verify_landing_head(
         run.tree,
         &delta_reuses,
     )?;
-    let mut failed = budget_refused;
-    for (name, gate) in to_run {
-        let code = record_verification(
-            &checkout_ctx,
-            store,
-            run.change_id,
+    let to_run_count = to_run.len();
+    let passed =
+        together::run_required(&checkout_ctx, store, run.change_id, to_run, |name, gate| {
             VerificationInput {
                 timings: gate.timings.clone(),
                 budget: Some(gate.budget_judgement(None)),
@@ -1424,12 +1414,9 @@ pub(crate) fn verify_landing_head(
                 falsification: None,
                 against_target: None,
                 landing: Some(run.attempt.to_string()),
-            },
-        )?;
-        if code != 0 {
-            failed += 1;
-        }
-    }
+            }
+        })?;
+    let failed = budget_refused + to_run_count - passed;
     let state = store.state(run.change_id)?;
     let legacy_trees = status::legacy_evidence_trees(&state, &ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
@@ -3198,6 +3185,10 @@ fn execute_verification(
             }
         };
     if !attested {
+        timing.exclusive = exclusive.as_ref().map(|request| request.name.clone());
+        timing.admission_ms = exclusive
+            .as_ref()
+            .map(|request| request.admission.as_millis() as u64);
         timing.execution_limit_ms = execution_limit_ms;
         timing.execution_limit_origin = origin;
     }
@@ -5573,6 +5564,8 @@ pub(super) fn normalized_declarations(
             (
                 name.clone(),
                 crate::model::NormalizedGate {
+                    concurrent: gate.concurrent,
+                    concurrent_acceptance: gate.concurrent_acceptance.clone(),
                     coverage_identity: gates::coverage_identity(gate),
                     paths: gate.paths.clone(),
                     inert: gate.coverage.inert.clone(),
@@ -6583,7 +6576,11 @@ fn check(
         print!("{}", render::blocker_explanation(&st, &report));
     }
     if !explain {
-        for gate in report.gates.iter().filter(|gate| gate.base_pass.is_some()) {
+        for gate in report
+            .gates
+            .iter()
+            .filter(|gate| gate.base_pass.is_some() || gate.timing.concurrent_batch.is_some())
+        {
             println!("gate {}: {}", gate.name, render::gate_line(gate));
         }
     }
