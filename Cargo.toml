@@ -45,9 +45,15 @@ tempfile = "3"
 lto = true
 strip = true
 
-# Development builds, test harnesses and spawned fixtures share one profile.
+# Development builds, test harnesses and spawned fixtures share one profile, so
+# the crate compiles once for all of them. The crate itself is unoptimized,
+# which keeps an incremental rebuild after a source edit short; dependencies
+# are optimized once and stay cached.
 [profile.dev]
-opt-level = 1
+opt-level = 0
 debug = 0
 debug-assertions = true
 overflow-checks = true
+
+[profile.dev.package."*"]
+opt-level = 2
