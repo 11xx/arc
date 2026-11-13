@@ -740,6 +740,56 @@ fn initial_budget_ms(min: u64, worst: u64) -> Result<u64> {
     u64::try_from(budget.div_ceil(quantum) * quantum).context("gate budget overflow")
 }
 
+/// Insert a field into its closest explicitly written table without rendering
+/// any existing text. Source spans also cover multiline values and dotted keys.
+fn budget_insertion(
+    document: &toml_edit::ImDocument<&str>,
+    path: &[&str],
+    value: &str,
+    newline: &str,
+) -> Result<(usize, String)> {
+    let source = document.raw();
+    for depth in (0..path.len()).rev() {
+        let Some(parent) = path[..depth]
+            .iter()
+            .try_fold(document.as_item(), |item, key| item.get(*key))
+        else {
+            continue;
+        };
+        let key = path[depth..]
+            .iter()
+            .map(|key| toml_edit::Key::new(*key).to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(table) = parent.as_inline_table() {
+            let end = table
+                .span()
+                .context("inline table source span unavailable")?
+                .end;
+            let separator = if table.is_empty() { "" } else { ", " };
+            return Ok((end - 1, format!("{separator}{key} = {value}")));
+        }
+        if let Some(table) = parent.as_table().filter(|table| !table.is_dotted()) {
+            if let Some(span) = table.span() {
+                let offset = if span.end == 0 {
+                    0
+                } else {
+                    source[span.end..]
+                        .find('\n')
+                        .map_or(source.len(), |n| span.end + n + 1)
+                };
+                let separator = if offset > 0 && !source[..offset].ends_with('\n') {
+                    newline
+                } else {
+                    ""
+                };
+                return Ok((offset, format!("{separator}{key} = {value}{newline}")));
+            }
+        }
+    }
+    bail!("gate declaration has no writable table")
+}
+
 pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
     anyhow::ensure!(runs > 0, "measurement rounds must be positive");
     let root = gitio::toplevel(&ctx.cwd)?;
@@ -754,24 +804,14 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
         "refusing to replace an existing budget"
     );
     anyhow::ensure!(!declared.gates.is_empty(), "no gates declared");
-    let mut document: toml::Value = toml::from_str(original.as_deref().unwrap_or(""))?;
-    let operator: toml::Value = toml::from_str(operator_text.as_deref().unwrap_or(""))?;
-    let tables = document
-        .as_table_mut()
-        .context("gate declaration must be a table")?
-        .entry("gates")
-        .or_insert_with(|| toml::Value::Table(Default::default()))
-        .as_table_mut()
-        .context("gates must be a table")?;
-    for name in declared.gates.keys() {
-        if !tables.contains_key(name) {
-            let gate = operator
-                .get("gates")
-                .and_then(|g| g.get(name))
-                .context("operator gate declaration unavailable")?;
-            tables.insert(name.clone(), gate.clone());
-        }
-    }
+    let source = original.as_deref().unwrap_or("");
+    let document = toml_edit::ImDocument::parse(source)?;
+    let operator: toml_edit::DocumentMut = operator_text.as_deref().unwrap_or("").parse()?;
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let mut measurements: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for round in 1..=runs {
         for (name, gate) in &declared.gates {
@@ -790,6 +830,7 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
         }
     }
     let mut total = 0_u64;
+    let mut insertions = Vec::new();
     for (name, mut samples) in measurements {
         samples.sort_unstable();
         let min = samples[0];
@@ -798,36 +839,53 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
         total = total
             .checked_add(measured)
             .context("budget total overflow")?;
-        let table = document
-            .get_mut("gates")
-            .and_then(|g| g.get_mut(&name))
-            .and_then(toml::Value::as_table_mut)
-            .context("gate declaration unavailable")?;
-        table.insert(
-            "budget".into(),
-            toml::Value::String(format!("{measured}ms")),
-        );
+        let value = toml_edit::Value::from(format!("{measured}ms"));
+        if document.get("gates").and_then(|g| g.get(&name)).is_some() {
+            insertions.push(budget_insertion(
+                &document,
+                &["gates", &name, "budget"],
+                &value.to_string(),
+                newline,
+            )?);
+        } else {
+            let mut gate = operator
+                .get("gates")
+                .and_then(|g| g.get(&name))
+                .context("operator gate declaration unavailable")?
+                .clone()
+                .into_value()
+                .map_err(|_| anyhow::anyhow!("operator gate must be a table"))?;
+            gate.as_inline_table_mut()
+                .context("operator gate must be a table")?
+                .insert("budget", value);
+            insertions.push(budget_insertion(
+                &document,
+                &["gates", &name],
+                &gate.to_string(),
+                newline,
+            )?);
+        }
         println!(
             "gate {name}: budget {} from {runs} rounds; min {min}ms, worst {max}ms, spread {}ms",
             crate::gate_budget::duration(measured),
             max - min
         );
     }
-    document
-        .as_table_mut()
-        .context("gate declaration must be a table")?
-        .insert(
-            "budget".into(),
-            toml::Value::Table(toml::map::Map::from_iter([(
-                "total".into(),
-                toml::Value::String(format!("{total}ms")),
-            )])),
-        );
+    let mut text = source.to_owned();
+    insertions.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
+    for (offset, insertion) in insertions {
+        text.insert_str(offset, &insertion);
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push_str(newline);
+    }
+    text.push_str(&format!("[budget]{newline}total = \"{total}ms\"{newline}"));
+    let _: gates::GatesFile = toml::from_str(&text)
+        .context("invalid initialized gate declarations; no budgets written")?;
     anyhow::ensure!(
         declaration_text(&file)? == original && declaration_text(&operator_file)? == operator_text,
         "gate declaration changed during measurement"
     );
-    let text = toml::to_string_pretty(&document)?;
     use std::os::unix::fs::PermissionsExt;
     let mode = match std::fs::metadata(&file) {
         Ok(meta) => FileMode::Keep(meta.permissions().mode()),

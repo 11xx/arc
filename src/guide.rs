@@ -5482,7 +5482,7 @@ GATES
   in .arc/gates.toml are worst run_ms plus spread (max minus min), at least
   105% of worst, rounded up to two significant digits in whole milliseconds
   (minimum 1ms). Total sums written budgets. It prints min, worst, spread,
-  written budget and rounds.
+  written budget and rounds. Budget insertions preserve every other byte.
   Operator-only gates are copied into the project; operator policy is untouched.
   Existing budgets, failed or unmeasured rounds, or declaration edits during
   measurement refuse without writing budgets. No verification evidence is recorded.

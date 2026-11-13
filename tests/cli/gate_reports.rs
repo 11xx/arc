@@ -536,6 +536,81 @@ fn initialization_single_round_has_rounded_headroom() {
     }
 }
 
+/// Claim: init inserts budgets while preserving every existing byte, including
+/// comments, ordering, spacing and line endings. Rejects reserialization of the
+/// author's declaration or mistaking table-like text in a command for a header.
+#[test]
+fn initialization_preserves_the_authored_declaration() {
+    for newline in ["\n", "\r\n"] {
+        let repo = Repo::new();
+        let original = "# project checks\n[gates.zeta] # first on purpose\npaths  = [ 'src/',\n  'tests/', ] # coverage\ncommand = '''true\n# [budget] is command text\n''' # shell\n\n# keep this with alpha\n[gates.'alpha.dot']\nevents = ['publication'] # release\ncommand='true' # fast\n\n[selection] # keep last\ninert = [ '**/*.md' ]\n# end\n".replace('\n', newline);
+        repo.redeclare_gates(&original);
+        let text = stdout(
+            repo.arc(&repo.root)
+                .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+                .args(["gates", "init", "--runs", "1"]),
+        );
+        let written = fs::read_to_string(repo.root.join(".arc/gates.toml")).unwrap();
+        let expected = original
+            .replace(
+                &format!("''' # shell{newline}"),
+                &format!("''' # shell{newline}budget = \"1100ms\"{newline}"),
+            )
+            .replace(
+                &format!("command='true' # fast{newline}"),
+                &format!("command='true' # fast{newline}budget = \"1100ms\"{newline}"),
+            )
+            + &format!("[budget]{newline}total = \"2200ms\"{newline}");
+        assert_eq!(written, expected, "init rewrote authored bytes");
+        assert!(text.contains("budget total: 2.2s"), "{text}");
+        assert!(!repo.root.join(".git/arc/config.json").exists());
+    }
+}
+
+/// Claim: inline and dotted gate declarations receive budgets without changing
+/// their existing text, even at EOF. Rejects rewriting valid TOML layouts or
+/// inserting a budget into the wrong table.
+#[test]
+fn initialization_preserves_inline_and_dotted_layouts() {
+    for (original, insertion, expected) in [
+        (
+            "gates = { unit = {command='true'} } # inline",
+            ", budget = \"1100ms\"",
+            "gates = { unit = {command='true', budget = \"1100ms\"} } # inline",
+        ),
+        (
+            "gates.'unit.dot'.command = 'true' # dotted\n",
+            "gates.\"unit.dot\".budget = \"1100ms\"\n",
+            "gates.'unit.dot'.command = 'true' # dotted\ngates.\"unit.dot\".budget = \"1100ms\"\n",
+        ),
+        (
+            "[gates]\nunit.command='true' # dotted\n",
+            "unit.budget = \"1100ms\"\n",
+            "[gates]\nunit.command='true' # dotted\nunit.budget = \"1100ms\"\n",
+        ),
+        (
+            "[gates.unit]\ncommand='true' # EOF",
+            "\nbudget = \"1100ms\"\n",
+            "[gates.unit]\ncommand='true' # EOF\nbudget = \"1100ms\"\n",
+        ),
+    ] {
+        let repo = Repo::new();
+        repo.redeclare_gates(original);
+        repo.arc(&repo.root)
+            .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+            .args(["gates", "init", "--runs", "1"])
+            .assert()
+            .success();
+        let written = fs::read_to_string(repo.root.join(".arc/gates.toml")).unwrap();
+        let end = if expected.ends_with('\n') { "" } else { "\n" };
+        assert_eq!(
+            written,
+            format!("{expected}{end}[budget]\ntotal = \"1100ms\"\n"),
+            "insertion {insertion:?}"
+        );
+    }
+}
+
 /// Claim: receipt diagnosis separates waiting, queueing, preparation and duplicate
 /// executions with numbers, and leaves absent fields unmeasured. Rejects treating
 /// reused evidence or legacy duration as observed command/CPU time, or excluding
