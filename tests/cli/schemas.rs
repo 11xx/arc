@@ -7,9 +7,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Every `…SCHEMA: &str = "…"` in the crate, as constant name and value. The
-/// source is scanned rather than a list kept here, so a constant added or
-/// bumped is covered without anyone remembering to say so twice.
 /// A floor on the schema constants found, so a scan that stopped matching
 /// fails rather than passing over an empty set.
 const MINIMUM_SCHEMAS: usize = 10;
@@ -46,6 +43,9 @@ fn every_schema_constant_is_registered_in_the_guide() {
     );
 }
 
+/// Every `…SCHEMA: &str = "…"` in the crate, as constant name and value. The
+/// source is scanned rather than a list kept here, so a constant added or
+/// bumped is covered without anyone remembering to say so twice.
 fn schema_constants() -> Vec<(String, String)> {
     let mut found = Vec::new();
     let mut sources = Vec::new();
