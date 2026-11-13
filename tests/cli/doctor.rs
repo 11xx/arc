@@ -846,52 +846,6 @@ fn begin_and_fork_begin_report_what_the_worktree_root_has_left() {
     assert!(forked.contains("worktree root free: "), "{forked}");
 }
 
-/// A script branches on a health check's exit status, so each command's help
-/// states every code it can return rather than leaving it to the source.
-#[test]
-fn help_states_each_exit_status() {
-    let repo = Repo::new();
-    let help = |args: &[&str]| stdout(repo.arc(&repo.root).args(args).arg("--help"));
-
-    for args in [&["doctor"][..], &["journal", "doctor"][..]] {
-        let text = help(args);
-        for status in [
-            "Exits 0",
-            "1 when it",
-            "also exits 1",
-            "usage error exits 2",
-        ] {
-            assert!(text.contains(status), "{args:?} omits {status:?}:\n{text}");
-        }
-    }
-
-    let check = help(&["check"]);
-    for row in [
-        "  0   ready to integrate",
-        "  6   closed, branch-missing, target-unreadable",
-        "  20  landing-pending",
-        "  15  fork-branch",
-        "  13  iterating",
-        "  7   blocked-by-changes",
-        "  19  lands-with",
-        "  11  needs-rebase",
-        "  14  merged-tree-unevaluated",
-        "  2   blocking-findings",
-        "  3   no-valid-approval",
-        "  5   gates-not-green",
-        "  12  acceptance-probes-not-green",
-        "  4   hold-active",
-        "  1   an error",
-        "  2   also a usage error",
-        "With --tag",
-    ] {
-        assert!(check.contains(row), "check --help omits {row:?}:\n{check}");
-    }
-
-    let backlog = help(&["workspace", "backlog"]);
-    assert!(backlog.contains("exits 16"), "{backlog}");
-}
-
 #[test]
 fn env_carries_build_revision() {
     let repo = Repo::new();

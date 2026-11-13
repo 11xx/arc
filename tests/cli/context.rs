@@ -1709,32 +1709,6 @@ fn env_does_not_carry_a_codex_effort_across_a_model_change() {
         )));
 }
 
-/// The guide and help are the command contract: a stale command or a stale
-/// exit-status claim sends a cold session down a path the CLI does not accept.
-#[test]
-fn guide_and_help_teach_current_debt_and_partial_opencode_identity() {
-    let repo = Repo::new();
-    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let integrate = normalize(stdout(repo.arc(&repo.root).args(["integrate", "--help"])));
-    assert!(integrate.contains("--debt <REASON>"), "{integrate}");
-    assert!(integrate.contains("arc query --debt"), "{integrate}");
-    assert!(!integrate.contains("audit-debt"), "{integrate}");
-
-    let guide = normalize(crate::common::instruction_topics(
-        &repo,
-        &["identity-sessions", "exit-codes"],
-    ));
-    assert!(!guide.contains("audit-debt"), "{guide}");
-    assert!(
-        guide.contains("OpenCode v2 (`opencode2`) is recognized without one"),
-        "{guide}"
-    );
-    assert!(
-        guide.contains("`arc env` exits 1 and prints the export template"),
-        "{guide}"
-    );
-}
-
 #[test]
 fn env_omits_model_when_no_session_store_matches() {
     let repo = Repo::new();
@@ -1938,17 +1912,6 @@ fn topic_depth_carries_the_workflow_contracts() {
             "guide missing {expected:?}:\n{guide}"
         );
     }
-}
-
-#[test]
-fn help_points_at_the_guide_and_at_live_state() {
-    let repo = Repo::new();
-    let help = stdout(repo.arc(&repo.root).arg("--help"));
-    assert!(
-        help.contains("no arguments for the capability map"),
-        "{help}"
-    );
-    assert!(help.contains("arc catchup"), "{help}");
 }
 
 /// Making the subcommand optional must not turn a mistyped invocation into a

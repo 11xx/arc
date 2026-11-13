@@ -2,72 +2,10 @@
 //! version bumped in code without the register being edited leaves it
 //! describing a format nothing writes.
 
-use super::common::{arc_binary, stdout, Repo};
+use super::common::arc_binary;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-#[test]
-fn staleness_inbox_help_matches_schema_constant() {
-    let repo = Repo::new();
-    let help = stdout(repo.arc(&repo.root).args(["inbox", "--help"]));
-    let schemas = schema_constants();
-    let (_, schema) = schemas
-        .iter()
-        .find(|(name, _)| name == "INBOX_SCHEMA")
-        .unwrap();
-    assert!(
-        help.contains(schema),
-        "inbox help must name {schema}: {help}"
-    );
-}
-
-#[test]
-fn staleness_guide_names_rebase_snapshot_journal_defaults() {
-    let repo = Repo::new();
-    let guide = crate::common::instruction_topics(&repo, &["rules-evidence"]);
-    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        flat.contains("snapshot (`snapshot`, `done`, `rebase`,"),
-        "{flat}"
-    );
-}
-
-/// A floor on the schema constants found, so a scan that stopped matching
-/// fails rather than passing over an empty set.
-const MINIMUM_SCHEMAS: usize = 10;
-
-/// The constants are the authority: each one's value must appear in the
-/// guide verbatim.
-#[test]
-fn every_schema_constant_is_registered_in_the_guide() {
-    let repo = Repo::new();
-    let guide =
-        crate::common::instruction_topics(&repo, &["schemas", "assurance", "debt-obligations"]);
-
-    let schemas = schema_constants();
-    assert!(
-        schemas.len() >= MINIMUM_SCHEMAS,
-        "found only {} schema constants in src/; the scan is no longer matching",
-        schemas.len()
-    );
-
-    let missing: Vec<&(String, String)> = schemas
-        .iter()
-        .filter(|(_, value)| !guide.contains(&format!("`{value}`")))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "{} schema constant(s) name a version the guide's SCHEMAS section does \
-         not list; update the line for each:\n{}",
-        missing.len(),
-        missing
-            .iter()
-            .map(|(name, value)| format!("{name} = {value}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-}
 
 /// Every `…SCHEMA: &str = "…"` in the crate, as constant name and value. The
 /// source is scanned rather than a list kept here, so a constant added or

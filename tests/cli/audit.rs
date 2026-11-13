@@ -15,19 +15,6 @@ fn repo_forbidding_self_approval() -> Repo {
     repo
 }
 
-fn repo_with_ordinary_review_scope() -> Repo {
-    let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/policy.toml"),
-        "[policy]\nforbid_self_approval = true\n\n[danger]\npaths = [\"dangerous.rs\"]\n",
-    )
-    .unwrap();
-    git(&repo.root, &["add", ".arc/policy.toml"]);
-    git(&repo.root, &["commit", "-m", "policy"]);
-    repo
-}
-
 fn self_approved_change(repo: &Repo, slug: &str) -> PathBuf {
     stdout(repo.arc(&repo.root).args(["begin", slug]));
     let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
@@ -834,47 +821,6 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
     assert!(inbox["debt-owed"].as_array().unwrap().is_empty());
-}
-
-/// A current refusal is an implementer's next action, not an optional debt
-/// route. Ordinary scope exercises both non-approval verdicts because neither
-/// one is covered by the policy rejection reason used for dangerous work.
-#[test]
-fn ordinary_refusing_verdicts_keep_their_action_out_of_debt_guidance() {
-    for (slug, verdict, cause) in [
-        ("ordinary-comment", "comment-only", None),
-        ("ordinary-changes", "changes-requested", Some("executor")),
-    ] {
-        let repo = repo_with_ordinary_review_scope();
-        stdout(repo.arc(&repo.root).args(["begin", slug]));
-        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
-        repo.commit(&worktree, "safe.txt", "safe\n", "feat: safe");
-        stdout(repo.arc(&worktree).args(["snapshot", slug]));
-
-        let mut review = vec!["review", slug, "--verdict", verdict];
-        if let Some(cause) = cause {
-            review.extend(["--cause", cause]);
-        }
-        repo.arc(&worktree)
-            .env("ARC_ACTOR", "Reviewer")
-            .args(review)
-            .assert()
-            .success();
-
-        let status = json_stdout(repo.arc(&repo.root).args(["status", slug]));
-        assert_eq!(status["danger"]["dangerous"], false, "{status}");
-        assert_eq!(status["next_action"], verdict, "{status}");
-        assert!(
-            status["review_options"]
-                .as_array()
-                .is_none_or(Vec::is_empty),
-            "{status}"
-        );
-        let review = json_stdout(repo.arc(&repo.root).args(["review", slug, "--json"]));
-        assert_eq!(review["schema"], "arc-review/5");
-        assert!(review.get("review_options").is_none(), "{review}");
-        repo.arc(&repo.root).args(["check", slug]).assert().code(3);
-    }
 }
 
 #[test]

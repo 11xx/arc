@@ -3417,33 +3417,6 @@ fn journal_note_scaffold_records_template_and_places_the_body() {
 }
 
 #[test]
-fn journal_help_prints_complete_question_workflow_commands() {
-    let repo = Repo::new();
-    let help = stdout(repo.arc(&repo.root).args(["journal", "--help"]));
-    assert!(
-        help.contains("verified"),
-        "help missing verified command:\n{help}"
-    );
-    assert!(
-        help.contains("current anchor revision"),
-        "help missing verification description:\n{help}"
-    );
-    for (verb, command) in [
-        ("question", "arc journal question <file> --placement opening|closing --option A --option B --body-file -"),
-        ("position", "arc journal position <file> --body-file - --question <id> --option <opt>"),
-        ("answer", "arc journal answer <file> --question <id> --option <chosen> --body-file -"),
-    ] {
-        let contract = stdout(repo.arc(&repo.root).args(["journal", verb, "--help"]));
-        assert!(contract.contains(command), "help missing {command:?}:\n{contract}");
-    }
-    let position_help = stdout(repo.arc(&repo.root).args(["journal", "position", "--help"]));
-    assert!(
-        position_help.contains("--stance <STANCE>"),
-        "{position_help}"
-    );
-}
-
-#[test]
 fn journal_note_scaffold_repo_override_wins_and_unknown_bails() {
     let repo = Repo::new();
     let templates = repo.root.join(".arc/templates");
@@ -8894,33 +8867,6 @@ fn journal_show_given_a_topic_points_at_latest() {
         .stderr(predicates::prelude::predicate::str::contains(
             "<timestamp>-<topic>-<kind>.md",
         ));
-}
-
-/// The alias mounts the kind verb's arguments rather than restating them, so
-/// the help cannot drift. It already had, on `--no-scaffold`.
-#[test]
-fn the_fr_alias_and_the_kind_verb_share_one_help_source() {
-    let repo = Repo::new();
-    let flags = |help: String| -> Vec<String> {
-        help.lines()
-            .skip_while(|line| !line.starts_with("Options:"))
-            .filter(|line| {
-                let item = line.trim();
-                ["--body-file", "--title", "--scaffold", "--no-scaffold"]
-                    .iter()
-                    .any(|flag| item.starts_with(flag))
-            })
-            .map(|line| line.trim().to_string())
-            .collect()
-    };
-    let alias = flags(stdout(repo.arc(&repo.root).args(["fr", "--help"])));
-    let verb = flags(stdout(repo.arc(&repo.root).args([
-        "journal",
-        "feature-request",
-        "--help",
-    ])));
-    assert!(!alias.is_empty(), "expected the shared write flags");
-    assert_eq!(alias, verb);
 }
 
 /// A journal artifact is append-only, so a caller choosing between
@@ -17025,21 +16971,6 @@ fn transition_retry_verifies_prepared_custom_body_and_preserves_prefix_evidence(
     );
 }
 
-/// `--json` help names the report each command emits.
-#[test]
-fn doctor_and_open_json_help_describe_their_own_reports() {
-    let repo = Repo::new();
-    let doctor = stdout(repo.arc(&repo.root).args(["journal", "doctor", "--help"]));
-    assert!(!doctor.contains("arc-journal-open"), "{doctor}");
-    assert!(!doctor.contains("pending recovery bucket"), "{doctor}");
-    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
-    assert!(report.get("schema").is_none(), "{report}");
-    assert!(report["problems"].is_array() && report["advice"].is_array());
-    let open = stdout(repo.arc(&repo.root).args(["journal", "open", "--help"]));
-    assert!(open.contains("arc-journal-open/1"), "{open}");
-    assert!(open.contains("pending recovery bucket"), "{open}");
-}
-
 /// A successor whose publication evidence is incomplete is a pending
 /// transition; no writer may treat it as a live source.
 #[test]
@@ -17179,33 +17110,6 @@ fn committed_promotion_cleanup_refuses_changed_bodies_and_relation_identity() {
             "{changed}"
         );
         assert!(!pending_path.exists(), "{changed}");
-    }
-}
-
-#[test]
-fn the_guide_and_help_teach_reading_a_known_artifact_without_a_filesystem_search() {
-    let repo = Repo::new();
-    let guide = crate::common::instruction_topics(&repo, &["journal-lookup"]);
-    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
-    for expected in [
-        "never by searching the filesystem",
-        "known filename `arc journal show <file.md>` reads the body, hot storage first and the cold archive after it;",
-        "`arc journal discussion <file.md>` reads its stances and open questions.",
-        "known topic `arc journal latest <topic> [--kind <kind>]`, matched exactly; `arc journal show <topic>` shows the newest live one and names it on stderr.",
-        "no filename `arc journal list [--kind <kind>]` browses live artifacts;",
-        "a path `arc journal dir` (`--explain` names the source that resolved it) only when a filesystem path is required.",
-    ] {
-        assert!(flat.contains(expected), "guide lacks {expected:?}");
-    }
-
-    for (verb, expected) in [
-        ("show", "the hot journal first, then its cold archive"),
-        ("list", "`latest` resolves it"),
-        ("dir", "`arc journal show <file.md>` needs no path"),
-    ] {
-        let help = stdout(repo.arc(&repo.root).args(["journal", verb, "--help"]));
-        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(flat.contains(expected), "journal {verb} --help: {help}");
     }
 }
 

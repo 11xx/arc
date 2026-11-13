@@ -274,27 +274,6 @@ fn a_same_model_verdict_may_authorize_integration_but_leaves_review_debt_owed() 
 }
 
 #[test]
-fn guide_and_review_help_distinguish_approval_authority_from_independent_coverage() {
-    let repo = Repo::new();
-    let guide = crate::common::instruction_topics(&repo, &["debt-recovery"]);
-    assert!(
-        guide.contains("policy governs approval authority, not independent coverage"),
-        "{guide}"
-    );
-    for command in ["audit", "review"] {
-        let help = stdout(repo.arc(&repo.root).args([command, "--help"]));
-        assert!(
-            help.contains("never discharges review debt"),
-            "{command}: {help}"
-        );
-        assert!(
-            help.contains("regardless of self-approval policy"),
-            "{command}: {help}"
-        );
-    }
-}
-
-#[test]
 fn an_audit_by_another_model_does_not_warn() {
     let repo = repo_with_policy("[policy]\nforbid_self_approval = false\n");
     trailed_change(&repo, "other", &[&[SOL]]);

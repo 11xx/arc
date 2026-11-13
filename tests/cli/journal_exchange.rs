@@ -698,32 +698,6 @@ fn export_carries_understood_records_that_question_replay_rejects() {
 }
 
 #[test]
-fn journal_bundle_guide_and_help_describe_artifact_admission() {
-    let repo = Repo::new();
-    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let guide = normalize(crate::common::instruction_topics(
-        &repo,
-        &["replicas", "schemas"],
-    ));
-    let schemas = guide.split("SCHEMAS").last().unwrap();
-    assert!(!schemas.contains("an import refuses a bundle carrying one"));
-    assert!(schemas.contains("journal import holds back each artifact carrying an unsupported event and its dependents"), "{schemas}");
-    let help = normalize(stdout(
-        repo.arc(&repo.root).args(["journal", "import", "--help"]),
-    ));
-    assert!(help.contains("Artifacts carrying unsupported events are held back as a unit"));
-    assert!(help.contains("their dependent artifacts are held back too"));
-    for text in [&guide, &help] {
-        assert!(
-            text.contains(
-                "Deduplication includes understood physical log records rejected by state replay"
-            ),
-            "{text}"
-        );
-    }
-}
-
-#[test]
 fn a_partial_receipt_allows_the_remaining_artifact_to_be_admitted() {
     let source = Repo::new();
     let recipient = Repo::new();

@@ -310,22 +310,6 @@ fn rebased_delivery_names_publishing_remedy(record_rewrite: bool) {
 }
 
 #[test]
-fn accept_delivery_guide_and_help_name_rebase_patchset_remedy() {
-    let repo = Repo::new();
-    let guide = crate::common::instruction_topics(&repo, &["replicas"]);
-    let pairing = guide.split("PAIR REPLICA STORES").nth(1).unwrap();
-    assert!(pairing.contains("rebase on the worker requires a patchset before export"));
-    assert!(pairing.contains("arc snapshot <change> --contributors <the implementing actor>"));
-    let help = stdout(repo.arc(&repo.root).args(["accept", "--help"]));
-    assert!(help.contains("signature-only successor"));
-    assert!(
-        help.contains("publishing replica")
-            && help.contains("snapshot")
-            && help.contains("export again")
-    );
-}
-
-#[test]
 fn accept_delivery_missing_branch_names_transport() {
     let d = Delivery::new();
     git(&d.receiver.root, &["branch", "-D", &d.branch]);

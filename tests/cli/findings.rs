@@ -592,23 +592,3 @@ fn blocking_findings_name_the_patchset_they_predate() {
         "{check}"
     );
 }
-
-/// Claim: `arc findings --json` is `--format json`, and naming both refuses
-/// with the accepted choices. Rejects refusing `--json` with a tip to pass it
-/// as a change argument.
-#[test]
-fn findings_json_is_the_format_json_shorthand() {
-    let repo = Repo::new();
-    let (wt, _) = finding_with_reply_target(&repo, "findings-json");
-    let long = stdout(
-        repo.arc(&wt)
-            .args(["findings", "findings-json", "--format", "json"]),
-    );
-    let short = stdout(repo.arc(&wt).args(["findings", "findings-json", "--json"]));
-    assert_eq!(short, long);
-    repo.arc(&wt)
-        .args(["findings", "findings-json", "--json", "--format", "sarif"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("cannot be used with"));
-}

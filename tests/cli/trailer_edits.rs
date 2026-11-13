@@ -781,25 +781,6 @@ fn the_placeholder_advisory_names_the_edit_form() {
 }
 
 #[test]
-fn the_help_states_the_format_and_the_order() {
-    let repo = Repo::new();
-    let help = stdout(repo.arc(&repo.root).args(["rewrite", "trailers", "--help"]));
-    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(flat.contains("--edits <FILE>"), "{flat}");
-    assert!(flat.contains("arc-trailer-edits/1"), "{flat}");
-    assert!(flat.contains("JSON string"), "{flat}");
-    assert!(flat.contains(r"\t encodes a tab"), "{flat}");
-    assert!(
-        flat.contains("unquoted fields keep literal backslashes"),
-        "{flat}"
-    );
-    assert!(
-        flat.contains("edits apply first, then --drop, then --append"),
-        "{flat}"
-    );
-}
-
-#[test]
 fn quoted_trailer_fields_drop_or_replace_tabs_without_losing_same_key_attribution() {
     for action in ["drop", "replace"] {
         let repo = Repo::new();

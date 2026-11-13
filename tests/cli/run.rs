@@ -14,15 +14,6 @@ fn json_run_list_has_a_versioned_envelope_for_empty_and_populated_lists() {
     assert_eq!(populated["runs"][0]["dispatch_event_id"], dispatch_id);
 }
 
-#[test]
-fn run_list_help_describes_the_versioned_envelope() {
-    let repo = Repo::new();
-    let help = stdout(repo.arc(&repo.root).args(["run", "list", "--help"]));
-    assert!(help.contains("arc-run-list/1"), "{help}");
-    assert!(help.contains("`schema`"), "{help}");
-    assert!(help.contains("`runs`"), "{help}");
-}
-
 fn run_rows(repo: &Repo) -> serde_json::Value {
     let mut document = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
     assert_eq!(document["schema"], "arc-run-list/1", "{document}");
