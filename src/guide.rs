@@ -5692,6 +5692,9 @@ GATE COSTS
   not establish a cause or alter gate acceptance. Time distributions use at
   most the latest 20 executed runs matching the current command and declared
   timeout, in the newest recorded environment. Medians use the lower middle.
+  `gates over` uses the selected overrun's effective declarations, including
+  gates declared only on its change, from any checkout. Without an overrun it
+  uses the invoking checkout's declarations.
   Each measure reports its sample count. Missing fields are unmeasured:
   legacy duration_ms never substitutes for command, CPU, wait or preparation.
 

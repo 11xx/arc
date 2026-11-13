@@ -696,3 +696,38 @@ fn check_timings_are_bounded_fresh_and_advisory() {
         }
     }
 }
+
+/// Claim: gates over CHANGE diagnoses the selected overrun's declarations from
+/// any checkout, including an explicitly named gate present only on the change.
+/// Rejects omitting named-gate observations or using the invoking checkout's
+/// older declaration set for its check timings.
+#[test]
+fn over_from_another_checkout_includes_change_only_checks() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.base]\ncommand='true'\n");
+    repo.commit(
+        &repo.root,
+        ".gitignore",
+        "checks.tsv\n",
+        "test: ignore observations",
+    );
+    let (id, wt, _) = change_with_patchset(&repo, "change-only-checks");
+    let command = "printf 'arc-check-timings/1\\nchange-witness\\t25\\tpass\\n' > checks.tsv";
+    repo.commit(&wt, ".arc/gates.toml", &format!("[gates.base]\ncommand='true'\n[gates.added]\ncommand={command:?}\nbudget='1s'\ntimings='checks.tsv'\n"), "test: declare an added gate");
+    repo.arc(&wt).args(["snapshot", &id]).assert().success();
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "2000")
+        .args(["verify", "--gate", "added"])
+        .assert()
+        .code(1);
+    let report = stdout(
+        repo.arc(&repo.root)
+            .args(["gates", "over", &id, "--gate", "added"]),
+    );
+    assert!(report.contains("added cost kinds"), "{report}");
+    assert!(
+        report.contains("change-witness")
+            && report.contains("never failed in 1 runs, costs 0.025 seconds"),
+        "{report}"
+    );
+}

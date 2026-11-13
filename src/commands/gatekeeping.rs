@@ -728,6 +728,7 @@ fn verify_with_landing(
         budget,
         adopt_budget_format,
         profiled_gate,
+        timings,
     } = declared_check(ctx, &st, gate.as_deref(), command)?;
     if adopt_budget_format {
         store.adopt_budgets()?;
@@ -801,7 +802,7 @@ fn verify_with_landing(
         &store,
         &change_id,
         VerificationInput {
-            timings: profiled_gate.as_ref().and_then(|g| g.timings.clone()),
+            timings,
             declaration,
             budget,
             exclusive,
@@ -6699,6 +6700,7 @@ pub(super) fn release_retention_refs(
 }
 
 struct DeclaredCheck {
+    timings: Option<String>,
     profiled_gate: Option<gates::Gate>,
     declaration: Option<String>,
     adopt_budget_format: bool,
@@ -6731,6 +6733,7 @@ fn declared_check(
                 None => bail!("gate {name:?} not declared in .arc/gates.toml"),
             };
             Ok(DeclaredCheck {
+                timings: declared.timings.clone(),
                 profiled_gate: declared.coverage.base_passes.then(|| declared.clone()),
                 declaration: gates::coverage_identity(declared),
                 adopt_budget_format: gates.has_budgets(),
@@ -6742,6 +6745,7 @@ fn declared_check(
             })
         }
         (None, Some(command)) => Ok(DeclaredCheck {
+            timings: None,
             profiled_gate: None,
             declaration: None,
             adopt_budget_format: false,

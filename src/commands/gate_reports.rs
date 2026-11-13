@@ -128,6 +128,15 @@ pub(super) fn collect(cwd: &Path, store: Option<&Store>) -> Result<GateReport> {
             Err(error) => return Err(error.into()),
         }
     };
+    collect_declarations(cwd, store, declared, repository)
+}
+
+fn collect_declarations(
+    cwd: &Path,
+    store: Option<&Store>,
+    declared: gates::GatesFile,
+    repository: bool,
+) -> Result<GateReport> {
     declared.ensure_unconflicted()?;
     let unclaimed_paths = if repository {
         tracked_paths(cwd)?
@@ -830,6 +839,8 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
         None => store.readable_states()?.into_values().collect(),
     };
     let mut runs = Vec::new();
+    let mut latest_declarations = None;
+    let mut latest_at = None;
     for mut state in states {
         state.target_branch = crate::declarations::accepted_target(&state).to_owned();
         let target = gitio::branch_head(&ctx.cwd, &state.target_branch)?;
@@ -849,6 +860,7 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
         if let Some(head) = head {
             let _ = crate::gate_raise::advise(&ctx.cwd, &state, &target, &head, &mut declared);
         }
+        let first_run = runs.len();
         for entry in &state.verifications {
             let Some(name) = entry
                 .gate
@@ -872,6 +884,12 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
                     entry.clone(),
                     judgement,
                 ));
+            }
+        }
+        if let Some(at) = runs[first_run..].iter().map(|r| r.0).max() {
+            if latest_at.is_none_or(|latest| at >= latest) {
+                latest_at = Some(at);
+                latest_declarations = Some(declared);
             }
         }
     }
@@ -900,7 +918,10 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
         println!("no over-budget run found");
     }
     let root = gitio::toplevel(&ctx.cwd)?;
-    let report = collect(&root, Some(&store))?;
+    let report = match latest_declarations {
+        Some(declared) => collect_declarations(&root, Some(&store), declared, true)?,
+        None => collect(&root, Some(&store))?,
+    };
     for row in report
         .gates
         .iter()
