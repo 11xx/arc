@@ -4,10 +4,11 @@ Integration runs the exact witnesses in `.arc/invariants.tsv`. Each row names it
 invariant and caller-visible claim. The runner validates every full name against
 libtest's inventory before dispatching it with `--exact`; missing, ignored and
 unexecuted witnesses fail. It selects the spawned executable from Cargo's artifact
-receipts. Development artifacts share optimization level 1 with debug symbols
-disabled. Debug assertions and integer overflow checks stay enabled. The build
-gate prepares the artifacts the invariant gate consumes. Build metadata reads
-preserve the watched Git index.
+receipts. Development artifacts share one profile: the crate is unoptimized, so
+an incremental rebuild after a source edit stays short, and dependencies are
+optimized. Debug symbols are disabled; debug assertions and integer overflow
+checks stay enabled. The invariant gate builds the artifacts it runs. Build
+metadata reads preserve the watched Git index.
 
 Run the invariant gate:
 
@@ -32,7 +33,7 @@ or a faulty variant; then demonstrate success. Add its full name and claim to
 the list. Replacements must establish the same boundary before a witness leaves
 it. A test's existence, cost or historical failure count does not make it required.
 
-Publication runs build, lint, the invariant gate and the five exact tests in module `release`
+Publication runs the invariant gate, clippy, formatting and the five exact tests in module `release`
 against the release-profile executable built from the checkout. Run that artifact
 check with `python3 .arc/test-binary.py release`. Area inventories do not participate.
 
