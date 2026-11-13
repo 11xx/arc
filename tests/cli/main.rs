@@ -136,6 +136,7 @@ mod take;
 mod tiebreak_reviewers;
 mod timeline;
 mod trailer_edits;
+mod trailer_projection;
 mod tree_gates;
 mod variant_share_pricing;
 mod verification_outcomes;
