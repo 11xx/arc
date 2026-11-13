@@ -20,7 +20,7 @@ PROFILE = "dev"
 
 
 def cargo_artifacts(command):
-    build = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=True)
+    build = subprocess.run(command, stdout=subprocess.PIPE, text=True)
     found = {}
     for line in build.stdout.splitlines():
         receipt = json.loads(line)
@@ -35,6 +35,8 @@ def cargo_artifacts(command):
         if key in found:
             raise ValueError(f"ambiguous Cargo artifact: {key}")
         found[key] = str(Path(receipt["executable"]).resolve())
+    if build.returncode != 0:
+        raise ValueError(f"cargo exited {build.returncode}; the build failed")
     return found
 
 

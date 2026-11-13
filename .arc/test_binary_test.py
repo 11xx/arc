@@ -52,6 +52,16 @@ class RunnerClaims(unittest.TestCase):
         with patch.object(runner.subprocess, "run", return_value=build):
             self.assertEqual(runner.cargo_artifacts(["cargo"])["arc"], "/selected/release/arc")
 
+    def test_failed_build_shows_compiler_messages_and_refuses(self):
+        """Claim: a build failure prints rustc's message and refuses; rejects a silent or green failed build."""
+        message = {"reason": "compiler-message", "message": {"rendered": "error[E0425]: missing\n"}}
+        build = subprocess.CompletedProcess([], 101, json.dumps(message))
+        shown = io.StringIO()
+        with patch.object(runner.subprocess, "run", return_value=build), patch.object(sys, "stderr", shown):
+            with self.assertRaisesRegex(ValueError, "the build failed"):
+                runner.cargo_artifacts(["cargo"])
+        self.assertIn("error[E0425]: missing", shown.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
