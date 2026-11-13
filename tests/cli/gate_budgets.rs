@@ -292,7 +292,7 @@ fn closed_history_and_current_applicability_are_labelled_separately() {
 }
 
 /// Claim: gate reports use command measurements for budget percentages, list the
-/// newest overrun, and init writes a measured declaration once. Rejects legacy
+/// newest overrun, and init writes a measured declaration with headroom once. Rejects exact-worst budgets, legacy
 /// duration percentages and replacing an existing declared budget.
 #[test]
 fn reports_and_init_expose_budget_cost_without_legacy_percentages() {
@@ -320,7 +320,7 @@ fn reports_and_init_expose_budget_cost_without_legacy_percentages() {
         .args(["gates", "init"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("budget total: 2.5s"));
+        .stdout(predicates::str::contains("budget total: 2.7s"));
     fresh
         .arc(&fresh.root)
         .args(["gates", "init"])
@@ -603,8 +603,9 @@ fn budget_queue_projection_stops_before_scheduling_recorded_refusal() {
 }
 
 /// Claim: init measures every declaration, including operator-only gates, and writes
-/// budgets into the project while preserving operator policy and check identity.
-/// Rejects requiring an existing project declaration or editing operator policy.
+/// budgets with headroom into the project while preserving operator policy and
+/// check identity. Rejects exact-worst budgets, requiring an existing project
+/// declaration or editing operator policy.
 #[test]
 fn budget_init_measures_operator_only_declarations_without_editing_policy() {
     let repo = Repo::new();
@@ -622,7 +623,7 @@ fn budget_init_measures_operator_only_declarations_without_editing_policy() {
         policy
     );
     let gates = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
-    assert_eq!(gates["gates"][0]["budget_ms"], 1500);
+    assert_eq!(gates["gates"][0]["budget_ms"], 1600);
     assert_eq!(
         gates["gates"][0]["declaration"]["environment"],
         "printf fixed"

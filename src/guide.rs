@@ -5478,13 +5478,14 @@ GATES
   Legacy duration_ms samples remain in the named historical distribution and
   never enter budget shares. A median above 80% is labelled in the report.
 
-  `arc gates init [--runs N]` measures six serial rounds by default and writes
-  each gate's worst run_ms from all rounds as its budget in .arc/gates.toml, and sets total to their sum. Operator-only
-  declarations are copied into that project file; operator policy is untouched.
-  It prints the rounds run and each gate's min, max and spread. A failed round
-  writes no budgets. A sub-millisecond measurement declares 1ms. It refuses
-  existing project or operator budgets, failed or unmeasured commands, and
-  declarations edited during measurement. It records no verification evidence.
+  `arc gates init [--runs N]` measures six serial rounds by default. Budgets
+  in .arc/gates.toml are worst run_ms plus spread (max minus min), at least
+  105% of worst, rounded up to two significant digits in whole milliseconds
+  (minimum 1ms). Total sums written budgets. It prints min, worst, spread,
+  written budget and rounds.
+  Operator-only gates are copied into the project; operator policy is untouched.
+  Existing budgets, failed or unmeasured rounds, or declaration edits during
+  measurement refuse without writing budgets. No verification evidence is recorded.
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
   the applicable budget, its history sources, host observations and output
   artifact, cost kinds and slowest recorded checks, followed by the order of

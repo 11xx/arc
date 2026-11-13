@@ -729,6 +729,17 @@ fn declaration_text(file: &Path) -> Result<Option<String>> {
     }
 }
 
+fn initial_budget_ms(min: u64, worst: u64) -> Result<u64> {
+    let worst = u128::from(worst);
+    let spread = worst - u128::from(min);
+    let budget = (worst + spread).max((worst * 105).div_ceil(100)).max(1);
+    let mut quantum = 1;
+    while budget / quantum >= 100 {
+        quantum *= 10;
+    }
+    u64::try_from(budget.div_ceil(quantum) * quantum).context("gate budget overflow")
+}
+
 pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
     anyhow::ensure!(runs > 0, "measurement rounds must be positive");
     let root = gitio::toplevel(&ctx.cwd)?;
@@ -783,7 +794,7 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
         samples.sort_unstable();
         let min = samples[0];
         let max = samples[samples.len() - 1];
-        let measured = max.max(1);
+        let measured = initial_budget_ms(min, max)?;
         total = total
             .checked_add(measured)
             .context("budget total overflow")?;
@@ -797,7 +808,7 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
             toml::Value::String(format!("{measured}ms")),
         );
         println!(
-            "gate {name}: budget {} from {runs} rounds; min {min}ms, max {max}ms, spread {}ms",
+            "gate {name}: budget {} from {runs} rounds; min {min}ms, worst {max}ms, spread {}ms",
             crate::gate_budget::duration(measured),
             max - min
         );
@@ -938,4 +949,36 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
         );
     }
     Ok(if report.failures.is_empty() { 0 } else { 16 })
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::initial_budget_ms;
+
+    /// Claim: initial budgets cover the spread and five-percent floor, rounded
+    /// upward to two significant digits. Rejects truncated floors, downward
+    /// rounding, missing spread, and overflowing budgets.
+    #[test]
+    fn headroom_arithmetic_boundaries() {
+        for (min, worst, budget) in [
+            (8363, 9522, 11000),
+            (0, 0, 1),
+            (1, 1, 2),
+            (94, 94, 99),
+            (95, 95, 100),
+            (100, 100, 110),
+            (1000, 1000, 1100),
+            (100, 150, 200),
+            (100, 151, 210),
+            (900, 999, 1100),
+        ] {
+            assert_eq!(
+                initial_budget_ms(min, worst).unwrap(),
+                budget,
+                "min {min}, worst {worst}"
+            );
+        }
+        assert!(initial_budget_ms(u64::MAX, u64::MAX).is_err());
+        assert!(initial_budget_ms(0, u64::MAX).is_err());
+    }
 }

@@ -3995,7 +3995,7 @@ enum GatesCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Write budgets from the worst of several serial rounds; refuses existing budgets
+    /// Write budgets with headroom from serial rounds; see `arc guide gates`
     Init {
         /// Number of measured rounds, greater than zero
         #[arg(long, default_value = "6", value_parser = clap::value_parser!(u32).range(1..))]

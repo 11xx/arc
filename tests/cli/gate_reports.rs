@@ -454,8 +454,8 @@ fn reports_include_exclusive_and_effective_admission() {
     );
 }
 
-/// Claim: init budgets every gate from the worst of all requested serial rounds,
-/// defaults to six, and reports spread without evidence. Rejects single-round,
+/// Claim: init uses every requested serial round, defaults to six, and writes
+/// headroom above the worst run without evidence. Rejects exact-worst,
 /// last-round or cheapest-round budgets and partial writes after a failure.
 #[test]
 fn initialization_uses_complete_rounds_and_is_atomic() {
@@ -469,9 +469,16 @@ fn initialization_uses_complete_rounds_and_is_atomic() {
         .collect();
     assert_eq!(measured.len(), 3, "{text}");
     let report = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
-    assert_eq!(
-        report["gates"][0]["budget_ms"],
-        *measured.iter().max().unwrap()
+    let budget = report["gates"][0]["budget_ms"].as_u64().unwrap();
+    let worst = *measured.iter().max().unwrap();
+    let spread = worst - measured.iter().min().unwrap();
+    assert!(
+        budget >= worst + spread,
+        "budget {budget} lacks spread {spread} above worst {worst}"
+    );
+    assert!(
+        budget * 100 >= worst * 105,
+        "budget {budget} lacks 5% headroom above worst {worst}"
     );
     assert!(
         text.contains("from 3 rounds") && text.contains("spread"),
@@ -505,6 +512,28 @@ fn initialization_uses_complete_rounds_and_is_atomic() {
         .args(["gates", "init", "--runs", "0"])
         .assert()
         .code(2);
+}
+
+/// Claim: a single round receives the five-percent floor and upward rounding,
+/// including a sub-millisecond run. Rejects an exact-worst or rounded-down budget.
+#[test]
+fn initialization_single_round_has_rounded_headroom() {
+    for (measured, budget) in [(9522, 10000), (1000, 1100), (95, 100), (1, 2), (0, 1)] {
+        let repo = Repo::new();
+        repo.redeclare_gates("[gates.unit]\ncommand='true'\n");
+        let text = stdout(
+            repo.arc(&repo.root)
+                .env("ARC_TEST_COMMAND_RUN_MS", measured.to_string())
+                .args(["gates", "init", "--runs", "1"]),
+        );
+        let report = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+        assert_eq!(report["gates"][0]["budget_ms"], budget);
+        assert_eq!(report["budget_rules"]["total"], budget);
+        assert!(
+            text.contains(&format!("worst {measured}ms, spread 0ms")),
+            "{text}"
+        );
+    }
 }
 
 /// Claim: receipt diagnosis separates waiting, queueing, preparation and duplicate
