@@ -21,7 +21,7 @@ Run an area suite on demand by its exact module path:
 python3 .arc/test-binary.py area cli gate_raises
 ```
 
-Use `area unit store::tests` for a unit module. The module argument names its
+Use `area unit store::tests` for a unit module and `area cli ''` for root tests. The module argument names its
 direct tests, not modules sharing a substring. Area suites belong to no gate.
 The runner's own acceptance checks are `python3 .arc/test_binary_test.py`.
 `cargo test --locked` runs the whole remaining Rust tree with the development executable.

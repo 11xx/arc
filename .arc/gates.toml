@@ -1,24 +1,31 @@
+[budget]
+total = "79s"
+
 [selection]
 base_passes = true
 inert = ["*.md", "tests/*.md", "UNLICENSE"]
 
 [gates.build]
+budget = "31s"
 command = "cargo build --locked --all-targets"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
 
 [gates.lint]
+budget = "28s"
 command = "cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
 
 [gates.invariants]
+budget = "20s"
 command = "python3 .arc/test-binary.py invariants"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
 timings = ".arc/invariant-timings.tsv"
 
 [gates.release]
+budget = "270s"
 command = "python3 .arc/test-binary.py release"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["publication"]
