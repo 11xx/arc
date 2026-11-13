@@ -145,7 +145,7 @@ pub(super) fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 /// Claim: measurement executes exactly the requested rounds on the current tree,
-/// prints wall, CPU and spread, and leaves ledger and output artifacts untouched.
+/// prints wall, CPU, physical/logical cores and spread, and leaves ledger and output artifacts untouched.
 /// Rejects recording verification evidence or measuring a different gate or tree.
 #[test]
 fn measurement_is_transient_and_honors_selection_and_failures() {
@@ -160,6 +160,30 @@ fn measurement_is_transient_and_honors_selection_and_failures() {
     assert_eq!(fs::read(wt.join("measured")).unwrap(), b"xxx");
     assert!(text.contains("unit 3/3: wall"), "{text}");
     assert!(text.contains("CPU") && text.contains("spread"), "{text}");
+    assert!(
+        text.contains("host cores: physical ") && text.contains("; logical "),
+        "{text}"
+    );
+    let topology = fs::read_to_string("/proc/cpuinfo").unwrap();
+    let physical = topology
+        .split("\n\n")
+        .filter_map(|block| {
+            let field = |name: &str| {
+                block.lines().find_map(|line| {
+                    line.split_once(':')
+                        .filter(|(k, _)| k.trim() == name)
+                        .map(|(_, v)| v.trim())
+                })
+            };
+            Some((field("physical id")?, field("core id")?))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if !physical.is_empty() {
+        assert!(
+            text.contains(&format!("physical {};", physical.len())),
+            "{text}"
+        );
+    }
     assert!(!text.contains("CPU -"), "{text}");
     assert!(!text.contains("release 1/"));
     assert_eq!(before, tree_bytes(&repo.root.join(".git/arc")));
@@ -427,4 +451,57 @@ fn reports_include_exclusive_and_effective_admission() {
         workspace_text.contains(&format!("exclusive: {name}; admission: 0.150s")),
         "{workspace_text}"
     );
+}
+
+/// Claim: init budgets every gate from the worst of all requested serial rounds,
+/// defaults to six, and reports spread without evidence. Rejects single-round,
+/// last-round or cheapest-round budgets and partial writes after a failure.
+#[test]
+fn initialization_uses_complete_rounds_and_is_atomic() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.unit]\ncommand='printf x >> rounds; case $(wc -c < rounds) in 1) sleep 0.01;; 2) sleep 0.08;; *) sleep 0.02;; esac'\n");
+    let text = stdout(repo.arc(&repo.root).args(["gates", "init", "--runs", "3"]));
+    assert_eq!(fs::read(repo.root.join("rounds")).unwrap(), b"xxx");
+    let measured: Vec<u64> = text
+        .lines()
+        .filter_map(|line| line.split_once("run_ms=").map(|(_, n)| n.parse().unwrap()))
+        .collect();
+    assert_eq!(measured.len(), 3, "{text}");
+    let report = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    assert_eq!(
+        report["gates"][0]["budget_ms"],
+        *measured.iter().max().unwrap()
+    );
+    assert!(
+        text.contains("from 3 rounds") && text.contains("spread"),
+        "{text}"
+    );
+    assert!(!repo.root.join(".git/arc/config.json").exists());
+
+    let default = Repo::new();
+    default.redeclare_gates("[gates.unit]\ncommand='printf x >> rounds'\n");
+    let text = stdout(default.arc(&default.root).args(["gates", "init"]));
+    assert_eq!(fs::read(default.root.join("rounds")).unwrap(), b"xxxxxx");
+    assert!(text.contains("from 6 rounds"), "{text}");
+    let failed = Repo::new();
+    failed.redeclare_gates(
+        "[gates.unit]\ncommand='printf x >> rounds; test $(wc -c < rounds) -ne 2'\n",
+    );
+    let before = fs::read(failed.root.join(".arc/gates.toml")).unwrap();
+    failed
+        .arc(&failed.root)
+        .args(["gates", "init", "--runs", "3"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("round 2/3"));
+    assert_eq!(
+        fs::read(failed.root.join(".arc/gates.toml")).unwrap(),
+        before
+    );
+    assert_eq!(fs::read(failed.root.join("rounds")).unwrap(), b"xx");
+    failed
+        .arc(&failed.root)
+        .args(["gates", "init", "--runs", "0"])
+        .assert()
+        .code(2);
 }

@@ -94,3 +94,21 @@ pub(crate) fn wait_usage(pid: i32, flags: i32) -> std::io::Result<Option<(i32, u
         }
     }
 }
+
+/// Distinct package/core pairs exposed by the host; absent without topology data.
+pub(crate) fn physical_core_count() -> Option<usize> {
+    let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    let mut cores = std::collections::BTreeSet::new();
+    for processor in text.split("\n\n").filter(|block| !block.trim().is_empty()) {
+        let fields = processor
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .map(|(key, value)| (key.trim(), value.trim()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        cores.insert((
+            fields.get("physical id")?.parse::<u64>().ok()?,
+            fields.get("core id")?.parse::<u64>().ok()?,
+        ));
+    }
+    (!cores.is_empty()).then_some(cores.len())
+}

@@ -497,6 +497,14 @@ pub(super) fn render(report: &GateReport) {
 }
 
 pub fn measure_gates(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i32> {
+    let host = crate::verification_timing::host_at_start();
+    println!(
+        "host cores: physical {}; logical {}",
+        crate::verification_timing::physical_core_count()
+            .map_or_else(|| "unmeasured".into(), |n| n.to_string()),
+        host.core_count
+            .map_or_else(|| "unmeasured".into(), |n| n.to_string())
+    );
     let root = gitio::toplevel(&ctx.cwd)?;
     let declared = gates::inspect(&root)?;
     declared.ensure_unconflicted()?;
@@ -672,7 +680,8 @@ fn declaration_text(file: &Path) -> Result<Option<String>> {
     }
 }
 
-pub fn init_budgets(ctx: &Ctx) -> Result<i32> {
+pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
+    anyhow::ensure!(runs > 0, "measurement rounds must be positive");
     let root = gitio::toplevel(&ctx.cwd)?;
     let file = root.join(".arc/gates.toml");
     let original = declaration_text(&file)?;
@@ -703,30 +712,45 @@ pub fn init_budgets(ctx: &Ctx) -> Result<i32> {
             tables.insert(name.clone(), gate.clone());
         }
     }
+    let mut measurements: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for round in 1..=runs {
+        for (name, gate) in &declared.gates {
+            let run = super::gatekeeping::measure_gate(gate, name, &root)?;
+            anyhow::ensure!(
+                run.status.success() && !run.timed_out && !run.admission_expired,
+                "gate {name} round {round}/{runs} was not measured successfully; no budgets written: {}",
+                run.output_tail.unwrap_or_default()
+            );
+            let measured = run
+                .timing
+                .run_ms
+                .context("command run_ms unavailable; no budgets written")?;
+            println!("gate {name} {round}/{runs}: run_ms={measured}");
+            measurements.entry(name.clone()).or_default().push(measured);
+        }
+    }
     let mut total = 0_u64;
-    for (name, gate) in &declared.gates {
-        let run = super::gatekeeping::measure_gate(gate, name, &root)?;
-        anyhow::ensure!(
-            run.status.success() && !run.timed_out && !run.admission_expired,
-            "gate {name} was not measured successfully: {}",
-            run.output_tail.unwrap_or_default()
-        );
-        let measured = run
-            .timing
-            .run_ms
-            .context("command run_ms unavailable")?
-            .max(1);
+    for (name, mut samples) in measurements {
+        samples.sort_unstable();
+        let min = samples[0];
+        let max = samples[samples.len() - 1];
+        let measured = max.max(1);
         total = total
             .checked_add(measured)
             .context("budget total overflow")?;
-        let table = document.get_mut("gates").and_then(|g| g.get_mut(name)).and_then(toml::Value::as_table_mut).with_context(|| format!("gate {name} is declared only by operator policy; declare it in .arc/gates.toml"))?;
+        let table = document
+            .get_mut("gates")
+            .and_then(|g| g.get_mut(&name))
+            .and_then(toml::Value::as_table_mut)
+            .context("gate declaration unavailable")?;
         table.insert(
             "budget".into(),
             toml::Value::String(format!("{measured}ms")),
         );
         println!(
-            "gate {name}: budget {} (one command measurement)",
-            crate::gate_budget::duration(measured)
+            "gate {name}: budget {} from {runs} rounds; min {min}ms, max {max}ms, spread {}ms",
+            crate::gate_budget::duration(measured),
+            max - min
         );
     }
     document

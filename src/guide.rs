@@ -5477,10 +5477,11 @@ GATES
   Legacy duration_ms samples remain in the named historical distribution and
   never enter budget shares. A median above 80% is labelled in the report.
 
-  `arc gates init` measures each declaration once, writes each observed run_ms
-  as its budget in .arc/gates.toml, and sets total to their sum. Operator-only
+  `arc gates init [--runs N]` measures six serial rounds by default and writes
+  each gate's worst run_ms from all rounds as its budget in .arc/gates.toml, and sets total to their sum. Operator-only
   declarations are copied into that project file; operator policy is untouched.
-  A sub-millisecond measurement declares 1ms. It refuses
+  It prints the rounds run and each gate's min, max and spread. A failed round
+  writes no budgets. A sub-millisecond measurement declares 1ms. It refuses
   existing project or operator budgets, failed or unmeasured commands, and
   declarations edited during measurement. It records no verification evidence.
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
@@ -5492,7 +5493,8 @@ GATES
   `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
   this tree, five times by default, honoring timeouts. Each round follows the
   `exclusive` and `admission` contract below. It prints command wall and child
-  CPU time with admission wait separately, and the wall min, max and spread.
+  CPU time with admission wait separately, the wall min, max and spread, and
+  physical and logical host cores. Missing topology is unmeasured.
   Wall far above CPU indicates waiting inside the command; a wide spread
   indicates load sensitivity. A round not admitted prints
   `not measured (not-admitted)` and contributes no timing sample. Summaries

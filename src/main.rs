@@ -3993,8 +3993,12 @@ enum GatesCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Measure each gate once and write its budget and their sum; refuses existing budgets
-    Init,
+    /// Write budgets from the worst of several serial rounds; refuses existing budgets
+    Init {
+        /// Number of measured rounds, greater than zero
+        #[arg(long, default_value = "6", value_parser = clap::value_parser!(u32).range(1..))]
+        runs: u32,
+    },
     /// Show the newest measured over-budget run and its host observations
     Over {
         /// Limit history to this change
@@ -6846,9 +6850,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 let reference = infer(None)?;
                 commands::raise_budget(&ctx, &reference, gate, total, &reason)
             }
-            Some(GatesCmd::Init) => {
+            Some(GatesCmd::Init { runs }) => {
                 anyhow::ensure!(!json, "gates init does not accept --json");
-                commands::init_budgets(&ctx)
+                commands::init_budgets(&ctx, runs)
             }
             Some(GatesCmd::Over { change, gate }) => {
                 anyhow::ensure!(!json, "gates over does not accept --json");
