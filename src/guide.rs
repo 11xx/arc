@@ -5827,12 +5827,18 @@ GATES TOGETHER
   batch. All members share those boundaries; each retains its own result,
   command time, CPU, load, timeout, budget judgement, lock and admission wait.
   Receipts name the acquired exclusive lock and its admission_ms limit.
+  Batch receipts retain batch id, acceptance id, producing store, host and
+  member declaration identities. Authorization entries retain the same
+  acceptance reference. The batch id binds the receipt's compact coordinates.
+  Full declarations, measurement date and five rounds remain in the host-local
+  acceptance record. Replay validates frozen references without loading that
+  record; `arc gates` reports its date and identities.
   One member's failure does not turn another's result into a failure.
   status, check, show and explain identify the producing batch.
 
   A direct clean batch execution may justify a gate raise under the usual
   newest-execution rule. An eligible batch member may seed a base pass; its
-  witness retains the batch and measurement. Current acceptance is checked
+  witness retains the batch and acceptance identity. Current acceptance is checked
   before using that witness. Imported batch evidence stays factual and cannot
   be green on a different store, even after that receiver measures its own
   batch. A local standalone run or a new local accepted batch supplies evidence.
@@ -5843,7 +5849,7 @@ GATES TOGETHER
   concurrent budget only when that profile's complete concurrent set exactly
   matches this store's current acceptance. Otherwise all budgets add. Total
   raises' declaration_sum_ms uses this same cost across profiles. Authorization
-  snapshots bind consent and the complete local acceptance, so a changed or
+  snapshots bind consent and the local acceptance identity, so a changed or
   removed measurement cannot inherit an earlier authorization. Historical
   replay validates frozen receipts without consulting local measurements.
   Store format 11 fences readers and writers without these batch semantics.

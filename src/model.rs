@@ -2950,7 +2950,7 @@ pub struct NormalizedGate {
     #[serde(default, skip_serializing_if = "is_false")]
     pub concurrent: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
+    pub concurrent_acceptance: Option<crate::gate_concurrency::AcceptanceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

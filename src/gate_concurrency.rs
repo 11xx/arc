@@ -25,10 +25,61 @@ pub struct Acceptance {
     pub rounds: Vec<BTreeMap<String, Sample>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptanceRef {
+    pub id: String,
+    pub producing_store: String,
+    pub host: String,
+    pub members: BTreeMap<String, String>,
+}
+
+impl AcceptanceRef {
+    pub fn same_claim(&self, other: &Self) -> bool {
+        self.producing_store == other.producing_store
+            && self.host == other.host
+            && self.members == other.members
+    }
+
+    fn valid(&self) -> bool {
+        crate::base_pass::valid_digest(&self.id)
+            && self.members.len() >= 2
+            && self
+                .members
+                .values()
+                .all(|identity| crate::base_pass::valid_digest(identity))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Receipt {
     pub batch_id: String,
-    pub acceptance: Acceptance,
+    pub acceptance: AcceptanceRef,
+}
+
+impl Receipt {
+    pub fn new(acceptance: &Acceptance) -> Result<Self> {
+        ensure!(acceptance.valid(), "concurrent measurement is incomplete");
+        let acceptance = acceptance.reference();
+        let nonce = crate::ids::new_identifier();
+        let binding = crate::base_pass::digest(&(&nonce, &acceptance));
+        Ok(Self {
+            batch_id: format!("{nonce}@{binding}"),
+            acceptance,
+        })
+    }
+
+    fn valid(&self) -> bool {
+        self.acceptance.valid()
+            && self
+                .batch_id
+                .split_once('@')
+                .is_some_and(|(nonce, binding)| {
+                    !nonce.is_empty()
+                        && binding == crate::base_pass::digest(&(nonce, &self.acceptance))
+                })
+    }
 }
 
 pub fn members<'a>(
@@ -42,6 +93,19 @@ pub fn members<'a>(
 }
 
 impl Acceptance {
+    pub fn reference(&self) -> AcceptanceRef {
+        AcceptanceRef {
+            id: self.id.clone(),
+            producing_store: self.producing_store.clone(),
+            host: self.host.clone(),
+            members: self
+                .members
+                .iter()
+                .map(|(name, declaration)| (name.clone(), crate::base_pass::digest(declaration)))
+                .collect(),
+        }
+    }
+
     pub fn same_claim(&self, other: &Self) -> bool {
         self.producing_store == other.producing_store
             && self.host == other.host
@@ -125,17 +189,16 @@ pub fn accepted<'a>(required: &[(&'a String, &'a Gate)]) -> Option<&'a Acceptanc
 }
 
 pub fn receipt_matches(receipt: &Receipt, name: Option<&str>, declaration: Option<&str>) -> bool {
-    receipt.acceptance.valid()
-        && !receipt.batch_id.is_empty()
+    receipt.valid()
         && name
             .and_then(|name| receipt.acceptance.members.get(name))
-            .is_some_and(|value| Some(crate::base_pass::digest(value)).as_deref() == declaration)
+            .is_some_and(|value| Some(value.as_str()) == declaration)
 }
 
 pub fn accepted_here(gate: &Gate, batch: Option<&Receipt>) -> bool {
     batch.is_none_or(|batch| {
         gate.concurrent_acceptance.as_ref().is_some_and(|current| {
-            current.same_claim(&batch.acceptance) && batch.acceptance.valid()
+            current.reference().same_claim(&batch.acceptance) && batch.valid()
         })
     })
 }
@@ -218,5 +281,83 @@ pub fn payload_uses_concurrency(payload: &crate::model::Payload) -> bool {
             .values()
             .any(|gate| gate.execution.timing.concurrent_batch.is_some()),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn measurement() -> Acceptance {
+        let gates: gates::GatesFile = toml::from_str(
+            "[gates.a]\ncommand='true'\nconcurrent=true\n[gates.b]\ncommand='true'\nconcurrent=true\n",
+        ).unwrap();
+        let members = members(gates.gates.iter());
+        let round = members
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    Sample {
+                        passed: true,
+                        run_ms: Some(100),
+                        cpu_user_ms: None,
+                        cpu_system_ms: None,
+                        wait_ms: Some(0),
+                    },
+                )
+            })
+            .collect();
+        let mut acceptance = Acceptance {
+            id: String::new(),
+            producing_store: "store".into(),
+            host: "host".into(),
+            measured_at: chrono::Utc::now(),
+            members,
+            rounds: vec![round; 5],
+        };
+        acceptance.id = crate::base_pass::digest(&acceptance);
+        acceptance
+    }
+
+    /// Claim: a compact receipt replays independently of local measurement data
+    /// while detecting changes to every frozen coordinate, including peers.
+    /// Rejects a matching member laundering changed acceptance, store, host,
+    /// peer identity or batch identity, or an unaccepted measurement being issued.
+    #[test]
+    fn compact_receipts_bind_every_frozen_coordinate_without_local_rounds() {
+        let acceptance = measurement();
+        let receipt = Receipt::new(&acceptance).unwrap();
+        let identity = &receipt.acceptance.members["a"];
+        let encoded = serde_json::to_vec(&receipt).unwrap();
+        let replayed: Receipt = serde_json::from_slice(&encoded).unwrap();
+        assert!(receipt_matches(&replayed, Some("a"), Some(identity)));
+        assert!(!receipt_matches(&replayed, Some("other"), Some(identity)));
+        assert!(!receipt_matches(&replayed, Some("a"), None));
+        for field in ["acceptance", "store", "host", "member", "peer", "batch"] {
+            let mut altered = replayed.clone();
+            match field {
+                "acceptance" => altered.acceptance.id = crate::base_pass::digest(&"different"),
+                "store" => altered.acceptance.producing_store.push('x'),
+                "host" => altered.acceptance.host.push('x'),
+                "member" | "peer" => {
+                    altered.acceptance.members.insert(
+                        if field == "peer" { "b" } else { "a" }.into(),
+                        crate::base_pass::digest(&"different"),
+                    );
+                }
+                "batch" => altered.batch_id.push('x'),
+                _ => unreachable!(),
+            }
+            assert!(
+                !receipt_matches(&altered, Some("a"), Some(identity)),
+                "{field} tampering must not replay"
+            );
+        }
+        let mut failed = acceptance;
+        failed.rounds[0].get_mut("a").unwrap().passed = false;
+        failed.id.clear();
+        failed.id = crate::base_pass::digest(&failed);
+        assert!(Receipt::new(&failed).is_err());
     }
 }

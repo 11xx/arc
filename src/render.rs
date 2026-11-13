@@ -1097,8 +1097,8 @@ pub fn markdown(
             if let Some(batch) = &v.timing.concurrent_batch {
                 let _ = writeln!(
                     w,
-                    "  - concurrent batch {}; measurement {} at {}",
-                    batch.batch_id, batch.acceptance.id, batch.acceptance.measured_at
+                    "  - concurrent batch {}; measurement {}",
+                    batch.batch_id, batch.acceptance.id
                 );
             }
             if let Some(base) = &v.base_pass {

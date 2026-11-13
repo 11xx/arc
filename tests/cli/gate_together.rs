@@ -79,8 +79,9 @@ fn approve(repo: &Repo, wt: &Path) {
 }
 
 /// Claim: a measured batch overlaps after standalone gates and supplies green,
-/// per-command receipts in every view. Rejects sequential scheduling, a batch
-/// preceding its standalone obligations, or shared command-time accounting.
+/// compact per-command receipts in every view. Rejects embedded measurement
+/// rounds or declarations, sequential scheduling, a batch preceding its
+/// standalone obligations, or shared command-time accounting.
 #[test]
 fn measured_batch_runs_together_after_standalone_and_keeps_own_receipts() {
     let (repo, id, wt) = fixture(
@@ -101,6 +102,13 @@ fn measured_batch_runs_together_after_standalone_and_keeps_own_receipts() {
             assert_eq!(after.get(&path), Some(&bytes));
         }
     }
+    let local: Value = serde_json::from_slice(&fs::read(acceptance_file(&repo)).unwrap()).unwrap();
+    assert_eq!(local["rounds"].as_array().unwrap().len(), 5);
+    assert!(local["members"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(Value::is_object));
     assert!(
         entries(&show(&repo, &wt)).is_empty(),
         "measurement must not record verification evidence"
@@ -143,13 +151,15 @@ fn measured_batch_runs_together_after_standalone_and_keeps_own_receipts() {
         ] {
             assert!(!entry[key].is_null(), "{key}: {entry}");
         }
-        assert!(
-            entry["concurrent_batch"]["acceptance"]["rounds"]
-                .as_array()
-                .unwrap()
-                .len()
-                == 5
-        );
+        let acceptance = &entry["concurrent_batch"]["acceptance"];
+        assert_eq!(acceptance.as_object().unwrap().len(), 4);
+        assert!(acceptance["members"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(Value::is_string));
+        assert!(acceptance["rounds"].is_null());
+        assert!(acceptance["measured_at"].is_null());
     }
     assert!(status(&repo, &wt)["gates"]
         .as_array()
@@ -169,8 +179,15 @@ fn measured_batch_runs_together_after_standalone_and_keeps_own_receipts() {
         .assert()
         .success();
     let closed = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+    let authorization = &closed["closure"]["authorization"]["gates"]["a"]["concurrent_acceptance"];
+    assert_eq!(authorization.as_object().unwrap().len(), 4);
+    assert!(authorization["members"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(Value::is_string));
     assert!(
-        closed["closure"]["authorization"]["gates"]["a"]["concurrent_acceptance"].is_object(),
+        authorization.is_object(),
         "authorization must freeze acceptance: {closed}"
     );
 }
@@ -396,7 +413,7 @@ fn duplicate_exclusive_names_are_refused() {
 
 /// Claim: foreign batch facts cannot become local green evidence and frozen
 /// receipt validation detects forged acceptance. Rejects a sender's measurement
-/// or a claimed successful round overriding the receiver's own measurement.
+/// or an altered member identity overriding the receiver's own measurement.
 #[test]
 fn foreign_and_corrupt_measurements_cannot_authorize_receipts() {
     let (repo, source_id, wt) = fixture("", "10s", "10s");
@@ -462,7 +479,8 @@ fn foreign_and_corrupt_measurements_cannot_authorize_receipts() {
     let st = show(&repo, &wt);
     let id = st["change_id"].as_str().unwrap();
     rewrite_event(&repo, id, "verification-recorded", |event| {
-        event["concurrent_batch"]["acceptance"]["rounds"][0]["a"]["passed"] = json!(false);
+        event["concurrent_batch"]["acceptance"]["members"]["a"] =
+            json!(format!("sha256:{}", "0".repeat(64)));
     });
     repo.arc(&wt)
         .args(["show", "--json"])

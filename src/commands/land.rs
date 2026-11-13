@@ -299,7 +299,7 @@ struct PrerequisitePin {
 
 #[derive(Debug, Clone, Serialize)]
 struct BudgetConstraint {
-    concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
+    concurrent_acceptance: Option<crate::gate_concurrency::AcceptanceRef>,
     budget_ms: Option<u64>,
     sources: Vec<crate::gate_budget::BudgetSource>,
 }

@@ -29,10 +29,17 @@ pub(super) struct ReadFailure {
 }
 
 #[derive(Serialize)]
+struct MeasuredAcceptance {
+    #[serde(flatten)]
+    reference: crate::gate_concurrency::AcceptanceRef,
+    measured_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize)]
 pub(super) struct GateRow {
     pub(super) name: String,
     declaration: Declaration,
-    concurrent_acceptance: Option<crate::gate_concurrency::Acceptance>,
+    concurrent_acceptance: Option<MeasuredAcceptance>,
     budget_ms: Option<u64>,
     budget_sources: Vec<crate::gate_budget::BudgetSource>,
     budget_share_percent: Option<f64>,
@@ -192,7 +199,12 @@ fn collect_declarations(
                 .map(|duration| duration.as_millis());
             let row = GateRow {
                 name: name.clone(),
-                concurrent_acceptance: gate.concurrent_acceptance.clone(),
+                concurrent_acceptance: gate.concurrent_acceptance.as_ref().map(|acceptance| {
+                    MeasuredAcceptance {
+                        reference: acceptance.reference(),
+                        measured_at: acceptance.measured_at,
+                    }
+                }),
                 declaration: Declaration {
                     timings: gate.timings,
                     concurrent: gate.concurrent,
@@ -459,10 +471,10 @@ pub(super) fn render(report: &GateReport) {
                 Some(acceptance) => {
                     println!(
                         "  concurrent: accepted {} at {} on host {}",
-                        acceptance.id, acceptance.measured_at, acceptance.host
+                        acceptance.reference.id, acceptance.measured_at, acceptance.reference.host
                     );
-                    for (name, declaration) in &acceptance.members {
-                        println!("    {name}: {}", crate::base_pass::digest(declaration));
+                    for (name, identity) in &acceptance.reference.members {
+                        println!("    {name}: {identity}");
                     }
                 }
                 None => println!("  concurrent: not accepted on this store and host; runs alone"),

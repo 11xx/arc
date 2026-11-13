@@ -81,10 +81,7 @@ fn batch(
     let dirt = gitio::dirt(&ctx.cwd)?;
     let dirty =
         dirt.tracked || dirt.untracked || before != gitio::commit_tree(&ctx.cwd, &revision)?;
-    let receipt = crate::gate_concurrency::Receipt {
-        batch_id: crate::ids::new_identifier(),
-        acceptance,
-    };
+    let receipt = crate::gate_concurrency::Receipt::new(&acceptance)?;
     eprintln!(
         "running concurrent batch {}: {}",
         receipt.batch_id,
@@ -136,7 +133,7 @@ fn batch(
     let local = crate::gate_concurrency::load(&ctx.cwd);
     let accepted = local
         .as_ref()
-        .is_some_and(|local| local.same_claim(&receipt.acceptance));
+        .is_some_and(|local| local.reference().same_claim(&receipt.acceptance));
     let mut passed = 0;
     for item in &mut completed {
         item.tested_tree = Some(before.clone());

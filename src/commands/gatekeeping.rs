@@ -5565,7 +5565,10 @@ pub(super) fn normalized_declarations(
                 name.clone(),
                 crate::model::NormalizedGate {
                     concurrent: gate.concurrent,
-                    concurrent_acceptance: gate.concurrent_acceptance.clone(),
+                    concurrent_acceptance: gate
+                        .concurrent_acceptance
+                        .as_ref()
+                        .map(crate::gate_concurrency::Acceptance::reference),
                     coverage_identity: gates::coverage_identity(gate),
                     paths: gate.paths.clone(),
                     inert: gate.coverage.inert.clone(),
