@@ -29,6 +29,24 @@ fn project_paths_cover_source_and_warmed_documentation_skips_execution() {
     let text =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".arc/gates.toml")).unwrap();
     let mut declarations: toml::Value = toml::from_str(&text).unwrap();
+    let gates = declarations["gates"].as_table().unwrap();
+    let all = gates.len();
+    let integration = gates
+        .values()
+        .filter(|gate| {
+            gate.get("events").is_none_or(|events| {
+                events
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.as_str() == Some("integration"))
+            })
+        })
+        .count();
+    assert!(
+        integration >= 1 && integration < all,
+        "{integration} of {all}"
+    );
     for (_, gate) in declarations["gates"].as_table_mut().unwrap().iter_mut() {
         gate["command"] = toml::Value::String("true".into());
         gate.as_table_mut().unwrap().remove("timings");
@@ -36,7 +54,11 @@ fn project_paths_cover_source_and_warmed_documentation_skips_execution() {
     repo.redeclare_gates(&toml::to_string(&declarations).unwrap());
     let warm = begin(&repo, "warm-project-gates", "README.md");
     repo.arc(&warm).args(["verify", "--all"]).assert().success();
-    assert_eq!(counts(&repo, &warm), (3, 0), "cold documentation executes");
+    assert_eq!(
+        counts(&repo, &warm),
+        (integration, 0),
+        "cold documentation executes"
+    );
     repo.arc(&warm)
         .args(["review", "--verdict", "approved"])
         .assert()
@@ -49,7 +71,7 @@ fn project_paths_cover_source_and_warmed_documentation_skips_execution() {
     repo.arc(&docs).args(["verify", "--all"]).assert().success();
     assert_eq!(
         counts(&repo, &docs),
-        (0, 3),
+        (0, integration),
         "warm documentation executes nothing"
     );
     for (slug, file) in [
@@ -72,13 +94,13 @@ fn project_paths_cover_source_and_warmed_documentation_skips_execution() {
         assert_eq!(row["inert"], false, "source must not be inert: {row}");
         assert_eq!(
             row["gates"].as_array().unwrap().len(),
-            4,
+            all,
             "publication coverage: {row}"
         );
         repo.arc(&wt).args(["verify", "--all"]).assert().success();
         assert_eq!(
             counts(&repo, &wt),
-            (3, 0),
+            (integration, 0),
             "covered changes execute every integration gate"
         );
     }

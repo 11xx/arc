@@ -67,3 +67,4 @@ I5	cli	base_pass::replay_refuses_fabricated_diff_and_ancestry	Replay verifies a 
 I5	cli	base_pass::covered_target_changes_since_the_baseline_execute_the_gate	Selection covers the full baseline-to-head diff including target changes.	Integration cannot weaken the target's required evidence.
 I5	cli	base_pass::local_refusals_cannot_be_rescued_by_a_baseline	An earlier local refusal cannot borrow permission from a baseline.	Integration cannot weaken the target's required evidence.
 I5	cli	verification_outcomes::retired_bypass_does_not_authorize_integration	Historical bypass and review debt cannot authorize an unrun gate.	Integration cannot weaken the target's required evidence.
+I5	cli	gate_together::moved_or_dirty_batch_is_never_green	A concurrent batch on a dirty or moved tree never supplies a green pass.	Integration cannot weaken the target's required evidence.
