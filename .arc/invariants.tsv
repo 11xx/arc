@@ -1,0 +1,69 @@
+invariant	target	test	claim	boundary
+I12	cli	absent_actor::a_ledger_write_with_no_establishable_actor_refuses_and_a_read_proceeds	a ledger write with no establishable actor refuses and a read proceeds	A command cannot cross its established identity, role or confinement boundary.
+I2	cli	bundle::a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported	a bundle from a newer arc is refused rather than partially imported	A reader never authorizes work using store semantics it does not understand.
+I1	cli	bundle::import_reads_the_previous_bundle_version_and_refuses_older	import reads the previous bundle version and refuses older	Supported old ledger histories retain their recorded meaning.
+I3	cli	bundle::import_rejects_malformed_known_events_before_writing	import rejects malformed known events before writing	Published ledger events preserve append-only identity and order.
+I14	cli	fixture_seeds::fixture_commands_use_the_selected_executable	fixture commands use the selected executable	Every fixture executes the selected artifact.
+I12	cli	fork::fork_begin_creates_worktree_marker_and_refuses_integration	fork begin creates worktree marker and refuses integration	A command cannot cross its established identity, role or confinement boundary.
+I5	cli	gate_declarations::a_deleted_gate_is_still_owed_from_the_change_worktree_and_the_target	a deleted gate is still owed from the change worktree and the target	Integration cannot weaken the target's required evidence.
+I5	cli	gate_environment::another_environment_is_inapplicable_without_a_local_pass	another environment is inapplicable without a local pass	Integration cannot weaken the target's required evidence.
+I5	cli	gate_paths::dangerous_paths_cannot_skip_gates	dangerous paths cannot skip gates	Integration cannot weaken the target's required evidence.
+I11	cli	import_authorization::enrolled_import_requires_exact_received_provenance_without_writes	enrolled import requires exact received provenance without writes	Untrusted imported claims cannot acquire local write or review authority.
+I11	cli	import_authorization::input_verdict_preserves_operator_claim_without_review_credit	input verdict preserves operator claim without review credit	Untrusted imported claims cannot acquire local write or review authority.
+I8	cli	import_authorization::policy_revocation_during_format_wait_refuses_without_writes	policy revocation during format wait refuses without writes	Execution refuses an authorization basis that changed before its effect.
+I8	cli	integrate::audit_fix_shape_revalidates_after_waiting_for_target_lock	audit fix shape revalidates after waiting for target lock	Execution refuses an authorization basis that changed before its effect.
+I10	cli	integrate::cleanup_keeps_a_worktree_whose_recorded_path_is_a_symlink	cleanup keeps a worktree whose recorded path is a symlink	An operation cannot delete or overwrite work it does not own.
+I9	cli	integrate::fast_forward_closure_publication_failure_reports_recovery	fast forward closure publication failure reports recovery	A published Git effect is never reported as a different durable completion.
+I10	cli	integrate::merge_writing_an_untracked_target_path_is_refused_by_name	merge writing an untracked target path is refused by name	An operation cannot delete or overwrite work it does not own.
+I4	cli	journal::journal_reader_and_writer_refuse_unprepared_torn_tail	journal reader and writer refuse unprepared torn tail	Acknowledged journal content survives interrupted publication.
+I4	cli	journal_exchange::failed_event_append_preserves_bodies_and_retry_converges	failed event append preserves bodies and retry converges	Acknowledged journal content survives interrupted publication.
+I15	cli	journal_pages::render_never_emits_active_content	render never emits active content	Rendered journal text cannot activate embedded code.
+I5	cli	landing::a_gate_the_top_member_adds_fails_and_nothing_closes	a gate the top member adds fails and nothing closes	Integration cannot weaken the target's required evidence.
+I9	cli	landing::recovery_at_the_composed_crash_point_runs_twice_to_the_same_end	recovery at the composed crash point runs twice to the same end	A published Git effect is never reported as a different durable completion.
+I3	cli	lifecycle::append_policy_has_a_single_authority	append policy has a single authority	Published ledger events preserve append-only identity and order.
+I7	cli	lifecycle::blocking_finding_blocks_until_resolved_and_reapproved	blocking finding blocks until resolved and reapproved	A standing refusal cannot be turned into permission by debt or retry.
+S1	cli	lifecycle::green_path_integrates_with_merge_commit	green path integrates with merge commit	A normal reviewed, verified change can complete the core lifecycle.
+I7	cli	lifecycle::hold_blocks_integration	hold blocks integration	A standing refusal cannot be turned into permission by debt or retry.
+I7	cli	lifecycle::iterating_change	iterating change	A standing refusal cannot be turned into permission by debt or retry.
+I7	cli	orchestrate::blocker_chain_transitions_and_suggests_ready_alternatives	blocker chain transitions and suggests ready alternatives	A standing refusal cannot be turned into permission by debt or retry.
+I9	cli	provisional::explicit_provisional_integration_keeps_the_change_open	explicit provisional integration keeps the change open	A published Git effect is never reported as a different durable completion.
+I7	cli	provisional::unapplied_retry_respects_holds	unapplied retry respects holds	A standing refusal cannot be turned into permission by debt or retry.
+I13	cli	relocate_redact::exchange_carries_a_redaction_and_never_restores_removed_text	exchange carries a redaction and never restores removed text	Exchange cannot restore redacted text.
+I10	cli	retention::a_trailer_rewrite_keeps_the_reviewed_commit_reachable	a trailer rewrite keeps the reviewed commit reachable	An operation cannot delete or overwrite work it does not own.
+I6	cli	review_extents::a_tree_read_never_covers_a_diff_obligation	a tree read never covers a diff obligation	An implementer's own read cannot count as independent clearance.
+I6	cli	review_roles::an_implementer_can_never_clear_its_own_work_even_when_trailers_disagree	an implementer can never clear its own work even when trailers disagree	An implementer's own read cannot count as independent clearance.
+I12	cli	roles::reviewer_role_can_review_and_resolve_but_cannot_close_or_integrate	reviewer role can review and resolve but cannot close or integrate	A command cannot cross its established identity, role or confinement boundary.
+I12	cli	sandbox::a_sandboxed_gate_run_refuses_the_recorded_checkout_outside_the_prefix	a sandboxed gate run refuses the recorded checkout outside the prefix	A command cannot cross its established identity, role or confinement boundary.
+I8	cli	selection::stale_target_and_stale_evaluation_are_refused_by_name	stale target and stale evaluation are refused by name	Execution refuses an authorization basis that changed before its effect.
+I5	cli	tree_gates::a_clean_merge_breaking_a_gate_is_refused_before_it_can_ship	a clean merge breaking a gate is refused before it can ship	Integration cannot weaken the target's required evidence.
+I5	cli	verify::declared_probe_blocks_until_discriminating_evidence_matches_patchset	declared probe blocks until discriminating evidence matches patchset	Integration cannot weaken the target's required evidence.
+I12	cli	verify::gate_timeout_records_failure_and_kills_the_process_group	gate timeout records failure and kills the process group	A command cannot cross its established identity, role or confinement boundary.
+I7	unit	approval::tests::a_local_refusal_of_this_patchset_is_not_waived	a local refusal of this patchset is not waived	A standing refusal cannot be turned into permission by debt or retry.
+I5	unit	approval::tests::an_approval_left_behind_by_the_head_is_stale	an approval left behind by the head is stale	Integration cannot weaken the target's required evidence.
+I6	unit	approval::tests::an_external_approval_never_counts_alone_on_a_dangerous_path	an external approval never counts alone on a dangerous path	An implementer's own read cannot count as independent clearance.
+I10	unit	custody::tests::a_symlinked_custody_directory_is_refused_for_every_access	a symlinked custody directory is refused for every access	An operation cannot delete or overwrite work it does not own.
+I8	unit	integration::tests::a_basis_the_second_reading_disagrees_with_refuses	a basis the second reading disagrees with refuses	Execution refuses an authorization basis that changed before its effect.
+I8	unit	integration::tests::an_unobservable_fact_refuses_with_its_own_error	an unobservable fact refuses with its own error	Execution refuses an authorization basis that changed before its effect.
+I7	unit	integration::tests::lifecycle_refusal_precedes_fast_forward_divergence	lifecycle refusal precedes fast forward divergence	A standing refusal cannot be turned into permission by debt or retry.
+I12	unit	session_store::tests::a_child_named_by_the_recording_cannot_break_out_of_its_line	a child named by the recording cannot break out of its line	A command cannot cross its established identity, role or confinement boundary.
+I1	unit	state::tests::events_without_the_supersession_edges_replay_unchanged	events without the supersession edges replay unchanged	Supported old ledger histories retain their recorded meaning.
+I1	unit	state::tests::guarded_integration_shapes_reduce_and_legacy_events_derive_shape	guarded integration shapes reduce and legacy events derive shape	Supported old ledger histories retain their recorded meaning.
+I1	unit	state::tests::legacy_reuse_of_non_green_passing_evidence_still_replays	legacy reuse of non green passing evidence still replays	Supported old ledger histories retain their recorded meaning.
+I1	unit	state::tests::old_opening_events_default_new_metadata	old opening events default new metadata	Supported old ledger histories retain their recorded meaning.
+I6	unit	state::tests::only_an_audit_of_what_landed_clears_a_replayed_unread_debt	only an audit of what landed clears a replayed unread debt	An implementer's own read cannot count as independent clearance.
+I2	unit	store::budget_format_tests::budget_adoption_fences_older_readers_only_when_needed	budget adoption fences older readers only when needed	A reader never authorizes work using store semantics it does not understand.
+I8	unit	store::tests::a_scope_is_derived_after_a_write_not_kept_across_it	a scope is derived after a write not kept across it	Execution refuses an authorization basis that changed before its effect.
+I3	unit	store::tests::an_event_whose_directory_sync_failed_is_visible_but_unconfirmed	an event whose directory sync failed is visible but unconfirmed	Published ledger events preserve append-only identity and order.
+I3	unit	store::tests::append_refuses_an_event_before_the_change_opening_without_writes	append refuses an event before the change opening without writes	Published ledger events preserve append-only identity and order.
+I2	unit	store::tests::format_stamp_waits_on_one_store_wide_lock_and_never_downgrades	format stamp waits on one store wide lock and never downgrades	A reader never authorizes work using store semantics it does not understand.
+I3	unit	store::tests::local_writers_issue_ids_in_publication_order_in_one_millisecond	local writers issue ids in publication order in one millisecond	Published ledger events preserve append-only identity and order.
+I8	unit	store::tests::one_read_reuses_repository_events_and_a_fresh_read_reports_damage	one read reuses repository events and a fresh read reports damage	Execution refuses an authorization basis that changed before its effect.
+I12	unit	tests::every_leaf_command_has_an_io_classification	every leaf command has an io classification	A command cannot cross its established identity, role or confinement boundary.
+I2	unit	store::budget_format_tests::base_pass_adoption_fences_budget_aware_and_stale_readers	Base-pass records fence readers that only understand budgets.	A reader never authorizes work using store semantics it does not understand.
+I5	cli	gate_budgets::ordinary_budget_refusal_preserves_the_pass_and_requires_explicit_rerun	An over-budget pass cannot authorize integration or implicit reuse.	Integration cannot weaken the target's required evidence.
+I5	cli	gate_raises::raise_unrecorded_green_integrate	A higher declaration needs a raise even when execution fits the old bound.	Integration cannot weaken the target's required evidence.
+I5	cli	gate_raises::raise_removal_refuses_check_and_integrate	Removing budgets or total while gates remain cannot relax target constraints.	Integration cannot weaken the target's required evidence.
+I5	cli	base_pass::replay_refuses_fabricated_diff_and_ancestry	Replay verifies a base pass against retained Git content and ancestry.	Integration cannot weaken the target's required evidence.
+I5	cli	base_pass::covered_target_changes_since_the_baseline_execute_the_gate	Selection covers the full baseline-to-head diff including target changes.	Integration cannot weaken the target's required evidence.
+I5	cli	base_pass::local_refusals_cannot_be_rescued_by_a_baseline	An earlier local refusal cannot borrow permission from a baseline.	Integration cannot weaken the target's required evidence.
+I5	cli	verification_outcomes::retired_bypass_does_not_authorize_integration	Historical bypass and review debt cannot authorize an unrun gate.	Integration cannot weaken the target's required evidence.

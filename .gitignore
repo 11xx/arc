@@ -1,2 +1,5 @@
 /target
 .arc/outbox/
+
+.arc/invariant-timings.tsv
+.arc/__pycache__/

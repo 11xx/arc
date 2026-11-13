@@ -1,18 +1,24 @@
-# Build and lint apply to integration and publication.
+[selection]
+base_passes = true
+inert = ["*.md", "tests/*.md", "UNLICENSE"]
+
 [gates.build]
-command = "python3 .arc/test-selection.py --unless-markdown 'cargo build --all-targets'"
+command = "cargo check --locked --all-targets"
+paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
-
-[gates.test]
-command = "python3 .arc/test_selection_test.py && python3 .arc/test-binary.py cargo test"
-events = ["publication"]
-
-[gates.test-integration]
-command = "python3 .arc/test-selection.py"
-events = ["integration"]
-selector = "python3 .arc/test-selection.py --selector"
-environment = "python3 .arc/test-selection.py --environment"
 
 [gates.lint]
-command = "python3 .arc/test-selection.py --unless-markdown 'cargo clippy --all-targets -- -D warnings && cargo fmt --check'"
+command = "cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check"
+paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
+
+[gates.invariants]
+command = "python3 .arc/test-binary.py invariants"
+paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
+events = ["integration", "publication"]
+timings = ".arc/invariant-timings.tsv"
+
+[gates.release]
+command = "python3 .arc/test-binary.py release"
+paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
+events = ["publication"]

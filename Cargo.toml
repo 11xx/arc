@@ -45,10 +45,9 @@ tempfile = "3"
 lto = true
 strip = true
 
-# CLI fixtures exercise optimized code while retaining development checks.
-[profile.cli-test]
-inherits = "dev"
-opt-level = 2
+# Development builds, test harnesses and spawned fixtures share one profile.
+[profile.dev]
+opt-level = 1
 debug = 0
 debug-assertions = true
 overflow-checks = true

@@ -25,6 +25,22 @@ operating rules.
   A change to what integration permits or refuses is one it must be re-pinned
   to.
 
+## Gate boundary
+
+Integration gates protect named invariants, not the test inventory. The exact
+witness list, invariant and caller-visible claim live in `.arc/invariants.tsv`.
+A missing, ignored or unexecuted name fails the invariant gate.
+
+Adding or replacing a witness requires naming its invariant and bad state in its
+doc comment and list entry, demonstrating failure for that state first, then
+passing at the head. A replacement proves the same boundary before removing its
+predecessor. Test existence and historical catches are not selection criteria.
+
+Area suites run on demand with `python3 .arc/test-binary.py area cli <module>`
+(or `area unit <module>`), using the exact module path. They belong to no gate.
+Publication runs build, lint, the invariant gate and five release-artifact checks
+against the release-profile executable. Runner details and commands are in `tests/README.md`.
+
 ## Releasing
 - CalVer. A version is its release date, `YYYY.M.D` with no leading zeros,
   prerelease, or build metadata. Cargo rejects a fourth field, so a second
