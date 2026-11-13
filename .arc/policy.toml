@@ -99,6 +99,10 @@ paths = [
   ".arc/policy.toml",
   # Gate declarations decide which commands and probes can satisfy integration.
   ".arc/gates.toml",
+  # The invariant gate is this runner executing this list: an edit to either
+  # can make the gate pass without proving anything.
+  ".arc/test-binary.py",
+  ".arc/invariants.tsv",
   # The changelog renderer runs the program `.arc/changelog.toml` declares,
   # with the invoking user's authority, the way a gate runs its command.
   ".arc/changelog.toml",
