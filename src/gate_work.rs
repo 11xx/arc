@@ -863,26 +863,30 @@ fn unwaited_tree_cpu(timing: &VerificationTiming) -> Option<u64> {
 pub fn cpu_during(before: Option<ArcCpu>, timing: &VerificationTiming) -> Option<u64> {
     let before = before?;
     let after = arc_cpu()?;
-    after
-        .own
-        .checked_sub(before.own)?
-        .checked_add(after.children.checked_sub(before.children)?)?
-        .checked_add(unwaited_tree_cpu(timing)?)
+    // Reaped, the tree's waited CPU is among arc's children; not yet reaped,
+    // only the tree's own clock holds it.
+    after.own.checked_sub(before.own)?.checked_add(
+        after
+            .children
+            .checked_sub(before.children)?
+            .checked_add(unwaited_tree_cpu(timing)?)?
+            .max(tree_cpu(timing)?),
+    )
 }
 struct Invocation {
     host: HostSample,
     cpu: ArcCpu,
-    unwaited: std::sync::atomic::AtomicU64,
+    trees: std::sync::atomic::AtomicU64,
     complete: std::sync::atomic::AtomicBool,
 }
 static INVOCATION: std::sync::OnceLock<Option<Invocation>> = std::sync::OnceLock::new();
 pub fn record_tree_cpu(timing: &VerificationTiming) {
     use std::sync::atomic::Ordering::Relaxed;
     if let Some(Some(invocation)) = INVOCATION.get() {
-        if let Some(unwaited) = unwaited_tree_cpu(timing) {
+        if let Some(cpu) = tree_cpu(timing) {
             let _ = invocation
-                .unwaited
-                .fetch_update(Relaxed, Relaxed, |n| Some(n.saturating_add(unwaited)));
+                .trees
+                .fetch_update(Relaxed, Relaxed, |n| Some(n.saturating_add(cpu)));
         } else {
             invocation.complete.store(false, Relaxed);
         }
@@ -893,7 +897,7 @@ pub fn begin_invocation() {
         Some(Invocation {
             host: HostSample::start()?,
             cpu: arc_cpu()?,
-            unwaited: std::sync::atomic::AtomicU64::new(0),
+            trees: std::sync::atomic::AtomicU64::new(0),
             complete: std::sync::atomic::AtomicBool::new(true),
         })
     });
@@ -910,11 +914,15 @@ pub fn conditions_before_spawn() -> Conditions {
         Some(Window {
             busy_ms: timing.host_busy_ms?,
             capacity_ms: timing.host_capacity_ms?,
+            // A tree's holder may not be reaped yet, so its waited CPU can be
+            // missing from arc's children; every earlier tree is subtracted in
+            // full beside them. Counting a reaped tree twice only lowers the
+            // share left to other work.
             arc_cpu_ms: current
                 .own
                 .checked_sub(start.cpu.own)?
                 .checked_add(current.children.checked_sub(start.cpu.children)?)?
-                .checked_add(start.unwaited.load(Relaxed))?,
+                .checked_add(start.trees.load(Relaxed))?,
             elapsed_ms: (crate::verification_timing::monotonic_ns()?
                 .checked_sub(start.host.started_ns)?)
                 / 1_000_000,

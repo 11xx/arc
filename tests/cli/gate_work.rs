@@ -956,11 +956,13 @@ fn hidden_user_work_cannot_shelter_behind_visible_kernel_cpu() {
     if ordinary["instructions"].is_null() || ordinary["tree_cpu_ms"].is_null() {
         return;
     }
-    // The fixture only discriminates while the visible kernel CPU exceeds the
-    // hidden user CPU; a host where it does not is not a counterexample.
+    // The fixture discriminates only while the visible kernel CPU exceeds the
+    // user CPU about to be hidden, and that user CPU exceeds the holder's
+    // tolerance of 2 ms plus a twentieth of waited CPU. A host where either
+    // fails is not a counterexample.
     let system = ordinary["cpu_system_ms"].as_u64().unwrap();
     let user = ordinary["cpu_user_ms"].as_u64().unwrap();
-    if system <= user {
+    if system <= user || user <= 2 * (2 + (system + user) / 20) {
         return;
     }
     let hidden = run(&opaque);
