@@ -715,7 +715,8 @@ enum Cmd {
     /// Lists declarations (arc guide gates), with runs, exact-tree
     /// reuses and selector skips counted separately. Timings prefer run_ms; older
     /// duration_ms samples are identified and excluded from budget shares. Lists budgets,
-    /// totals, the latest over-budget run and receipt cost kinds (arc guide gate-costs). Reads record
+    /// totals, recent landing costs, the latest over-budget run and receipt cost kinds
+    /// (arc guide gate-costs). Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
     Gates {
         /// Inspect coverage or measure commands without recording evidence
@@ -4036,7 +4037,8 @@ enum GatesCmd {
 
 #[derive(Subcommand)]
 enum WorkspaceCmd {
-    /// Gate declarations and costs from each registered project's own ledger
+    /// Gate declarations and landing costs, ranked by paid time in 30 days,
+    /// from each registered project's own ledger
     ///
     /// Uses --under/--here/--global scope and the workspace collection manifest.
     /// Retired registrations are counted without observation; --retired lists them.

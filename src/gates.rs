@@ -34,6 +34,7 @@ pub const BYPASS_RETIRED: &str = "--bypass is retired; make the gate fit its bud
 /// Declared verification gates. A gate with no `profiles` list is required
 /// for every profile. This is the local analogue of required CI checks.
 #[derive(Debug, Default, Deserialize)]
+#[serde(from = "GateDeclarations")]
 pub struct GatesFile {
     #[serde(skip)]
     pub concurrent_measurement: Option<crate::gate_concurrency::Acceptance>,
@@ -51,10 +52,45 @@ pub struct GatesFile {
     pub dangerous: Vec<String>,
     #[serde(default)]
     pub budget: Option<crate::gate_budget::BudgetRules>,
+    #[serde(skip)]
+    pub landing_budget_ms: Option<u64>,
     #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
     #[serde(skip)]
     pub conflicts: Vec<GateConflict>,
+}
+
+#[derive(Deserialize)]
+struct GateDeclarations {
+    #[serde(default)]
+    selection: PathSelection,
+    budget: Option<BudgetDeclaration>,
+    #[serde(default)]
+    gates: BTreeMap<String, Gate>,
+}
+
+#[derive(Deserialize)]
+struct BudgetDeclaration {
+    #[serde(flatten)]
+    rules: crate::gate_budget::BudgetRules,
+    #[serde(default, deserialize_with = "crate::gate_budget::deserialize_ms")]
+    landing: Option<u64>,
+}
+
+impl From<GateDeclarations> for GatesFile {
+    fn from(declared: GateDeclarations) -> Self {
+        let (budget, landing_budget_ms) = declared.budget.map_or((None, None), |b| {
+            let enforced = b.landing.is_none() || b.rules != Default::default();
+            (enforced.then_some(b.rules), b.landing)
+        });
+        Self {
+            selection: declared.selection,
+            gates: declared.gates,
+            budget,
+            landing_budget_ms,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -611,6 +647,11 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
             toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?;
         let source = source.to_string();
         layer.name_budget_sources(&origin);
+        merged.landing_budget_ms = merged
+            .landing_budget_ms
+            .into_iter()
+            .chain(layer.landing_budget_ms)
+            .min();
         crate::gate_budget::merge_rules(&mut merged.budget, layer.budget.take());
 
         if source == PROJECT_SOURCE {

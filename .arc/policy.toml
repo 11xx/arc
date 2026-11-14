@@ -284,6 +284,8 @@ acknowledged_safe = [
   # never judge one. `arc gates init` writes budgets into .arc/gates.toml,
   # which is a dangerous path, so what it writes is reviewed as a diff.
   "src/commands/gate_reports.rs",
+  # Landing cost projections and advisory declarations never authorize integration.
+  "src/commands/gate_reports/landing.rs",
   "src/gate_diagnostics.rs",
   "src/check_timings.rs",
   "src/context.rs",

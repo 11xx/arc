@@ -144,6 +144,17 @@ pub(super) fn report(scope: WorkspaceScope, show_retired: bool, json: bool) -> R
             }
         }
     }
+    output.projects.sort_by(|a, b| {
+        let paid = |project: &ProjectGates| {
+            project
+                .report
+                .as_ref()
+                .map(|report| report.landing.last_30_days.measured_ms)
+        };
+        paid(b)
+            .cmp(&paid(a))
+            .then_with(|| a.project.cmp(&b.project))
+    });
     if json {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -154,7 +165,7 @@ pub(super) fn report(scope: WorkspaceScope, show_retired: bool, json: bool) -> R
                 match project.declares_gates {
                     Some(true) => "gates declared",
                     Some(false) => "no gates declared",
-                    None => "unreadable",
+                    None => "unobserved",
                 }
             );
             if let Some(report) = &project.report {

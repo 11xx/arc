@@ -5542,7 +5542,7 @@ GATES
   Budget durations accept positive whole milliseconds with ms, s, m or h
   units, including decimal forms such as 2.5s and 0.001s. Overflow and precision
   below a millisecond are refused. A [budget] table may declare total = "15s".
-  Every required integration gate needs a budget when that table exists.
+  Every required integration gate needs a budget when it has enforcement keys.
   `arc guide gates-together` defines the total's profile and batch accounting.
   The effective suite is validated after layering for every declared
   profile and the unqualified case. A missing budget or excessive sum is a
@@ -5702,6 +5702,37 @@ GATE COSTS
   uses the invoking checkout's declarations.
   Each measure reports its sample count. Missing fields are unmeasured:
   legacy duration_ms never substitutes for command, CPU, wait or preparation.
+
+  `arc workspace gates` rows include declared total, landing median and p90,
+  and landings and paid gate time in 7/30 days. They sort by 30-day measured
+  gate time descending (the known lower bound when incomplete), then project
+  name; unobserved projects follow readable ones.
+
+  Landing costs use the latest 100 readable integrated changes, including
+  asserted and legacy closures and each completed stack member separately.
+  Each change pays the sum of run_ms of its executed, named integration gates
+  through closure, including failures and reruns. Reuse, selection, base passes,
+  attestation and not-admitted attempts pay nothing; publication is excluded.
+  A stack's shared execution is charged only to the member recording it.
+  Missing run_ms makes that change unmeasured; duration_ms is never substituted.
+  Median (lower middle) and p90 (nearest rank) use measured changes, including
+  zero-cost changes; the report names missing samples and the zero-execution
+  share of all window landings. Empty history has no median or share.
+  The 7/30-day windows use closure time and include every readable change
+  landed within that period, charging its complete landing cost there.
+  Paid totals are null if any such change is unmeasured; measured_ms retains
+  the known lower bound. Unreadable changes remain collection failures.
+
+  Total bounds the worst-case integration suite and is enforced.
+  Landing declares typical executed cost and is advisory, reported against
+  the latest-100 median with a doctor advice finding when exceeded.
+  Declare landing = "2s" in [budget]; it needs no raise record and never
+  changes acceptance. Its value comes from the invoking change's destination
+  branch, or the current branch without a matching change, combined with the
+  operator's landing declaration by minimum; change-head additions do not bind.
+  A detached checkout without a matching destination reports it unobserved.
+  Every required integration gate needs a budget when enforcement keys exist
+  in that table; a landing-only table requires no individual budgets.
 
   Five cost kinds:
   - waiting: paired wall/CPU medians have wall >= 100ms and wall >= twice CPU.

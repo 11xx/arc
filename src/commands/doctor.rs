@@ -202,6 +202,24 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         }
     }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
+    let mut landing_costs = super::gate_reports::landing::Costs::new(&toplevel, true)?;
+    for (id, events) in &readable {
+        let integrated_at = states
+            .get(id)
+            .and_then(|state| state.closure.as_ref())
+            .filter(|closure| closure.outcome == crate::model::Closure::Integrated)
+            .map(|closure| closure.created_at);
+        landing_costs.observe(id, events, integrated_at);
+    }
+    if let Some(detail) = landing_costs
+        .summarize(&toplevel, true, Utc::now())?
+        .over_budget()
+    {
+        advice.push(Finding {
+            code: "landing-budget-exceeded",
+            detail,
+        });
+    }
     match crate::policy::load(&toplevel) {
         Ok(policy) => {
             inspect_danger_paths(&toplevel, &policy, &mut problems);

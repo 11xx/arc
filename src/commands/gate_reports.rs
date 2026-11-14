@@ -2,6 +2,7 @@
 
 use super::*;
 mod concurrent;
+pub(super) mod landing;
 use serde::Serialize;
 
 const GATES_SCHEMA: &str = "arc-gates/1";
@@ -11,6 +12,7 @@ type BudgetSample = (chrono::DateTime<chrono::Utc>, Option<String>, u64);
 #[derive(Serialize)]
 pub(super) struct GateReport {
     schema: &'static str,
+    pub(super) landing: landing::Report,
     unclaimed_paths: usize,
     pub(super) budget_declared: bool,
     budget_rules: Option<crate::gate_budget::BudgetRules>,
@@ -237,6 +239,7 @@ fn collect_declarations(
         .collect();
     let mut failures = Vec::new();
     let mut integrated_changes = 0;
+    let mut landing_costs = landing::Costs::new(cwd, repository)?;
     if let Some(store) = store {
         let read = store.read()?;
         for id in read.change_ids()? {
@@ -250,10 +253,10 @@ fn collect_declarations(
                     continue;
                 }
             };
-            let integrated = events
+            let integrated_at = events
                 .iter()
                 .chain(read.landings()?.derived_events(&id).iter())
-                .any(|e| {
+                .filter(|e| {
                     matches!(
                         e.payload,
                         Payload::ChangeIntegrated { .. }
@@ -263,7 +266,11 @@ fn collect_declarations(
                                 ..
                             }
                     )
-                });
+                })
+                .map(|e| e.created_at)
+                .max();
+            landing_costs.observe(&id, &events, integrated_at);
+            let integrated = integrated_at.is_some();
             integrated_changes += usize::from(integrated);
             let mut failed_first = false;
             for event in events.iter() {
@@ -404,6 +411,7 @@ fn collect_declarations(
         .collect();
     Ok(GateReport {
         schema: GATES_SCHEMA,
+        landing: landing_costs.summarize(cwd, repository, chrono::Utc::now())?,
         unclaimed_paths,
         budget_declared,
         budget_warning,
@@ -439,6 +447,7 @@ fn ms(value: Option<u64>) -> String {
 }
 
 pub(super) fn render(report: &GateReport) {
+    report.landing.render();
     match report.budget_rules.as_ref().and_then(|b| b.total) {
         Some(total) => println!(
             "budget total: {}; unqualified integration sum {}",
