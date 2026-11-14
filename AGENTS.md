@@ -42,7 +42,7 @@ The invariant gate is the only integration gate. It compiles the crate to run
 its witnesses, so it is also the build check, and its 20 s budget covers that
 compile after a source edit. A check joins it only as a witness of something
 that must never pass; a budget overrun is answered by the order of work in
-`arc guide gate-costs`, with a larger budget last.
+`arc guide gate-rounds`, with a larger budget last.
 Publication adds clippy, formatting and five release-artifact checks against
 the release-profile executable. Run `cargo clippy --all-targets -- -D warnings`
 and `cargo fmt` while working: nothing checks them before publication.

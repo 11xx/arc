@@ -1037,7 +1037,7 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
         row.diagnosis.render(&row.name);
         row.checks.render();
     }
-    println!("Order of work: get the number first; measure serially; remove waste; rank checks by what they guard and cut from the bottom, never by cost alone; make what matters fit; lower concurrency until nothing fails; stop at a named floor; raise the budget last. See arc guide gate-costs for the levers.");
+    println!("Order of work: get the number first; measure serially; remove waste; rank checks by what they guard and cut from the bottom, never by cost alone; make what matters fit; lower concurrency until nothing fails; stop at a named floor; raise the budget last. See arc guide gate-rounds for the method and arc guide gate-costs for the levers.");
     for failure in &report.failures {
         eprintln!(
             "cannot read change {}: {}",

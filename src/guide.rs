@@ -5464,8 +5464,8 @@ GATES
   `unclaimed_paths` counts tracked paths outside inert exclusions that no
   explicit gate pattern names; a gate with no paths does not name a path.
   Unreadable changes are named, readable history is retained, and a partial
-  report exits 16. JSON is `arc-gates/1`. Cost kinds, check timings and the
-  order of work are defined in `arc guide gate-costs`.
+  report exits 16. JSON is `arc-gates/1`. Cost kinds and check timings are
+  defined in `arc guide gate-costs`.
 
   `arc gates paths [--json]` reports tracked paths, affected gates and why
   coverage is mandatory, using one `git ls-files` with no ledger reads or
@@ -5489,7 +5489,7 @@ GATES
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
   the applicable budget, its history sources, host observations and output
   artifact, cost kinds and slowest recorded checks, followed by the order of
-  work in `arc guide gate-costs`.
+  work in `arc guide gate-rounds`.
   `arc guide gate-raises` defines raising and its trusted counting rules.
 
   `arc gates measure --concurrent` accepts a batch under `arc guide gates-together`.
@@ -5720,25 +5720,20 @@ GATE COSTS
   Waiting/real-work needs paired fields; queueing and preparation need their
   own field and wall. Absence never means zero.
 
-  The order of work, also printed by `arc gates over`:
-  1. Get the number first.
-  2. Measure serially.
-  3. Remove waste.
-  4. Rank checks by what they guard and cut from the bottom, never by cost alone.
-  5. Make what matters fit.
-  6. Lower concurrency until nothing fails.
-  7. Stop at a named floor.
-  8. Raise the budget last, within the change's allowance.
+  The order of work that `arc gates over` prints is steps 1 to 8 of a round
+  in `arc guide gate-rounds`, which also holds the rules a gate follows.
 
   Levers, in order, are guidance arc states and does not automate:
   1. Use an optimized binary for spawned tests.
-  2. Skip durability syscalls behind an explicit test-only switch.
-  3. Use cheaper fixtures.
-  4. Use events in place of sleeps.
-  5. Increase harness parallelism or remove a shared serialization point.
-  6. Call in process where no process is needed.
-  7. Split a suite into gates by area with `paths`.
-  8. Cut tests on evidence of what each has ever caught, ranked by what it guards.
+  2. Build an artifact the checks share once, behind a lock.
+  3. Skip durability syscalls behind an explicit test-only switch.
+  4. Use cheaper fixtures.
+  5. Kill a throwaway process; do not ask it to exit.
+  6. Use events in place of sleeps and polls.
+  7. Increase harness parallelism or remove a shared serialization point.
+  8. Call in process where no process is needed.
+  9. Split a suite into gates by area with `paths`.
+  10. Cut tests on evidence of what each has ever caught, ranked by what it guards.
   Cost and failures inform review; they do not choose which check to remove.
 
   A gate may declare timings = "checks.tsv". Its command writes the relative
@@ -5777,6 +5772,112 @@ GATE COSTS
   observations. This is recorded history, not proof that a check caught nothing
   or that it can be cut. Dropped checks and invalid or absent timings are
   counted explicitly. Arc builds no result store, impact planner or diff judge.
+
+GATE ROUNDS
+  A gate decides whether a change may land. A round brings one project's
+  gates inside a bound the operator sets; this topic is enough to run one.
+  Declarations, selection and budget judgement are defined in
+  `arc guide gates`, cost kinds, levers and check timings in
+  `arc guide gate-costs`, and raises in `arc guide gate-raises`.
+
+  Arc holds these rules itself:
+  - A budget for each required integration gate and a total, judged as
+    `arc guide gates` defines. A budget rises only through a recorded raise.
+  - A gate runs once for a piece of content and not for paths that cannot
+    affect it: exact-tree reuse, selection by `paths`, and base passes where
+    the project adopts them (`arc guide base-passes`).
+  - A gate command that could not start exits 75 and is recorded as not
+    run, never as a pass (`arc guide change-gates`).
+
+  The rest is judgement, which no command holds:
+  - The bound comes first. The operator names it in seconds before anything
+    is measured: a total, and a share per gate where the operator splits it.
+    A measurement over the bound is the list of what to cut or make fit,
+    never a reason to move it. Nothing is skipped to fit.
+  - A check earns its place by what it guards, not by being cheap. Rank the
+    checks by what must never break, fund those first, and give what is left
+    to the rest. Cutting by cost alone removes the slowest checks, which are
+    the ones guarding the riskiest behaviour.
+  - A witness states one claim, runs in a few seconds, and fails first on
+    the unfixed code or a faulty variant, for the reason it names.
+  - No inventories on the landing path: no whole suite, matrix, sweep or
+    all-frame comparison runs at integration because it exists. Publication
+    is rare and off that path. It checks the artifact it ships and may run
+    the remaining suite; a failure there is fixed, or the test removed,
+    before the release. A check that guards a landing is made to fit, not
+    moved to publication.
+  - No retries. A failure fails; a flake is a defect. A check that fails
+    only under load is fixed or given less concurrency.
+  - Nothing passes with coverage owed. A check that did not run is reported
+    as not run, and a named check that was skipped or missing fails its gate.
+  - A check gets a private home, temporary directory and state. It never
+    reaches the person's own.
+  - Prefer making a defect unrepresentable. A type, a module boundary or a
+    single source of truth that rules a defect out beats any test of it. Two
+    lists of the same thing are a defect waiting to happen; derive both from
+    one.
+
+  When a defect gets through:
+  1. Reproduce it, or show the static contradiction that proves it.
+  2. Name the layer that should have caught it.
+  3. Make the bad state unrepresentable or remove the second source of
+     truth. Only when neither is possible, add the smallest witness that
+     fails first.
+  4. Record the escape with `arc journal incident <topic>`, naming that
+     layer, so the gate decision's revisit trigger fires on evidence.
+  5. Delete the checks the repair supersedes.
+
+  A round is one session. It ends with every gate inside the bound and the
+  round recorded. `arc gates over` prints steps 1 to 8 as the order of work.
+  1. Get the number first. Ask the operator for the bound before measuring.
+  2. Measure serially, before changing anything: `arc gates measure`. Then
+     read `arc gates`, which sorts each gate's recorded runs into the cost
+     kinds of `arc guide gate-costs` and lists its slowest checks when the
+     gate declares `timings`. A fixed cost per check, such as starting a
+     process or a browser or waiting out a server's shutdown, shows in those
+     checks and in the test runner's per-test setup and teardown.
+  3. Remove the waste, which costs no coverage: the levers of
+     `arc guide gate-costs` in their order, up to cutting tests. Duplication
+     answers to reuse, `paths` and base passes; queueing, to fewer and
+     shorter runs holding an `exclusive` lock.
+  4. Rank the checks by what they guard, as above, and cut from the bottom
+     until the bound holds, never by cost alone.
+  5. Make what matters fit. Shorten the product's waits inside the test,
+     leaving whole any wait a check depends on. Start the longest checks
+     first, each on its own worker.
+  6. Lower concurrency until nothing fails under load: contention sets the
+     ceiling, not the core count. Gates share a run only as a measured batch
+     (`arc guide gates-together`).
+  7. Stop at a named floor, as below.
+  8. Raise the budget last, within the change's allowance:
+     `arc gates raise <gate> --reason <text>`.
+  9. Prove it. `arc gates init` runs six serial rounds of every gate and
+     writes budgets from them; a failed round writes nothing. Where budgets
+     are declared it refuses: `arc gates measure --runs 6` measures six runs
+     of each gate, every gate's worst run must fit its budget, and a budget
+     may be lowered by hand (`arc guide gate-raises`). The budgets must fit
+     the bound. Each regression check fails with its fix reverted.
+  10. Write it into the project. `.arc/gates.toml` is the one home of what
+     the round settled: `budget` per gate and `[budget] total`; `paths` for
+     each gate, with `arc gates paths` showing what no gate claims;
+     `exclusive` where two runs disturb each other; and `[selection]` with
+     `inert` for paths that affect no gate and `base_passes` for selection
+     across changes. A README points at the declaration rather than
+     repeating its numbers.
+  11. Record the round in the project's journal with
+     `arc journal conclusion <topic>`: the bound, each gate before and after,
+     what was cut and what it guarded, the floors named, and what surprised.
+     `arc workspace gates` is the view across projects, including those
+     with no gates or no budget yet.
+
+  When to stop:
+  - A floor is named and left: a browser's second to start, a compiler's
+    interface cascade. Fighting a floor is the rabbit hole.
+  - No infrastructure before a measurement asks for it: no result store,
+    impact planner or judge until receipts show the duplicate or the
+    misclassification it would remove.
+  - A fix that needs a second session is filed as its own work, with the
+    measurement that justifies it, by `arc journal todo <topic>`.
 
 GATES TOGETHER
   A gate declaring concurrent = true may share a batch with other consenting
@@ -6731,8 +6832,8 @@ const SECTIONS: &[Section] = &[
     Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
     Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
     Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
-    Section { name: "gate-costs", family: "gates", title: "Cost diagnosis, check timings and the order of work", start: "GATE COSTS" },
-
+    Section { name: "gate-costs", family: "gates", title: "Cost diagnosis, levers and check timings", start: "GATE COSTS" },
+    Section { name: "gate-rounds", family: "gates", title: "Gate rules and the method of a round", start: "GATE ROUNDS" },
     Section { name: "gates-together", family: "gates-together", title: "Measured concurrent batches and host-local acceptance", start: "GATES TOGETHER" },
     Section { name: "gate-raises", family: "gates", title: "Budget raises and trusted growth counting", start: "GATE RAISES" },
     Section { name: "base-passes", family: "base-passes", title: "Project adoption, baseline proofs and publication audits", start: "BASE PASSES" },
