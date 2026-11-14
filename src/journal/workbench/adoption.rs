@@ -5,6 +5,15 @@
 //! lock is held; every check below reads that opened object, and the move
 //! confirms it is still the one at the material's path. Nothing here reads
 //! a file's content except the first line of an index arc may have written.
+//!
+//! These guards stop mistakes and accidents: a wrong path, a link, a
+//! repository, a journal, another arc writer, which the journal's locks
+//! serialize, and a file that appears while arc works. They do not defeat a
+//! process that deliberately swaps directory entries during the call: no
+//! rename on this platform binds the identity of the entry it moves, and
+//! Git is asked about the material by its path. A swap between the last
+//! check and the rename is detected after the move, which then stops as
+//! moved and not recorded.
 
 use super::fsat::{Dir, Stat};
 use super::{walk, Measure, DIR, INDEX};
@@ -201,6 +210,7 @@ fn journal_entries(dir: &Dir) -> Result<Option<&'static str>> {
     }
     if present(dir, "events.jsonl") {
         for name in dir.names()? {
+            let name = name?;
             let artifact = name.to_str().and_then(crate::journal::parse_artifact_name);
             if artifact.is_some_and(|(_, _, kind)| super::super::known_kind(&kind)) {
                 return Ok(Some("an event log beside journal artifacts"));
@@ -429,7 +439,12 @@ pub(super) fn refuse_tracked(source: &Source) -> Result<()> {
     let toplevel = git(&["rev-parse".as_ref(), "--show-toplevel".as_ref()])?;
     if !toplevel.status.success() {
         let stderr = String::from_utf8_lossy(&toplevel.stderr);
-        if stderr.contains("not a git repository") {
+        // Git's own answer that no repository holds the probe: its fatal
+        // exit status and a diagnostic that begins with exactly this. The
+        // same words inside any other error, such as a malformed
+        // configuration value, are no answer.
+        if toplevel.status.code() == Some(128) && stderr.starts_with("fatal: not a git repository")
+        {
             return Ok(());
         }
         bail!(
@@ -501,7 +516,8 @@ pub(super) fn survey(source: &Source, in_place: bool) -> Result<Measure> {
     let root_path = &source.path;
     if root.entry(OsStr::new(INDEX))?.is_some() && !(in_place && super::is_arc_index(root)) {
         bail!(
-            "{} already holds {INDEX}, and arc did not write it; rename it before adopting",
+            "{} is not an index arc wrote, and arc never overwrites, moves or renames it: move or rename it, then adopt {} again",
+            root_path.join(INDEX).display(),
             root_path.display()
         );
     }

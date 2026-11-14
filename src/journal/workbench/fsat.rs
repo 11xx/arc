@@ -163,16 +163,19 @@ impl Dir {
         }
     }
 
-    /// The names this directory holds, without `.` and `..`.
-    pub(super) fn names(&self) -> io::Result<Vec<OsString>> {
+    /// The names this directory holds, without `.` and `..`, read as a
+    /// stream in the order the filesystem gives them, so a caller that stops
+    /// early never reads the rest.
+    pub(super) fn names(&self) -> io::Result<impl Iterator<Item = io::Result<OsString>>> {
         // The descriptor's own entry under /dev/fd opens this directory,
         // whatever path once led to it.
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(format!("/dev/fd/{}", self.fd.as_raw_fd()))? {
-            names.push(entry?.file_name());
-        }
-        names.sort();
-        Ok(names)
+        let entries = std::fs::read_dir(format!("/dev/fd/{}", self.fd.as_raw_fd()))?;
+        Ok(entries.map(|entry| entry.map(|entry| entry.file_name())))
+    }
+
+    /// Where this directory is now, as far as the kernel can name it.
+    pub(super) fn current_path(&self) -> Option<PathBuf> {
+        std::fs::read_link(format!("/proc/self/fd/{}", self.fd.as_raw_fd())).ok()
     }
 
     /// Where the link `name` leads.

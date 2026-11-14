@@ -636,7 +636,7 @@ fn adopt_refuses_a_directory_holding_the_index_name() {
     fs::create_dir(&material).unwrap();
     fs::write(material.join("WORKBENCH.md"), "mine\n").unwrap();
     let stderr = adopt_refused(&repo, &material);
-    assert!(stderr.contains("already holds WORKBENCH.md"), "{stderr}");
+    assert!(stderr.contains("is not an index arc wrote"), "{stderr}");
     assert_eq!(
         fs::read_to_string(material.join("WORKBENCH.md")).unwrap(),
         "mine\n"
@@ -949,7 +949,7 @@ fn adopt_refuses_a_file_named_like_the_index_wherever_it_stands() {
         fs::read_to_string(stray.join("WORKBENCH.md")).unwrap(),
         "written by hand\n"
     );
-    assert!(stderr.contains("already holds WORKBENCH.md"), "{stderr}");
+    assert!(stderr.contains("is not an index arc wrote"), "{stderr}");
     assert_eq!(workbench_events(&dir).len(), 1);
 }
 
@@ -1685,4 +1685,183 @@ fn a_partial_walk_never_calls_a_workbench_stale() {
     assert!(!catchup.contains("(stale)"), "{catchup}");
     assert!(!catchup.contains("untouched"), "{catchup}");
     assert!(catchup.contains("staleness unknown"), "{catchup}");
+}
+
+/// Claim: adoption refuses unless Git answers whether the material is
+/// tracked, or says exactly that no repository holds it; any other Git
+/// failure refuses. Rejects a repository whose broken configuration makes
+/// Git print the words "not a git repository" inside another error,
+/// letting a tracked file move.
+#[test]
+fn adopt_refuses_when_git_cannot_say_whether_material_is_tracked() {
+    let repo = Repo::new();
+    let other = repo.home.join("other");
+    fs::create_dir(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    fs::write(other.join("notes.txt"), "tracked\n").unwrap();
+    git(&other, &["add", "notes.txt"]);
+    git(
+        &other,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "add notes",
+        ],
+    );
+    git(&other, &["config", "core.bare", "not a git repository"]);
+    let stderr = adopt_refused(&repo, &other.join("notes.txt"));
+    assert!(other.join("notes.txt").is_file(), "{stderr}");
+    assert!(
+        stderr.contains("cannot tell whether a repository tracks"),
+        "{stderr}"
+    );
+}
+
+/// Claim: an adoption stopped by a `WORKBENCH.md` arc did not write names
+/// that file and the step that frees it, adopting in place says the same
+/// while the file is there, and once it is moved aside adopting in place
+/// records the workbench with that file untouched. Rejects a repair the
+/// message names and the command then refuses, and arc moving or
+/// overwriting the user's file itself.
+#[test]
+fn a_foreign_index_names_the_step_that_lets_the_repair_record() {
+    let repo = Repo::new();
+    let source = material(&repo.home.join("loose-notes"));
+    let child = adopt_paused_at(&repo, &source, "workbench-adopt-checked");
+    fs::write(source.join("WORKBENCH.md"), "made meanwhile\n").unwrap();
+    let (_, stderr) = finish(child);
+    let dir = journal_dir(&repo);
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let target = dir.join("workbench").join(format!("loose-notes-{today}"));
+    let foreign = target.join("WORKBENCH.md");
+    assert!(stderr.contains(foreign.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("move or rename it"), "{stderr}");
+
+    let stderr = adopt_refused(&repo, &target);
+    assert!(stderr.contains(foreign.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("move or rename it"), "{stderr}");
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), "made meanwhile\n");
+
+    fs::rename(&foreign, target.join("mine.md")).unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "adopt",
+        target.to_str().unwrap(),
+        "--purpose",
+        "recorded where it stands",
+    ]));
+    assert_eq!(
+        fs::read_to_string(target.join("mine.md")).unwrap(),
+        "made meanwhile\n"
+    );
+    assert_eq!(doctor_codes(&repo), Vec::<String>::new());
+}
+
+/// Claim: when `workbench/` leaves the journal while an adoption is about
+/// to move into it, the adoption stops as moved and not recorded, names
+/// where the material went, and records nothing. Rejects reporting success
+/// for material that landed outside the journal.
+#[test]
+fn an_adoption_whose_destination_left_the_journal_records_nothing() {
+    let repo = Repo::new();
+    open_workbench(&repo, "first", "makes the workbench directory");
+    let dir = journal_dir(&repo);
+    let source = material(&repo.home.join("loose-notes"));
+    let child = adopt_paused_at(&repo, &source, "workbench-adopt-moving");
+    let saved = repo.home.join("saved");
+    fs::rename(dir.join("workbench"), &saved).unwrap();
+    let (succeeded, stderr) = finish(child);
+    assert!(!succeeded, "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(stderr.contains(saved.to_str().unwrap()), "{stderr}");
+    assert_eq!(workbench_events(&dir).len(), 1);
+}
+
+/// Claim: when the material is replaced just before an adoption moves it,
+/// the adoption stops as moved and not recorded, saying what moved and
+/// where. Rejects recording an object no check looked at.
+#[test]
+fn an_adoption_that_moved_a_replacement_records_nothing() {
+    let repo = Repo::new();
+    let source = material(&repo.home.join("loose-notes"));
+    let child = adopt_paused_at(&repo, &source, "workbench-adopt-moving");
+    fs::rename(&source, repo.home.join("moved-away")).unwrap();
+    fs::create_dir(&source).unwrap();
+    let (succeeded, stderr) = finish(child);
+    assert!(!succeeded, "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(
+        stderr.contains("not the material that was checked"),
+        "{stderr}"
+    );
+    assert!(workbench_events(&journal_dir(&repo)).is_empty());
+}
+
+/// A closed workbench and its name, paused in an archive at `phase`.
+fn archive_paused_at(repo: &Repo, phase: &str) -> (std::process::Child, PathBuf, String) {
+    let path = open_workbench(repo, "finished", "finished work");
+    fs::write(path.join("result.txt"), "done\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "close",
+        &name,
+        "--note",
+        "kept for reference",
+    ]));
+    let child =
+        spawn_arc_at_rendezvous(repo, &repo.root, &["journal", "archive", &name], phase, &[]);
+    (child, path, name)
+}
+
+fn archived_events(dir: &Path) -> usize {
+    workbench_events(dir)
+        .iter()
+        .filter(|event| event["event"] == "workbench-archived")
+        .count()
+}
+
+/// Claim: when the archive's `workbench/` leaves the archive while an
+/// archive is about to move into it, the archive stops as moved and not
+/// recorded, names where the workbench went, and records nothing. Rejects
+/// recording a workbench archived that lies outside the journal's storage.
+#[test]
+fn an_archive_whose_destination_left_the_archive_records_nothing() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let cold = PathBuf::from(format!("{}-archive", dir.display()));
+    fs::create_dir_all(cold.join("workbench")).unwrap();
+    let (child, _, _) = archive_paused_at(&repo, "workbench-archive-moving");
+    let saved = repo.home.join("saved");
+    fs::rename(cold.join("workbench"), &saved).unwrap();
+    let (succeeded, stderr) = finish(child);
+    assert!(!succeeded, "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(stderr.contains(saved.to_str().unwrap()), "{stderr}");
+    assert_eq!(archived_events(&dir), 0);
+}
+
+/// Claim: when a workbench is replaced just before an archive moves it,
+/// the archive stops as moved and not recorded and records nothing.
+/// Rejects recording as archived a directory no measure looked at.
+#[test]
+fn an_archive_that_moved_a_replacement_records_nothing() {
+    let repo = Repo::new();
+    let (child, path, _) = archive_paused_at(&repo, "workbench-archive-moving");
+    fs::rename(&path, repo.home.join("moved-away")).unwrap();
+    fs::create_dir(&path).unwrap();
+    let (succeeded, stderr) = finish(child);
+    assert!(!succeeded, "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(
+        stderr.contains("not the material that was checked"),
+        "{stderr}"
+    );
+    assert_eq!(archived_events(&journal_dir(&repo)), 0);
 }

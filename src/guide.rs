@@ -2203,7 +2203,17 @@ WORKBENCHES (working material in the journal)
                           directory where it stands, or rerunning the
                           archive or unarchive, records it.
   An open says `created, not recorded`, and an act that moved nothing says
-  `nothing moved, not recorded`. A record prepared but not yet published is
+  `nothing moved, not recorded`. When a `WORKBENCH.md` arc did not write
+  stands in the directory, one made meanwhile or an index arc began and
+  never finished, which lacks arc's marker, the message names it, and arc
+  never overwrites, moves or renames it: move or rename it yourself, then
+  adopt the directory where it stands. After every move arc confirms that
+  what arrived is what it checked and that the directory it moved into is
+  still the journal's; otherwise it stops, names where the material went,
+  and records nothing. These guards stop mistakes, links, repositories,
+  journals, another arc writer and files appearing while arc works; they
+  do not defeat a process that deliberately swaps directory entries during
+  the call, which no rename here can prevent. A record prepared but not yet published is
   the second until the next journal write publishes it. A later act rewrites the index only while it
   is the one arc wrote, and leaves any other `WORKBENCH.md` as it is.
   `journal doctor` reports a recorded workbench whose directory is gone, in

@@ -9,6 +9,12 @@
 //!
 //! Its events carry the workbench's name and no artifact `file`, so every
 //! artifact view, exchange included, passes them by.
+//!
+//! Moves guard against mistakes and accidents, not against a process that
+//! deliberately swaps directory entries during the call, which no rename
+//! here can prevent: after every move arc confirms that what arrived is the
+//! object checked and that the directory it moved into is still the
+//! journal's, and otherwise stops as moved and not recorded.
 
 use super::{
     append_event, archive_dir, event_identity_label, format_age, lock_journal_transition,
@@ -570,6 +576,7 @@ fn walk(
     let mut current = Some((Rc::new(start), root_path.to_path_buf(), true));
     while let Some((dir, path, at_root)) = current.take() {
         for name in dir.names().with_context(|| cannot(&path))? {
+            let name = name.with_context(|| cannot(&path))?;
             if at_root && name == INDEX {
                 continue;
             }
@@ -1049,6 +1056,33 @@ fn is_arc_index(opened: &Dir) -> bool {
         && first.trim_end_matches('\n') == INDEX_MARKER
 }
 
+/// What frees a workbench at `at` whose index name holds a file arc did
+/// not write, such as one made while arc worked or an index arc began and
+/// never finished, which carries no marker.
+fn foreign_index_step(at: &Path) -> String {
+    format!(
+        "{} is not an index arc wrote, and arc never overwrites, moves or renames it: move or rename it, then `arc journal workbench adopt {} --purpose TEXT` records the workbench where it stands",
+        at.join(INDEX).display(),
+        at.display()
+    )
+}
+
+/// Whether `holding`, opened earlier, is still the directory at `path` in
+/// the journal or its archive: the same device and inode there, reached
+/// without a link at the archive root.
+fn still_holds(dir: &Path, cold: bool, holding: &Dir) -> bool {
+    if cold && !std::fs::symlink_metadata(archive_dir(dir)).is_ok_and(|metadata| metadata.is_dir())
+    {
+        return false;
+    }
+    let path = root_path(dir, cold).join(DIR);
+    let (Ok(now), Ok(opened)) = (std::fs::symlink_metadata(&path), holding.stat()) else {
+        return false;
+    };
+    use std::os::unix::fs::MetadataExt;
+    now.is_dir() && now.dev() == opened.dev && now.ino() == opened.ino
+}
+
 /// What the journal holds of one act after its append reported an error.
 enum Outcome {
     Recorded,
@@ -1105,6 +1139,41 @@ struct Unrecorded<'a> {
 }
 
 impl Unrecorded<'_> {
+    /// The index of the workbench opened as `opened` could not be written.
+    /// A file arc did not write in the index's place is what stops it, and
+    /// only its owner frees the name.
+    fn index_error(&self, opened: &Dir, error: anyhow::Error) -> anyhow::Error {
+        if opened
+            .entry(OsStr::new(INDEX))
+            .is_ok_and(|entry| entry.is_some())
+            && !is_arc_index(opened)
+        {
+            return anyhow!(
+                "{}, not recorded: the material is at {}. {}",
+                self.done,
+                self.at.display(),
+                foreign_index_step(self.at)
+            );
+        }
+        self.error(format_args!("{error:#}"))
+    }
+
+    /// The directory the material moved into is no longer the journal's:
+    /// say where the move put it, as far as it can be named, and record
+    /// nothing for material outside the journal.
+    fn escaped(&self, what: &Path, holding: &Dir, name: &OsStr) -> anyhow::Error {
+        let place = holding.current_path().map_or_else(
+            || "a directory arc can no longer name".to_string(),
+            |path| path.join(name).display().to_string(),
+        );
+        anyhow!(
+            "{}, not recorded: {} moved to {place}, because {} left the journal while arc moved into it. Nothing is recorded for material outside the journal; adopt it from where it is with `arc journal workbench adopt PATH --purpose TEXT`",
+            self.done,
+            what.display(),
+            self.at.parent().unwrap_or(self.at).display()
+        )
+    }
+
     fn error(&self, detail: impl std::fmt::Display) -> anyhow::Error {
         anyhow!(
             "{}, not recorded: the material is at {}. {detail}. `arc journal doctor` reports {}; {}",
@@ -1239,10 +1308,12 @@ fn open(ctx: &Ctx, slug: &str, purpose: &str) -> Result<i32> {
     let opened = holding
         .open_dir(OsStr::new(&name))
         .map_err(|error| state.error(error))?;
+    if !still_holds(&dir, false, &holding) {
+        return Err(state.escaped(&path, &holding, OsStr::new(&name)));
+    }
     let mut with = events.clone();
     with.push(event.clone());
-    write_index(&with, &opened, &path, true)
-        .map_err(|error| state.error(format_args!("{error:#}")))?;
+    write_index(&with, &opened, &path, true).map_err(|error| state.index_error(&opened, error))?;
     state.record(ctx, &dir, &event)?;
     println!("opened: {name}");
     println!("{}", path.display());
@@ -1435,6 +1506,8 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
                 from.display()
             );
         }
+        #[cfg(debug_assertions)]
+        crate::import_authorization::test_rendezvous("workbench-archive-moving")?;
         fsat::rename_new(&source, OsStr::new(name), &target, OsStr::new(name)).with_context(
             || {
                 format!(
@@ -1444,6 +1517,15 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
                 )
             },
         )?;
+        if !still_holds(&dir, to_cold, &target) {
+            return Err(state.escaped(&from, &target, OsStr::new(name)));
+        }
+        if !target
+            .entry(OsStr::new(name))?
+            .is_some_and(|entry| entry.same(&identity))
+        {
+            return Err(state.error(not_checked(&from)));
+        }
         state.record(ctx, &dir, &event)?;
     } else {
         Unrecorded {
@@ -1585,13 +1667,13 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
             .context("an in-place adoption is a directory")?;
         let fresh = !is_arc_index(opened);
         write_index(&with, opened, &target, fresh)
-            .map_err(|error| state.error(format_args!("{error:#}")))?;
+            .map_err(|error| state.index_error(opened, error))?;
         state.record(ctx, &dir, &event)?;
     } else {
         let holding = holding(&dir, false)?;
-        let opened = move_material(&source, &holding, &name, &target, &state)?;
+        let opened = move_material(&dir, &source, &holding, &name, &target, &state)?;
         write_index(&with, &opened, &target, true)
-            .map_err(|error| state.error(format_args!("{error:#}")))?;
+            .map_err(|error| state.index_error(&opened, error))?;
         state.record(ctx, &dir, &event)?;
     }
     println!(
@@ -1611,6 +1693,7 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
 /// opened. A file moves into a directory made for it. Once the rename is
 /// done nothing is taken back: a failure after it is `state`.
 fn move_material(
+    dir: &Path,
     source: &adoption::Source,
     holding: &Dir,
     name: &str,
@@ -1627,10 +1710,15 @@ fn move_material(
     let name = OsStr::new(name);
     if source.is_dir() {
         adoption::confirm(source)?;
+        #[cfg(debug_assertions)]
+        crate::import_authorization::test_rendezvous("workbench-adopt-moving")?;
         fsat::rename_new(&source.parent, &source.name, holding, name).map_err(cannot)?;
+        if !still_holds(dir, false, holding) {
+            return Err(state.escaped(&source.path, holding, name));
+        }
         let opened = holding.open_dir(name).map_err(|error| state.error(error))?;
         if !opened.stat()?.same(&source.stat) {
-            return Err(state.error("What arrived is not the material that was checked"));
+            return Err(state.error(not_checked(&source.path)));
         }
         return Ok(opened);
     }
@@ -1651,14 +1739,25 @@ fn move_material(
         let _ = holding.remove_empty_dir(name);
         return Err(cannot(error));
     }
+    if !still_holds(dir, false, holding) {
+        return Err(state.escaped(&source.path, holding, name));
+    }
     let opened = made.map_err(|error| state.error(error))?;
     if !opened
         .entry(&source.name)?
         .is_some_and(|entry| entry.same(&source.stat))
     {
-        return Err(state.error("What arrived is not the material that was checked"));
+        return Err(state.error(not_checked(&source.path)));
     }
     Ok(opened)
+}
+
+/// What moved from `from` once a move found it was not the object checked.
+fn not_checked(from: &Path) -> String {
+    format!(
+        "What moved from {} is not the material that was checked, so nothing is recorded for it",
+        from.display()
+    )
 }
 
 /// Report workbenches whose directories and records disagree: a recorded
@@ -1899,7 +1998,7 @@ mod tests {
         let whole = measure(None);
         assert_eq!((whole.files, whole.bytes, whole.partial), (5, 5, false));
         let bounded = measure(Some(3));
-        assert_eq!((bounded.files, bounded.partial), (3, true));
+        assert!(bounded.partial && bounded.files <= 3);
         let exact = measure(Some(6));
         assert_eq!((exact.files, exact.partial), (5, false));
     }
