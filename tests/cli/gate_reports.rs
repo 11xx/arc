@@ -848,7 +848,8 @@ fn close_at(repo: &Repo, id: &str, at: chrono::DateTime<chrono::Utc>) {
 
 /// Claim: a landing pays every executed integration gate, including failed reruns
 /// and removed declarations, exactly once. Rejects charging reuse, publication,
-/// attestation or denied admission, and substituting legacy duration for run_ms.
+/// attestation or denied admission, substituting legacy duration for run_ms,
+/// or claiming a window percentile that missing measurements could change.
 #[test]
 fn landing_cost_counts_executions_and_preserves_missing_measurements() {
     let repo = declared("true");
@@ -898,8 +899,9 @@ fn landing_cost_counts_executions_and_preserves_missing_measurements() {
     assert_eq!(landing["landings"], 3);
     assert_eq!(landing["unmeasured"], 1);
     assert_eq!(landing["timing"]["samples"], 2);
-    assert_eq!(landing["timing"]["median_ms"], 0);
-    assert_eq!(landing["timing"]["p90_ms"], 50);
+    assert!(landing["timing"]["median_ms"].is_null());
+    assert!(landing["timing"]["p90_ms"].is_null());
+    assert!(landing["timing"]["worst_ms"].is_null());
     assert_eq!(landing["zero_execution_share"], 1.0 / 3.0);
     let paid = landing["changes"]
         .as_array()
@@ -1152,4 +1154,66 @@ fn workspace_ranks_paid_landings_and_retains_unobserved_projects() {
             .args(["workspace", "gates", "--global"]),
     );
     assert!(text.contains("unobserved"), "{text}");
+}
+
+/// Claim: landing percentiles describe the full window only when unknown costs
+/// cannot change their values, and an unknown median has no budget judgment.
+/// Rejects a measured-only zero median or p90, an invented worst cost, or a
+/// budget verdict guessed from zero-execution samples in incomplete history.
+#[test]
+fn landing_percentiles_require_determined_window_positions() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[budget]\nlanding='1ms'\n[gates.unit]\ncommand='true'\n");
+    let (zero, wt, _) = change_with_patchset(&repo, "known-zero");
+    close_at(&repo, &zero, chrono::Utc::now());
+    for slug in ["unknown-one", "unknown-two"] {
+        let (id, unknown, _) = change_with_patchset(&repo, slug);
+        repo.arc(&unknown)
+            .args(["verify", "--all"])
+            .assert()
+            .success();
+        rewrite_event(&repo, &id, "verification-recorded", |v| {
+            v.as_object_mut().unwrap().remove("run_ms");
+        });
+        close_at(&repo, &id, chrono::Utc::now());
+    }
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let landing = &report["landing"];
+    assert_eq!(landing["landings"], 3);
+    assert_eq!(landing["unmeasured"], 2);
+    assert_eq!(landing["timing"]["samples"], 1);
+    assert!(landing["timing"]["median_ms"].is_null(), "{landing}");
+    assert!(landing["timing"]["p90_ms"].is_null(), "{landing}");
+    assert!(landing["timing"]["worst_ms"].is_null(), "{landing}");
+    assert!(landing.get("median_exceeds_budget").is_none(), "{landing}");
+    let text = stdout(repo.arc(&wt).arg("gates"));
+    assert!(
+        text.contains("3 landings, 2 unmeasured; median unmeasured, p90 unmeasured"),
+        "{text}"
+    );
+    let doctor = json_stdout_any_status(repo.arc(&wt).args(["doctor", "--json"]));
+    assert!(
+        !doctor["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "landing-budget-exceeded"),
+        "{doctor}"
+    );
+    for index in 0..17 {
+        let (id, _, _) = change_with_patchset(&repo, &format!("extra-zero-{index}"));
+        close_at(&repo, &id, chrono::Utc::now());
+        if index == 1 || index == 16 {
+            let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+            let landing = &report["landing"];
+            assert_eq!(landing["timing"]["median_ms"], 0, "{landing}");
+            assert_eq!(landing["median_exceeds_budget"], false, "{landing}");
+            if index == 1 {
+                assert!(landing["timing"]["p90_ms"].is_null(), "{landing}");
+            } else {
+                assert_eq!(landing["timing"]["p90_ms"], 0, "{landing}");
+            }
+            assert!(landing["timing"]["worst_ms"].is_null(), "{landing}");
+        }
+    }
 }

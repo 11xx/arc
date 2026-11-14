@@ -48,6 +48,7 @@ pub(in crate::commands) struct Report {
     unmeasured: usize,
     zero_execution_share: Option<f64>,
     timing: Distribution,
+    #[serde(skip_serializing_if = "Option::is_none")]
     median_exceeds_budget: Option<bool>,
     pub(in crate::commands) last_7_days: Period,
     pub(in crate::commands) last_30_days: Period,
@@ -189,14 +190,15 @@ impl Costs {
             .iter()
             .filter_map(|c| c.run_ms)
             .collect::<Vec<_>>();
-        let timing = Distribution::of(&mut samples, 0);
+        let unmeasured = landings - samples.len();
+        let timing = window_timing(&mut samples, unmeasured);
         Ok(Report {
             window: WINDOW,
             budget_ms,
             budget_destination: destination,
             budget_warning,
             landings,
-            unmeasured: landings - samples.len(),
+            unmeasured,
             zero_execution_share: (landings > 0).then(|| {
                 self.changes.iter().filter(|c| c.executions == 0).count() as f64 / landings as f64
             }),
@@ -212,6 +214,25 @@ impl Costs {
     }
 }
 
+fn window_timing(samples: &mut [u64], unmeasured: usize) -> Distribution {
+    let mut timing = Distribution::of(samples, 0);
+    if unmeasured > 0 {
+        let landings = samples.len() + unmeasured;
+        let determined = |rank: usize| {
+            let lower = if rank < unmeasured {
+                0
+            } else {
+                samples[rank - unmeasured]
+            };
+            samples.get(rank).copied().filter(|upper| *upper == lower)
+        };
+        timing.median_ms = determined((landings - 1) / 2);
+        timing.p90_ms = determined((landings * 9).div_ceil(10) - 1);
+        timing.worst_ms = None;
+    }
+    timing
+}
+
 impl Report {
     pub(in crate::commands) fn over_budget(&self) -> Option<String> {
         self.median_exceeds_budget.filter(|over| *over).map(|_| format!(
@@ -221,8 +242,10 @@ impl Report {
     }
 
     pub(in crate::commands) fn render(&self) {
+        let statistic =
+            |value: Option<u64>| value.map_or_else(|| "unmeasured".into(), |value| ms(Some(value)));
         println!("landing: latest {} changes; {} landings, {} unmeasured; median {}, p90 {}; budget {}{}; zero executions {}",
-            self.window, self.landings, self.unmeasured, ms(self.timing.median_ms), ms(self.timing.p90_ms), ms(self.budget_ms),
+            self.window, self.landings, self.unmeasured, statistic(self.timing.median_ms), statistic(self.timing.p90_ms), ms(self.budget_ms),
             if self.median_exceeds_budget == Some(true) { " (median exceeds advisory)" } else { "" },
             self.zero_execution_share.map_or_else(|| "unmeasured".into(), |s| format!("{:.1}%", s*100.0)));
         if let Some(warning) = &self.budget_warning {

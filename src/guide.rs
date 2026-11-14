@@ -5715,9 +5715,11 @@ GATE COSTS
   attestation and not-admitted attempts pay nothing; publication is excluded.
   A stack's shared execution is charged only to the member recording it.
   Missing run_ms makes that change unmeasured; duration_ms is never substituted.
-  Median (lower middle) and p90 (nearest rank) use measured changes, including
-  zero-cost changes; the report names missing samples and the zero-execution
-  share of all window landings. Empty history has no median or share.
+  Median (lower middle) and p90 (nearest rank) are known only when assigning
+  every unmeasured cost zero or arbitrarily large values yields the same result;
+  otherwise that statistic and any dependent budget judgment are unmeasured.
+  The report names missing samples and the zero-execution share of all window
+  landings. Empty history has no median or share.
   The 7/30-day windows use closure time and include every readable change
   landed within that period, charging its complete landing cost there.
   Paid totals are null if any such change is unmeasured; measured_ms retains
