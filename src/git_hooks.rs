@@ -268,10 +268,7 @@ fn hook_free(arguments: &[OsString], index: usize) -> bool {
         Some("config") => {
             arguments.len() == index + 2
                 && !arguments[index + 1].to_string_lossy().starts_with('-')
-                && !matches!(
-                    arguments[index + 1].to_str(),
-                    Some("set" | "unset" | "rename-section" | "remove-section" | "edit")
-                )
+                && arguments[index + 1].to_string_lossy().contains('.')
                 || arguments.get(index + 1).is_some_and(|argument| {
                     matches!(
                         argument.to_str(),
@@ -328,10 +325,7 @@ fn environment(command: &Command, key: &str) -> Option<OsString> {
     command
         .get_envs()
         .find(|(name, _)| *name == key)
-        .map_or_else(
-            || std::env::var_os(key),
-            |(_, value)| value.map(OsStr::to_os_string),
-        )
+        .and_then(|(_, value)| value.map(OsStr::to_os_string))
 }
 
 #[allow(
@@ -346,6 +340,7 @@ fn query(
 ) -> Result<Option<String>> {
     use crate::perf::Counted;
     let mut query = crate::child_command::command(command.get_program());
+    query.env_clear();
     query.args(global);
     for (key, value) in command.get_envs() {
         if let Some(value) = value {
@@ -623,7 +618,11 @@ fn refuses_configured_hook(entry: &str, cwd: &Path) -> Result<bool> {
     Ok(crate::confinement::declaration("configuration-defined Git hook", cwd)?.is_some())
 }
 
-pub(crate) fn prepare(command: &mut Command, args: &[OsString]) -> Result<Option<Hooks>> {
+pub(crate) fn prepare(
+    command: &mut Command,
+    args: &[OsString],
+    inherit_environment: bool,
+) -> Result<Option<Hooks>> {
     if crate::confinement::unconfined() {
         command.args(args);
         return Ok(None);
@@ -633,6 +632,23 @@ pub(crate) fn prepare(command: &mut Command, args: &[OsString]) -> Result<Option
         command.args(args);
         return Ok(None);
     }
+    let authority = Authority {
+        scope: crate::confinement::current(),
+    };
+    command.env(AUTHORITY, serde_json::to_string(&authority)?);
+    let mut effective = if inherit_environment {
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            effective.insert(key.to_os_string(), value.to_os_string());
+        } else {
+            effective.remove(key);
+        }
+    }
+    command.env_clear().envs(effective);
     let cwd = command
         .get_current_dir()
         .map(Path::to_path_buf)
@@ -649,17 +665,6 @@ pub(crate) fn prepare(command: &mut Command, args: &[OsString]) -> Result<Option
     ];
     key.extend(args[..index].iter().cloned());
     key.push(OsString::new());
-    for name in [
-        "HOME",
-        "PATH",
-        "XDG_CONFIG_HOME",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_NOSYSTEM",
-    ] {
-        key.push(name.into());
-        key.push(environment(command, name).unwrap_or_default());
-    }
     for (name, value) in command.get_envs() {
         key.push(name.to_os_string());
         key.push(value.unwrap_or_default().to_os_string());
@@ -725,10 +730,6 @@ pub(crate) fn prepare(command: &mut Command, args: &[OsString]) -> Result<Option
         fs::write(&path, script)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
-    let authority = Authority {
-        scope: crate::confinement::current(),
-    };
-    command.env(AUTHORITY, serde_json::to_string(&authority)?);
     // The last command-line value overrides both environment and earlier global options.
     command
         .args(&args[..index])
@@ -782,12 +783,13 @@ pub(crate) fn main() -> ! {
 mod tests {
     use super::*;
 
-    /// Claim I12: unknown Git verbs forward hooks and global option values are
-    /// not verbs. Rejects an allowlist of hook-capable words or argument scanning.
+    /// Claim I12: unknown Git verbs and config actions forward hooks; global
+    /// option values are not verbs. Rejects word scanning or invalid legacy keys.
     #[test]
     fn forwarding_defaults_closed_and_parses_global_option_values() {
         for (args, expected, free) in [
             (vec!["--version"], 1, true),
+            (vec!["config", "future-action"], 0, false),
             (vec!["restore", "--source", "rev-parse"], 0, false),
             (vec!["future-command", "cat-file"], 0, false),
             (
@@ -1166,6 +1168,108 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("hook.global.command"));
+        assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
+    }
+
+    /// Claim I12: discovery uses Git's actual inherited or cleared environment.
+    /// Rejects stale --config-env values and inheriting variables after env_clear.
+    #[test]
+    fn discovery_matches_inherited_and_cleared_environments() {
+        const MODE: &str = "ARC_GIT_ENVIRONMENT_CASE";
+        let Some(mode) = std::env::var_os(MODE) else {
+            let mut failures = Vec::new();
+            for mode in ["inherit", "clear"] {
+                let output = crate::child_command::command(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "git_hooks::tests::discovery_matches_inherited_and_cleared_environments",
+                        "--nocapture",
+                    ])
+                    .env(MODE, mode)
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    failures.push(format!(
+                        "{mode}: {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+            return;
+        };
+        if !supported() {
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let configured = root.join("environment-config");
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                configured.to_str().unwrap(),
+                "hook.environment.command",
+                &format!("printf escaped > '{}'", decoy.display()),
+            ],
+        );
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                configured.to_str().unwrap(),
+                "hook.environment.event",
+                "post-checkout",
+            ],
+        );
+        let _scope = crate::confinement::Scope::new(&Some(crate::confinement::Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        }));
+        if mode == "inherit" {
+            let empty = root.join("empty-config");
+            fs::write(&empty, "").unwrap();
+            std::env::set_var("ARC_GIT_SELECTED_INCLUDE", &empty);
+            let make = |args: &[&str]| {
+                let mut arguments = vec!["--config-env=include.path=ARC_GIT_SELECTED_INCLUDE"];
+                arguments.extend_from_slice(args);
+                command(root, &arguments)
+            };
+            assert!(make(&["status", "--porcelain"])
+                .output()
+                .unwrap()
+                .status
+                .success());
+            std::env::set_var("ARC_GIT_SELECTED_INCLUDE", &configured);
+            let result = make(&["restore", "--source", "HEAD", "--worktree", "--", "."]).output();
+            assert!(
+                result.is_err(),
+                "changed inherited configuration was admitted: {result:?}"
+            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("hook.environment.command"));
+        } else {
+            std::env::set_var("GIT_CONFIG_GLOBAL", &configured);
+            let home = root.join("empty-home");
+            fs::create_dir(&home).unwrap();
+            let result = command(root, &["status", "--porcelain"])
+                .env_clear()
+                .env("HOME", home)
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output();
+            assert!(
+                result.as_ref().is_ok_and(|output| output.status.success()),
+                "cleared environment inherited configuration: {result:?}"
+            );
+        }
         assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
     }
 }

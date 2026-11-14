@@ -17,6 +17,7 @@ pub struct Command {
     receipt: Option<Receipt>,
     hooks: Option<crate::git_hooks::Hooks>,
     started: bool,
+    inherit_environment: bool,
 }
 
 enum Kind {
@@ -60,6 +61,7 @@ fn make(program: impl AsRef<OsStr>, kind: Kind) -> Command {
         receipt: None,
         hooks: None,
         started: false,
+        inherit_environment: true,
     }
 }
 
@@ -118,6 +120,7 @@ impl Command {
         self
     }
     pub fn env_clear(&mut self) -> &mut Self {
+        self.inherit_environment = false;
         self.inner.env_clear();
         self
     }
@@ -174,8 +177,12 @@ impl Command {
                 if self.hooks.is_none() {
                     let arguments = self.get_args().map(OsStr::to_os_string).collect::<Vec<_>>();
                     self.git_args = None;
-                    self.hooks = crate::git_hooks::prepare(&mut self.inner, &arguments)
-                        .map_err(io::Error::other)?;
+                    self.hooks = crate::git_hooks::prepare(
+                        &mut self.inner,
+                        &arguments,
+                        self.inherit_environment,
+                    )
+                    .map_err(io::Error::other)?;
                 }
             }
         }
