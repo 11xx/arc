@@ -230,6 +230,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         Ok(policy) => {
             inspect_danger_paths(&toplevel, &policy, &mut problems);
             inspect_danger_classification(&toplevel, &policy, &mut problems);
+            inspect_preparation_guard(&toplevel, &policy, &mut advice);
         }
         Err(error) => problems.push(Finding {
             code: "policy-unreadable",
@@ -1134,6 +1135,32 @@ fn inspect_danger_classification(
             });
         }
     }
+}
+
+/// Preparation is read from the evaluated checkout, so where budgets judge
+/// gates and `.arc/worktrees.toml` is not dangerous, a change can move gate
+/// work into its `[prepare]` command and outside every budget on a self-verdict.
+fn inspect_preparation_guard(
+    toplevel: &Path,
+    policy: &crate::policy::PolicyFile,
+    advice: &mut Vec<Finding>,
+) {
+    const FILE: &str = ".arc/worktrees.toml";
+    if policy.danger.is_dangerous(FILE)
+        || !crate::warm_worktree::declares_prepare_command(toplevel)
+        || !crate::gates::inspect(toplevel).is_ok_and(|gates| gates.has_budgets())
+    {
+        return;
+    }
+    advice.push(Finding {
+        code: "preparation-unguarded",
+        detail: format!(
+            "{FILE} declares a [prepare] command and gates declare budgets, but no dangerous \
+             path names it: preparation is read from the evaluated checkout, so a change can \
+             move gate work into it outside every budget; add \"{FILE}\" to [danger] paths \
+             in .arc/policy.toml"
+        ),
+    });
 }
 
 fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {

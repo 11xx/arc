@@ -3494,7 +3494,10 @@ enum Cmd {
     /// a problem is not checked for one. Under `[policy] review_clearance = "assessed"`, a
     /// debt it leaves owed that a read would discharge without it is the advice
     /// `clearance-keeps-debt-owed`, naming the change, the debt, that read and the debt's
-    /// findings reads.
+    /// findings reads. Where gates declare budgets and `.arc/worktrees.toml` declares a
+    /// `[prepare]` command that no dangerous path names, the advice `preparation-unguarded`
+    /// names the policy line to add: preparation is read from the evaluated checkout, so a
+    /// change could move gate work into it, outside every budget.
     ///
     /// Git identity, bare checkout and signing problems are included; the scoped
     /// project exception and shared orientation views are defined in `arc guide sandbox`.

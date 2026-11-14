@@ -1137,3 +1137,52 @@ fn doctor_counts_debt_as_the_ledger_reads_it_after_a_history_rewrite() {
         .collect();
     assert!(owed.is_empty(), "{owed:?}");
 }
+
+/// Claim: doctor advises `preparation-unguarded`, naming `.arc/worktrees.toml`
+/// and the policy line to add, exactly when gates declare budgets, the file
+/// declares a `[prepare]` command and no dangerous path names it. Rejects
+/// silence over a checkout where a change can move gate work into
+/// preparation outside every budget, and advice where a budget, a command or
+/// the guard is absent.
+#[test]
+fn doctor_advises_guarding_preparation_beside_budgets() {
+    let repo = Repo::new();
+    let unguarded = |repo: &Repo| -> Option<String> {
+        let report: serde_json::Value = serde_json::from_str(&stdout_any_status(
+            repo.arc(&repo.root).args(["doctor", "--json"]),
+        ))
+        .unwrap();
+        report["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["code"] == "preparation-unguarded")
+            .map(|finding| finding["detail"].as_str().unwrap().to_string())
+    };
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        "[prepare]\nmode = \"path-stable\"\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    assert_eq!(unguarded(&repo), None, "no budgets are declared");
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[budget]\ntotal = \"5s\"\n[gates.unit]\ncommand = \"true\"\nbudget = \"1s\"\n",
+    )
+    .unwrap();
+    let detail = unguarded(&repo).expect("budgets beside an unguarded [prepare] command");
+    assert!(
+        detail.contains(r#"add ".arc/worktrees.toml" to [danger] paths in .arc/policy.toml"#),
+        "{detail}"
+    );
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[danger]\npaths = [\".arc/worktrees.toml\"]\n",
+    )
+    .unwrap();
+    assert_eq!(unguarded(&repo), None, "the file is declared dangerous");
+    fs::remove_file(repo.root.join(".arc/policy.toml")).unwrap();
+    fs::write(repo.root.join(".arc/worktrees.toml"), "[slots]\nsize = 2\n").unwrap();
+    assert_eq!(unguarded(&repo), None, "no [prepare] command is declared");
+}

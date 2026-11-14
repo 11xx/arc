@@ -309,6 +309,22 @@ pub fn slot_declaration(
         .transpose()
 }
 
+/// Whether `.arc/worktrees.toml` in `checkout` names a `[prepare]` command,
+/// which runs before every gate in the evaluated checkout.
+pub fn declares_prepare_command(checkout: &Path) -> bool {
+    fs::read_to_string(checkout.join(CONFIG))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("prepare")?
+                .get("command")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .is_some_and(|command| !command.trim().is_empty())
+}
+
 fn configuration(text: &str) -> Result<Option<(Hook, u64)>> {
     let config: Configuration = toml::from_str(text).context("invalid .arc/worktrees.toml")?;
     let Some(prepare) = config.prepare else {
