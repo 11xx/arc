@@ -9979,7 +9979,7 @@ impl JournalEvent {
             | "workbench-unarchived" => workbench::well_formed(self),
             "item-added" | "item-renamed" | "item-moved" | "item-dropped" | "item-done"
             | "item-reopened" | "item-linked" | "item-unlinked" | "item-split"
-            | "series-related" => series::well_formed(self),
+            | "series-related" | "series-unrelated" => series::well_formed(self),
             _ => false,
         }
     }
@@ -11045,7 +11045,7 @@ fn event_message(event: &JournalEvent) -> String {
                 .unwrap_or_default()
         ),
         kind if kind.starts_with("workbench-") => workbench::event_message(event),
-        kind if kind.starts_with("item-") || kind == "series-related" => {
+        kind if kind.starts_with("item-") || kind.starts_with("series-") => {
             series::event_message(event)
         }
         _ => String::new(),
@@ -14893,6 +14893,20 @@ fn reconciliation_facts_from(events: &[JournalEvent]) -> ReconciliationFacts {
                         .consumed
                         .entry(file.to_string())
                         .or_insert_with(|| outcome.to_string());
+                    // A superseded consumption that names the artifact of
+                    // this journal that resolved it records that artifact as
+                    // its successor, as a transition records the artifact it
+                    // wrote.
+                    let successor = event
+                        .decision
+                        .as_deref()
+                        .filter(|_| outcome == "superseded" && event.decision_project.is_none());
+                    if let Some(successor) = successor {
+                        facts
+                            .successors
+                            .entry(file.to_string())
+                            .or_insert_with(|| successor.to_string());
+                    }
                 }
             }
             "transition" => {

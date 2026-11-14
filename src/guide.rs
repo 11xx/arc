@@ -6711,7 +6711,9 @@ SLOTS
 PROGRESS
   `arc progress` answers "where does this series of work stand?" for whoever
   asks. It is pulled, never pushed: no other command prints it, and no
-  status, check, catchup, advisory or hook carries a line of it.
+  status, check, catchup, advisory or hook carries a line of it. The
+  journal's own history, read by name (`arc journal catchup` and
+  `arc journal events`), lists item edits as the journal events they are.
 
   A series is a journal artifact of kind `progress`, written by
   `arc progress start <topic> --title T [--follows <plan>] [--item T]...`.
@@ -6724,19 +6726,29 @@ PROGRESS
     done <item> [--note N]                  reopen <item> [--note N]
     link <item> <change>                    unlink <item>
     split <item> --into T --into T... --reason R
-  `done` and `reopen` are for items no change carries. A linked item's
-  stage is the ledger's: `arc begin <slug> --item <series>:<item>` links when
-  the change opens. A dropped or split item stays visible and leaves the
-  count; a split's parts follow it in the list.
+  Items take no generic correction; each edit has its reversal. `reopen`
+  undoes `drop` and `done` alike, for any item; a reopened linked item reads
+  its derived stage again. A rename is undone by another rename, a move by
+  another move, a link by `unlink`. A split is final: its parts are items of
+  their own. A dropped or split item stays visible and leaves the count.
+
+  `done` is for an item no change carries; a linked item's stage is the
+  ledger's. `arc begin <slug> --item <series>:<item>` links when the change
+  opens, checking the item before anything is written. A link replaces an
+  item's link only when that change closed without integrating, and only
+  while the link is still the one the command read.
 
   Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, from the
   change in this project's ledger at the moment of reading: `opened`,
-  `committed` (commits beyond its base), `snapshotted`, `gates-green` (every
-  required gate green at the newest patchset), `changes-requested`,
-  `approved` or `commented` (a verdict on the newest patchset), `landed`
-  (with its time and revision), `closed` (closed without integrating). The
-  report also names who holds a live claim on the change and how many review
-  rounds asked for changes. Nothing about external runners is read.
+  `committed` (its branch has moved from its base), `snapshotted`,
+  `gates-green` (every gate the target requires is green at the newest
+  patchset; when the target's declarations cannot be read the requirements
+  are unknown and never green, while none required is green),
+  `changes-requested`, `approved` or `commented` (a verdict on the newest
+  patchset), `landed` (with its time and revision), `closed` (closed without
+  integrating), `unknown` (no such change). The report also names who holds a
+  live claim on the change and how many review rounds asked for changes.
+  Nothing about external runners is read.
 
   The share complete is a count: landed and done items over the items that
   stand, printed as counts first and one percentage after. No estimate of
@@ -6746,23 +6758,32 @@ PROGRESS
   `arc progress` prints every series of this project that is not retired, in
   full, one block per series under a `==` header line; `arc progress
   <series>` narrows to one and reads a retired series too. After the local
-  blocks come any open journal questions that wait on a person.
+  blocks come any open journal questions that wait on a person. A report
+  opens a ledger only for linked items and reads each linked change alone,
+  so its cost follows its series, linked items and related series, never
+  the other changes or projects there are.
 
   Related series. `arc progress relate <series> <project>::<series>` records,
   in this journal only, that a series relates to one in another registered
   project, named by slug or label as other cross-project journal references
-  are. The same call in the other project makes it mutual; until then the
-  block's `related:` line, directly under its header, says `one-sided`. Each
-  related series then prints after the local ones as a compact `--` block:
-  its counts, last landing and in-flight items, read from that project's
-  journal events and ledger only. A related journal that cannot be read
-  prints one line and fails nothing. Relations share no items and roll up no
-  percentage.
+  are; `unrelate` with the same arguments removes it here. The same call in
+  the other project makes it mutual; until then the block's `related:` line,
+  directly under its header, says `one-sided`. Each related series then
+  prints after the local ones as a compact `--` block: its counts, last
+  landing and in-flight items, read from that project's journal events and
+  ledger only. A related journal that cannot be read prints one line and
+  fails nothing. Relations share no items and roll up no percentage.
 
   `arc progress retire <series> --by <conclusion>` records the series as
-  `consumed`, outcome `superseded`, naming the conclusion as what resolved it.
-  A retired series leaves the default listing, stays readable by name, and
-  refuses further edits. `arc workspace progress` prints every registered
+  `consumed`, outcome `superseded`, naming the conclusion as what resolved
+  it, and the journal's inventories show the conclusion as its successor.
+  `--by` and `--follows` take a bare filename of this journal; a path,
+  another journal's reference or a symbolic link is refused. A retired series
+  leaves the default listing, stays readable by name, and refuses every
+  `arc progress` edit. As for every consumed artifact, the journal's
+  amendments still apply: `arc journal correct` replaces its recorded title,
+  which the report then shows, and `arc journal retract` withdraws evidence
+  or a position filed on it. `arc workspace progress` prints every registered
   project's active series. `--json` prints `arc-progress/1` and
   `arc-workspace-progress/1`.
 

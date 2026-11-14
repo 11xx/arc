@@ -443,9 +443,9 @@ enum Cmd {
         #[arg(long = "from-journal")]
         from_journal: Option<String>,
         /// Link the opened change to an item of a progress series,
-        /// `<series>:<item>` (see `arc progress link`). Checked before
-        /// anything is written; an item linked to an open or integrated
-        /// change is refused
+        /// `<series>:<item>` (see `arc progress link`). Checked from the
+        /// journal before anything is written, the ledger included; an item
+        /// linked to an open or integrated change is refused
         #[arg(long, value_name = "SERIES:ITEM")]
         item: Option<String>,
         /// Open by promoting a fork's work onto a new branch, recording the
@@ -9036,6 +9036,7 @@ mod tests {
             "progress unlink",
             "progress split",
             "progress relate",
+            "progress unrelate",
             "progress retire",
             "journal bind",
             "journal spool",

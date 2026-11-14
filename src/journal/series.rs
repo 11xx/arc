@@ -20,7 +20,6 @@ use crate::commands::Ctx;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// The artifact kind a series is filed under.
@@ -135,7 +134,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.change.is_none()
                 && fields.related.is_none()
         }
-        "series-related" => {
+        "series-related" | "series-unrelated" => {
             fields.item.is_none()
                 && placements.is_empty()
                 && fields.parts.is_empty()
@@ -176,10 +175,20 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        "series-related" => {
+        "series-related" | "series-unrelated" => {
             let related = fields.related.as_ref();
             format!(
-                "related {file} to {}::{}",
+                "{} {file} {} {}::{}",
+                if event.event == "series-related" {
+                    "related"
+                } else {
+                    "unrelated"
+                },
+                if event.event == "series-related" {
+                    "to"
+                } else {
+                    "from"
+                },
                 related.map_or("", |r| r.project.as_str()),
                 related.map_or("", |r| r.file.as_str())
             )
@@ -414,6 +423,11 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     }
                 }
             }
+            "series-unrelated" => {
+                if let Some(related) = &fields.related {
+                    current.related.retain(|known| known != related);
+                }
+            }
             "consumed" => {
                 current.retired = Some(Retirement {
                     at: event.ts.clone(),
@@ -444,6 +458,9 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
     }
     if let Some(series) = series.as_mut() {
         series.added = added;
+        if let Some(title) = super::Amendments::collect(events, file).title() {
+            series.title = title.to_string();
+        }
     }
     series
 }
@@ -591,6 +608,36 @@ fn one_line(what: &str, value: &str) -> Result<String> {
     Ok(value.trim().to_string())
 }
 
+/// An artifact a write names on the command line, as a path inside this
+/// journal. Only a bare artifact filename of `kind` is accepted: a path, a
+/// `<journal-dir>::<file>` reference, or another kind is refused by the
+/// journal's own name check, and the name must be a regular file in the hot
+/// journal or its cold archive. A symbolic link is refused rather than
+/// followed, so a name never leads out of the journal's directories.
+fn named_artifact(
+    ctx: &Ctx,
+    dir: &Path,
+    name: &str,
+    kind: &str,
+    flag: &str,
+) -> Result<std::path::PathBuf> {
+    let (_, found) = super::check_artifact_name(ctx, name)?;
+    if found != kind {
+        bail!("{flag} takes a {kind} artifact's filename; {name} is a {found}");
+    }
+    for candidate in [dir.join(name), archive_dir(dir).join(name)] {
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() => return Ok(candidate),
+            Ok(_) => bail!("{} is not a regular file", candidate.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", candidate.display()))
+            }
+        }
+    }
+    bail!("no {kind} {name} in {} or its cold archive", dir.display())
+}
+
 /// Where an added or moved item goes, checked against the list.
 #[derive(Clone, Copy)]
 pub(crate) enum Placement<'a> {
@@ -636,13 +683,7 @@ pub(crate) fn start(
         .collect::<Result<Vec<_>>>()?;
     let dir = resolve_dir(&ctx.cwd)?;
     if let Some(plan) = follows {
-        match parse_artifact_name(plan) {
-            Some((_, _, kind)) if kind == "plan" => {}
-            _ => bail!("--follows takes a plan artifact's filename, got {plan:?}"),
-        }
-        if !dir.join(plan).is_file() && !archive_dir(&dir).join(plan).is_file() {
-            bail!("no plan {plan} in {} or its cold archive", dir.display());
-        }
+        named_artifact(ctx, &dir, plan, "plan", "--follows")?;
     }
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -757,11 +798,26 @@ pub(crate) fn linkable(ctx: &Ctx, name: &str, id: &str) -> Result<(String, Optio
     Ok((file, item.change.clone()))
 }
 
-/// Link an item to a change. `replaceable` says whether the link the item
-/// already carries may be replaced, which only the ledger can answer.
-pub(crate) fn link(ctx: &Ctx, name: &str, id: &str, change: &str, replaceable: bool) -> Result<()> {
+/// Link an item to a change. `expected` is the link the caller read before
+/// taking the journal's lock, and `replaceable` whether the ledger lets that
+/// link be replaced. A link that changed in between is refused, so a
+/// concurrent link is never replaced on a stale reading.
+pub(crate) fn link(
+    ctx: &Ctx,
+    name: &str,
+    id: &str,
+    change: &str,
+    expected: Option<&str>,
+    replaceable: bool,
+) -> Result<()> {
     let open = open_for_write(ctx, name)?;
     let item = open.standing(id)?;
+    if item.change.as_deref() != expected {
+        bail!(
+            "item {id} is linked to {} since this command read it; read the series again",
+            item.change.as_deref().unwrap_or("nothing")
+        );
+    }
     if item.state == ItemState::Done {
         bail!("item {id} is done; reopen it before linking a change");
     }
@@ -833,32 +889,33 @@ pub(crate) fn relate(ctx: &Ctx, name: &str, related: RelatedSeries) -> Result<bo
     Ok(true)
 }
 
+/// Remove a relation the series records.
+pub(crate) fn unrelate(ctx: &Ctx, name: &str, related: RelatedSeries) -> Result<()> {
+    let open = open_for_write(ctx, name)?;
+    if !open.series.related.contains(&related) {
+        bail!(
+            "{} does not relate to {}::{}",
+            open.series.file,
+            related.project,
+            related.file
+        );
+    }
+    let mut event = open.event(ctx, "series-unrelated", None);
+    event.series.related = Some(related);
+    open.append(ctx, &event)
+}
+
 /// Retire a series as superseded by its conclusion.
 pub(crate) fn retire(ctx: &Ctx, name: &str, conclusion: &str) -> Result<String> {
     let open = open_for_write(ctx, name)?;
-    match parse_artifact_name(conclusion) {
-        Some((_, _, kind)) if kind == "conclusion" => {}
-        _ => bail!("--by takes a conclusion artifact's filename, got {conclusion:?}"),
-    }
-    let path = [
-        open.dir.join(conclusion),
-        archive_dir(&open.dir).join(conclusion),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
-    .with_context(|| {
-        format!(
-            "no conclusion {conclusion} in {} or its cold archive",
-            open.dir.display()
-        )
-    })?;
-    let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let path = named_artifact(ctx, &open.dir, conclusion, "conclusion", "--by")?;
+    let digest = super::body_digest(&path)?;
     let mut event = open.event(ctx, "consumed", None);
     event.outcome = Some("superseded".to_string());
     event.note = Some(format!("retired by {conclusion}"));
     event.decision = Some(conclusion.to_string());
     event.decision_kind = Some("conclusion".to_string());
-    event.decision_digest = Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))));
+    event.decision_digest = Some(digest);
     open.append(ctx, &event)?;
     Ok(open.series.file.clone())
 }
