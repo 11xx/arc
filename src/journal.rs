@@ -644,6 +644,8 @@ pub enum JournalCmd {
     /// searching the filesystem for the name is never the way to find it.
     ///
     /// Directory precedence and stable anchors: `arc guide journal-resolution`.
+    /// `arc journal bind [<dir>]` creates a durable project outside Git.
+    /// ARC_JOURNAL_DIR selects a directory; writes under it record no binding.
     /// Records no events; ledger reads do not require a parseable append policy.
     Dir {
         /// Print the cold sibling archive directory
@@ -652,6 +654,18 @@ pub enum JournalCmd {
         /// Explain the resolution source and stable anchor
         #[arg(long)]
         explain: bool,
+    },
+    /// Create and record a durable journal binding for a directory outside Git
+    ///
+    /// Prints <ai-home>/journals/<directory-path-slug>. The directory must exist
+    /// and must be outside arc's home and every journal. Git repositories,
+    /// including those with no commits, already imply a journal and refuse.
+    /// Existing bindings and configured journal scopes refuse with their path.
+    /// ARC_JOURNAL_DIR writes do not record bindings; use bind without the
+    /// override to establish a durable project. --global is not supported.
+    Bind {
+        /// Directory to bind (defaults to the current directory)
+        dir: Option<PathBuf>,
     },
     /// Check the journal for malformed or stale state (read-only)
     ///
@@ -1875,6 +1889,12 @@ fn read_scope(ctx: &Ctx, cmd: &JournalCmd) -> Result<Option<PathBuf>> {
 }
 
 pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
+    if let JournalCmd::Bind { dir } = &cmd {
+        if global {
+            bail!("journal bind creates a project journal; --global is not supported");
+        }
+        return bind(ctx, dir.as_deref());
+    }
     if global
         && matches!(
             &cmd,
@@ -1926,6 +1946,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         }
     }
     match cmd {
+        JournalCmd::Bind { .. } => unreachable!("binding is dispatched before scope selection"),
         JournalCmd::Dir { archive, explain } => {
             let resolution = resolve(&ctx.cwd)?;
             let directory = if archive {
@@ -5164,6 +5185,10 @@ fn is_global_dir(path: &Path) -> Result<bool> {
 }
 
 fn resolve(cwd: &Path) -> Result<JournalResolution> {
+    resolve_with_unbound(cwd, false)
+}
+
+fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolution> {
     if is_global_dir(cwd)? {
         return Ok(JournalResolution {
             directory: config::global_journal_dir()?,
@@ -5230,7 +5255,7 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
         });
     }
 
-    if looks_like_a_journal(&canonical_cwd).unwrap_or(false) {
+    if is_journal_directory(&canonical_cwd)? {
         if let Some(anchor) = recorded_anchor(&canonical_cwd)? {
             bail!(
                 "{} is a journal directory for the project at {anchor}; run this command \
@@ -5245,15 +5270,126 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
         );
     }
 
+    let proposed = crate::registry::journals_root(&cfg).join(config::path_slug(&canonical_cwd));
+    if allow_unbound {
+        return Ok(JournalResolution {
+            directory: proposed,
+            source: ResolutionSource::SluggedPath,
+            anchor: Some(canonical_cwd),
+        });
+    }
     bail!(
         "cannot resolve a stable journal anchor from {}: checked ARC_JOURNAL_DIR \
          (environment), [journals.dirs] path prefixes (config), Git discovery, recorded \
-         anchors, and the journal this path would slug to; no source matched; set ARC_JOURNAL_DIR or add an absolute path-prefix entry \
+         anchors, and the journal this path would slug to; no source matched; \
+         run `arc journal bind` from this directory to create {}; \
+         set ARC_JOURNAL_DIR or add an absolute path-prefix entry \
          to {}; a path-prefix entry covering a directory with repositories beneath it will \
          shadow their Git discovery",
         canonical_cwd.display(),
+        proposed.display(),
         cfg.config_path.display()
     )
+}
+
+fn is_journal_directory(dir: &Path) -> Result<bool> {
+    if dir.join("events.jsonl").is_file() || bindings_path(dir).is_file() {
+        return Ok(true);
+    }
+    Ok(std::fs::read_dir(dir)?.filter_map(Result::ok).any(|entry| {
+        parse_artifact_name(&entry.file_name().to_string_lossy())
+            .is_some_and(|(stamp, _, _)| parse_artifact_timestamp(&stamp).is_some())
+    }))
+}
+
+fn bind(ctx: &Ctx, dir: Option<&Path>) -> Result<i32> {
+    if std::env::var_os("ARC_JOURNAL_DIR").is_some() {
+        bail!("journal bind requires ARC_JOURNAL_DIR to be unset; the override does not record a binding");
+    }
+    let requested = dir.map_or_else(|| ctx.cwd.clone(), |dir| ctx.cwd.join(dir));
+    let anchor = std::fs::canonicalize(&requested).with_context(|| {
+        format!(
+            "cannot bind directory {}: it must exist",
+            requested.display()
+        )
+    })?;
+    if !anchor.is_dir() {
+        bail!("cannot bind {}: not a directory", anchor.display());
+    }
+    let cfg = config::load()?;
+    if anchor.starts_with(config::resolved(&cfg.ai_home)) {
+        bail!(
+            "cannot bind {}: inside arc's home {}",
+            anchor.display(),
+            cfg.ai_home.display()
+        );
+    }
+    for (_, journal) in crate::registry::known_journals(&cfg)? {
+        if anchor.starts_with(config::resolved(&journal)) {
+            bail!(
+                "cannot bind {}: inside journal {}",
+                anchor.display(),
+                journal.display()
+            );
+        }
+    }
+    for ancestor in anchor.ancestors() {
+        if is_journal_directory(ancestor)? {
+            bail!(
+                "cannot bind {}: inside journal {}",
+                anchor.display(),
+                ancestor.display()
+            );
+        }
+    }
+    if let Some(journal) = recorded_anchor_journal(&cfg, &anchor)? {
+        bail!(
+            "{} is already bound to {}",
+            anchor.display(),
+            journal.display()
+        );
+    }
+    let resolution = resolve_with_unbound(&anchor, true)?;
+    if !matches!(resolution.source, ResolutionSource::SluggedPath) {
+        bail!(
+            "{} already has a journal at {} (source: {}); no binding created",
+            anchor.display(),
+            resolution.directory.display(),
+            resolution.source.as_str()
+        );
+    }
+    let journal = resolution.directory;
+    if let Some(recorded) = recorded_anchor(&journal)? {
+        bail!(
+            "{} is already bound to {recorded}; cannot bind {}",
+            journal.display(),
+            anchor.display()
+        );
+    }
+    let _events = lock_journal_events(&journal)?;
+    if let Some(recorded) = recorded_anchor(&journal)? {
+        bail!(
+            "{} is already bound to {recorded}; cannot bind {}",
+            journal.display(),
+            anchor.display()
+        );
+    }
+    let (harness, session) = identity(ctx);
+    write_binding(
+        &journal,
+        &JournalBinding {
+            schema: BINDING_SCHEMA.to_string(),
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            event: "bound".to_string(),
+            anchor: anchor.display().to_string(),
+            previous_anchor: None,
+            harness,
+            session,
+            reason: None,
+        },
+    )?;
+    println!("{}", journal.display());
+    Ok(0)
 }
 
 /// The journal for a directory Git and config cannot anchor, in order of how

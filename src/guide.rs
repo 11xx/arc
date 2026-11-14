@@ -6670,6 +6670,20 @@ const JOURNAL_RESOLUTION: &str = r#"JOURNAL DIRECTORY RESOLUTION
      or the journal named by this directory's slug.
   A prefix covering repositories shadows their Git journals.
 
+  `arc journal bind [<dir>]` creates the default-root slug journal for an
+  existing directory outside Git and records its binding. With no argument
+  it binds the current directory. The printed path resolves durably without
+  configuration. Git repositories, including unborn ones, already imply a
+  journal; a first journal write records their binding. Binding refuses an
+  existing binding or configured scope, arc's home, and journal directories
+  and their descendants. A first unanchored write names bind and its target
+  without creating them. ARC_JOURNAL_DIR writes record no binding; unset it
+  and use bind for a durable project. Bound directories without Git appear
+  in workspace backlog, report and pins with their journal holdings and no
+  ledger. Workspace list and inbox aggregate ledgers only.
+  `arc catchup` reads a journal project outside Git with ledger, replica and
+  worktrees null in its JSON view. It creates no ledger or Git repository.
+
   `arc journal rebind <journal-dir>` adopts an existing journal and records
   the move to this project's anchor. It refuses when both journals hold
   content. Read `arc journal rebind --help` for its input contract.
@@ -6687,6 +6701,7 @@ SAY WHO YOU ARE
 
 FIND YOUR BEARINGS
   arc catchup                    inside a project; then read the memories it names
+  arc journal bind [<dir>]        create a journal project outside Git
   arc workspace backlog --here   above several projects
   arc journal open               work waiting for a session
   arc resume <change>            one change's brief, state and journal context

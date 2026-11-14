@@ -625,10 +625,8 @@ fn journal_open_resolves_a_non_repository_recorded_anchor() {
 
 #[test]
 fn journal_open_resolves_a_binding_less_journal_by_its_slugged_path() {
-    // A journal written before bindings existed states nothing about who owns
-    // it, and no arc command can give it one: recording a binding needs a
-    // resolution, which is the thing that fails. The directory this path slugs
-    // to is the journal arc would itself create here, so it is the answer.
+    // A journal without a binding states nothing about who owns it. The
+    // directory this path slugs to is the journal arc would create here.
     let repo = Repo::new();
     let cwd = repo.home.join("binding-less");
     fs::create_dir_all(&cwd).unwrap();

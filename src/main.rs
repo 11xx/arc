@@ -3554,6 +3554,8 @@ enum Cmd {
     /// missing, a placeholder or a session id; valid models omit it.
     ///
     /// Human ledger sections name guide topics for the blockers already observed.
+    /// A journal project outside Git reports its journal without a ledger;
+    /// ledger, replica and worktrees are null in JSON.
     ///
     /// Each intake configured as `[intake.<name>]` in the user config adds one
     /// line, `intake: <name>: <n> open items`, and the JSON field `intake`
@@ -3591,7 +3593,8 @@ enum Cmd {
     ///
     /// Events replay in append order; timestamps record observation time. Project reads
     /// also resolve from their journal directory; project writes name the checkout they
-    /// need. --global works from any directory.
+    /// need. --global works from any directory. Outside Git, `journal bind` creates
+    /// a durable project. ARC_JOURNAL_DIR writes record no project binding.
     Journal {
         /// Target the operator journal at <ai-home>/arc/journals/global, from
         /// any directory. All journal kinds share this scope. With promote,
@@ -8893,6 +8896,7 @@ mod tests {
             "hooks uninstall",
             "hook-run",
             "fr",
+            "journal bind",
             "journal spool",
             "journal note",
             "journal feature-request",

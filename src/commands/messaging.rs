@@ -1144,11 +1144,21 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         std::thread::spawn(move || crate::session_store::project_sessions(&cwd))
     });
     let intake = crate::intake::start(&ctx.cwd);
-    let store = ctx.store()?;
-    let replica = crate::replica::status(&store)?;
-    let (mut inbox, reports) = collect_inbox_with_reports(ctx, &store, None)?;
-    if let Ok(unowned) = crate::context::unowned_surface(ctx) {
-        inbox.absorb_unowned(unowned);
+    let store = if super::workspace::has_git_repository(&ctx.cwd)? {
+        Some(ctx.store()?)
+    } else {
+        crate::journal::resolve_dir(&ctx.cwd)?;
+        None
+    };
+    let replica = store.as_ref().map(crate::replica::status).transpose()?;
+    let (mut inbox, reports) = match &store {
+        Some(store) => collect_inbox_with_reports(ctx, store, None)?,
+        None => (crate::inbox::Inbox::new(None), BTreeMap::new()),
+    };
+    if store.is_some() {
+        if let Ok(unowned) = crate::context::unowned_surface(ctx) {
+            inbox.absorb_unowned(unowned);
+        }
     }
     let journal = crate::journal::orientation(ctx);
     let (recent_sessions, session_discovery_errors) = match discovery {
@@ -1161,16 +1171,17 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     };
     let filed = crate::journal::filed_report(ctx, None, 14);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
-    let states = store.readable_states_shared()?;
+    let states = match &store {
+        Some(store) => store.readable_states_shared()?,
+        None => std::sync::Arc::new(BTreeMap::new()),
+    };
     let provisional_integrations: Vec<_> = states
         .values()
         .flat_map(|state| crate::provisional::unresolved_at(state, chrono::Utc::now()))
         .collect();
-    let worktrees = crate::worktree_usage::measure(
-        &ctx.cwd,
-        &states,
-        &crate::commands::fork::checkouts(&forks),
-    );
+    let worktrees = store.as_ref().map(|_| {
+        crate::worktree_usage::measure(&ctx.cwd, &states, &crate::commands::fork::checkouts(&forks))
+    });
     let intake = intake.finish();
 
     if json {
@@ -1178,7 +1189,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": "arc-catchup/12",
-                "ledger": inbox,
+                "ledger": store.as_ref().map(|_| &inbox),
                 "journal": journal.as_ref().ok(),
                 "replica": replica,
                 "provisional_integrations": provisional_integrations,
@@ -1201,8 +1212,14 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
 
     crate::context::render_build_warning(&ctx.cwd);
     let debts = collect_debts(ctx, &states)?;
-    let review_queue = collect_review_queue(&store, &states)?;
-    println!("ledger: {}", store.root.display());
+    let review_queue = store
+        .as_ref()
+        .map(|store| collect_review_queue(store, &states))
+        .transpose()?;
+    match &store {
+        Some(store) => println!("ledger: {}", store.root.display()),
+        None => println!("ledger: none (journal project without Git)"),
+    }
     if !provisional_integrations.is_empty() {
         println!("Provisional integrations:");
         for row in &provisional_integrations {
@@ -1220,7 +1237,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
             );
         }
     }
-    crate::replica::render_status(&replica);
+    if let Some(replica) = &replica {
+        crate::replica::render_status(replica);
+    }
     let mut any = false;
     let mut instruction_blockers = Vec::new();
     let mut rendered_debt_details = BTreeSet::new();
@@ -1241,7 +1260,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         }
         any = true;
         if name == "needs-review" {
-            review_queue.render();
+            if let Some(review_queue) = &review_queue {
+                review_queue.render();
+            }
         }
         println!("{name} ({}):", rows.len());
         for row in rows.iter().take(limit) {
@@ -1262,7 +1283,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
             }
         }
     }
-    if !any {
+    if !any && store.is_some() {
         println!("  no open changes");
     }
     print!("{}", crate::guide::blocker_pointers(&instruction_blockers));
@@ -1307,7 +1328,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     }
     render_forks(&forks);
     render_waiting_spools(ctx, &states);
-    render_worktree_accounting(&worktrees);
+    if let Some(worktrees) = &worktrees {
+        render_worktree_accounting(worktrees);
+    }
     render_debts(&debts);
     render_deferred(&inbox.deferred);
     render_unowned(&inbox);
