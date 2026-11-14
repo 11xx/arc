@@ -977,6 +977,113 @@ fn under_assessed_clearance_clears_decides_the_refusal() {
         &["--assessment", clearing.to_str().unwrap()],
     )
     .failure()
-    .stderr(predicates::str::contains("review_clearance = \"assessed\""));
+    .stderr(predicates::str::contains("review_clearance = \"assessed\""))
+    .stderr(predicates::str::contains(
+        "without --kind, --read, --assessment, --qualifier and --route-version",
+    ));
     assert!(debt_of(&repo, "clears").is_null());
+
+    // The advised invocation records the kind the ledger derives: the read
+    // carries no assessment, so it is a findings read.
+    repo.arc(&repo.root)
+        .args(["integrate", "clears", "--debt", "same-family read only"])
+        .assert()
+        .success();
+    assert_eq!(debt_of(&repo, "clears")["missing"], "ineligible-review");
+}
+
+/// Claim: a declaration is refused only when its read would discharge the
+/// debt it declares, coverage included, so an audit that read part of the
+/// change refuses a declaration whose extent it covers and leaves one owing
+/// the whole change recorded. Rejects a refusal that judges the read without
+/// the extent the declaration proposes.
+#[test]
+fn a_scoped_read_refuses_only_a_declaration_it_covers() {
+    let repo = repo_forbidding_self_approval();
+    stdout(repo.arc(&repo.root).args(["begin", "scoped"]));
+    let worktree = repo.home.join(".worktrees/repo-scoped");
+    repo.commit(&worktree, "scoped-a.txt", "a\n", "feat: a");
+    repo.commit(&worktree, "scoped-b.txt", "b\n", "feat: b");
+    stdout(repo.arc(&worktree).args(["snapshot", "scoped"]));
+    read_by(&repo, "scoped", "Reviewer", SAME_FAMILY_REVIEWER);
+    repo.arc(&repo.root)
+        .args(["integrate", "scoped", "--debt", "same-family read only"])
+        .assert()
+        .success();
+    let file = assessment_v2(&repo, "scoped.json", "eligible", true, &[]);
+    let audit = event_of(&stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "Auditor")
+            .args(["--model", "fixture-other#high"])
+            .args(["audit", "scoped", "--verdict", "approved"])
+            .args(["--extent-paths", "scoped-a.txt", "--assessment"])
+            .arg(&file),
+    ));
+    let declare = |extent: &[&str]| {
+        repo.arc(&repo.root)
+            .args([
+                "debt",
+                "scoped",
+                "--reason",
+                "owed",
+                "--kind",
+                "ineligible-review",
+            ])
+            .args(["--read", &audit, "--assessment"])
+            .arg(&file)
+            .args(extent)
+            .assert()
+    };
+    declare(&["--extent-paths", "scoped-a.txt"])
+        .failure()
+        .stderr(predicates::str::contains("no ineligible read to record"));
+    declare(&["--extent", "whole"]).success();
+    let debt = debt_of(&repo, "scoped");
+    assert_eq!(debt["missing"], "ineligible-review", "{debt}");
+    assert_eq!(debt["ineligible"]["read"], audit.as_str(), "{debt}");
+}
+
+/// Claim: a verdict recorded since an `ineligible-review` declaration
+/// without an eligible, bound assessment leaves the debt owed, and is listed
+/// beside it with its reason among the findings reads where assessed
+/// clearance applies, and nowhere without it. Rejects a guide or projection
+/// that hides the verdict under the policy, or lists it without one.
+#[test]
+fn an_unassessed_verdict_is_listed_only_under_assessed_clearance() {
+    for (repo, listed) in [
+        (repo_forbidding_self_approval(), false),
+        (repo_assessing_clearance(), true),
+    ] {
+        read_change(&repo, "listed");
+        repo.arc(&repo.root)
+            .args(["debt", "listed", "--reason", "same-family read only"])
+            .args(["--kind", "ineligible-review", "--qualifier", "same-family"])
+            .assert()
+            .success();
+        let verdict = read_by(&repo, "listed", "Other", "fixture-other#high");
+        repo.arc(&repo.root)
+            .args(["integrate", "listed"])
+            .assert()
+            .success();
+        let status = json_stdout(repo.arc(&repo.root).args(["status", "listed", "--json"]));
+        assert_eq!(status["debt_outstanding"], true, "{status}");
+        let reads = status["debt"]["findings_reads"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let row = reads
+            .iter()
+            .find(|read| read["event_id"] == verdict.as_str());
+        assert_eq!(row.is_some(), listed, "{status}");
+        if let Some(row) = row {
+            assert_eq!(row["source"], "verdict", "{row}");
+            assert_eq!(row["reason"], "no-assessment", "{row}");
+        }
+        assert!(
+            status["debt"]["ineligible"]["later_reads"]
+                .as_array()
+                .is_none_or(|reads| reads.is_empty()),
+            "{status}"
+        );
+    }
 }

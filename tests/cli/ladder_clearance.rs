@@ -1417,3 +1417,135 @@ fn a_declaration_under_a_ladder_is_refused_only_where_the_ladder_clears() {
         "ineligible-review"
     );
 }
+
+/// A repository whose `release` branch has assessed policy and no ladder,
+/// and whose `master`, the target changes record, adds the ladder on top.
+fn repo_with_a_release_without_a_ladder() -> Repo {
+    let repo = repo(true, false, None);
+    git(&repo.root, &["branch", "release"]);
+    fs::write(
+        repo.root.join(".arc/review-ladder.toml"),
+        toml::to_string(&table()).unwrap(),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(
+        &repo.root,
+        &["commit", "-q", "-m", "test: master gains a ladder"],
+    );
+    repo
+}
+
+/// A change on `master` authored at OPUS and approved by Reader at SOL,
+/// whom the ladder clears, under a bound assessment that does not clear.
+fn approved_by_sol(repo: &Repo, slug: &str) -> (PathBuf, PathBuf) {
+    let file = assessment(repo, &format!("{slug}.json"), SOL, false);
+    let wt = subject(repo, slug, Some(OPUS), "");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reader")
+        .args([
+            "--model",
+            SOL,
+            "review",
+            slug,
+            "--verdict",
+            "approved",
+            "--assessment",
+        ])
+        .arg(&file)
+        .assert()
+        .success();
+    (wt, file)
+}
+
+/// Claim: `integrate --into` judges a declaration, and derives its kind,
+/// under the destination's review context: a branch without a ladder judges
+/// a reader by assessment alone though the recorded target's ladder clears
+/// it. Rejects a judgment made under the recorded target's ladder.
+#[test]
+fn integrating_into_a_branch_without_a_ladder_judges_by_its_context() {
+    let repo = repo_with_a_release_without_a_ladder();
+    let (wt, file) = approved_by_sol(&repo, "declared");
+    repo.arc(&wt)
+        .args([
+            "integrate",
+            "declared",
+            "--into",
+            "release",
+            "--debt",
+            "ladder read",
+        ])
+        .args(["--kind", "ineligible-review", "--assessment"])
+        .arg(&file)
+        .assert()
+        .success();
+    assert_eq!(
+        show(&repo, "declared")["debt"]["missing"],
+        "ineligible-review"
+    );
+
+    let repo = repo_with_a_release_without_a_ladder();
+    let (wt, _) = approved_by_sol(&repo, "derived");
+    repo.arc(&wt)
+        .args([
+            "integrate",
+            "derived",
+            "--into",
+            "release",
+            "--debt",
+            "ladder read",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        show(&repo, "derived")["debt"]["missing"],
+        "ineligible-review"
+    );
+}
+
+/// Claim: where self-approval is permitted, an author's own approval gates
+/// without review clearance, and under assessed ladder clearance it never
+/// does, because a reader matching an author identity does not clear.
+/// Rejects a gate that lets a permitted self-approval stand under a ladder,
+/// or refuses one where no clearance applies.
+#[test]
+fn a_permitted_self_approval_gates_only_without_ladder_clearance() {
+    for assessed in [false, true] {
+        let repo = Repo::new();
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        let clearance = if assessed {
+            "review_clearance = \"assessed\"\n"
+        } else {
+            ""
+        };
+        fs::write(
+            repo.root.join(".arc/policy.toml"),
+            format!("[policy]\n{clearance}"),
+        )
+        .unwrap();
+        fs::write(
+            repo.root.join(".arc/review-ladder.toml"),
+            toml::to_string(&table()).unwrap(),
+        )
+        .unwrap();
+        git(&repo.root, &["add", ".arc"]);
+        git(
+            &repo.root,
+            &["commit", "-q", "-m", "test: permitted self-approval"],
+        );
+        subject(&repo, "own", Some(OPUS), "");
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "Writer")
+            .args(["--model", SOL, "review", "own", "--verdict", "approved"])
+            .assert()
+            .success();
+        let status = json_stdout(repo.arc(&repo.root).args(["status", "own", "--json"]));
+        assert_eq!(status["has_valid_approval"], !assessed, "{status}");
+        if assessed {
+            let reason = status["approval_rejection_reason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(reason.contains("findings read"), "{status}");
+        }
+    }
+}

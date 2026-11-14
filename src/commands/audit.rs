@@ -125,7 +125,8 @@ impl IneligibleInputs {
                 bail!(
                     "under this assessment read {read} clears the review an ineligible-review \
                      debt would owe ({}), so there is no ineligible read to record; declare \
-                     the debt without --kind to record the kind the ledger derives",
+                     the debt without --kind, --read, --assessment, --qualifier and \
+                     --route-version to record the kind the ledger derives",
                     judge.clearance_name()
                 );
             }
@@ -147,6 +148,7 @@ pub(super) struct ReadJudge<'a> {
     clearance: crate::policy::ReviewClearance,
     production: Option<&'a crate::model::DebtProduction>,
     implementers: Option<&'a [String]>,
+    extent: Option<&'a crate::extent::Extent>,
 }
 
 impl ReadJudge<'_> {
@@ -174,7 +176,14 @@ impl ReadJudge<'_> {
             })
             .flatten();
         let bound = bind_assessment_to(model.as_deref(), assessed, self.implementers);
-        st.read_would_clear(read, &bound, subject, self.production, self.clearance)
+        st.read_would_clear(
+            read,
+            &bound,
+            subject,
+            self.production,
+            self.extent,
+            self.clearance,
+        )
     }
 
     fn clearance_name(&self) -> &'static str {
@@ -527,14 +536,22 @@ fn plan_debt_of(
     };
     // The caller's kind wins: arc reads the ledger, and the ledger cannot
     // distinguish a merge resolution from a repair.
-    // The destination's policy is read only where a judgment needs it.
-    let clearance = if (kind.is_none() && subject.is_some()) || inputs.assessment.is_some() {
-        ctx.declarations(st)?.policy.policy.review_clearance
-    } else {
-        crate::policy::ReviewClearance::default()
-    };
+    // A judgment answers to the destination: its policy, and its review
+    // context, which `--into` may make another branch's than the one the
+    // change recorded. Both are read only where a judgment needs them.
+    let destination;
+    let (clearance, judged) =
+        if (kind.is_none() && subject.is_some()) || inputs.assessment.is_some() {
+            let declarations = ctx.declarations(st)?;
+            let mut state = st.clone();
+            state.set_review_context(declarations.review_context);
+            destination = state;
+            (declarations.policy.policy.review_clearance, &destination)
+        } else {
+            (crate::policy::ReviewClearance::default(), st)
+        };
     let ineligible = inputs.resolve(
-        st,
+        judged,
         subject,
         kind,
         &ReadJudge {
@@ -543,19 +560,20 @@ fn plan_debt_of(
             implementers: production
                 .as_ref()
                 .and_then(|production| production.trailer_implementers.as_deref()),
+            extent: extent.as_ref(),
         },
     )?;
     // Under the clearance policy an approval that only finds is the read the
     // obligation names, so the review it did not supply is owed as
     // `ineligible-review`.
     let findings = match (kind, subject) {
-        (None, Some(subject)) if clearance.is_assessed() => st.findings_approval(subject),
+        (None, Some(subject)) if clearance.is_assessed() => judged.findings_approval(subject),
         _ => None,
     };
     let (missing, ineligible) = match findings {
         Some(read) => (DebtMissing::IneligibleReview, Some(read)),
         None => (
-            kind.unwrap_or_else(|| st.derive_debt_missing(subject)),
+            kind.unwrap_or_else(|| judged.derive_debt_missing(subject)),
             ineligible,
         ),
     };

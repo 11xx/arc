@@ -2842,18 +2842,19 @@ REVIEW COVERAGE AND DEBT
   path declared dangerous by either file is dangerous. Integration reads
   `.arc/policy.toml` from the change's target branch, wherever it is run.
   Under `forbid_self_approval`, a change touching a declared path needs a
-  verdict from somebody other than its author; elsewhere, or with it off, a
-  self-recorded verdict satisfies the gate. `arc integrate --debt` still
-  lands such a change and leaves its review owed. Declare no danger paths
+  verdict from somebody other than its author. Elsewhere authorship refuses
+  no approval, but assessed clearance gates only a clearing one, which an
+  author's own read never is under a ladder (`arc guide debt-clearance`).
+  `arc integrate --debt` still lands such a change and leaves its review
+  owed. Declare no danger paths
   and every change is in scope. `arc begin --dangerous` raises a single change
   whatever it turns out to touch, and nothing lowers it afterwards — a project
   decides its own gate in advance, rather than a change deciding it under
   pressure to ship. `arc check` names the rule that fired, and `arc doctor`
   reports a declared literal that can never match — one that names nothing, or
   a directory, since declared paths are matched against changed files.
-  Gate and policy declaration files can change these integration rules, so
-  changes touching `.arc/gates.toml` or `.arc/policy.toml` need independent
-  review when those paths are declared dangerous.
+  Declaring `.arc/gates.toml` and `.arc/policy.toml` dangerous holds edits
+  to these rules to that bar.
 
   Required booleans apply when either policy enables them, danger and safe
   declarations combine with danger taking priority, debt thresholds use the
@@ -3045,8 +3046,9 @@ REVIEW COVERAGE AND DEBT
   named beside it) or `authors-unread` (the range's authors could not be read). An
   audit without an assessment, with an `ineligible` one, or
   whose binding is not `bound` is recorded, says why, and is listed beside the
-  obligation, which stays open; a verdict in the same case leaves it open
-  without being listed.
+  obligation, which stays open; a verdict in the same case leaves it open,
+  listed with its reason among the findings reads where assessed clearance
+  applies (`arc guide debt-recovery`).
   `arc query --debt`, `arc catchup`, `arc inbox`, the workspace backlog, the
   debt advisory, `arc show` and `arc explain` show the qualifiers, the read's
   reviewer and model as its verdict recorded them, whether the assessment
@@ -6807,8 +6809,8 @@ REVIEW
   Read the diff and record your verdict with arc review. If you contributed, or
   policy refuses your approval, record arc debt instead. Ask for an independent
   reviewer only when policy or someone requires one.
-  A path policy declares dangerous needs somebody else's verdict, or a debt that
-  stays owed.
+  Under forbid_self_approval a dangerous path needs somebody else's verdict, or
+  a debt that stays owed.
   An approval binds its exact patchset, so a new commit needs a new snapshot and a
   fresh verdict. Gates must cover the tree that will ship.
   What is owed: arc inbox, arc query --debt. Discharge it with arc audit.

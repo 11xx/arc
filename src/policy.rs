@@ -180,9 +180,9 @@ impl PolicySources {
     }
 }
 
-/// Surfaces the project or operator has declared dangerous. A change touching
-/// one needs a verdict from somebody other than its author; everywhere else a
-/// self-recorded verdict satisfies the gate.
+/// Surfaces the project or operator has declared dangerous. Under
+/// `forbid_self_approval`, a change touching one needs a verdict from
+/// somebody other than its author; elsewhere authorship refuses no approval.
 ///
 /// The declaration is a judgement made once, in a reviewable commit or local
 /// operator policy, by an identifiable author — rather than one made per

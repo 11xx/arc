@@ -2894,9 +2894,11 @@ enum Cmd {
         /// the ledger; a declared kind wins, because arc cannot tell a merge
         /// resolution from a repair. `ineligible-review` records that a read
         /// happened by a reviewer routing does not count as independent of
-        /// the author: arc never derives it, and it takes why from
-        /// `--assessment` or `--qualifier`, and the read from `--read`.
-        /// `replayed-unread` is the reverse: only `arc land` derives it, and
+        /// the author. Declared, it takes why from `--assessment` or
+        /// `--qualifier`, and the read from `--read`; arc derives it only
+        /// under `review_clearance = "assessed"`, for an approval that finds
+        /// without clearing.
+        /// `replayed-unread` is only derived: `arc land` records it, and
         /// declaring it is refused
         #[arg(long = "kind", value_enum, requires = "debt")]
         debt_kind: Option<DebtMissing>,
@@ -3042,9 +3044,11 @@ enum Cmd {
         /// ledger; a declared kind wins, because arc cannot tell a merge
         /// resolution from a repair. `ineligible-review` records that a read
         /// happened by a reviewer routing does not count as independent of
-        /// the author: arc never derives it, and it takes why from
-        /// `--assessment` or `--qualifier`, and the read from `--read`.
-        /// `replayed-unread` is the reverse: only `arc land` derives it, and
+        /// the author. Declared, it takes why from `--assessment` or
+        /// `--qualifier`, and the read from `--read`; arc derives it only
+        /// under `review_clearance = "assessed"`, for an approval that finds
+        /// without clearing.
+        /// `replayed-unread` is only derived: `arc land` records it, and
         /// declaring it is refused
         #[arg(long, value_enum)]
         kind: Option<DebtMissing>,

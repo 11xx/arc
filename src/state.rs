@@ -5592,7 +5592,17 @@ impl ChangeState {
         debt: &Debt,
         read: Option<&crate::extent::Extent>,
     ) -> crate::extent::Coverage {
-        let obligation = match (&debt.extent, self.extent_subject()) {
+        self.coverage_against(debt.extent.as_ref(), read)
+    }
+
+    /// Whether `read` covers an obligation naming `required`, else the
+    /// whole [`extent_subject`](Self::extent_subject).
+    fn coverage_against(
+        &self,
+        required: Option<&crate::extent::Extent>,
+        read: Option<&crate::extent::Extent>,
+    ) -> crate::extent::Coverage {
+        let obligation = match (required, self.extent_subject()) {
             (Some(extent), _) => crate::extent::Obligation::Extent(extent),
             (None, Some((base, revision))) => {
                 crate::extent::Obligation::Unestablished { base, revision }
@@ -5716,15 +5726,18 @@ impl ChangeState {
 
     /// Whether the read `event_id` on `shipped`, judged under `assessment`
     /// in place of the one it recorded, would discharge an
-    /// `ineligible-review` debt under `clearance`, the destination's review
-    /// clearance policy. `false` when there is no such read or its judgment
-    /// is not established.
+    /// `ineligible-review` debt naming `extent` under `clearance`, the
+    /// destination's review clearance policy: every bar of discharge,
+    /// coverage last, except that the read predates the declaration.
+    /// `false` when there is no such read or its judgment is not
+    /// established.
     pub fn read_would_clear(
         &self,
         event_id: &str,
         assessment: &AuditAssessment,
         shipped: &Patchset,
         production: Option<&DebtProduction>,
+        extent: Option<&crate::extent::Extent>,
         clearance: crate::policy::ReviewClearance,
     ) -> bool {
         let read = self
@@ -5753,6 +5766,10 @@ impl ChangeState {
                     clearance,
                 )
                 .is_none()
+            && !matches!(
+                self.coverage_against(extent, read.extent),
+                crate::extent::Coverage::Gap(_)
+            )
     }
 
     /// Why `read`, judged by its reader's identity, model and assessment,
