@@ -774,3 +774,39 @@ fn budget_warning_median_does_not_count_selector_receipts_as_runs() {
         .success()
         .stderr(predicates::str::contains("recent command median").not());
 }
+
+/// Claim: when a change removes a destination gate that has no budget while
+/// declaring a total, the refusal names the way through: land the
+/// replacement first with no total, then declare budgets and the total in a
+/// following change. A gate the head itself keeps without a budget gets the
+/// plain refusal. Rejects a refusal that leaves the replacement with no
+/// route, and the two-step route offered where it would not help.
+#[test]
+fn a_removed_destination_gate_refusal_names_the_two_step_route() {
+    const ROUTE: &str = "land the gate replacement first with no total declared, then \
+                         declare budgets and the total in a following change";
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.old]\ncommand = 'true'\n");
+    let replaced = "[budget]\ntotal = '10s'\n[gates.new]\ncommand = 'true'\nbudget = '5s'\n";
+    for (slug, gates, routed) in [
+        ("replaces-gates", replaced.to_string(), true),
+        (
+            "keeps-old",
+            format!("{replaced}[gates.old]\ncommand = 'true'\n"),
+            false,
+        ),
+    ] {
+        let (id, wt, _) = change_with_patchset(&repo, slug);
+        repo.commit(&wt, ".arc/gates.toml", &gates, "test: replace gates");
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        approve(&repo, &wt);
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        let output = repo.arc(&wt).args(["check", &id]).assert().code(5);
+        let text = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+        let refusal = text
+            .lines()
+            .find(|line| line.contains("integration gate old needs a budget (profile unqualified)"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(refusal.contains(ROUTE), routed, "{slug}: {refusal}");
+    }
+}

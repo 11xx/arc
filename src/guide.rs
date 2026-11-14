@@ -5652,7 +5652,7 @@ GATES
   Budget durations accept positive whole milliseconds with ms, s, m or h
   units, including decimal forms such as 2.5s and 0.001s. Overflow and precision
   below a millisecond are refused. A [budget] table may declare total = "15s".
-  Every required integration gate needs a budget when it has enforcement keys.
+  Which integration gates need a budget is defined in `arc guide gate-costs`.
   `arc guide gates-together` defines the total's profile and batch accounting.
   The effective suite is validated after layering for every declared
   profile and the unqualified case. A missing budget or excessive sum is a
@@ -5904,7 +5904,12 @@ GATE COSTS
   operator's landing declaration by minimum; change-head additions do not bind.
   A detached checkout without a matching destination reports it unobserved.
   Every required integration gate needs a budget when enforcement keys exist
-  in that table; a landing-only table requires no individual budgets.
+  in that table; a landing-only table requires no individual budgets. That
+  includes a gate the destination declares and a change's head removes,
+  since the change still owes it, so one change cannot both replace gates
+  and declare a total. Land the replacement first with no total declared,
+  then declare budgets and the total in a following change, once the
+  destination holds only the gates it keeps; the refusal names this route.
 
   `arc gates init [--runs N] [--publication]` measures six serial rounds of
   every gate that runs at integration, in any profile, by default. A

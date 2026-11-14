@@ -77,6 +77,9 @@ pub(crate) fn for_change_at(
     if let Some(change_head) = change_head {
         crate::gate_raise::apply(cwd, state, &target_head, &change_head, &mut required)?;
         let own = gates::inspect_at(cwd, &change_head)?;
+        for (name, gate) in &mut required.gates {
+            gate.head_removes = !own.gates.contains_key(name);
+        }
         let divergences = required.owe_also(
             own,
             &format!("{target}'s .arc/gates.toml"),

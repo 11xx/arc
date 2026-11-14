@@ -219,7 +219,15 @@ impl GatesFile {
             for (name, gate) in required {
                 if gate.budget.is_none() {
                     errors.push(format!(
-                        "budget: integration gate {name} needs a budget (profile {label})"
+                        "budget: integration gate {name} needs a budget (profile {label}){}",
+                        if gate.head_removes {
+                            "; the head removes it and the destination still declares it, so \
+                             land the gate replacement first with no total declared, then \
+                             declare budgets and the total in a following change, once the \
+                             destination holds only the gates it keeps"
+                        } else {
+                            ""
+                        }
                     ));
                 }
             }

@@ -243,6 +243,10 @@ pub struct Gate {
     pub binds: Binding,
     #[serde(skip, default)]
     pub declared_by: Vec<String>,
+    /// Declared by a change's destination and not by its head. It informs
+    /// refusals only: the gate is still required and judged like any other.
+    #[serde(skip, default)]
+    pub head_removes: bool,
 }
 
 /// What a gate's pass answers for.
