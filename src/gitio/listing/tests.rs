@@ -13,7 +13,6 @@ struct Fixture {
 impl Fixture {
     /// A repository whose `master` holds `shared.txt`.
     fn new() -> Fixture {
-        let _confinement = crate::confinement::Scope::new(&None);
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();

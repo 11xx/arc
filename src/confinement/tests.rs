@@ -410,10 +410,10 @@ fn declared_shared_memory_directory_supports_file_creation() {
     );
 }
 
-/// Claim: switching branches without project hooks does not evaluate a malformed
-/// confinement declaration. Rejects policy validation before any project command.
+/// Claim: switching branches does not evaluate a malformed confinement
+/// declaration. Rejects policy validation before any project command.
 #[test]
-fn a_hookless_switch_does_not_evaluate_confinement() {
+fn a_switch_does_not_evaluate_confinement() {
     let scratch = scratch();
     let cwd = scratch.path();
     let git = |args: &[&str]| {
@@ -442,7 +442,7 @@ fn a_hookless_switch_does_not_evaluate_confinement() {
     git(&["branch", "side"]);
     assert!(
         crate::gitio::git(cwd, &["switch", "side"]).is_ok(),
-        "hookless switch evaluated confinement"
+        "switch evaluated confinement"
     );
 }
 

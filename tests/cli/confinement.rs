@@ -170,8 +170,8 @@ fn destination_roots_bind_runs_and_new_confinement_requires_execution() {
     );
 }
 
-/// Claim: preparation, environment probes, selectors, checkout hooks and the
-/// changelog renderer share gate confinement. Rejects any project runner that
+/// Claim: preparation, environment probes, selectors and the changelog
+/// renderer share gate confinement. Rejects any project runner that
 /// permits an explicit write to a decoy outside its roots.
 #[test]
 fn auxiliary_project_commands_share_the_write_boundary() {
@@ -240,16 +240,6 @@ fn auxiliary_project_commands_share_the_write_boundary() {
     .unwrap();
     repo.arc(&repo.root)
         .args(["changelog"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("ran confined"));
-    assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
-    use std::os::unix::fs::PermissionsExt;
-    let hook = repo.root.join(".git/hooks/post-checkout");
-    fs::write(&hook, format!("#!/bin/sh\n{script}\n")).unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    repo.arc(&repo.root)
-        .args(["begin", "hook", "--target", "master"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("ran confined"));
@@ -460,85 +450,6 @@ fn operator_event_and_watch_handlers_are_not_project_commands() {
     assert_eq!(fs::read_to_string(&decoy).unwrap(), "operator");
 }
 
-/// Claim I12: hooks fired by Git's own commit path are confined individually,
-/// while Git retains authority to restore the checkout after a refused hook.
-/// Rejects squash running a tracked pre-commit hook with operator write authority.
-#[test]
-fn git_commit_hooks_cannot_escape_through_squash() {
-    if !supported() {
-        return;
-    }
-    let (repo, scratch) = fixture();
-    let decoy = scratch.path().join("commit-hook-decoy");
-    fs::write(&decoy, "retained").unwrap();
-    repo.redeclare_gates(&declaration("true"));
-    let change = open(&repo);
-    repo.commit(&repo.root, "feature", "one", "test: first feature");
-    repo.commit(&repo.root, "feature", "two", "test: second feature");
-    fs::create_dir(repo.root.join(".hooks")).unwrap();
-    let hook = repo.root.join(".hooks/pre-commit");
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    git(&repo.root, &["add", ".hooks"]);
-    git(&repo.root, &["commit", "-m", "test: tracked hook"]);
-    git(&repo.root, &["config", "core.hooksPath", ".hooks"]);
-    let head = repo.head(&repo.root);
-    let output = repo
-        .arc(&repo.root)
-        .args(["squash", &change, "--message", "test: squash"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "squash hook was unconfined");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("ran confined"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
-    assert_eq!(repo.head(&repo.root), head);
-}
-
-/// Claim I12: native reference hooks use committed destination authority for
-/// snapshot retention writes. Rejects missing authority that refuses a hook
-/// before applying its destination confinement.
-#[test]
-fn reference_hooks_receive_destination_authority_for_snapshot() {
-    use std::os::unix::fs::PermissionsExt;
-    if !supported() {
-        return;
-    }
-    let (repo, scratch) = fixture();
-    let decoy = scratch.path().join("reference-hook-decoy");
-    fs::write(&decoy, "retained").unwrap();
-    repo.redeclare_gates(&declaration("true"));
-    let id = open(&repo);
-    repo.commit(&repo.root, "code", "changed", "test: snapshot content");
-    let hook = repo.root.join(".git/hooks/reference-transaction");
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    let output = repo
-        .arc(&repo.root)
-        .args(["snapshot", &id])
-        .output()
-        .unwrap();
-    let diagnostic = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "reference hook escaped: {diagnostic}"
-    );
-    assert!(diagnostic.contains("ran confined"), "{diagnostic}");
-    assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
-}
-
 /// Claim I5: measurements for open or closed changes use destination roots
 /// even when the working table widens them. Rejects measurement/init treating a working declaration as authority.
 #[test]
@@ -578,162 +489,6 @@ fn measurement_and_init_cannot_choose_working_tree_roots() {
             .unwrap();
         assert!(!output.status.success(), "{operation} used working roots");
         assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
-    }
-}
-
-/// Claim I12: Git's native rebase checkout/rewrite hooks inherit destination
-/// confinement. Rejects the fallback rebase command running hooks unconfined.
-#[test]
-fn git_rebase_hooks_cannot_escape_the_destination_scope() {
-    if !supported() {
-        return;
-    }
-    let (repo, scratch) = fixture();
-    let decoy = scratch.path().join("rebase-hook-decoy");
-    fs::write(&decoy, "retained").unwrap();
-    repo.redeclare_gates(&declaration("true"));
-    let change = open(&repo);
-    repo.commit(&repo.root, "feature", "branch", "test: branch feature");
-    stdout(repo.arc(&repo.root).args(["snapshot", &change]));
-    let target = repo.home.join("target-checkout");
-    git(
-        &repo.root,
-        &["worktree", "add", target.to_str().unwrap(), "master"],
-    );
-    repo.commit(
-        &target,
-        "target-only",
-        "advance",
-        "test: advance rebase destination",
-    );
-    git(
-        &repo.root,
-        &["worktree", "remove", target.to_str().unwrap()],
-    );
-    use std::os::unix::fs::PermissionsExt;
-    for name in ["post-checkout", "post-rewrite"] {
-        let hook = repo.root.join(".git/hooks").join(name);
-        fs::write(
-            &hook,
-            format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let output = repo
-        .arc(&repo.root)
-        .env("PATH", path_without_git_replay(&repo))
-        .args(["rebase", &change])
-        .output()
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(&decoy).unwrap(),
-        "retained",
-        "native rebase hook escaped"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("ran confined"),
-        "{} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Claim I12: squash recovery confines restore's post-checkout hook after a
-/// refused commit. Rejects deciding forwarding from an incomplete verb list.
-#[test]
-fn squash_recovery_restore_cannot_escape_through_checkout_hooks() {
-    use std::os::unix::fs::PermissionsExt;
-    if !supported() {
-        return;
-    }
-    let (repo, scratch) = fixture();
-    let decoy = scratch.path().join("restore-decoy");
-    fs::write(&decoy, "retained").unwrap();
-    repo.redeclare_gates(&declaration("true"));
-    let change = open(&repo);
-    repo.commit(&repo.root, "feature", "one", "test: first feature");
-    repo.commit(&repo.root, "feature", "two", "test: second feature");
-    for (name, script) in [
-        ("pre-commit", "exit 1".to_string()),
-        (
-            "post-checkout",
-            format!("printf escaped > '{}'", decoy.display()),
-        ),
-    ] {
-        let hook = repo.root.join(".git/hooks").join(name);
-        fs::write(&hook, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    repo.arc(&repo.root)
-        .args(["squash", &change, "--message", "test: squash"])
-        .assert()
-        .failure();
-    assert_eq!(
-        fs::read_to_string(decoy).unwrap(),
-        "retained",
-        "restore hook escaped"
-    );
-}
-
-/// Claim I12: configuration-defined hooks cannot run beside forwarded hooks
-/// with Git's authority. Rejects ignoring hook command entries, including includes.
-#[test]
-fn configuration_defined_hooks_are_refused_by_name() {
-    if !supported() {
-        return;
-    }
-    for included in [false, true] {
-        let (repo, scratch) = fixture();
-        let decoy = scratch.path().join("config-hook-decoy");
-        fs::write(&decoy, "retained").unwrap();
-        repo.redeclare_gates(&declaration("true"));
-        let change = open(&repo);
-        repo.commit(&repo.root, "feature", "one", "test: first feature");
-        repo.commit(&repo.root, "feature", "two", "test: second feature");
-        let configuration = if included {
-            let path = repo.root.join(".git/hook-config");
-            git(
-                &repo.root,
-                &["config", "include.path", path.to_str().unwrap()],
-            );
-            path
-        } else {
-            repo.root.join(".git/config")
-        };
-        git(
-            &repo.root,
-            &[
-                "config",
-                "--file",
-                configuration.to_str().unwrap(),
-                "hook.escape.command",
-                &format!("printf escaped > '{}'", decoy.display()),
-            ],
-        );
-        git(
-            &repo.root,
-            &[
-                "config",
-                "--file",
-                configuration.to_str().unwrap(),
-                "hook.escape.event",
-                "pre-commit",
-            ],
-        );
-        let output = repo
-            .arc(&repo.root)
-            .args(["squash", &change, "--message", "test: squash"])
-            .output()
-            .unwrap();
-        assert_eq!(
-            fs::read_to_string(decoy).unwrap(),
-            "retained",
-            "configured hook escaped"
-        );
-        assert!(!output.status.success(), "configured hook was not refused");
-        let diagnostic = String::from_utf8_lossy(&output.stderr);
-        assert!(diagnostic.contains("hook.escape.command"), "{diagnostic}");
     }
 }
 

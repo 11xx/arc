@@ -5840,8 +5840,8 @@ GATE CONFINEMENT
 
   Project commands run under the committed destination's declaration:
   gates, selectors, environment probes, preparation, slot identity, invalidate
-  and warm commands, checkout hooks, Git-fired hooks, changelog renderers, and
-  commands in acceptance and publication scratch checkouts. Every launch needs
+  and warm commands, changelog renderers, and commands in acceptance and
+  publication scratch checkouts. Every launch needs
   an explicit destination scope; a missing scope refuses and names the site.
   The checkout being evaluated cannot select its own authority. Without the
   table, an explicitly scoped command retains ordinary write authority; doctor
@@ -5907,30 +5907,15 @@ GATE CONFINEMENT
   refuses execution. The child installs its restriction before exec; every
   descendant inherits it and cannot lift it. Nested restrictions intersect.
 
-  Git retains authority for Arc's own ref, object and index operations. Hooks
-  it fires, including rebase's checkout/rewrite hooks and commit's pre-commit,
-  message and post-commit hooks, pass through the project-command constructor.
-  Hook forwarding controls live outside writable build/cache roots and remain
-  until Git exits. Dispatch carries lazy committed destination authority for
-  native hooks; target mutations pin their destination before moving refs.
-  Forwarding is the default for Git subcommands; only named hook-free plumbing
-  bypasses it. Global option values are not subcommands. Discovery is cached
-  per process for the actual Git environment and global options, and invalidated
-  when configuration dependencies, HEAD or hook
-  directories change. Conditional include targets are inspected even while
-  inactive, so changing branches cannot activate an unexamined hook command.
-  Every executable hook file is forwarded, including custom names. Explicit
-  native hook names must be single filenames. An empty inventory retains the
-  forwarding directory so missing names cannot fall back to native execution.
-  Configuration-defined hook.<name>.command entries refuse the operation by
-  name when confinement is declared; native execution beside wrappers is denied.
-  Programs Git runs from configuration are the operator's configuration and
-  run with Git's authority: filters, merge and diff drivers, textconv,
-  credential helpers, core.sshCommand, fsmonitor and similar programs. Hooks
-  are the class forwarded through project confinement.
-  Operator-supplied `watch --exec` and `events --exec` handlers are not project
-  commands and retain operator authority, subject to inherited restrictions.
-  Switching branches without a project command does not evaluate confinement.
+  Confinement applies to the commands a project declares to arc. Programs Git
+  itself runs, hooks and what Git starts from configuration (filters, merge
+  and diff drivers, textconv, credential helpers, core.sshCommand), are the
+  operator's Git configuration and run with Git's authority, as they do when
+  the operator runs Git; so does the post-checkout hook arc runs in Git's place
+  when it populates a checkout. Arc keeps the authority its own Git operations
+  need to populate checkouts and record evidence. Operator-supplied
+  `watch --exec` and `events --exec` handlers are not project commands and
+  retain operator authority, subject to inherited restrictions.
 
   Gate receipts include confinement: whether enforced, ABI, resolved writable
   roots and identity, a SHA-256 digest of those roots and ABI. An unavailable
@@ -5944,8 +5929,7 @@ GATE CONFINEMENT
   or substituted configuration; metadata-only changes; already-open writable
   descriptors; or a service outside the process tree writing on the command's
   behalf. Existing build daemons, D-Bus, systemd, Docker and tmux can act for a
-  process through sockets. This boundary applies to project commands, while
-  Arc retains the authority it needs to populate checkouts and record evidence.
+  process through sockets.
 
 GATE COSTS
   `arc gates` in text and JSON and `arc gates over` diagnose command costs

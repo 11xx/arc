@@ -1,7 +1,6 @@
 disallowed-methods = [
   { path = "arc::changelog_render::run_operator", reason = "Only explicit operator workflows can run a configured program without project authority." },
   { path = "arc::project_command::operator", reason = "Operator programs require an explicit role-specific exception; project programs use project_command::new." },
-  { path = "arc::project_command::git", reason = "Only gitio::git_command owns privileged Git construction." },
   { path = "arc::child_command::command", reason = "Project commands must use project_command::new with destination authority; trusted utilities require a scoped exception." },
   { path = "std::process::Command::new", reason = "Use child_command::command to isolate inherited Git repository state." },
 ]

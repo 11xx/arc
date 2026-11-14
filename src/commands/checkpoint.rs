@@ -804,7 +804,6 @@ mod tests {
 
     /// A repository holding one commit, and that commit.
     fn repository(tmp: &tempfile::TempDir) -> (std::path::PathBuf, String) {
-        let _confinement = crate::confinement::Scope::new(&None);
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         for args in [

@@ -1,9 +1,9 @@
-//! Typed launch boundary for project programs and hook-capable Git operations.
+//! Typed launch boundary for project programs and the operator programs beside them.
 
 use crate::confinement::{Declaration, Receipt};
 use crate::perf::Counted;
 use anyhow::Result;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -12,12 +12,9 @@ use std::process::{Child, ExitStatus, Output, Stdio};
 pub struct Command {
     inner: std::process::Command,
     kind: Kind,
-    git_args: Option<Vec<OsString>>,
     storage: Option<crate::warm_worktree::CommandStorage>,
     receipt: Option<Receipt>,
-    hooks: Option<crate::git_hooks::Hooks>,
     started: bool,
-    inherit_environment: bool,
 }
 
 enum Kind {
@@ -25,7 +22,6 @@ enum Kind {
         checkout: PathBuf,
         declaration: Option<Declaration>,
     },
-    Git,
     Operator,
 }
 
@@ -41,9 +37,6 @@ pub fn new(program: impl AsRef<OsStr>, checkout: &Path, site: &'static str) -> R
     ))
 }
 
-pub(crate) fn git(program: impl AsRef<OsStr>) -> Command {
-    make(program, Kind::Git)
-}
 pub(crate) fn operator(program: impl AsRef<OsStr>) -> Command {
     make(program, Kind::Operator)
 }
@@ -55,13 +48,10 @@ pub(crate) fn operator(program: impl AsRef<OsStr>) -> Command {
 fn make(program: impl AsRef<OsStr>, kind: Kind) -> Command {
     Command {
         inner: crate::child_command::command(program),
-        git_args: matches!(kind, Kind::Git).then(Vec::new),
         kind,
         storage: None,
         receipt: None,
-        hooks: None,
         started: false,
-        inherit_environment: true,
     }
 }
 
@@ -74,11 +64,7 @@ impl std::ops::Deref for Command {
 
 impl Command {
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
-        if let Some(arguments) = &mut self.git_args {
-            arguments.push(arg.as_ref().to_os_string());
-        } else {
-            self.inner.arg(arg);
-        }
+        self.inner.arg(arg);
         self
     }
     pub fn args<I, S>(&mut self, args: I) -> &mut Self
@@ -86,17 +72,8 @@ impl Command {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        for argument in args {
-            self.arg(argument);
-        }
+        self.inner.args(args);
         self
-    }
-    pub fn get_args(&self) -> impl Iterator<Item = &OsStr> {
-        self.git_args
-            .iter()
-            .flatten()
-            .map(OsString::as_os_str)
-            .chain(self.inner.get_args())
     }
     pub fn current_dir(&mut self, path: impl AsRef<Path>) -> &mut Self {
         self.inner.current_dir(path);
@@ -117,11 +94,6 @@ impl Command {
     }
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.inner.env_remove(key);
-        self
-    }
-    pub fn env_clear(&mut self) -> &mut Self {
-        self.inherit_environment = false;
-        self.inner.env_clear();
         self
     }
     pub fn stdin(&mut self, value: impl Into<Stdio>) -> &mut Self {
@@ -173,30 +145,13 @@ impl Command {
                 .map_err(io::Error::other)?;
             }
             Kind::Project { .. } | Kind::Operator => {}
-            Kind::Git => {
-                if self.hooks.is_none() {
-                    let arguments = self.get_args().map(OsStr::to_os_string).collect::<Vec<_>>();
-                    self.git_args = None;
-                    self.hooks = crate::git_hooks::prepare(
-                        &mut self.inner,
-                        &arguments,
-                        self.inherit_environment,
-                    )
-                    .map_err(io::Error::other)?;
-                }
-            }
         }
         Ok(())
     }
 
-    pub fn spawn(&mut self) -> io::Result<Child> {
-        self.counted_spawn()
-    }
-    pub fn output(&mut self) -> io::Result<Output> {
-        self.counted_output()
-    }
+    #[cfg(test)]
     pub fn status(&mut self) -> io::Result<ExitStatus> {
-        let status = self.spawn()?.wait()?;
+        let status = self.counted_spawn()?.wait()?;
         self.failed(status);
         Ok(status)
     }
@@ -215,24 +170,12 @@ impl Counted for Command {
     fn counted_output(&mut self) -> io::Result<Output> {
         self.prepare()?;
         let output = self.inner.counted_output()?;
-        if matches!(self.kind, Kind::Git) && output.status.success() {
-            let diagnostic = String::from_utf8_lossy(&output.stderr);
-            if diagnostic.contains("ran confined (")
-                || diagnostic.contains("destination confinement scope")
-            {
-                eprint!("{diagnostic}");
-            }
-        }
         self.failed(output.status);
         Ok(output)
     }
     fn counted_spawn(&mut self) -> io::Result<Child> {
         self.prepare()?;
-        let mut child = self.inner.counted_spawn()?;
-        if let Some(hooks) = self.hooks.take() {
-            hooks.hold_for(&mut child)?;
-        }
-        Ok(child)
+        self.inner.counted_spawn()
     }
     fn confinement(&self) -> Option<Receipt> {
         self.receipt.clone()

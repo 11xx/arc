@@ -1069,18 +1069,7 @@ impl ScratchWorktree {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
-        gitio::git(
-            repo,
-            &[
-                "worktree",
-                "add",
-                "--no-checkout",
-                "--detach",
-                &display,
-                revision,
-            ],
-        )?;
-        gitio::populate_checkout(path)?;
+        gitio::git(repo, &["worktree", "add", "--detach", &display, revision])?;
         Ok(())
     }
 }
@@ -2450,7 +2439,6 @@ pub fn rebase(
     // the branch has moved.
     let transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
-    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &st.target_branch);
     if st.is_closed() {
         eprintln!("{change_id} is closed; its branch has nothing left to replay");
         return Ok(status::Blocker::Closed.exit_code());
@@ -2957,13 +2945,11 @@ fn create_baseline_checkout(
             &[
                 "worktree",
                 "add",
-                "--no-checkout",
                 "--detach",
                 path.to_str().context("non-UTF8 worktree path")?,
                 base,
             ],
         )?;
-        gitio::populate_checkout(&path)?;
         Ok(())
     })();
     if let Err(error) = creation {
@@ -4845,7 +4831,6 @@ fn integrate_one(
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(status::check_exit_code(&report));
     };
-    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &target_head);
     let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
     ensure_destination_actor(ctx, &policy)?;
     selection.validate(&policy)?;
@@ -6420,8 +6405,6 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }
-    let _confinement =
-        crate::confinement::Scope::at(&ctx.cwd, into.as_deref().unwrap_or(&st.target_branch));
     super::land::refuse_pending(&st)?;
     if assert_integrated.is_some() {
         super::land::refuse_alone(&st, &store.readable_states()?)?;

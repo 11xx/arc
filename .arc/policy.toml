@@ -81,9 +81,8 @@ paths = [
   "src/child_command.rs",
   # Enforces destination writable roots before project commands execute.
   "src/confinement.rs",
-  # Typed command construction and Git hook forwarding preserve destination authority.
+  # Typed command construction carries destination authority to project programs.
   "src/project_command.rs",
-  "src/git_hooks.rs",
   # Confinement witnesses must reject commands that escape writable roots.
   "src/confinement/tests.rs",
   "tests/cli/confinement.rs",

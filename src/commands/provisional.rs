@@ -661,7 +661,6 @@ fn publish_transition(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
     else {
         bail!("provisional intent has the wrong event kind");
     };
-    let _confinement = crate::confinement::Scope::at(&ctx.cwd, staging_before);
     let raw = gitio::git(&ctx.cwd, &["cat-file", "commit", provisional_commit])?;
     let commit = gitio::read_commit(&ctx.cwd, provisional_commit)?;
     if commit.parents != [staging_before, source_head].map(Clone::clone)

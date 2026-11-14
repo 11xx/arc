@@ -37,7 +37,6 @@ mod gate_raise;
 mod gate_work;
 mod gates;
 mod git_health;
-mod git_hooks;
 mod gitio;
 mod guide;
 #[cfg(test)]
@@ -6505,9 +6504,6 @@ fn main() {
         exclusive::waiter_main();
     }
     gate_work::begin_invocation();
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(git_hooks::ENTRY)) {
-        git_hooks::main();
-    }
     perf::start();
     let invocation = (|| -> Result<()> {
         let cwd = gitio::invocation_directory(&std::env::current_dir()?)?;
@@ -6749,7 +6745,6 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
-    let _confinement = confinement::Scope::checkout_destination(&ctx.cwd);
 
     // Neighbouring commands take the change as a flag, so `--change` works
     // wherever the positional is optional rather than being guessed at against

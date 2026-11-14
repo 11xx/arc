@@ -1,6 +1,5 @@
 use crate::commands::fork::is_fork_branch;
 use crate::perf::Counted;
-use crate::project_command::Command;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,7 +7,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command as RawCommand, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -82,11 +81,11 @@ fn git_program() -> &'static std::ffi::OsStr {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "Git administration owns its repository writes; project hooks are forwarded through the typed boundary."
+    reason = "Git runs with arc's authority; what Git starts from configuration is the operator's Git configuration."
 )]
 pub fn git_command() -> Command {
     PROCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut command = crate::project_command::git(git_program());
+    let mut command = crate::child_command::command(git_program());
     command.env("GIT_NO_LAZY_FETCH", "1");
     command.env("GIT_EDITOR", "true");
     command.env("GIT_SEQUENCE_EDITOR", "true");
@@ -238,7 +237,7 @@ fn command_output(command: &mut Command) -> Result<Output> {
 /// thread's [`with_deadline`] scope when it has one. A bounded child leads its
 /// own process group, with a null stdin, and the group is killed when the
 /// deadline passes.
-pub(crate) fn bounded_output(command: &mut RawCommand) -> std::io::Result<Output> {
+pub(crate) fn bounded_output(command: &mut Command) -> std::io::Result<Output> {
     let Some(deadline) = COMMAND_DEADLINE.get() else {
         return command.output();
     };
@@ -1461,7 +1460,7 @@ fn piped_output(
     input: &[u8],
     setup: impl FnOnce(&mut Command),
 ) -> Result<Vec<u8>> {
-    let mut command = crate::project_command::operator(program);
+    let mut command = crate::child_command::command(program);
     setup(&mut command);
     piped_output_with(command, program, args, input)
 }
@@ -1877,6 +1876,10 @@ pub fn populate_worktree(path: &Path) -> Result<()> {
 }
 
 /// Write an allocated worktree's files and run its checkout hooks.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "A Git hook runs with Git's authority, as it does when Git fires it."
+)]
 pub fn populate_checkout(path: &Path) -> Result<()> {
     git(path, &["read-tree", "--reset", "-u", "HEAD"])?;
     let format = git(path, &["rev-parse", "--show-object-format"])?;
@@ -1886,18 +1889,13 @@ pub fn populate_checkout(path: &Path) -> Result<()> {
         _ => bail!("unsupported Git object format {format:?}"),
     };
     let head = git(path, &["rev-parse", "HEAD"])?;
-    checkout_hook(path, &null_oid, &head)
-}
-
-fn checkout_hook(path: &Path, previous: &str, head: &str) -> Result<()> {
     let hook = git_path(path, "hooks")?.join("post-checkout");
     use std::os::unix::fs::PermissionsExt;
     if fs::metadata(&hook)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     {
-        let mut command = crate::project_command::new(&hook, path, "post-checkout hook")?;
-        let output = command
-            .args([previous, head, "1"])
+        let output = crate::child_command::command(&hook)
+            .args([&null_oid, &head, "1"])
             .current_dir(path)
             .counted_output()
             .context("cannot run post-checkout hook")?;
@@ -3676,7 +3674,6 @@ mod tests {
     /// A repository holding one commit, with the machine's own configuration
     /// out of scope.
     fn fixture(tmp: &tempfile::TempDir, config: &[&str]) -> PathBuf {
-        let _confinement = crate::confinement::Scope::new(&None);
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let mut setup: Vec<Vec<&str>> = vec![
@@ -3983,7 +3980,7 @@ mod tests {
         ] {
             let started = Instant::now();
             with_deadline(Some(started + Duration::from_millis(100)), || {
-                let mut command = crate::project_command::operator("sh");
+                let mut command = Command::new("sh");
                 command.args(["-c", &script]);
                 let result = command_output(&mut command);
                 assert!(started.elapsed() < HANG_BOUND);
@@ -4090,7 +4087,7 @@ mod tests {
                         })
                         .map(drop)
                     } else {
-                        let mut command = crate::project_command::operator("sh");
+                        let mut command = Command::new("sh");
                         command.args(["-c", &script]).current_dir(&path);
                         command_output(&mut command).map(drop)
                     }
@@ -4117,7 +4114,7 @@ mod tests {
         use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let started = Instant::now();
         let result = with_deadline(Some(started + Duration::from_millis(100)), || {
-            Ok(crate::project_command::operator("sleep")
+            Ok(Command::new("sleep")
                 .arg(OUTLIVING_SECS.to_string())
                 .counted_output())
         })
@@ -4145,7 +4142,7 @@ mod tests {
         use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let started = Instant::now();
         with_deadline(Some(started + Duration::from_millis(50)), || {
-            let mut command = crate::project_command::operator("sleep");
+            let mut command = Command::new("sleep");
             command.arg(OUTLIVING_SECS.to_string());
             let error = command_output(&mut command).unwrap_err();
             assert!(error.to_string().contains("timed out"));

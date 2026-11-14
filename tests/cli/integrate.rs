@@ -1949,9 +1949,6 @@ exec '{git}' "$@"
     assert_eq!(events(&repo, &id), recorded);
 }
 
-/// Claim I8: integration observes a target move made by an unconfined
-/// destination's reference hook. Rejects forwarding the hook without its
-/// destination scope and refusing before the competing move occurs.
 #[test]
 fn fast_forward_checks_target_after_reference_transaction_hook() {
     use std::os::unix::fs::PermissionsExt;

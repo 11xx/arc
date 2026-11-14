@@ -282,7 +282,6 @@ mod tests {
 
     #[test]
     fn recognition_on_primary_fixture_needs_no_ownership() {
-        let _confinement = crate::confinement::Scope::new(&None);
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
         crate::gitio::git(root, &["init"]).unwrap();
