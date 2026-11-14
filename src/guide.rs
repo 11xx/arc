@@ -1487,6 +1487,13 @@ RUN A CHANGE
   as a warning when the integration still proceeds. A gate's declaration in
   the basis carries `binds: "commit"` when it binds to a commit and omits the
   key when it binds to a tree, so a binding changed since the plan is a move.
+  Both readings of readiness must have read the target revision the decision
+  observes and, unless a contribution declaration hands the change to a
+  receiver, the merge tree it observes. A disagreement there, or gate, policy
+  or budget declarations differing from the basis, refuses with exit 1 and
+  "integration target, merge tree, gate or policy configuration changed while
+  preparing the merge; nothing was written; re-run once the worktree has
+  settled", and writes nothing.
 
   When no checkout holds the target, `integrate` takes over the change's own
   checkout if it still holds the change branch, checks the target out there,
@@ -6995,8 +7002,9 @@ TRACING
   Project commands discard every held Git answer before and after execution.
   Every lock acquisition discards held answers, including an uncontended lock.
   Authorization boundaries start fresh mutable observations. Movement guards
-  take independent observations. Readiness target heads and merge trees must
-  agree with the destination and tree observed by the decision.
+  take independent observations. Integration's agreement between readiness
+  and the decision's own target observation is in `arc guide
+  change-integration`.
 
   `coverage` names what the counters see. `ledger: store` counts ledger
   files read through the store's readers, not a file a diagnostic opens on

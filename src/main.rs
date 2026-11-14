@@ -2683,6 +2683,9 @@ enum Cmd {
     ///
     /// Refuses recorded patchsets with reserved-domain author or committer addresses;
     /// see `arc guide change-integration` for the domains and re-authoring.
+    /// Readiness must have read the target revision and merge tree the decision
+    /// observes; a disagreement refuses with exit 1 and writes nothing (`arc guide
+    /// change-integration`).
     /// Integration runs where the target is checked out. That checkout's tracked
     /// modifications refuse, staged or unstaged. Untracked or ignored paths
     /// integration does not write are left in place and named in the report; a
