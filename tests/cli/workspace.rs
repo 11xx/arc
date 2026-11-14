@@ -3746,8 +3746,6 @@ fn workspace_report_library_carries_every_artifact_and_fate() {
             item["title"],
             if *kind == "conclusion" {
                 "Corrected conclusion".to_string()
-            } else if *kind == "discussion" {
-                "Discussion".to_string()
             } else {
                 format!("Filed {kind}")
             }

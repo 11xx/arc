@@ -613,7 +613,8 @@ pub struct KindWrite {
     pub title: Option<String>,
     /// Scaffold template around the body (.arc/templates/<name>.md or a
     /// built-in: sol-low, sol-high, reviewer, discussion). The body takes the
-    /// place of the template's `{{body}}` line, or follows a template without one
+    /// place of the template's `{{body}}` line, or follows a template without
+    /// one; a heading the body opens with stays the artifact's first line
     #[arg(long, conflicts_with = "no_scaffold")]
     pub scaffold: Option<String>,
     /// Record the body alone, without the kind's default scaffold
@@ -6355,6 +6356,29 @@ fn headed(topic: &str, title: Option<&str>, prelude: Option<&str>, body: &str) -
     }
 }
 
+/// A body filled into its scaffold template. The heading the author's body
+/// opens with stays the artifact's first line, above the template, so a
+/// template that opens on prose never hides it from [`headed`].
+fn scaffolded(template: &str, content: &str) -> String {
+    let leading = content.len() - content.trim_start_matches(['\n', '\r']).len();
+    let opening = &content[leading..];
+    let heading_line = opening
+        .lines()
+        .next()
+        .filter(|_| opens_with_heading(opening));
+    match heading_line {
+        Some(line) if !template.is_empty() => {
+            let rest = opening[line.len()..].trim_start_matches(['\n', '\r']);
+            format!(
+                "{}\n\n{}",
+                line.trim_end(),
+                crate::commands::scaffold::filled(template, rest)
+            )
+        }
+        _ => crate::commands::scaffold::filled(template, content),
+    }
+}
+
 fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) -> Result<i32> {
     let topic = write.topic.as_str();
     let title = write.title.as_deref();
@@ -6393,7 +6417,7 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         Some(source) => read_body_verbatim(source)?,
         None => String::new(),
     };
-    let body = crate::commands::scaffold::filled(&template, &content);
+    let body = scaffolded(&template, &content);
     // An artifact with nothing in it is a queue entry that says nothing. A
     // repo-local template may be empty, so the check is on what would be
     // written rather than on which options were passed.

@@ -13545,6 +13545,67 @@ fn journal_title_and_an_authored_heading_outrank_the_slug() {
     );
 }
 
+/// Claim: a body recorded through a scaffold keeps the heading its author
+/// opened it with as the artifact's first line, above the template, and
+/// `heading derived from slug` prints only when a heading was derived.
+/// Rejects a discussion whose authored heading is buried under the template
+/// with a second heading derived from the slug above it, and the notice
+/// printed for a body that brought its own heading.
+#[test]
+fn a_scaffolded_body_keeps_its_authored_heading_on_top() {
+    let repo = Repo::new();
+    let authored = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "pick-a-store",
+            "--kind",
+            "discussion",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("\n# Which store holds it\n\nThe choice is open.\n")
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&authored.get_output().stderr).into_owned();
+    assert!(!stderr.contains("heading derived"), "{stderr}");
+    let file = PathBuf::from(
+        String::from_utf8_lossy(&authored.get_output().stdout)
+            .trim()
+            .to_owned(),
+    );
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("# Which store holds it\n\n> "), "{text}");
+    assert_eq!(text.matches("Which store holds it").count(), 1, "{text}");
+    assert!(text.contains("The choice is open.\n"), "{text}");
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("# ")).count(),
+        1,
+        "{text}"
+    );
+
+    let derived = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "pick-a-queue",
+            "--kind",
+            "discussion",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The choice is open.\n")
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&derived.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("heading derived from slug: # Pick a queue"),
+        "{stderr}"
+    );
+}
+
 /// A sandboxed executor spools into the worktree it is confined to, and that
 /// worktree is removed once the change lands. Snapshotting from the anchor
 /// files those writes with the identity each was spooled under.
