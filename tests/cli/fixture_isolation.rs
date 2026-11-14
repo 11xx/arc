@@ -355,7 +355,14 @@ fn stand_in_target() -> (TempDir, PathBuf) {
         .prefix("stand-in-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
-    let target = scratch.path().join("target");
+    let harness = link_harness_into(&scratch.path().join("target"));
+    (scratch, harness)
+}
+
+/// This harness hard-linked into `target`, created and marked as Cargo's
+/// cache, so a harness started from the link has `target` as its build's
+/// target directory.
+fn link_harness_into(target: &Path) -> PathBuf {
     fs::create_dir_all(target.join("deps")).unwrap();
     fs::write(
         target.join("CACHEDIR.TAG"),
@@ -364,7 +371,7 @@ fn stand_in_target() -> (TempDir, PathBuf) {
     .unwrap();
     let harness = target.join("deps/harness");
     fs::hard_link(std::env::current_exe().unwrap(), &harness).unwrap();
-    (scratch, harness)
+    harness
 }
 
 /// A started child harness must pass: its test asserts what it observes.
@@ -620,9 +627,9 @@ fn a_device_ioctl_outside_the_granted_nodes_is_refused() {
     );
 }
 
-/// A system call a child is denied: its number, an argument that must hold
-/// a value for the denial to apply, and the error it fails with.
-type Denial = (libc::c_long, Option<(usize, u32)>, libc::c_int);
+/// A system call a child is denied: its number, the arguments that must each
+/// hold a value for the denial to apply, and the error it fails with.
+type Denial = (libc::c_long, &'static [(usize, u32)], libc::c_int);
 
 /// A seccomp program failing each call `denials` names, and allowing the
 /// rest. Arguments are compared by their low 32 bits.
@@ -641,21 +648,18 @@ fn seccomp_program(denials: &[Denial]) -> Vec<libc::sock_filter> {
     };
     let load = |offset: u32| statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, offset);
     let mut program = Vec::new();
-    for &(call, argument, errno) in denials {
-        program.push(load(0));
-        let deny = statement(
+    for &(call, arguments, errno) in denials {
+        // Each mismatch skips the rest of this denial, ending in its return.
+        let mut remaining = 2 * arguments.len() as u8 + 1;
+        program.extend([load(0), jump_unless(call as u32, remaining)]);
+        for &(index, value) in arguments {
+            remaining -= 2;
+            program.extend([load(16 + 8 * index as u32), jump_unless(value, remaining)]);
+        }
+        program.push(statement(
             libc::BPF_RET | libc::BPF_K,
             libc::SECCOMP_RET_ERRNO | errno as u32,
-        );
-        match argument {
-            None => program.extend([jump_unless(call as u32, 1), deny]),
-            Some((index, value)) => program.extend([
-                jump_unless(call as u32, 3),
-                load(16 + 8 * index as u32),
-                jump_unless(value, 1),
-                deny,
-            ]),
-        }
+        ));
     }
     program.push(statement(
         libc::BPF_RET | libc::BPF_K,
@@ -692,7 +696,7 @@ fn deny_calls(command: &mut Command, denials: &[Denial]) {
 }
 
 /// `close_range` refused as a kernel without it refuses it.
-const NO_CLOSE_RANGE: Denial = (libc::SYS_close_range, None, libc::ENOSYS);
+const NO_CLOSE_RANGE: Denial = (libc::SYS_close_range, &[], libc::ENOSYS);
 
 /// Make `command` start with descriptor 3 open on `file` for writing.
 fn inherit_writable_descriptor(command: &mut Command, file: &Path) -> fs::File {
@@ -816,7 +820,7 @@ fn a_descriptor_that_cannot_be_closed_leaves_the_harness_unconfined() {
             .push(inherit_writable_descriptor(&mut command, &file));
         deny_calls(
             &mut command,
-            &[NO_CLOSE_RANGE, (libc::SYS_close, Some((0, 3)), libc::EPERM)],
+            &[NO_CLOSE_RANGE, (libc::SYS_close, &[(0, 3)], libc::EPERM)],
         );
         command
     });
@@ -886,12 +890,86 @@ fn a_standard_input_that_cannot_be_replaced_leaves_the_harness_unconfined() {
             &mut command,
             &[
                 #[cfg(target_arch = "x86_64")]
-                (libc::SYS_dup2, Some((1, 0)), libc::EPERM),
-                (libc::SYS_dup3, Some((1, 0)), libc::EPERM),
+                (libc::SYS_dup2, &[(1, 0)], libc::EPERM),
+                (libc::SYS_dup3, &[(1, 0)], libc::EPERM),
             ],
         );
         command
     });
+    assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+/// Claim: a status query on standard input that fails other than with
+/// `EBADF` is a failure to confine: with confinement required the harness
+/// refuses, naming it; otherwise it runs unconfined with the notice naming
+/// it, and the decoy file its writable standard input is open on keeps its
+/// bytes. Rejects a harness that takes a failed `F_GETFL` for a read-only
+/// standard input and reports itself confined.
+#[test]
+fn a_failed_standard_input_query_leaves_the_harness_unconfined() {
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
+    assert_unconfined_for("standard input may be writable", || {
+        let stdin = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file)
+            .unwrap();
+        let mut command = Command::new(&stand_in.1);
+        command.args(["--exact", PROBE, "--nocapture"]).stdin(stdin);
+        deny_calls(
+            &mut command,
+            &[(
+                libc::SYS_fcntl,
+                &[(0, 0), (1, libc::F_GETFL as u32)],
+                libc::EPERM,
+            )],
+        );
+        command
+    });
+    assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+/// Claim: where `close_range` is refused, a failed listing of
+/// `/proc/self/fd`, or a status query on a descriptor that would not close
+/// failing other than with `EBADF`, is a failure to confine: with
+/// confinement required the harness refuses, naming it; otherwise it runs
+/// unconfined with the notice naming it, and the decoy file the inherited
+/// descriptor is open on keeps its bytes. Rejects a harness that skips
+/// entries it could not list, or takes a failed `F_GETFD` for a closed
+/// descriptor, and reports itself confined with descriptor 3 still open.
+#[test]
+fn a_failed_descriptor_query_leaves_the_harness_unconfined() {
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
+    let unlistable: &[Denial] = &[NO_CLOSE_RANGE, (libc::SYS_getdents64, &[], libc::EPERM)];
+    let unqueryable: &[Denial] = &[
+        NO_CLOSE_RANGE,
+        (libc::SYS_close, &[(0, 3)], libc::EPERM),
+        (
+            libc::SYS_fcntl,
+            &[(0, 3), (1, libc::F_GETFD as u32)],
+            libc::EPERM,
+        ),
+    ];
+    for (reason, denials) in [
+        ("listing /proc/self/fd", unlistable),
+        ("inherited descriptor 3 may stay open", unqueryable),
+    ] {
+        let held = std::cell::RefCell::new(Vec::new());
+        assert_unconfined_for(reason, || {
+            let mut command = Command::new(&stand_in.1);
+            // A child that cannot list directories makes no temporary
+            // directory of its own, which it could not remove.
+            command
+                .args(["--exact", PROBE, "--nocapture"])
+                .env("TMPDIR", crate::harness_entry::SYSTEM_TEMPORARY);
+            held.borrow_mut()
+                .push(inherit_writable_descriptor(&mut command, &file));
+            deny_calls(&mut command, denials);
+            command
+        });
+    }
     assert_eq!(fs::read(file).unwrap(), bytes);
 }
 
@@ -926,6 +1004,45 @@ fn a_target_directory_that_is_the_home_is_never_granted() {
             .env("HOME", &home);
         command
     });
+}
+
+/// Claim: a target directory named through a home's `.config` that is a
+/// symbolic link to another directory is never granted for writing: a
+/// harness linked into that target, with `XDG_CONFIG_HOME` unset, refuses
+/// when confinement is required and otherwise runs unconfined with the
+/// notice, naming the home's configuration. Proven with a decoy home.
+/// Rejects a protected path compared unresolved, which a resolved target
+/// never lies inside, granting writes to the Git configuration beside it.
+#[test]
+fn a_target_through_a_symlinked_configuration_directory_is_never_granted() {
+    let scratch = tempfile::Builder::new()
+        .prefix("linked-configuration-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let home = scratch.path().join("home");
+    let configuration = scratch.path().join("configuration");
+    fs::create_dir_all(configuration.join("git")).unwrap();
+    fs::write(
+        configuration.join("git/config"),
+        "[user]\n\tname = Operator\n",
+    )
+    .unwrap();
+    fs::create_dir(&home).unwrap();
+    std::os::unix::fs::symlink(&configuration, home.join(".config")).unwrap();
+    link_harness_into(&configuration.join("target"));
+    let harness = home.join(".config/target/deps/harness");
+    assert_unconfined_for("inside the home's configuration", || {
+        let mut command = Command::new(&harness);
+        command
+            .args(["--exact", PROBE, "--nocapture"])
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME");
+        command
+    });
+    assert_eq!(
+        fs::read(configuration.join("git/config")).unwrap(),
+        b"[user]\n\tname = Operator\n"
+    );
 }
 
 /// Claim: confinement leaves a fixture's own repository under the temporary

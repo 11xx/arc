@@ -61,12 +61,16 @@ it within their 108 bytes. A target directory that is, or contains, the
 checkout, the home directory or the directory holding the checkout's shared Git
 directory, that lies inside that Git directory, in the checkout other than
 within its `target`, or in the home's configuration, is refused rather than
-granted. Descriptors inherited above standard error are closed, one by one from
-`/proc/self/fd` where `close_range` is refused, and standard input is made
-read-only, since a descriptor opened before confinement keeps its access. A
-kernel without the Landlock rights this needs, a refused root, or a descriptor
-the harness cannot close or replace leaves a plain `cargo test` unconfined with
-a notice naming why; the runner sets `ARC_TEST_CONFINEMENT=required`, and the
+granted. Each comparison is between fully resolved paths, every symbolic link
+followed on both sides; a protected path that does not exist protects nothing
+there, and one that cannot be resolved refuses the root. Descriptors inherited
+above standard error are closed, one by one from `/proc/self/fd` where
+`close_range` is refused, and standard input is made read-only, since a
+descriptor opened before confinement keeps its access; only `EBADF` establishes
+that a descriptor is absent. A kernel without the Landlock rights this needs, a
+refused root, a descriptor the harness cannot close or replace, or any failed
+call on the way to confinement leaves a plain `cargo test` unconfined with a
+notice naming why; the runner sets `ARC_TEST_CONFINEMENT=required`, and the
 harness then refuses to run. A machine prepared in advance to defeat the guard,
 with a hard link or bind mount planted inside the build directory, is outside
 it, and Landlock does not restrict metadata-only changes such as mode,

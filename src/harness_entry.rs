@@ -13,13 +13,16 @@
 //! contains, the checkout, the home directory or the directory holding the
 //! checkout's shared Git directory, that lies inside that Git directory, in
 //! the checkout other than within its `target`, or in the home's
-//! configuration, is refused rather than granted. Descriptors the harness
-//! inherited above standard error are closed and standard input is
-//! read-only, since a descriptor opened before confinement keeps its access.
-//! A kernel without the Landlock rights this needs, a refused root, or a
-//! descriptor the harness cannot close or replace leaves the harness
-//! unconfined with a notice naming why; the invariant runner asks for
-//! confinement and the harness then refuses to run.
+//! configuration, is refused rather than granted. Each comparison is between
+//! fully resolved paths, every symbolic link followed on both sides; a
+//! protected path that does not exist protects nothing there, and one that
+//! cannot be resolved refuses the root. Descriptors the harness inherited
+//! above standard error are closed and standard input is read-only, since a
+//! descriptor opened before confinement keeps its access. A kernel without
+//! the Landlock rights this needs, a refused root, a descriptor the harness
+//! cannot close or replace, or any failed call on the way to confinement
+//! leaves the harness unconfined with a notice naming why; the invariant
+//! runner asks for confinement and the harness then refuses to run.
 //!
 //! Two limits stand. A machine prepared in advance to defeat the guard, with
 //! a hard link or bind mount planted inside the build directory before the
@@ -86,18 +89,24 @@ extern "C" fn enter() {
         std::env::remove_var(name);
     }
     let temporary = own_temporary_directory();
+    let ceilings = discovery_ceilings();
     std::env::set_var(
         "GIT_CEILING_DIRECTORIES",
-        std::env::join_paths(discovery_ceilings()).expect("ceiling paths hold no separator"),
+        std::env::join_paths(ceilings.as_deref().unwrap_or_default())
+            .expect("ceiling paths hold no separator"),
     );
-    // Without a temporary directory of its own, Git reads an empty global
-    // configuration and cannot write one.
-    let global = match &temporary {
-        Ok(_) => own_global_config(),
-        Err(_) => PathBuf::from("/dev/null"),
-    };
-    let roots = descriptors.and(temporary).and_then(writable_roots);
-    std::env::set_var("GIT_CONFIG_GLOBAL", global);
+    // Without a global configuration of its own, Git reads an empty one and
+    // cannot write one.
+    let global = temporary.clone().and_then(|_| own_global_config());
+    std::env::set_var(
+        "GIT_CONFIG_GLOBAL",
+        global.as_deref().unwrap_or(Path::new("/dev/null")),
+    );
+    let roots = descriptors
+        .and(ceilings)
+        .and(global)
+        .and(temporary)
+        .and_then(writable_roots);
     std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
     std::env::set_var("GIT_TEMPLATE_DIR", "");
     std::env::set_var("GIT_EDITOR", "true");
@@ -121,49 +130,93 @@ extern "C" fn enter() {
 /// read-only: a descriptor opened before confinement keeps the access it was
 /// opened with, and the harness needs none of them. What Cargo passes, its
 /// jobserver among it, serves the build, not the tests. Where `close_range`
-/// is refused, each descriptor `/proc/self/fd` lists is closed instead. One
-/// left open, or a standard input still writable, is a failure to confine.
+/// is refused, each descriptor `/proc/self/fd` lists is closed instead. Only
+/// `EBADF` establishes that a descriptor is absent; one left open, a standard
+/// input still writable, or any failed listing or status query is a failure
+/// to confine.
 fn close_inherited_descriptors() -> Result<(), String> {
     // SAFETY: close_range takes integer bounds and closes only descriptors.
     if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {
         let refused = std::io::Error::last_os_error();
-        let listed: Vec<libc::c_int> = std::fs::read_dir("/proc/self/fd")
-            .map_err(|error| format!("close_range: {refused}; /proc/self/fd: {error}"))?
-            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-            .filter(|fd| *fd > 2)
-            .collect();
+        let listing = |error: &dyn std::fmt::Display| {
+            format!("close_range: {refused}; listing /proc/self/fd: {error}")
+        };
+        let mut listed = Vec::new();
+        for entry in std::fs::read_dir("/proc/self/fd").map_err(|error| listing(&error))? {
+            let name = entry.map_err(|error| listing(&error))?.file_name();
+            let fd: libc::c_int = name
+                .to_str()
+                .and_then(|name| name.parse().ok())
+                .ok_or_else(|| listing(&format!("{name:?} names no descriptor")))?;
+            if fd > 2 {
+                listed.push(fd);
+            }
+        }
         for fd in listed {
             // SAFETY: closing a descriptor number; the listing's own, already
             // closed, fails with EBADF.
-            let closed = unsafe { libc::close(fd) } == 0;
+            if unsafe { libc::close(fd) } == 0 {
+                continue;
+            }
             let error = std::io::Error::last_os_error();
-            // SAFETY: F_GETFD only asks whether the descriptor is open.
-            if !closed && unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
-                return Err(format!(
+            match descriptor_status(fd, libc::F_GETFD) {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    return Err(format!(
                     "inherited descriptor {fd} stays open: close_range: {refused}; close: {error}"
-                ));
+                ))
+                }
+                Err(query) => {
+                    return Err(format!(
+                        "inherited descriptor {fd} may stay open: close_range: {refused}; \
+                         close: {error}; {query}"
+                    ))
+                }
             }
         }
     }
-    // SAFETY: F_GETFL reads the status flags of descriptor 0.
-    let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
-    if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY {
+    let flags = match descriptor_status(0, libc::F_GETFL) {
+        Ok(Some(flags)) => flags,
+        Ok(None) => return Ok(()),
+        Err(query) => return Err(format!("standard input may be writable: {query}")),
+    };
+    if flags & libc::O_ACCMODE == libc::O_RDONLY {
         return Ok(());
     }
     // SAFETY: the path is NUL-terminated; dup2 replaces descriptor 0 with a
     // read-only /dev/null, and the extra descriptor is closed after.
     unsafe {
         let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        let replaced = null >= 0 && libc::dup2(null, 0) == 0;
-        let error = std::io::Error::last_os_error();
-        if null >= 0 {
-            libc::close(null);
+        if null < 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(format!("standard input stays writable: /dev/null: {error}"));
         }
-        if !replaced {
+        if libc::dup2(null, 0) != 0 {
+            let error = std::io::Error::last_os_error();
+            libc::close(null);
             return Err(format!("standard input stays writable: {error}"));
+        }
+        if libc::close(null) != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(format!("a read-only /dev/null stays open: {error}"));
         }
     }
     Ok(())
+}
+
+/// `fcntl(fd, query)` for a status query: the answer, `None` when `EBADF`
+/// establishes that `fd` is not open, or the error of any other failure.
+fn descriptor_status(fd: libc::c_int, query: libc::c_int) -> Result<Option<libc::c_int>, String> {
+    // SAFETY: F_GETFD and F_GETFL only read a descriptor's flags.
+    let answer = unsafe { libc::fcntl(fd, query) };
+    if answer >= 0 {
+        return Ok(Some(answer));
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EBADF) => Ok(None),
+        _ => Err(format!("querying descriptor {fd}: {error}")),
+    }
 }
 
 static CONFINED: OnceLock<bool> = OnceLock::new();
@@ -179,12 +232,14 @@ fn refuse(message: &str) -> ! {
 }
 
 /// The directories Git discovery must not climb into from below, resolved,
-/// since Git compares them with the resolved working directory.
-pub(crate) fn discovery_ceilings() -> Vec<PathBuf> {
-    [checkout(), PathBuf::from(SYSTEM_TEMPORARY)]
-        .into_iter()
-        .filter_map(|path| path.canonicalize().ok())
-        .collect()
+/// since Git compares them with the resolved working directory. One that does
+/// not exist has nothing beneath it to discover.
+pub(crate) fn discovery_ceilings() -> Result<Vec<PathBuf>, String> {
+    let mut ceilings = Vec::new();
+    for ceiling in [checkout(), PathBuf::from(SYSTEM_TEMPORARY)] {
+        ceilings.extend(resolve(&ceiling)?);
+    }
+    Ok(ceilings)
 }
 
 /// The checkout this suite was built from.
@@ -193,12 +248,40 @@ pub(crate) fn checkout() -> PathBuf {
 }
 
 /// The build's target directory: the nearest ancestor of this executable that
-/// Cargo marked as its cache.
-pub(crate) fn target_directory() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    exe.ancestors()
-        .find(|dir| dir.join("CACHEDIR.TAG").is_file())
-        .map(Path::to_path_buf)
+/// Cargo marked as its cache. A marker that cannot be looked up is an error,
+/// not a reason to climb past it to a wider directory.
+pub(crate) fn target_directory() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map_err(|error| format!("this executable: {error}"))?;
+    for dir in exe.ancestors().skip(1) {
+        let marker = dir.join("CACHEDIR.TAG");
+        match std::fs::metadata(&marker) {
+            Ok(metadata) if metadata.is_file() => return Ok(dir.to_path_buf()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", marker.display())),
+        }
+    }
+    Err("the build's target directory is not marked".to_owned())
+}
+
+/// `path` fully resolved, every symbolic link along it followed, or `None`
+/// when nothing exists there. Every comparison between a candidate root and
+/// a protected path is between resolved paths. A protected path that does not
+/// exist protects nothing there; a candidate root must exist. Any other
+/// failure to resolve is an error, which refuses the root.
+fn resolve(path: &Path) -> Result<Option<PathBuf>, String> {
+    match path.canonicalize() {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("resolving {}: {error}", path.display())),
+    }
+}
+
+/// A candidate root, resolved; one that does not exist is refused.
+fn resolve_root(root: &Path) -> Result<PathBuf, String> {
+    resolve(root)?.ok_or_else(|| format!("the writable root {} does not exist", root.display()))
 }
 
 /// The system temporary directory, the one writable root the environment
@@ -221,6 +304,7 @@ fn own_temporary_directory() -> Result<PathBuf, String> {
     let system = Path::new(SYSTEM_TEMPORARY)
         .canonicalize()
         .map_err(|error| format!("{SYSTEM_TEMPORARY}: {error}"))?;
+    // An inherited directory that cannot be resolved is not taken for /tmp.
     let inherited = std::env::temp_dir().canonicalize().ok();
     if inherited.as_deref() != Some(system.as_path()) {
         let own = tempfile::Builder::new()
@@ -230,8 +314,7 @@ fn own_temporary_directory() -> Result<PathBuf, String> {
             .keep();
         std::env::set_var("TMPDIR", &own);
         if OWN.set(own).is_ok() {
-            // SAFETY: remove_own is an extern "C" function taking no arguments.
-            unsafe { libc::atexit(remove_own) };
+            remove_at_exit(remove_own)?;
         }
     }
     Ok(system)
@@ -241,20 +324,16 @@ fn own_temporary_directory() -> Result<PathBuf, String> {
 /// checked against what it must never grant, and the system temporary
 /// directory.
 fn writable_roots(temporary: PathBuf) -> Result<Vec<PathBuf>, String> {
-    let target = target_directory().ok_or("the build's target directory is not marked")?;
+    let target = target_directory()?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let configuration = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-    if let Some(refusal) = target_refusal(
+    check_target(
         &target,
         &checkout(),
         home.as_deref(),
         configuration.as_deref(),
-    ) {
-        return Err(refusal);
-    }
-    if let Some(refusal) = root_refusal(&temporary, &checkout(), home.as_deref()) {
-        return Err(refusal);
-    }
+    )?;
+    check_root(&temporary, &checkout(), home.as_deref())?;
     Ok(vec![target, temporary])
 }
 
@@ -267,48 +346,69 @@ pub(crate) fn target_refusal(
     home: Option<&Path>,
     configuration: Option<&Path>,
 ) -> Option<String> {
-    if let Some(refusal) = root_refusal(target, checkout, home) {
-        return Some(refusal);
-    }
-    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let target = resolved(target);
-    let checkout = resolved(checkout);
-    if target.starts_with(&checkout) && !target.starts_with(checkout.join("target")) {
-        return Some(format!(
-            "the target directory {} lies inside the checkout's source tree",
-            target.display()
-        ));
+    check_target(target, checkout, home, configuration).err()
+}
+
+fn check_target(
+    target: &Path,
+    checkout: &Path,
+    home: Option<&Path>,
+    configuration: Option<&Path>,
+) -> Result<(), String> {
+    check_root(target, checkout, home)?;
+    let target = resolve_root(target)?;
+    if let Some(checkout) = resolve(checkout)? {
+        // Cargo's build directory is exempt only where it is itself: a
+        // `target` that resolves elsewhere in the checkout exempts nothing.
+        let build = checkout.join("target");
+        let exempt = resolve(&build)?.filter(|resolved| *resolved == build);
+        if target.starts_with(&checkout) && !exempt.is_some_and(|build| target.starts_with(build)) {
+            return Err(format!(
+                "the target directory {} lies inside the checkout's source tree",
+                target.display()
+            ));
+        }
     }
     let configurations = [
-        home.map(|home| resolved(home).join(".config")),
-        configuration.map(resolved),
+        home.map(|home| home.join(".config")),
+        configuration.map(Path::to_path_buf),
     ];
-    if let Some(configuration) = configurations
-        .into_iter()
-        .flatten()
-        .find(|configuration| target.starts_with(configuration))
-    {
-        return Some(format!(
-            "the target directory {} lies inside the home's configuration, {}",
-            target.display(),
-            configuration.display()
-        ));
+    for configuration in configurations.into_iter().flatten() {
+        if let Some(resolved) = resolve(&configuration)? {
+            if target.starts_with(&resolved) {
+                return Err(format!(
+                    "the target directory {} lies inside the home's configuration, {}",
+                    target.display(),
+                    resolved.display()
+                ));
+            }
+        }
     }
-    None
+    Ok(())
 }
 
 /// Why `root` cannot be granted for writing: it is, or contains, the
 /// checkout, the home directory or the directory holding the checkout's
-/// shared Git directory, or it lies inside that Git directory. `None` when
-/// it grants none of them.
+/// shared Git directory, it lies inside that Git directory, or one of them
+/// cannot be resolved. `None` when it grants none of them.
 pub(crate) fn root_refusal(root: &Path, checkout: &Path, home: Option<&Path>) -> Option<String> {
-    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let root = resolved(root);
-    let checkout = resolved(checkout);
-    let shared = shared_git_directory(&checkout).map(|dir| resolved(&dir));
+    check_root(root, checkout, home).err()
+}
+
+fn check_root(root: &Path, checkout: &Path, home: Option<&Path>) -> Result<(), String> {
+    let root = resolve_root(root)?;
+    let checkout = resolve(checkout)?;
+    let shared = match &checkout {
+        Some(checkout) => shared_git_directory(checkout)?,
+        None => None,
+    };
+    let home = match home {
+        Some(home) => resolve(home)?,
+        None => None,
+    };
     let protected = [
-        Some(("the checkout", checkout.clone())),
-        home.map(|home| ("the home directory", resolved(home))),
+        checkout.map(|checkout| ("the checkout", checkout)),
+        home.map(|home| ("the home directory", home)),
         shared.as_ref().and_then(|dir| dir.parent()).map(|holder| {
             (
                 "the directory holding the shared Git directory",
@@ -318,7 +418,7 @@ pub(crate) fn root_refusal(root: &Path, checkout: &Path, home: Option<&Path>) ->
     ];
     for (what, path) in protected.into_iter().flatten() {
         if path.starts_with(&root) {
-            return Some(format!(
+            return Err(format!(
                 "the writable root {} would grant {what}, {}",
                 root.display(),
                 path.display()
@@ -326,50 +426,73 @@ pub(crate) fn root_refusal(root: &Path, checkout: &Path, home: Option<&Path>) ->
         }
     }
     if let Some(shared) = shared.filter(|shared| root.starts_with(shared)) {
-        return Some(format!(
+        return Err(format!(
             "the writable root {} lies inside the shared Git directory {}",
             root.display(),
             shared.display()
         ));
     }
-    None
+    Ok(())
 }
 
-/// The Git directory every worktree of `checkout`'s repository shares, read
-/// from the checkout's `.git` without running Git.
-fn shared_git_directory(checkout: &Path) -> Option<PathBuf> {
+/// The Git directory every worktree of the resolved `checkout`'s repository
+/// shares, resolved, read from the checkout's `.git` without running Git.
+/// `None` when the checkout has no `.git`.
+fn shared_git_directory(checkout: &Path) -> Result<Option<PathBuf>, String> {
     let dot_git = checkout.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
+    let unreadable = |error: std::io::Error| format!("{}: {error}", dot_git.display());
+    match std::fs::metadata(&dot_git) {
+        Ok(metadata) if metadata.is_dir() => return resolve(&dot_git),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(unreadable(error)),
     }
-    let pointer = std::fs::read_to_string(&dot_git).ok()?;
-    let own = checkout.join(pointer.strip_prefix("gitdir:")?.trim());
-    match std::fs::read_to_string(own.join("commondir")) {
-        Ok(common) => Some(own.join(common.trim())),
-        Err(_) => Some(own),
+    let pointer = std::fs::read_to_string(&dot_git).map_err(unreadable)?;
+    let own = pointer
+        .strip_prefix("gitdir:")
+        .map(|own| checkout.join(own.trim()))
+        .ok_or_else(|| format!("{} names no Git directory", dot_git.display()))?;
+    let commondir = own.join("commondir");
+    match std::fs::read_to_string(&commondir) {
+        Ok(common) => resolve(&own.join(common.trim())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => resolve(&own),
+        Err(error) => Err(format!("{}: {error}", commondir.display())),
     }
 }
 
 /// A global configuration file in a directory this process created, under a
 /// fresh name no other process can have chosen, and removed when it exits.
-fn own_global_config() -> PathBuf {
+fn own_global_config() -> Result<PathBuf, String> {
     static OWN: OnceLock<PathBuf> = OnceLock::new();
     extern "C" fn remove_own() {
         if let Some(own) = OWN.get() {
-            let _ = std::fs::remove_dir_all(own);
+            // The file, then the directory, so removal needs no listing.
+            let _ = std::fs::remove_file(own.join("gitconfig"));
+            if std::fs::remove_dir(own).is_err() {
+                let _ = std::fs::remove_dir_all(own);
+            }
         }
     }
     let own = tempfile::Builder::new()
         .prefix("arc-test-git-global-")
         .tempdir()
-        .unwrap_or_else(|error| refuse(&format!("the harness's global configuration: {error}")))
+        .map_err(|error| format!("the harness's global configuration: {error}"))?
         .keep();
     let file = own.join("gitconfig");
     if OWN.set(own).is_ok() {
-        // SAFETY: remove_own is an extern "C" function taking no arguments.
-        unsafe { libc::atexit(remove_own) };
+        remove_at_exit(remove_own)?;
     }
-    file
+    Ok(file)
+}
+
+/// Register `remove`, which removes a directory this process created, to run
+/// when it exits.
+fn remove_at_exit(remove: extern "C" fn()) -> Result<(), String> {
+    // SAFETY: remove is an extern "C" function taking no arguments.
+    match unsafe { libc::atexit(remove) } {
+        0 => Ok(()),
+        _ => Err("a directory of the harness's own would outlive it".to_owned()),
+    }
 }
 
 /// This process's identity as a parent: its PID and the kernel's start time
@@ -658,6 +781,7 @@ mod tests {
                 "{root:?}: {refusal:?}"
             );
         }
+        std::fs::create_dir(checkout.join("target")).unwrap();
         assert_eq!(
             super::root_refusal(&checkout.join("target"), &checkout, Some(&home)),
             None
@@ -679,6 +803,7 @@ mod tests {
                 "{root:?}: {refusal:?}"
             );
         }
+        std::fs::create_dir(checkout.join("target")).unwrap();
         assert_eq!(
             super::root_refusal(&checkout.join("target"), &checkout, None),
             None
@@ -717,20 +842,32 @@ mod tests {
     }
 
     /// Claim: a target directory inside the checkout other than within its
-    /// `target` build directory is refused, naming the source tree, and one
-    /// within `target` is accepted. Rejects `CARGO_TARGET_DIR=<checkout>/src`
-    /// granting the checkout's sources, which contain no protected path.
+    /// `target` build directory is refused, naming the source tree, whether
+    /// named directly or through a `target` that is a symbolic link into the
+    /// sources, and one within a real `target` is accepted. Rejects
+    /// `CARGO_TARGET_DIR=<checkout>/src` granting the checkout's sources,
+    /// which contain no protected path, and an exemption compared after
+    /// resolution that a symbolic link turns into the source tree.
     #[test]
     fn a_target_inside_the_source_tree_is_refused() {
         let (_scratch, home, _main, checkout) = decoy_worktree();
-        let refusal =
-            super::target_refusal(&checkout.join("src/build"), &checkout, Some(&home), None);
-        assert!(
-            refusal
-                .as_deref()
-                .is_some_and(|r| r.contains("inside the checkout's source tree")),
-            "{refusal:?}"
-        );
+        std::fs::create_dir_all(checkout.join("src/build")).unwrap();
+        std::fs::create_dir_all(checkout.join("target/nested")).unwrap();
+        let (_linked_scratch, linked_home, _main, linked) = decoy_worktree();
+        std::fs::create_dir_all(linked.join("src/build")).unwrap();
+        std::os::unix::fs::symlink("src", linked.join("target")).unwrap();
+        for (target, checkout, home) in [
+            (checkout.join("src/build"), &checkout, &home),
+            (linked.join("target/build"), &linked, &linked_home),
+        ] {
+            let refusal = super::target_refusal(&target, checkout, Some(home), None);
+            assert!(
+                refusal
+                    .as_deref()
+                    .is_some_and(|r| r.contains("inside the checkout's source tree")),
+                "{target:?}: {refusal:?}"
+            );
+        }
         assert_eq!(
             super::target_refusal(
                 &checkout.join("target/nested"),
@@ -750,6 +887,13 @@ mod tests {
     fn a_target_inside_the_home_configuration_is_refused() {
         let (scratch, home, _main, checkout) = decoy_worktree();
         let configuration = scratch.path().join("configuration");
+        for dir in [
+            home.join(".config/git"),
+            configuration.join("cargo"),
+            home.join("build"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         for target in [home.join(".config/git"), configuration.join("cargo")] {
             let refusal =
                 super::target_refusal(&target, &checkout, Some(&home), Some(&configuration));

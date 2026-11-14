@@ -123,13 +123,18 @@ pub(crate) fn confine(roots: &[&Path]) -> Result<(), String> {
     }
     let ruleset = ruleset as libc::c_int;
     let result = (|| {
-        allow(ruleset, Path::new("/"), READS)?;
+        allow(ruleset, Path::new("/"), READS).map_err(|error| format!("/: {error}"))?;
         for root in roots {
-            allow(ruleset, root, handled)?;
+            allow(ruleset, root, handled)
+                .map_err(|error| format!("{}: {error}", root.display()))?;
         }
         for (device, access) in DEVICES {
-            // A node this host lacks needs no rule.
-            let _ = allow(ruleset, Path::new(device), access & handled);
+            match allow(ruleset, Path::new(device), access & handled) {
+                Ok(()) => {}
+                // A node this host lacks needs no rule.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("{device}: {error}")),
+            }
         }
         // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes integer arguments only.
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -145,21 +150,23 @@ pub(crate) fn confine(roots: &[&Path]) -> Result<(), String> {
         Ok(())
     })();
     // SAFETY: ruleset is a descriptor this function opened and owns.
-    unsafe { libc::close(ruleset) };
-    result
+    let closed = unsafe { libc::close(ruleset) } == 0;
+    let error = std::io::Error::last_os_error();
+    result?;
+    if !closed {
+        return Err(format!("the ruleset stays open: {error}"));
+    }
+    Ok(())
 }
 
-fn allow(ruleset: libc::c_int, path: &Path, access: u64) -> Result<(), String> {
+/// Grant `access` beneath `path` in `ruleset`.
+fn allow(ruleset: libc::c_int, path: &Path, access: u64) -> std::io::Result<()> {
     let name = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| format!("{} holds a NUL byte", path.display()))?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "a NUL byte"))?;
     // SAFETY: name is a NUL-terminated path; O_PATH opens without reading.
     let fd = unsafe { libc::open(name.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
     if fd < 0 {
-        return Err(format!(
-            "{}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        ));
+        return Err(std::io::Error::last_os_error());
     }
     let rule = PathBeneathAttr {
         allowed_access: access,
@@ -177,9 +184,11 @@ fn allow(ruleset: libc::c_int, path: &Path, access: u64) -> Result<(), String> {
     };
     let error = std::io::Error::last_os_error();
     // SAFETY: fd was opened above and is not used again.
-    unsafe { libc::close(fd) };
+    if unsafe { libc::close(fd) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     if added != 0 {
-        return Err(format!("{}: {error}", path.display()));
+        return Err(error);
     }
     Ok(())
 }
