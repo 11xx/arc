@@ -655,6 +655,10 @@ struct ItemRow {
     integrated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     revision: Option<String>,
+    /// For a change in flight, the newest run the ledger records dispatched
+    /// against it with no recorded end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatch: Option<Dispatch>,
     /// The journal question the item waits on, while it is open and waits
     /// on a person.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -664,6 +668,19 @@ struct ItemRow {
     note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     split_into: Vec<String>,
+}
+
+/// A run dispatched against a linked change, as the ledger records it: no
+/// runner is asked whether it is alive.
+#[derive(Serialize, Clone)]
+struct Dispatch {
+    /// The subject the dispatch was recorded for, else the route it went
+    /// through.
+    to: String,
+    route: String,
+    at: String,
+    /// Whether a backend session is recorded as executing it.
+    bound: bool,
 }
 
 /// An open question an item waits on.
@@ -699,6 +716,7 @@ impl ItemRow {
             changes_requested_rounds: 0,
             integrated_at: None,
             revision: None,
+            dispatch: None,
             waiting: None,
             note: item.note.clone(),
             split_into: item.split_into.clone(),
@@ -829,6 +847,9 @@ struct Ledger {
     label: String,
     opener: Opener,
     store: std::cell::OnceCell<std::result::Result<Option<Store>, String>>,
+    /// Each change's newest dispatch with no recorded end, gathered once
+    /// from the repository events the change's reduction already read.
+    dispatches: std::cell::OnceCell<BTreeMap<String, Dispatch>>,
 }
 
 impl Ledger {
@@ -869,6 +890,7 @@ impl Ledger {
             label: place.display().to_string(),
             opener: Box::new(opener),
             store: std::cell::OnceCell::new(),
+            dispatches: std::cell::OnceCell::new(),
         }
     }
 
@@ -906,6 +928,22 @@ impl Ledger {
             .with_context(|| format!("cannot read change {change} in {}", self.label))
     }
 
+    /// The newest run dispatched against `change` that has no recorded end.
+    fn open_dispatch(&self, change: &str) -> Result<Option<Dispatch>> {
+        let Some(store) = self.store()? else {
+            return Ok(None);
+        };
+        if self.dispatches.get().is_none() {
+            let events = store.repository_events()?;
+            let _ = self.dispatches.set(open_dispatches(&events));
+        }
+        Ok(self
+            .dispatches
+            .get()
+            .and_then(|open| open.get(change))
+            .cloned())
+    }
+
     /// The item as this ledger leaves it. An unlinked item's stage is what
     /// the series recorded; a linked one's is what the change last recorded.
     fn row(&self, item: &series::Item, now: DateTime<Utc>) -> Result<ItemRow> {
@@ -931,8 +969,45 @@ impl Ledger {
                 .then(|| format!("{} via {}", claim.owner.actor, claim.owner.harness))
         });
         row.stage = recorded_stage(&state, &mut row);
+        if row.in_flight() {
+            row.dispatch = self.open_dispatch(change)?;
+        }
         Ok(row)
     }
+}
+
+/// Each change's newest dispatch that no recorded end closes, in the order
+/// the repository events record them.
+fn open_dispatches(events: &[crate::model::Event]) -> BTreeMap<String, Dispatch> {
+    let mut open = BTreeMap::new();
+    for round in super::run::rounds(events) {
+        let Some(super::run::RunSubject::Change { id }) = &round.subject else {
+            continue;
+        };
+        let crate::model::Payload::RunDispatched { route, .. } = &round.dispatch.payload else {
+            continue;
+        };
+        if round.ending.is_some() {
+            continue;
+        }
+        open.insert(
+            id.clone(),
+            Dispatch {
+                to: round
+                    .dispatch
+                    .on_behalf_of
+                    .clone()
+                    .unwrap_or_else(|| route.clone()),
+                route: route.clone(),
+                at: round
+                    .dispatch
+                    .created_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+                bound: round.binding.is_some(),
+            },
+        );
+    }
+    open
 }
 
 /// A registered project as a report reads it.
@@ -1515,6 +1590,19 @@ fn render_row(row: &ItemRow, width: usize) {
                 .as_deref()
                 .map(|revision| format!(" at {}", &revision[..revision.len().min(12)]))
                 .unwrap_or_default()
+        ));
+    }
+    if let Some(dispatch) = &row.dispatch {
+        detail.push(format!(
+            "dispatched to {} at {}{}{}",
+            dispatch.to,
+            dispatch.at,
+            if dispatch.to == dispatch.route {
+                String::new()
+            } else {
+                format!(" via route {}", dispatch.route)
+            },
+            if dispatch.bound { "" } else { ", unbound" }
         ));
     }
     if let Some(waiting) = &row.waiting {

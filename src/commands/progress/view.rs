@@ -362,6 +362,14 @@ impl View {
             if let Some(holder) = &row.held_by {
                 parts.push(self.dim(&format!("held by {holder}")));
             }
+            if let Some(dispatch) = &row.dispatch {
+                parts.push(self.dim(&format!(
+                    "dispatched to {} {}{}",
+                    dispatch.to,
+                    self.age(&dispatch.at),
+                    if dispatch.bound { "" } else { ", unbound" }
+                )));
+            }
         }
         if row.waiting.is_some() && row.stage != "open" {
             parts.push(self.look.paint(YELLOW, "waiting"));
@@ -497,6 +505,7 @@ mod tests {
             changes_requested_rounds: 0,
             integrated_at: None,
             revision: None,
+            dispatch: None,
             waiting: None,
             note: None,
             split_into: Vec::new(),
@@ -690,6 +699,75 @@ ship-it · 1 added since the start
         );
         assert_eq!(view.age("2026-01-02T12:00:00Z"), "2026-01-02T12:00:00Z");
         assert_eq!(view.age("2026-01-02T11:59:59Z"), "just now");
+    }
+
+    fn waiting(heading: Option<&str>) -> Option<super::super::Waiting> {
+        Some(super::super::Waiting {
+            file: "20260102T000000Z-store-discussion.md".to_string(),
+            question: "q1".to_string(),
+            heading: heading.map(str::to_string),
+        })
+    }
+
+    /// The facts a row carries beyond its stage, drawn: a change of another
+    /// project as `<project>::<change>`; an open item that waits as `?` and
+    /// `waiting` with its question's heading under the title; a linked item
+    /// that waits keeping its stage with `waiting` beside it; a dispatch as
+    /// `dispatched to <subject> <age>`, `unbound` while no session is bound;
+    /// and the bar counting the waiting items. Colour adds nothing to these
+    /// words. Rejects a foreign change printed without its project, a wait
+    /// that replaces a linked stage or hides on an open item, a dispatch
+    /// that drops whether it is bound, and colour that changes the text.
+    #[test]
+    fn row_facts_beyond_the_stage_are_drawn_in_words() {
+        let mut held = row("i1", "Decide the store", "open");
+        held.waiting = waiting(Some("Which store holds the cache?"));
+        let mut remote = row("i2", "Remote slice", "snapshotted");
+        remote.change = Some("slice-abc123".to_string());
+        remote.project = Some("tapes".to_string());
+        remote.project_slug = Some("home-tapes".to_string());
+        remote.waiting = waiting(None);
+        remote.dispatch = Some(super::super::Dispatch {
+            to: "codex:gpt-5#high".to_string(),
+            route: "gpt-5#high via codex".to_string(),
+            at: "2026-01-02T11:00:00Z".to_string(),
+            bound: false,
+        });
+        let mut bound = row("i3", "Local slice", "opened");
+        bound.change = Some("local-def456".to_string());
+        bound.dispatch = Some(super::super::Dispatch {
+            to: "gpt-5#high via codex".to_string(),
+            route: "gpt-5#high via codex".to_string(),
+            at: "2026-01-02T09:00:00Z".to_string(),
+            bound: true,
+        });
+        let report = series(vec![held, remote, bound, row("i4", "Later", "open")]);
+        let text = drawn(look(false, None), &report);
+        assert_eq!(
+            text,
+            "\
+Ship it
+▒▒▒▒▒▒▒▒▒▒░░░░░░░░░░  0 of 4 · 0%   2 in flight · 2 waiting · 2 open
+ship-it · 1 added since the start
+
+  ? i1  Decide the store  waiting
+        Which store holds the cache?
+  ◑ i2  Remote slice      snapshotted  tapes::slice-abc123 · dispatched to codex:gpt-5#high 1h ago, unbound · waiting
+        question q1 of 20260102T000000Z-store-discussion.md
+  ◔ i3  Local slice       opened       local-def456 · dispatched to gpt-5#high via codex 3h ago
+  ○ i4  Later"
+        );
+        let painted = drawn(look(true, None), &report);
+        assert!(painted.contains("\x1b[33m?\x1b[0m"), "{painted:?}");
+        let mut stripped = String::new();
+        let mut rest = painted.as_str();
+        while let Some(start) = rest.find("\x1b[") {
+            stripped.push_str(&rest[..start]);
+            rest = &rest[start..];
+            rest = &rest[rest.find('m').unwrap() + 1..];
+        }
+        stripped.push_str(rest);
+        assert_eq!(stripped, text);
     }
 
     /// A narrow terminal narrows the title column, so the stage and a short

@@ -6773,8 +6773,12 @@ PROGRESS
   `closed` (closed without integrating); `unknown` (no such change). A stage
   is what the ledger last recorded, never a live judgement, so it can lag
   the change but never run ahead of it; `arc status <change>` is the live
-  reading. The report also names who holds a live claim on the change.
-  Nothing about external runners is read.
+  reading. The report also names who holds a live claim on the change,
+  and, for a change in flight, the newest run the ledger records
+  dispatched against it with no recorded end (`arc run dispatch`, `bind`,
+  `end`): to whom (the represented subject, else the route), when, and
+  whether a backend session is bound. That is the ledger's record of a
+  dispatch, not a reading of whether the run is alive; no runner is asked.
 
   The share complete is a count: integrated and done items over the items that
   stand, printed as counts first and one percentage after. No estimate of
@@ -6791,7 +6795,8 @@ PROGRESS
   the complete, in-flight and remaining items, and one line per item: a
   mark, the id and title, then the stage and beside it the change, or the
   revision and age of the integration; a change of another project prints
-  as `<project>::<change>`. The marks are `✓` complete,
+  as `<project>::<change>`, and a dispatch as `dispatched to <subject>
+  <age>`, `unbound` when no session is bound. The marks are `✓` complete,
   `○` open, a circle that fills from `opened` to `reviewed`, `×` dropped or
   closed, `÷` split and `?` unknown. An open item that waits reads
   `waiting` with a `?`; any other item that waits keeps its stage with
@@ -6814,7 +6819,8 @@ PROGRESS
   change does, as when the ledger checks a reused base pass. Opening a
   ledger, which happens only for a project with a linked item, pays the
   store's shared cost once: its repository-wide records, the import batches
-  among them, which grow with the ledger. Each other project an item links into or a related series lives
+  among them, which grow with the ledger. Dispatches are read from those
+  records. Each other project an item links into or a related series lives
   in opens its ledger at most once per report, and the registry is read
   once, only when an item or relation names another project. A ledger of
   this project that cannot be read fails the report, puts its project among

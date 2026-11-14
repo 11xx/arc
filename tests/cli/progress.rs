@@ -1858,3 +1858,82 @@ fn workspace_progress_knows_whether_a_relation_is_mutual() {
         assert!(relation.get("mutual").is_none(), "{relation}");
     }
 }
+
+/// Claim: a linked item in flight carries the newest run the ledger records
+/// dispatched against its change until that run's end is recorded: whom it
+/// was dispatched to (the represented subject, else the route), when, and
+/// whether a backend session is bound, in every form. Rejects a dispatch
+/// shown after its recorded end, a bound run shown unbound, and a dispatch
+/// against another change shown on this item.
+#[test]
+fn a_dispatch_shows_on_its_item_until_its_end_is_recorded() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "runs", &["Delegated", "Other"]);
+    let change = begin_change(&repo, "delegated", None);
+    let elsewhere = begin_change(&repo, "elsewhere", None);
+    progress(&repo, &repo.root, &["link", "runs", "i1", &change]);
+    progress(&repo, &repo.root, &["link", "runs", "i2", &elsewhere]);
+    assert!(stage(&repo, &file, "i1").get("dispatch").is_none());
+    let dispatch = |route: &str| {
+        let printed = stdout(repo.arc(&repo.root).args([
+            "run",
+            "dispatch",
+            "--route",
+            route,
+            "--worktree",
+            "/work/run",
+            "--change",
+            &change,
+        ]));
+        printed
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .unwrap()
+            .to_string()
+    };
+    let first = dispatch("first-route");
+    let run = dispatch("second-route");
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["dispatch"]["to"], "second-route", "{row}");
+    assert_eq!(row["dispatch"]["bound"], false);
+    assert!(row["dispatch"]["at"].is_string(), "{row}");
+    assert!(stage(&repo, &file, "i2").get("dispatch").is_none());
+    let view = progress(&repo, &repo.root, &[]);
+    assert!(
+        view.contains("dispatched to second-route just now, unbound"),
+        "{view}"
+    );
+    assert!(
+        progress(&repo, &repo.root, &["--plain"]).contains("dispatched to second-route at "),
+        "plain lost the dispatch"
+    );
+
+    stdout(repo.arc(&repo.root).args([
+        "run",
+        "bind",
+        &run,
+        "--executor-harness",
+        "pi",
+        "--executor-session",
+        "session-one",
+    ]));
+    assert_eq!(stage(&repo, &file, "i1")["dispatch"]["bound"], true);
+    let view = progress(&repo, &repo.root, &[]);
+    assert!(
+        view.contains("dispatched to second-route just now"),
+        "{view}"
+    );
+    assert!(!view.contains("unbound"), "{view}");
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["run", "end", &run, "--outcome", "completed"]),
+    );
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["dispatch"]["to"], "first-route", "{row}");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["run", "end", &first, "--outcome", "completed"]),
+    );
+    assert!(stage(&repo, &file, "i1").get("dispatch").is_none());
+}
