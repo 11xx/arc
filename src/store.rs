@@ -2991,6 +2991,20 @@ impl Store {
             .context("cannot read the recorded history rewrites; `arc doctor` reports which")
     }
 
+    /// Whether this ledger holds `change_id`, in its own event files or in an
+    /// import batch. An absent change is an answer here, where `load_events`
+    /// refuses one.
+    pub fn holds_change(&self, change_id: &str) -> Result<bool> {
+        ids::validate_id_component(change_id)?;
+        if self.events_dir(change_id).is_dir() {
+            return Ok(true);
+        }
+        Ok(self
+            .import_batches()?
+            .iter()
+            .any(|batch| batch.change_id == change_id))
+    }
+
     /// All events of one change in ID order, preserving imported identities.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
         self.load_events_in(change_id, &self.import_batches()?)

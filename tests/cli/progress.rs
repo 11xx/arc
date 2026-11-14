@@ -1176,3 +1176,57 @@ fn a_successor_is_only_an_artifact_the_journal_holds() {
         );
     }
 }
+
+/// Claim: `verified` needs a pass recorded at the newest patchset's own head.
+/// Rejects a pass recorded before a rewrite reading as a run at the rewritten
+/// head, which would show a patchset as verified that nothing was run at.
+#[test]
+fn a_pass_recorded_before_a_rewrite_does_not_verify_the_rewritten_head() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.unit]\ncommand='true'\n");
+    let file = start(&repo, &repo.root, "rewritten", &["one"]);
+    let begun = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "carried", "--item", "rewritten:i1"]),
+    );
+    let change = opened_change_id(&begun);
+    let worktree = repo.home.join(".worktrees").join("repo-carried");
+    repo.commit(&worktree, "carried.txt", "one\n", "feat: carried");
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    stdout(repo.arc(&worktree).args(["verify", &change, "--all"]));
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "verified");
+
+    stdout(repo.arc(&worktree).args([
+        "rewrite",
+        "trailers",
+        "--from",
+        "HEAD",
+        "--append",
+        "Assisted-by: fixture:model",
+        "--no-sign",
+    ]));
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    assert_eq!(
+        stage(&repo, &file, "i1")["stage"],
+        "snapshotted",
+        "no run is recorded at the rewritten head"
+    );
+}
+
+/// Claim: an item linked to a change this ledger does not hold reads
+/// `unknown` and the report still prints. Rejects failing the whole report
+/// for one absent change, as a ledger that cannot be read does.
+#[test]
+fn an_item_whose_change_the_ledger_does_not_hold_reads_unknown() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "absent", &["one", "two"]);
+    let begun = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "gone", "--item", "absent:i1"]),
+    );
+    let change = opened_change_id(&begun);
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "opened");
+    fs::remove_dir_all(repo.root.join(".git/arc/changes").join(&change)).unwrap();
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "unknown");
+    assert_eq!(stage(&repo, &file, "i2")["stage"], "open");
+}

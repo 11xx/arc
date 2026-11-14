@@ -6762,11 +6762,13 @@ PROGRESS
   <series>` narrows to one and reads a retired series too. After the local
   blocks come any open journal questions that wait on a person. A report
   reads one event log per journal it shows and reduces only the linked
-  changes; it starts Git only to locate a project and open its ledger, never
-  to find a stage. So what it reads follows its series, linked items and
-  related series. Opening a ledger, which happens only for a project with a
-  linked item, has the store's own fixed cost: its repository-wide records,
-  the import batches among them. A ledger that cannot be read fails the
+  changes; finding a stage starts no Git process of its own. So what it
+  reads follows its series, linked items and related series. Git runs to
+  locate a project and open its ledger, and wherever reducing a linked
+  change does, as when the ledger checks a reused base pass. Opening a
+  ledger, which happens only for a project with a linked item, pays the
+  store's shared cost once: its repository-wide records, the import batches
+  among them, which grow with the ledger. A ledger that cannot be read fails the
   report, puts its project among `arc workspace progress`'s failures, and
   makes a related series unavailable.
 

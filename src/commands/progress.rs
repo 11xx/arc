@@ -720,7 +720,7 @@ impl Ledger {
         let Some(store) = self.store()? else {
             return Ok(None);
         };
-        if store.load_events(change)?.is_empty() {
+        if !store.holds_change(change)? {
             return Ok(None);
         }
         store
@@ -834,7 +834,9 @@ fn verified_at(state: &ChangeState, head: &str) -> bool {
         let Some(gate) = entry.gate.as_deref() else {
             continue;
         };
-        if entry.revision != head
+        // The revision the run was recorded at: a pass carried to `head` by
+        // a recorded rewrite is not a run at `head`.
+        if entry.recorded_revision != head
             || entry.probe.is_some()
             || entry.result == crate::model::VerifyResult::NotAdmitted
         {
