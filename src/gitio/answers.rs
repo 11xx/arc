@@ -523,6 +523,7 @@ mod tests {
         let before = head(&root).unwrap();
         let tree = commit_tree(&root, "HEAD").unwrap();
         let command = "printf second > file && git add file && git -c commit.gpgsign=false -c user.name=Tester -c user.email=tester@arc-fixture.dev commit -qm gate && printf gate-identity";
+        let _confinement = crate::confinement::Scope::new(&None);
         crate::gates::environment_probe(&root, command, Some(10)).unwrap();
         assert_ne!(
             head(&root).unwrap(),
