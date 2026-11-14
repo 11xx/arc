@@ -92,25 +92,25 @@ pub struct Rule {
     pub minimum_prior_window_ms: u64,
 }
 impl Rule {
-    fn version_two() -> Self {
+    fn current() -> Self {
         Self {
-            version: 2,
+            version: 1,
             instruction_ceiling_basis_points: 10300,
             minimum_instruction_rate_basis_points: 1000,
             minimum_other_basis_points: 2500,
-            wall_slack_basis_points: 11000,
+            wall_slack_basis_points: 12500,
             minimum_prior_window_ms: 100,
         }
     }
 }
 impl Default for Rule {
     fn default() -> Self {
-        Self::version_two()
+        Self::current()
     }
 }
 impl Rule {
     fn supported(&self) -> bool {
-        self == &Self::version_two()
+        self == &Self::current()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,43 +205,41 @@ pub fn excuse(timing: &VerificationTiming, budget: u64) -> Option<Excuse> {
     if reference.run_ms > budget || reference.instructions == 0 {
         return None;
     }
-    if let Some(conditions) = &timing.work_conditions {
-        let rule = &conditions.rule;
-        let prior = conditions.prior.as_ref()?;
-        let identity = timing.work_identity.as_ref()?;
-        let host = identity.host.as_ref()?;
-        let source = reference_timing(&reference.execution, identity)?;
-        let user_ms = timing.cpu_user_ms.filter(|n| *n > 0)?;
-        let source_user_ms = source.cpu_user_ms.filter(|n| *n > 0)?;
-        if !rule.supported()
-            || !host.unrestricted
-            || conditions.concurrent_unattributed
-            || prior.elapsed_ms < rule.minimum_prior_window_ms
-            || prior.share()? < rule.minimum_other_basis_points
-            || share < rule.minimum_other_basis_points
-            || share >= 10000
-            || instructions == 0
-            || u128::from(instructions) * 10000
-                > u128::from(reference.instructions)
-                    * u128::from(rule.instruction_ceiling_basis_points)
-            || !plausible_rate(
-                instructions,
-                source_user_ms,
-                reference.instructions,
-                user_ms,
-                rule.minimum_instruction_rate_basis_points,
-            )
-            || u128::from(timing.run_ms?) * u128::from(10000 - share)
-                > u128::from(reference.run_ms) * u128::from(rule.wall_slack_basis_points)
-        {
-            return None;
-        }
-    } else {
-        // Version 1 receipts retain the rule that produced their judgement.
-        if u128::from(instructions) * 100 > u128::from(reference.instructions) * 103 || share < 2500
-        {
-            return None;
-        }
+    // A judgement without its recorded rule has nothing to be read by.
+    let conditions = timing.work_conditions.as_ref()?;
+    let rule = &conditions.rule;
+    let prior = conditions.prior.as_ref()?;
+    let identity = timing.work_identity.as_ref()?;
+    let host = identity.host.as_ref()?;
+    let source = reference_timing(&reference.execution, identity)?;
+    let user_ms = timing.cpu_user_ms.filter(|n| *n > 0)?;
+    let source_user_ms = source.cpu_user_ms.filter(|n| *n > 0)?;
+    // The reference's clock already holds the delay of the load it ran under,
+    // so the allowance scales by the capacity each run had left.
+    let source_share = other_cpu_basis_points(source).filter(|s| *s < 10000)?;
+    if !rule.supported()
+        || !host.unrestricted
+        || conditions.concurrent_unattributed
+        || prior.elapsed_ms < rule.minimum_prior_window_ms
+        || prior.share()? < rule.minimum_other_basis_points
+        || share < rule.minimum_other_basis_points
+        || share >= 10000
+        || instructions == 0
+        || u128::from(instructions) * 10000
+            > u128::from(reference.instructions) * u128::from(rule.instruction_ceiling_basis_points)
+        || !plausible_rate(
+            instructions,
+            source_user_ms,
+            reference.instructions,
+            user_ms,
+            rule.minimum_instruction_rate_basis_points,
+        )
+        || u128::from(timing.run_ms?) * u128::from(10000 - share) * 10000
+            > u128::from(reference.run_ms)
+                * u128::from(rule.wall_slack_basis_points)
+                * u128::from(10000 - source_share)
+    {
+        return None;
     }
     Some(Excuse {
         reference_event_id: reference.execution.event_id.clone(),
@@ -853,30 +851,38 @@ fn tree_cpu(timing: &VerificationTiming) -> Option<u64> {
     timing.tree_cpu_ms.as_ref()?;
     observed_tree_cpu_ms(timing)
 }
+/// Tree CPU that no wait reported: children the tree reaped automatically.
+/// Waited CPU already reaches arc through its own children's usage.
+fn unwaited_tree_cpu(timing: &VerificationTiming) -> Option<u64> {
+    let waited = timing
+        .cpu_user_ms
+        .zip(timing.cpu_system_ms)
+        .map_or(0, |(u, s)| u.saturating_add(s));
+    Some(tree_cpu(timing)?.saturating_sub(waited))
+}
 pub fn cpu_during(before: Option<ArcCpu>, timing: &VerificationTiming) -> Option<u64> {
     let before = before?;
     let after = arc_cpu()?;
-    after.own.checked_sub(before.own)?.checked_add(
-        after
-            .children
-            .checked_sub(before.children)?
-            .max(tree_cpu(timing)?),
-    )
+    after
+        .own
+        .checked_sub(before.own)?
+        .checked_add(after.children.checked_sub(before.children)?)?
+        .checked_add(unwaited_tree_cpu(timing)?)
 }
 struct Invocation {
     host: HostSample,
     cpu: ArcCpu,
-    trees: std::sync::atomic::AtomicU64,
+    unwaited: std::sync::atomic::AtomicU64,
     complete: std::sync::atomic::AtomicBool,
 }
 static INVOCATION: std::sync::OnceLock<Option<Invocation>> = std::sync::OnceLock::new();
 pub fn record_tree_cpu(timing: &VerificationTiming) {
     use std::sync::atomic::Ordering::Relaxed;
     if let Some(Some(invocation)) = INVOCATION.get() {
-        if let Some(cpu) = tree_cpu(timing) {
+        if let Some(unwaited) = unwaited_tree_cpu(timing) {
             let _ = invocation
-                .trees
-                .fetch_update(Relaxed, Relaxed, |n| Some(n.saturating_add(cpu)));
+                .unwaited
+                .fetch_update(Relaxed, Relaxed, |n| Some(n.saturating_add(unwaited)));
         } else {
             invocation.complete.store(false, Relaxed);
         }
@@ -887,7 +893,7 @@ pub fn begin_invocation() {
         Some(Invocation {
             host: HostSample::start()?,
             cpu: arc_cpu()?,
-            trees: std::sync::atomic::AtomicU64::new(0),
+            unwaited: std::sync::atomic::AtomicU64::new(0),
             complete: std::sync::atomic::AtomicBool::new(true),
         })
     });
@@ -904,12 +910,11 @@ pub fn conditions_before_spawn() -> Conditions {
         Some(Window {
             busy_ms: timing.host_busy_ms?,
             capacity_ms: timing.host_capacity_ms?,
-            arc_cpu_ms: current.own.checked_sub(start.cpu.own)?.checked_add(
-                current
-                    .children
-                    .checked_sub(start.cpu.children)?
-                    .max(start.trees.load(Relaxed)),
-            )?,
+            arc_cpu_ms: current
+                .own
+                .checked_sub(start.cpu.own)?
+                .checked_add(current.children.checked_sub(start.cpu.children)?)?
+                .checked_add(start.unwaited.load(Relaxed))?,
             elapsed_ms: (crate::verification_timing::monotonic_ns()?
                 .checked_sub(start.host.started_ns)?)
                 / 1_000_000,

@@ -30,17 +30,20 @@ mod linux {
     pub fn prepare(command: &mut Command) -> Option<Pending> {
         use std::io::{Read, Write};
         let (mut parent, child) = std::os::unix::net::UnixStream::pair().ok()?;
-        let worker = std::thread::spawn(move || {
-            let mut pid = [0_u8; 4];
-            parent.read_exact(&mut pid).ok()?;
-            let pid = i32::from_ne_bytes(pid);
-            let counter = open(pid, 0, 1).map(|instructions| Counter {
-                instructions,
-                cpu: open(pid, 1, 1),
-            });
-            parent.write_all(&[0]).ok()?;
-            counter
-        });
+        // A host that refuses the thread has no counter; the command runs unmeasured.
+        let worker = std::thread::Builder::new()
+            .spawn(move || {
+                let mut pid = [0_u8; 4];
+                parent.read_exact(&mut pid).ok()?;
+                let pid = i32::from_ne_bytes(pid);
+                let counter = open(pid, 0, 1).map(|instructions| Counter {
+                    instructions,
+                    cpu: open(pid, 1, 1),
+                });
+                parent.write_all(&[0]).ok()?;
+                counter
+            })
+            .ok()?;
         // SAFETY: the child uses stack storage and async-signal-safe syscalls only.
         unsafe {
             command.pre_exec(move || {
@@ -59,7 +62,7 @@ mod linux {
                         {
                             continue
                         }
-                        _ => return Err(std::io::Error::other("counter holder disconnected")),
+                        _ => return Err(std::io::Error::from_raw_os_error(libc::EPIPE)),
                     }
                 }
             });

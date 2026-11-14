@@ -11,7 +11,7 @@ pub(super) fn readings(instructions: Option<u64>, other: u64) -> String {
         "host_capacity_ms": 10000, "cpu_user_ms": 90, "cpu_system_ms": 10,
         "prior": {"busy_ms":2600,"capacity_ms":10000,"arc_cpu_ms":100,"elapsed_ms":1000},
         "host": {"logical_cpus":10,"cpu_model":"fixture cpu","unrestricted":true},
-        "rule": {"version":2,"instruction_ceiling_basis_points":10300,"minimum_instruction_rate_basis_points":1000,"minimum_other_basis_points":2500,"wall_slack_basis_points":11000,"minimum_prior_window_ms":100}})
+        "rule": {"version":1,"instruction_ceiling_basis_points":10300,"minimum_instruction_rate_basis_points":1000,"minimum_other_basis_points":2500,"wall_slack_basis_points":12500,"minimum_prior_window_ms":100}})
     .to_string()
 }
 fn run(
@@ -507,13 +507,20 @@ fn prior_load_excludes_arc_and_requires_a_measurable_window() {
     }
 }
 
-/// I5: an excuse cannot exceed the delay explained by contention plus 10 percent.
-/// Rejects arbitrary waiting under a qualifying load, including one ms past the cap.
+/// I5: an excuse cannot exceed the delay explained by contention plus a quarter,
+/// counted from the capacity the reference itself had left. Rejects arbitrary
+/// waiting under a qualifying load, including one ms past the cap, and an
+/// allowance computed as if a reference from a busy host had run on a quiet one.
 #[test]
 fn the_clock_excuse_is_bounded_by_measured_load() {
     let (repo, _, wt) = fixture("bounded-clock");
-    run(&repo, &wt, 1320, Some(1000), 2500, 0);
-    run(&repo, &wt, 1321, Some(1000), 2500, 1);
+    // The fixture's reference ran 900 ms with a tenth of the host taken.
+    run(&repo, &wt, 1350, Some(1000), 2500, 0);
+    run(&repo, &wt, 1351, Some(1000), 2500, 1);
+    // A newer reference from a quiet host explains more delay for the same clock.
+    run(&repo, &wt, 900, Some(1000), 0, 0);
+    run(&repo, &wt, 1500, Some(1000), 2500, 0);
+    run(&repo, &wt, 1501, Some(1000), 2500, 1);
 }
 
 /// I5: CPU topology and model belong to host identity; restricted capacity refuses.
@@ -560,7 +567,7 @@ fn ineligible_trees_cannot_supply_work_references() {
     }
 }
 
-/// I2: valid archived rule-two facts survive changes in reader defaults.
+/// I2: valid archived facts survive changes in reader defaults.
 /// Rejects replay replacing the recorded rule and making historical acceptance unreadable.
 #[test]
 fn replay_uses_the_receipts_rule_thresholds() {
@@ -592,30 +599,30 @@ fn parallel_sibling_load_is_not_other_process_load() {
     assert_eq!(verdict(&repo, &wt, &id), "over-budget");
 }
 
-/// I2: version-one receipts keep their original judgement and remain readable.
-/// Rejects applying a later delay cap to a historical, self-contained excuse.
+/// I2: an excuse stripped of its recorded rule is not a judgement a reader can
+/// repeat. Rejects accepting a receipt whose rule and thresholds were removed.
 #[test]
-fn legacy_receipts_keep_their_version_one_rule() {
-    let (repo, id, wt) = fixture("legacy-rule");
+fn an_excuse_without_its_recorded_rule_is_refused() {
+    let (repo, id, wt) = fixture("ruleless-excuse");
     run(&repo, &wt, 1100, Some(1000), 5000, 0);
+    assert_eq!(verdict(&repo, &wt, &id), "excused");
     rewrite_event(&repo, &id, "verification-recorded", |v| {
-        v.as_object_mut().unwrap().remove("work_conditions");
-        v["work_identity"].as_object_mut().unwrap().remove("host");
-        if v["work_reference"].is_object() {
-            let source = &mut v["work_reference"]["execution"];
-            source.as_object_mut().unwrap().remove("work_conditions");
-            source["work_identity"]
-                .as_object_mut()
-                .unwrap()
-                .remove("host");
-            let bytes = serde_json::to_vec(source).unwrap();
-            v["work_reference"]["digest"] =
-                json!(format!("sha256:{}", hex::encode(Sha256::digest(bytes))));
-            v["run_ms"] = json!(9000);
-            v["budget_at_run"]["run_ms"] = json!(9000);
+        if v["run_ms"] == 1100 {
+            v.as_object_mut().unwrap().remove("work_conditions");
         }
     });
-    assert_eq!(verdict(&repo, &wt, &id), "excused");
+    let out = repo
+        .arc(&wt)
+        .args(["show", &id, "--json"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("no rule version"), "{text}");
 }
 
 /// I5: a cached publication pass retains its execution facts without becoming
@@ -917,5 +924,48 @@ fn an_execute_only_command_cannot_seed_a_dropped_counter_reference() {
     assert!(
         dropped["instructions"].is_null(),
         "detached counter treated as work: {dropped}"
+    );
+}
+
+/// I5: work the counters cannot follow shows as waited CPU the tree clock never
+/// saw, kernel time included. Rejects hiding user work from an execute-only
+/// program behind the kernel CPU of the visible part of the command.
+#[cfg(target_os = "linux")]
+#[test]
+fn hidden_user_work_cannot_shelter_behind_visible_kernel_cpu() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let opaque = repo.home.join("opaque-python");
+    fs::copy("/usr/bin/python3", &opaque).unwrap();
+    fs::set_permissions(&opaque, fs::Permissions::from_mode(0o111)).unwrap();
+    let command = r#"dd if=/dev/zero of=/dev/null bs=1M count=16000 2>/dev/null; "$W1_PYTHON" -c 'sum(range(6000000))'"#;
+    repo.declare_gates_locally(&format!(
+        "[gates.unit]\ncommand={}\nbudget='60s'\n",
+        serde_json::to_string(command).unwrap()
+    ));
+    let (id, wt, _) = change_with_patchset(&repo, "hidden-behind-kernel");
+    let run = |python: &Path| {
+        repo.arc(&wt)
+            .env("W1_PYTHON", python)
+            .args(["verify", "--all", "--rerun"])
+            .assert()
+            .success();
+        latest(&repo, &wt, &id)
+    };
+    let ordinary = run(Path::new("/usr/bin/python3"));
+    if ordinary["instructions"].is_null() || ordinary["tree_cpu_ms"].is_null() {
+        return;
+    }
+    // The fixture only discriminates while the visible kernel CPU exceeds the
+    // hidden user CPU; a host where it does not is not a counterexample.
+    let system = ordinary["cpu_system_ms"].as_u64().unwrap();
+    let user = ordinary["cpu_user_ms"].as_u64().unwrap();
+    if system <= user {
+        return;
+    }
+    let hidden = run(&opaque);
+    assert!(
+        hidden["instructions"].is_null() && hidden["tree_cpu_ms"].is_null(),
+        "hidden user work passed as measured: {hidden}"
     );
 }

@@ -970,11 +970,14 @@ pub fn holder_main() -> ! {
             .and_then(|counter| counter.cpu_ms())
             .map(Box::new);
         observation.timing.instructions = counter.and_then(|counter| counter.finish());
+        // An exec the counters cannot follow still reports its CPU to wait,
+        // user and system alike; the task clock then reads short of it.
+        let waited = (user + system) / 1000;
         if observation
             .timing
             .tree_cpu_ms
             .as_deref()
-            .is_some_and(|cpu| cpu.saturating_add(2) < user / 1000)
+            .is_some_and(|cpu| cpu.saturating_add(2 + waited / 20) < waited)
         {
             observation.timing.instructions = None;
             observation.timing.tree_cpu_ms = None;
