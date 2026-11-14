@@ -3,7 +3,7 @@
 use crate::confinement::{Declaration, Receipt};
 use crate::perf::Counted;
 use anyhow::Result;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use std::process::{Child, ExitStatus, Output, Stdio};
 pub struct Command {
     inner: std::process::Command,
     kind: Kind,
+    git_args: Option<Vec<OsString>>,
     storage: Option<crate::warm_worktree::CommandStorage>,
     receipt: Option<Receipt>,
     hooks: Option<crate::git_hooks::Hooks>,
@@ -53,6 +54,7 @@ pub(crate) fn operator(program: impl AsRef<OsStr>) -> Command {
 fn make(program: impl AsRef<OsStr>, kind: Kind) -> Command {
     Command {
         inner: crate::child_command::command(program),
+        git_args: matches!(kind, Kind::Git).then(Vec::new),
         kind,
         storage: None,
         receipt: None,
@@ -70,7 +72,11 @@ impl std::ops::Deref for Command {
 
 impl Command {
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
-        self.inner.arg(arg);
+        if let Some(arguments) = &mut self.git_args {
+            arguments.push(arg.as_ref().to_os_string());
+        } else {
+            self.inner.arg(arg);
+        }
         self
     }
     pub fn args<I, S>(&mut self, args: I) -> &mut Self
@@ -78,8 +84,17 @@ impl Command {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.inner.args(args);
+        for argument in args {
+            self.arg(argument);
+        }
         self
+    }
+    pub fn get_args(&self) -> impl Iterator<Item = &OsStr> {
+        self.git_args
+            .iter()
+            .flatten()
+            .map(OsString::as_os_str)
+            .chain(self.inner.get_args())
     }
     pub fn current_dir(&mut self, path: impl AsRef<Path>) -> &mut Self {
         self.inner.current_dir(path);
@@ -157,8 +172,10 @@ impl Command {
             Kind::Project { .. } | Kind::Operator => {}
             Kind::Git => {
                 if self.hooks.is_none() {
-                    self.hooks =
-                        crate::git_hooks::prepare(&mut self.inner).map_err(io::Error::other)?;
+                    let arguments = self.get_args().map(OsStr::to_os_string).collect::<Vec<_>>();
+                    self.git_args = None;
+                    self.hooks = crate::git_hooks::prepare(&mut self.inner, &arguments)
+                        .map_err(io::Error::other)?;
                 }
             }
         }

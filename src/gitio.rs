@@ -3676,6 +3676,7 @@ mod tests {
     /// A repository holding one commit, with the machine's own configuration
     /// out of scope.
     fn fixture(tmp: &tempfile::TempDir, config: &[&str]) -> PathBuf {
+        let _confinement = crate::confinement::Scope::new(&None);
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let mut setup: Vec<Vec<&str>> = vec![

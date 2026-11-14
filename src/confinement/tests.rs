@@ -445,3 +445,24 @@ fn a_hookless_switch_does_not_evaluate_confinement() {
         "hookless switch evaluated confinement"
     );
 }
+
+/// Claim: a temporary root beneath home is refused as an overlap, not described
+/// as an ancestor. Rejects a diagnostic that misidentifies the denied path.
+#[test]
+fn home_temporary_roots_name_the_actual_overlap() {
+    let result = validate_root(
+        Path::new("/fixture/home/cache/tmp"),
+        Path::new("/fixture/checkout"),
+        Path::new("/fixture/home"),
+        None,
+        &[],
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        result.contains("TMPDIR") && result.contains("overlaps the home directory"),
+        "{result}"
+    );
+    assert!(!result.contains("top level or an ancestor"), "{result}");
+}

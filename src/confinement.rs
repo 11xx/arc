@@ -139,41 +139,58 @@ pub(crate) fn declaration(site: &str, checkout: &Path) -> Result<Option<Declarat
 pub(crate) fn for_checkout(checkout: &Path) -> Result<Option<Declaration>> {
     let top = crate::gitio::toplevel(checkout)?;
     let root = crate::store::Store::resolve_root(&top)?;
-    if let Some(store) = crate::store::Store::open_at_for(&root, &top)? {
-        if let Some(branch) = crate::gitio::current_branch(&top)? {
-            let states = store.readable_states_shared()?;
-            let owners = states
-                .values()
-                .filter(|state| state.branch == branch)
-                .collect::<Vec<_>>();
-            let open = owners
-                .iter()
-                .copied()
-                .filter(|state| !state.is_closed())
-                .collect::<Vec<_>>();
-            let owners = if open.is_empty() { owners } else { open };
-            if owners.len() > 1 {
-                bail!("ambiguous destination for {branch}; use the destination checkout");
-            }
-            if let Some(state) = owners.first() {
-                if state.is_closed() {
-                    return at(
-                        &top,
-                        &crate::gitio::branch_head(&top, &state.target_branch)?,
-                    );
-                }
-                let declarations = crate::declarations::for_change(&top, state)?;
-                if declarations.target_unreadable {
-                    bail!("destination of {} is unreadable", state.change_id);
-                }
-                return Ok(declarations.gates.confine);
-            }
+    let store = crate::store::Store::open_at_for(&root, &top)?;
+    let states = store
+        .as_ref()
+        .map(|store| store.readable_states_shared())
+        .transpose()?;
+    let owner = |branch: &str| -> Result<Option<Option<Declaration>>> {
+        let Some(states) = &states else {
+            return Ok(None);
+        };
+        let owners = states
+            .values()
+            .filter(|state| state.branch == branch)
+            .collect::<Vec<_>>();
+        let open = owners
+            .iter()
+            .copied()
+            .filter(|state| !state.is_closed())
+            .collect::<Vec<_>>();
+        let owners = if open.is_empty() { owners } else { open };
+        if owners.len() > 1 {
+            bail!("ambiguous destination for {branch}; run from the destination checkout");
+        }
+        let Some(state) = owners.first() else {
+            return Ok(None);
+        };
+        if state.is_closed() {
+            return Ok(Some(at(
+                &top,
+                &crate::gitio::branch_head(&top, &state.target_branch)?,
+            )?));
+        }
+        let declarations = crate::declarations::for_change(&top, state)?;
+        if declarations.target_unreadable {
+            bail!("destination of {} is unreadable", state.change_id);
+        }
+        Ok(Some(declarations.gates.confine))
+    };
+    let branch = crate::gitio::current_branch(&top)?;
+    if let Some(branch) = &branch {
+        if let Some(declaration) = owner(branch)? {
+            return Ok(declaration);
         }
     }
-    let destination = crate::gitio::primary_worktree_branch(&top)?.context(
-        "detached checkout has no destination; an explicit confinement scope is required",
-    )?;
-    at(&top, &crate::gitio::branch_head(&top, &destination)?)
+    if let Some(primary) = crate::gitio::primary_worktree_branch(&top)? {
+        if let Some(declaration) = owner(&primary)? {
+            return Ok(declaration);
+        }
+        if branch.as_deref() == Some(primary.as_str()) {
+            return at(&top, &crate::gitio::branch_head(&top, &primary)?);
+        }
+    }
+    bail!("checkout {} has no established confinement destination; run `arc gates measure` or `arc gates init` from the destination checkout, or use `arc verify <change>` for a recorded change", top.display())
 }
 
 #[derive(Deserialize)]
@@ -507,10 +524,10 @@ fn validate_root(
     } else {
         "confinement writable root"
     };
-    if home.starts_with(root)
-        || root.parent() == Some(home)
-        || (temporary && root.starts_with(home))
-    {
+    if temporary && root.starts_with(home) {
+        bail!("TMPDIR {} overlaps the home directory; choose a temporary directory outside home, the checkout and Git administration", root.display());
+    }
+    if home.starts_with(root) || root.parent() == Some(home) {
         bail!(
             "{kind} {} grants the home directory's top level or an ancestor",
             root.display()

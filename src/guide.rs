@@ -5854,8 +5854,10 @@ GATE CONFINEMENT
   execution identity, so a pass under another declaration, including an
   unconfined pass, cannot silently remain green. Measurement and budget init
   can run working-copy commands, but use the associated open or closed change's destination
-  confinement, or the primary branch's committed confinement outside a change.
-  An unowned detached checkout requires an explicit destination.
+  confinement. A free checkout can use the primary checkout's recorded owner's
+  destination, never that owner's head. An unowned primary checkout uses its
+  committed branch. Otherwise destination resolution refuses and asks for a
+  run from the destination checkout or `arc verify <change>`.
 
   Relative roots must stay inside the evaluated checkout, through every
   symlink and parent component. Absolute roots name destination-authorized
@@ -5874,6 +5876,10 @@ GATE CONFINEMENT
   storage: it must also be covered by destination writes and never becomes an
   implicit root merely because preparation names it. Installed executables
   and configuration directories should not be granted as package caches.
+  Extracted sources in registry/src and git/checkouts can be compiled and run
+  by later builds outside confinement; writing them stages future code even
+  though the writes stay inside the roots. A project-specific CARGO_HOME in
+  Arc-owned storage isolates those build inputs from the operator's caches.
 
   Arc-owned build/cache storage, /tmp and process devices /dev/null, /dev/zero,
   /dev/random, /dev/urandom and /dev/tty are implicit. TMPDIR is writable only
@@ -5907,8 +5913,15 @@ GATE CONFINEMENT
   Hook forwarding controls live outside writable build/cache roots and remain
   until Git exits. Dispatch carries lazy committed destination authority for
   native hooks; target mutations pin their destination before moving refs.
-  Git-configured filters, merge drivers and fsmonitor programs
-  are configuration programs, not Git hooks, and are outside this forwarding.
+  Forwarding is the default for Git subcommands; only named hook-free plumbing
+  bypasses it. Global option values are not subcommands. Discovery is cached
+  per process and invalidated when configuration or hook directories change.
+  Configuration-defined hook.<name>.command entries refuse the operation by
+  name when confinement is declared; native execution beside wrappers is denied.
+  Programs Git runs from configuration are the operator's configuration and
+  run with Git's authority: filters, merge and diff drivers, textconv,
+  credential helpers, core.sshCommand, fsmonitor and similar programs. Hooks
+  are the class forwarded through project confinement.
   Operator-supplied `watch --exec` and `events --exec` handlers are not project
   commands and retain operator authority, subject to inherited restrictions.
   Switching branches without a project command does not evaluate confinement.

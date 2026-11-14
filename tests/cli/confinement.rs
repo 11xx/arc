@@ -638,3 +638,179 @@ fn git_rebase_hooks_cannot_escape_the_destination_scope() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Claim I12: squash recovery confines restore's post-checkout hook after a
+/// refused commit. Rejects deciding forwarding from an incomplete verb list.
+#[test]
+fn squash_recovery_restore_cannot_escape_through_checkout_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("restore-decoy");
+    fs::write(&decoy, "retained").unwrap();
+    repo.redeclare_gates(&declaration("true"));
+    let change = open(&repo);
+    repo.commit(&repo.root, "feature", "one", "test: first feature");
+    repo.commit(&repo.root, "feature", "two", "test: second feature");
+    for (name, script) in [
+        ("pre-commit", "exit 1".to_string()),
+        (
+            "post-checkout",
+            format!("printf escaped > '{}'", decoy.display()),
+        ),
+    ] {
+        let hook = repo.root.join(".git/hooks").join(name);
+        fs::write(&hook, format!("#!/bin/sh\n{script}\n")).unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    repo.arc(&repo.root)
+        .args(["squash", &change, "--message", "test: squash"])
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(decoy).unwrap(),
+        "retained",
+        "restore hook escaped"
+    );
+}
+
+/// Claim I12: configuration-defined hooks cannot run beside forwarded hooks
+/// with Git's authority. Rejects ignoring hook command entries, including includes.
+#[test]
+fn configuration_defined_hooks_are_refused_by_name() {
+    if !supported() {
+        return;
+    }
+    for included in [false, true] {
+        let (repo, scratch) = fixture();
+        let decoy = scratch.path().join("config-hook-decoy");
+        fs::write(&decoy, "retained").unwrap();
+        repo.redeclare_gates(&declaration("true"));
+        let change = open(&repo);
+        repo.commit(&repo.root, "feature", "one", "test: first feature");
+        repo.commit(&repo.root, "feature", "two", "test: second feature");
+        let configuration = if included {
+            let path = repo.root.join(".git/hook-config");
+            git(
+                &repo.root,
+                &["config", "include.path", path.to_str().unwrap()],
+            );
+            path
+        } else {
+            repo.root.join(".git/config")
+        };
+        git(
+            &repo.root,
+            &[
+                "config",
+                "--file",
+                configuration.to_str().unwrap(),
+                "hook.escape.command",
+                &format!("printf escaped > '{}'", decoy.display()),
+            ],
+        );
+        git(
+            &repo.root,
+            &[
+                "config",
+                "--file",
+                configuration.to_str().unwrap(),
+                "hook.escape.event",
+                "pre-commit",
+            ],
+        );
+        let output = repo
+            .arc(&repo.root)
+            .args(["squash", &change, "--message", "test: squash"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(decoy).unwrap(),
+            "retained",
+            "configured hook escaped"
+        );
+        assert!(!output.status.success(), "configured hook was not refused");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("hook.escape.command"), "{diagnostic}");
+    }
+}
+
+/// Claim I5: detached and unowned checkouts answer to the primary change's
+/// destination, never that change's head. Rejects removing confinement in place
+/// and using a free checkout to run an unrestricted measurement.
+#[test]
+fn free_checkouts_cannot_take_an_in_place_change_heads_authority() {
+    if !supported() {
+        return;
+    }
+    for detached in [true, false] {
+        let (repo, scratch) = fixture();
+        let decoy = scratch.path().join("free-checkout-decoy");
+        fs::write(&decoy, "retained").unwrap();
+        let script = format!("printf escaped > '{}'", decoy.display());
+        repo.redeclare_gates(&declaration(&script));
+        open(&repo);
+        repo.commit(
+            &repo.root,
+            ".arc/gates.toml",
+            &format!("[gates.guard]\ncommand={script:?}\n"),
+            "test: remove confinement at change head",
+        );
+        let checkout = scratch.path().join("free");
+        let mut args = vec!["worktree", "add"];
+        if detached {
+            args.push("--detach");
+        } else {
+            args.extend(["-b", "unowned"]);
+        }
+        args.extend([checkout.to_str().unwrap(), "HEAD"]);
+        git(&repo.root, &args);
+        let output = repo
+            .arc(&checkout)
+            .args(["gates", "measure", "--runs", "1"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "free checkout ran unconfined");
+        assert_eq!(
+            fs::read_to_string(decoy).unwrap(),
+            "retained",
+            "free checkout selected change roots"
+        );
+    }
+}
+
+/// Claim I5: a free detached checkout without a recorded destination refuses
+/// measurement and names a usable invocation. Rejects guessing a primary head.
+#[test]
+fn an_unowned_detached_checkout_requires_a_destination() {
+    let (repo, scratch) = fixture();
+    repo.redeclare_gates(&declaration("true"));
+    let checkout = scratch.path().join("unowned-detached");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            checkout.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let output = repo
+        .arc(&checkout)
+        .args(["gates", "measure", "--runs", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "measurement guessed a detached destination"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("no established confinement destination")
+            && diagnostic.contains("destination checkout"),
+        "{diagnostic}"
+    );
+}

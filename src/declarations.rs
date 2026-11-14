@@ -220,6 +220,7 @@ mod ladder_tests {
     }
 
     fn git(cwd: &Path, args: &[&str]) -> String {
+        let _confinement = crate::confinement::Scope::new(&None);
         let mut options = vec![
             "-c",
             "user.name=Fixture",
