@@ -1663,6 +1663,11 @@ fn show(
             }
             Err(error) => value["gate_status_error"] = serde_json::json!(format!("{error:#}")),
         }
+        if at.is_none() {
+            value["landing_time"] = serde_json::to_value(
+                super::gate_reports::landing::Costs::of_change(&store, &change_id)?,
+            )?;
+        }
         if crate::forge_round_trip::applies(&st) {
             value["forge_view"] = crate::forge_view::build(
                 &store,
@@ -1687,6 +1692,13 @@ fn show(
             Vec::new()
         };
         print!("{}", render::markdown(&st, &report, &alternatives));
+        if at.is_none() {
+            if let Some(figure) =
+                super::gate_reports::landing::Costs::of_change(&store, &change_id)?
+            {
+                println!("\n## Landing time\n\n{}", figure.line());
+            }
+        }
         if !report.budget_raises.is_empty() {
             println!("\n## Budget raises\n");
             for entry in &report.budget_raises {

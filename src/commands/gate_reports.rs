@@ -262,23 +262,16 @@ fn collect_declarations(
                     continue;
                 }
             };
-            let integrated_at = events
-                .iter()
-                .chain(read.landings()?.derived_events(&id).iter())
-                .filter(|e| {
-                    matches!(
-                        e.payload,
-                        Payload::ChangeIntegrated { .. }
-                            | Payload::IntegrationAsserted { .. }
-                            | Payload::ChangeClosed {
-                                outcome: crate::model::Closure::Integrated,
-                                ..
-                            }
-                    )
-                })
-                .map(|e| e.created_at)
-                .max();
-            landing_costs.observe(&id, &events, integrated_at);
+            let derived = read.landings()?.derived_events(&id);
+            let joined;
+            let landed: &[Event] = if derived.is_empty() {
+                &events
+            } else {
+                joined = crate::landing::with_derived(&events, derived);
+                &joined
+            };
+            let integrated_at = landing::integrated_at(landed);
+            landing_costs.observe(&id, landed, integrated_at);
             let integrated = integrated_at.is_some();
             integrated_changes += usize::from(integrated);
             let mut failed_first = false;

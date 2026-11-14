@@ -63,6 +63,17 @@ pub fn invocation_id() -> &'static str {
     INVOCATION.get_or_init(|| format!("inv-{}", ulid::Ulid::new().to_string().to_lowercase()))
 }
 
+/// Whether `value` has the shape `invocation_id` issues.
+pub fn is_invocation_id(value: &str) -> bool {
+    value.strip_prefix("inv-").is_some_and(|suffix| {
+        suffix.len() == 26
+            && suffix
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
+            && suffix.to_uppercase().parse::<ulid::Ulid>().is_ok()
+    })
+}
+
 pub fn new_finding_id() -> String {
     format!("f{}", ulid::Ulid::new().to_string().to_lowercase())
 }
@@ -189,9 +200,10 @@ mod tests {
     #[test]
     fn the_invocation_id_is_one_prefixed_lowercase_ulid_per_process() {
         assert_eq!(invocation_id(), invocation_id());
-        let suffix = invocation_id().strip_prefix("inv-").unwrap();
-        assert_eq!(suffix, suffix.to_lowercase());
-        assert!(suffix.to_uppercase().parse::<ulid::Ulid>().is_ok());
+        assert!(is_invocation_id(invocation_id()), "{}", invocation_id());
+        assert!(!is_invocation_id(&invocation_id().to_uppercase()));
+        assert!(!is_invocation_id("inv-"));
+        assert!(!is_invocation_id(&new_deferral_id()));
     }
 
     #[test]

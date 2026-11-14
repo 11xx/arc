@@ -419,6 +419,58 @@ fn a_stack_lands_with_one_gate_run_and_each_member_keeps_its_own_range() {
     );
 }
 
+/// Claim: each stack member's own landing time leaves out the gate run its
+/// landing command recorded on the top member's ledger, and `arc show`
+/// states the figure `arc gates` reports for each member. Rejects counting
+/// that gate run inside a lower member's own time, and a show figure that
+/// reads only the member's own ledger.
+#[test]
+fn a_stack_members_own_time_excludes_the_gate_its_landing_ran_elsewhere() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, _)) = stack(&repo);
+    // A gate run longer than the landing command leaves it no own time.
+    repo.arc(&repo.root)
+        .env("ARC_TEST_COMMAND_RUN_MS", "600000")
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let lander = repository_events(&repo)
+        .into_iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .unwrap()["invocation_id"]
+        .clone();
+    assert!(lander.is_string(), "{lander}");
+    let gates = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    for change in [&lower, &upper] {
+        let mut commands = std::collections::BTreeMap::new();
+        for event in change_events(&repo, change)
+            .iter()
+            .skip_while(|event| event["event_type"] != "patchset-added")
+            .filter(|event| event["invocation_id"] != lander)
+        {
+            let longest = commands
+                .entry(event["invocation_id"].to_string())
+                .or_insert(0);
+            *longest = event["invocation_elapsed_ms"]
+                .as_u64()
+                .unwrap()
+                .max(*longest);
+        }
+        let own: u64 = commands.values().sum();
+        let row = gates["landing"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["change_id"] == change.as_str())
+            .unwrap();
+        assert_eq!(row["own_ms"], own, "{change}: {row}");
+        let shown = json_stdout(repo.arc(&repo.root).args(["show", change, "--json"]));
+        let figure = &shown["landing_time"];
+        assert_eq!(figure["own_ms"], own, "{change}: {figure}");
+        assert_eq!(figure["total_ms"], row["total_ms"], "{change}: {figure}");
+    }
+}
+
 const LANDER: &str = "019a0000-0000-7000-8000-0000000000d4";
 
 /// A Claude recording with one request, so the lander's session reads.

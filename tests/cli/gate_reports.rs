@@ -1033,6 +1033,164 @@ fn landing_cost_counts_executions_and_preserves_missing_measurements() {
     assert_eq!(before, tree_bytes(&repo.root.join(".git/arc")));
 }
 
+/// Rewrite the running time of every event of `id` from its shipped patchset
+/// on: `elapsed` names it by event type, and any other event reads 50ms.
+fn set_running_times(repo: &Repo, id: &str, elapsed: &[(&str, u64)]) {
+    let mut paths: Vec<_> = fs::read_dir(event_dir(repo, id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    let mut started = false;
+    for path in paths {
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let kind = value["event_type"].as_str().unwrap().to_string();
+        started |= kind == "patchset-added";
+        if !started {
+            continue;
+        }
+        let ms = elapsed
+            .iter()
+            .find(|(named, _)| *named == kind)
+            .map_or(50, |(_, ms)| *ms);
+        value["invocation_elapsed_ms"] = json!(ms);
+        fs::write(&path, json_file_bytes(&value)).unwrap();
+    }
+}
+
+/// A landing whose snapshot ran 400ms, whose verify ran 2500ms around a
+/// 1000ms gate with 300ms preparation, and whose integration ran 700ms.
+fn timed_landing(repo: &Repo, slug: &str) -> (String, PathBuf) {
+    let (id, wt, _) = change_with_patchset(repo, slug);
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    rewrite_event(repo, &id, "verification-recorded", |v| {
+        v["prepare_ms"] = json!(300);
+    });
+    close_at(repo, &id, chrono::Utc::now());
+    rewrite_event(repo, &id, "change-closed", |v| {
+        v["invocation_id"] = json!(format!(
+            "inv-{}",
+            ulid::Ulid::new().to_string().to_lowercase()
+        ));
+    });
+    set_running_times(
+        repo,
+        &id,
+        &[
+            ("patchset-added", 400),
+            ("verification-run-started", 100),
+            ("verification-recorded", 2500),
+            ("change-closed", 700),
+        ],
+    );
+    (id, wt)
+}
+
+/// Claim: a landing's own time is, for each command from the one that
+/// recorded the shipped patchset through the integration event, the longest
+/// running time among its events, less the gate run and preparation time it
+/// recorded, summed; landing time adds gate and preparation, in `arc gates`
+/// per landing, window and period, text and JSON, and in `arc show`, while
+/// the landing budget keeps judging gate time. Rejects summing every event's
+/// running time, a command's first event standing for it, gate or
+/// preparation time counted twice, and a budget judging the sum.
+#[test]
+fn landing_time_is_gate_preparation_and_each_commands_longest_running_time() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[budget]\nlanding = '2s'\n[gates.unit]\ncommand = 'true'\n");
+    let (id, wt) = timed_landing(&repo, "timed");
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let l = &report["landing"];
+    let change = &l["changes"][0];
+    assert_eq!(change["run_ms"], 1000, "{change}");
+    assert_eq!(change["prepare_ms"], 300, "{change}");
+    assert_eq!(
+        change["own_ms"],
+        400 + (2500 - 1000 - 300) + 700,
+        "{change}"
+    );
+    assert_eq!(change["total_ms"], 3600, "{change}");
+    assert_eq!(l["own"]["median_ms"], 2300, "{l}");
+    assert_eq!(l["total"]["median_ms"], 3600, "{l}");
+    assert_eq!(l["own_unmeasured"], 0);
+    assert_eq!(l["median_exceeds_budget"], false, "{l}");
+    assert_eq!(l["last_7_days"]["own_paid_ms"], 2300);
+    assert_eq!(l["last_7_days"]["total_paid_ms"], 3600);
+    let text = stdout(repo.arc(&wt).arg("gates"));
+    assert!(
+        text.contains("arc's own commands: 0 unmeasured; median 2.300s, p90 2.300s"),
+        "{text}"
+    );
+    assert!(
+        text.contains("landing time (gate, preparation and arc's own): 0 unmeasured; median 3.600s, p90 3.600s; reported, not budgeted: the landing budget judges gate time"),
+        "{text}"
+    );
+    assert!(
+        text.contains("arc's own paid 2.300s; measured 2.300s; 0 unmeasured; landing time paid 3.600s; 0 unmeasured"),
+        "{text}"
+    );
+    let shown = json_stdout(repo.arc(&wt).args(["show", &id, "--json"]));
+    assert_eq!(
+        shown["landing_time"],
+        json!({"gate_ms": 1000, "prepare_ms": 300, "own_ms": 2300, "total_ms": 3600})
+    );
+    let text = stdout(repo.arc(&wt).args(["show", &id]));
+    assert!(
+        text.contains("## Landing time\n\ngate 1.000s, preparation 0.300s, arc's own commands 2.300s: landing time 3.600s; reported, not budgeted: the landing budget judges gate time"),
+        "{text}"
+    );
+}
+
+/// Claim: a landing with an event that names no invocation has no own time
+/// or landing time, its events still load, and the window states a
+/// percentile or a period total of either only when no value the unmeasured
+/// landing could hold would change it. Rejects reading unstamped events as
+/// zero, a window median the unmeasured landing could move, and a refusal to
+/// read history written before the stamp.
+#[test]
+fn a_landing_with_unstamped_events_reads_unmeasured() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.unit]\ncommand = 'true'\n");
+    let (_, wt) = timed_landing(&repo, "stamped");
+    let (legacy, _) = timed_landing(&repo, "legacy");
+    rewrite_event(&repo, &legacy, "verification-run-started", |v| {
+        let object = v.as_object_mut().unwrap();
+        object.remove("invocation_id");
+        object.remove("invocation_elapsed_ms");
+    });
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    assert_eq!(report["failures"], json!([]), "{report}");
+    let l = &report["landing"];
+    let row = |change: &str| {
+        l["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["change_id"] == change)
+            .unwrap()
+            .clone()
+    };
+    let unstamped = row(&legacy);
+    assert!(unstamped["own_ms"].is_null(), "{unstamped}");
+    assert!(unstamped["total_ms"].is_null(), "{unstamped}");
+    assert_eq!(unstamped["run_ms"], 1000, "{unstamped}");
+    assert_eq!(l["own_unmeasured"], 1, "{l}");
+    assert_eq!(l["own"]["samples"], 1, "{l}");
+    assert!(l["own"]["median_ms"].is_null(), "{l}");
+    assert!(l["total"]["median_ms"].is_null(), "{l}");
+    assert_eq!(l["timing"]["median_ms"], 1000, "{l}");
+    assert!(l["last_7_days"]["own_paid_ms"].is_null(), "{l}");
+    assert!(l["last_7_days"]["total_paid_ms"].is_null(), "{l}");
+    assert_eq!(l["last_7_days"]["measured_own_ms"], 2300, "{l}");
+    let shown = json_stdout(repo.arc(&wt).args(["show", &legacy, "--json"]));
+    assert!(shown["landing_time"]["own_ms"].is_null(), "{shown}");
+    assert_eq!(shown["landing_time"]["gate_ms"], 1000, "{shown}");
+}
+
 /// Claim: landing declarations are destination-owned, combined with the operator
 /// by minimum, and only advise on excessive median cost. Rejects change-head
 /// overrides, required per-gate budgets, raise requirements or a doctor error.

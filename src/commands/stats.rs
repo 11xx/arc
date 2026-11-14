@@ -533,9 +533,12 @@ fn is_integration(payload: &Payload) -> bool {
     )
 }
 
-/// The change's final landing, or `None` when nothing integrated it or the
-/// integrated patchset was never recorded on this ledger.
-fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
+/// Where the change's final landing opens and closes in `events`: the
+/// `patchset-added` of the patchset the last integration event names (on a
+/// legacy close, the last one before it) and that integration event. `None`
+/// when nothing integrated the change or that patchset was never recorded on
+/// this ledger.
+pub(super) fn final_landing(events: &[Event]) -> Option<(usize, usize)> {
     let end = events
         .iter()
         .rposition(|event| is_integration(&event.payload))?;
@@ -558,6 +561,13 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
             }
             _ => false,
         })?;
+    Some((start, end))
+}
+
+/// The change's final landing, or `None` when nothing integrated it or the
+/// integrated patchset was never recorded on this ledger.
+fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
+    let (start, end) = final_landing(events)?;
     let Payload::PatchsetAdded {
         patchset_id,
         base,

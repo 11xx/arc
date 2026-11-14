@@ -6004,9 +6004,10 @@ GATE COSTS
   never enter budget shares. A median above 80% is labelled in the report.
 
   `arc workspace gates` rows include declared total, landing median and p90,
-  and landings, paid gate time and paid preparation in 7/30 days. They sort
-  by 30-day measured gate time descending (the known lower bound when
-  incomplete), then project name; unobserved projects follow readable ones.
+  and landings, paid gate time, preparation, arc's own time and landing
+  time in 7/30 days. They sort by 30-day measured gate time descending (the
+  known lower bound when incomplete), then project name; unobserved
+  projects follow readable ones.
 
   Landing costs use the latest 100 readable integrated changes, including
   asserted and legacy closures and each completed stack member separately.
@@ -6029,6 +6030,21 @@ GATE COSTS
   receipts by the same rules: a receipt without prepare_ms leaves its
   landing's preparation unmeasured, and a percentile is stated only when
   known. The landing budget judges gate time alone.
+
+  Landing time is what a landing cost the person waiting: gate time,
+  preparation and arc's own commands, summed per landing, window and
+  period, and by `arc show` for an integrated change. arc's own time takes
+  the change's events from the shipped patchset's `patchset-added` through
+  the integration event (the `arc stats --round-trip` window), groups them
+  by `invocation_id`, takes each command's largest `invocation_elapsed_ms`
+  less the gate run and preparation time on integration-gate receipts it
+  recorded on any ledger, and sums them. Time between commands, waiting on
+  a reviewer or the operator, is not counted. Work a command does after its
+  last event is not seen, so each command's time is a lower bound; a command
+  landing several changes counts in each. An event without the fields
+  leaves its landing's own time and sum unmeasured, under the rules above.
+  The sum is reported, never budgeted: it includes time a project cannot
+  change, and the landing budget judges gate time alone.
 
   Total bounds the worst-case integration suite and is enforced.
   Landing declares typical executed cost and is advisory, reported against
@@ -6228,7 +6244,8 @@ GATE ROUNDS
      shorter runs holding an `exclusive` lock. A build a gate needs is
      declared as preparation, `[prepare]` in `.arc/worktrees.toml`
      (`arc guide files`), so `arc gates` shows its time beside the gate's
-     rather than inside it.
+     rather than inside it. Landing time adds arc's own commands to both
+     (`arc guide gate-costs`); the bound judges gate time alone.
   4. Rank the checks by what they guard, as above, and cut from the bottom
      until the bound holds, never by cost alone.
   5. Make what matters fit. Shorten the product's waits inside the test,

@@ -1,5 +1,6 @@
 //! Command time paid by integrated changes, counted once at their closure,
-//! with the preparation the same receipts paid beside it.
+//! with the preparation the same receipts paid beside it, arc's own command
+//! time around them, and the three summed as landing time.
 
 use super::*;
 use chrono::{DateTime, Duration, Utc};
@@ -15,6 +16,37 @@ pub(in crate::commands) struct ChangeCost {
     measured_ms: u64,
     prepare_ms: Option<u64>,
     measured_prepare_ms: u64,
+    /// arc's own command time; see `own_ms`.
+    own_ms: Option<u64>,
+    /// Gate, preparation and arc's own time summed, when all three are known.
+    total_ms: Option<u64>,
+    /// The landing's commands by invocation, each with its largest running
+    /// time; `None` when an event in the landing carries no invocation.
+    #[serde(skip)]
+    commands: Option<BTreeMap<String, u64>>,
+}
+
+/// One integrated change's landing time and its parts, as `arc show` states it.
+#[derive(Serialize)]
+pub(in crate::commands) struct Figure {
+    pub(in crate::commands) gate_ms: Option<u64>,
+    pub(in crate::commands) prepare_ms: Option<u64>,
+    pub(in crate::commands) own_ms: Option<u64>,
+    pub(in crate::commands) total_ms: Option<u64>,
+}
+
+impl Figure {
+    /// The figure as one line: its parts, their sum, and what judges it.
+    pub(in crate::commands) fn line(&self) -> String {
+        let part = |value: Option<u64>| value.map_or_else(|| "unmeasured".into(), |v| ms(Some(v)));
+        format!(
+            "gate {}, preparation {}, arc's own commands {}: landing time {}; reported, not budgeted: the landing budget judges gate time",
+            part(self.gate_ms),
+            part(self.prepare_ms),
+            part(self.own_ms),
+            part(self.total_ms)
+        )
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -26,6 +58,11 @@ pub(in crate::commands) struct Period {
     measured_prepare_ms: u64,
     prepare_unmeasured: usize,
     prepare_paid_ms: Option<u64>,
+    measured_own_ms: u64,
+    own_unmeasured: usize,
+    own_paid_ms: Option<u64>,
+    total_unmeasured: usize,
+    total_paid_ms: Option<u64>,
 }
 
 impl Period {
@@ -42,10 +79,17 @@ impl Period {
                 .measured_prepare_ms
                 .saturating_add(change.measured_prepare_ms);
             period.prepare_unmeasured += usize::from(change.prepare_ms.is_none());
+            period.measured_own_ms = period
+                .measured_own_ms
+                .saturating_add(change.own_ms.unwrap_or(0));
+            period.own_unmeasured += usize::from(change.own_ms.is_none());
+            period.total_unmeasured += usize::from(change.total_ms.is_none());
         }
         period.paid_ms = (period.unmeasured == 0).then_some(period.measured_ms);
         period.prepare_paid_ms =
             (period.prepare_unmeasured == 0).then_some(period.measured_prepare_ms);
+        period.own_paid_ms = (period.own_unmeasured == 0).then_some(period.measured_own_ms);
+        period.total_paid_ms = sum([period.paid_ms, period.prepare_paid_ms, period.own_paid_ms]);
         period
     }
 }
@@ -62,6 +106,10 @@ pub(in crate::commands) struct Report {
     timing: Distribution,
     prepare_unmeasured: usize,
     preparation: Distribution,
+    own_unmeasured: usize,
+    own: Distribution,
+    total_unmeasured: usize,
+    total: Distribution,
     #[serde(skip_serializing_if = "Option::is_none")]
     median_exceeds_budget: Option<bool>,
     pub(in crate::commands) last_7_days: Period,
@@ -69,10 +117,77 @@ pub(in crate::commands) struct Report {
     changes: Vec<ChangeCost>,
 }
 
+#[derive(Default)]
 pub(in crate::commands) struct Costs {
     branch: Option<String>,
     destination: Option<(DateTime<Utc>, String)>,
     changes: Vec<ChangeCost>,
+    /// Gate run and preparation time each invocation recorded on the
+    /// receipts gate time counts, from every change observed; `None` when
+    /// one of them lacks either.
+    inside: BTreeMap<String, Option<u64>>,
+}
+
+/// `a + b + c` when all are known.
+fn sum(parts: [Option<u64>; 3]) -> Option<u64> {
+    parts
+        .into_iter()
+        .try_fold(0u64, |total, part| total.checked_add(part?))
+}
+
+/// When a change was integrated: its latest integration event, its own or one
+/// a landing derived for it.
+pub(in crate::commands) fn integrated_at(events: &[Event]) -> Option<DateTime<Utc>> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.payload,
+                Payload::ChangeIntegrated { .. }
+                    | Payload::IntegrationAsserted { .. }
+                    | Payload::ChangeClosed {
+                        outcome: crate::model::Closure::Integrated,
+                        ..
+                    }
+            )
+        })
+        .map(|e| e.created_at)
+        .max()
+}
+
+/// The invocation an event names, when it names a well-formed one with its
+/// running time.
+fn invocation(event: &Event) -> Option<(&str, u64)> {
+    let id = event
+        .invocation_id
+        .as_deref()
+        .filter(|id| crate::ids::is_invocation_id(id))?;
+    Some((id, event.invocation_elapsed_ms?))
+}
+
+/// The commands of a change's final landing, from the one that recorded the
+/// shipped patchset through the integration event, each with the largest
+/// running time among its events there. `None` when the change has no
+/// landing window or an event in it carries no invocation.
+fn landing_commands(events: &[Event]) -> Option<BTreeMap<String, u64>> {
+    let (start, end) = super::super::stats::final_landing(events)?;
+    let mut commands = BTreeMap::new();
+    for event in &events[start..=end] {
+        let (id, elapsed) = invocation(event)?;
+        let longest: &mut u64 = commands.entry(id.to_string()).or_default();
+        *longest = (*longest).max(elapsed);
+    }
+    Some(commands)
+}
+
+/// arc's own time on a landing: each command's running time less the gate
+/// run and preparation time it recorded, summed. `None` when a command's
+/// receipt lacks either.
+fn own_ms(commands: &BTreeMap<String, u64>, inside: &BTreeMap<String, Option<u64>>) -> Option<u64> {
+    commands.iter().try_fold(0u64, |total, (id, elapsed)| {
+        let gated = inside.get(id).copied().unwrap_or(Some(0))?;
+        total.checked_add(elapsed.saturating_sub(gated))
+    })
 }
 
 impl Costs {
@@ -85,7 +200,52 @@ impl Costs {
             },
             destination: None,
             changes: Vec::new(),
+            inside: BTreeMap::new(),
         })
+    }
+
+    /// One change's landing time, reading the other members of the landing
+    /// that integrated it for the gate time its command recorded on their
+    /// ledgers.
+    pub(in crate::commands) fn of_change(store: &Store, id: &str) -> Result<Option<Figure>> {
+        let read = store.read()?;
+        let events = read.events_with_landings(id)?;
+        let attempt = events.iter().rev().find_map(|event| match &event.payload {
+            Payload::ChangeIntegrated {
+                landing: Some(landing),
+                ..
+            } => Some(landing.attempt.as_str()),
+            _ => None,
+        });
+        let landings = read.landings()?;
+        let completion = attempt.and_then(|attempt| landings.completion(attempt));
+        let mut costs = Self::default();
+        if let Some(Payload::LandingCompleted { members, .. }) = completion.map(|c| &c.payload) {
+            for member in members.iter().filter(|member| member.change_id != id) {
+                let theirs = read.events_with_landings(&member.change_id)?;
+                costs.observe(&member.change_id, &theirs, None);
+            }
+        }
+        costs.observe(id, &events, integrated_at(&events));
+        costs.settle();
+        Ok(costs.changes.pop().map(|change| Figure {
+            gate_ms: change.run_ms,
+            prepare_ms: change.prepare_ms,
+            own_ms: change.own_ms,
+            total_ms: change.total_ms,
+        }))
+    }
+
+    /// Each observed landing's own and total time, once every change's
+    /// receipts are in.
+    fn settle(&mut self) {
+        for change in &mut self.changes {
+            change.own_ms = change
+                .commands
+                .as_ref()
+                .and_then(|commands| own_ms(commands, &self.inside));
+            change.total_ms = sum([change.run_ms, change.prepare_ms, change.own_ms]);
+        }
     }
 
     pub(in crate::commands) fn observe(
@@ -103,6 +263,9 @@ impl Costs {
             measured_ms: 0,
             prepare_ms: Some(0),
             measured_prepare_ms: 0,
+            own_ms: None,
+            total_ms: None,
+            commands: landing_commands(events),
         });
         for event in events {
             match &event.payload {
@@ -118,7 +281,7 @@ impl Costs {
                 {
                     self.destination = Some((event.created_at, target_branch.clone()));
                 }
-                Payload::VerificationRunStarted { event: kind, .. } if cost.is_some() => {
+                Payload::VerificationRunStarted { event: kind, .. } => {
                     run_events.insert(event.event_id.as_str(), *kind);
                 }
                 Payload::VerificationRecorded {
@@ -129,11 +292,7 @@ impl Costs {
                     timing,
                     ..
                 } => {
-                    let Some(cost) = &mut cost else {
-                        continue;
-                    };
-                    if event.created_at > cost.integrated_at
-                        || *result == VerifyResult::NotAdmitted
+                    if *result == VerifyResult::NotAdmitted
                         || run_id
                             .as_deref()
                             .and_then(|id| run_events.get(id))
@@ -141,6 +300,20 @@ impl Costs {
                             .unwrap_or_default()
                             != GateEvent::Integration
                     {
+                        continue;
+                    }
+                    if let Some((id, _)) = invocation(event) {
+                        let gated = timing
+                            .run_ms
+                            .zip(timing.prepare_ms)
+                            .and_then(|(run, prepare)| run.checked_add(prepare));
+                        let inside = self.inside.entry(id.to_string()).or_insert(Some(0));
+                        *inside = inside.zip(gated).and_then(|(a, b)| a.checked_add(b));
+                    }
+                    let Some(cost) = &mut cost else {
+                        continue;
+                    };
+                    if event.created_at > cost.integrated_at {
                         continue;
                     }
                     cost.executions += 1;
@@ -169,6 +342,7 @@ impl Costs {
         repository: bool,
         now: DateTime<Utc>,
     ) -> Result<Report> {
+        self.settle();
         let destination = self.destination.map(|(_, branch)| branch).or(self.branch);
         let (budget_ms, budget_warning) = if repository {
             match destination
@@ -222,6 +396,20 @@ impl Costs {
             .collect::<Vec<_>>();
         let prepare_unmeasured = landings - preparation.len();
         let preparation = window_timing(&mut preparation, prepare_unmeasured);
+        let mut own = self
+            .changes
+            .iter()
+            .filter_map(|c| c.own_ms)
+            .collect::<Vec<_>>();
+        let own_unmeasured = landings - own.len();
+        let own = window_timing(&mut own, own_unmeasured);
+        let mut total = self
+            .changes
+            .iter()
+            .filter_map(|c| c.total_ms)
+            .collect::<Vec<_>>();
+        let total_unmeasured = landings - total.len();
+        let total = window_timing(&mut total, total_unmeasured);
         Ok(Report {
             window: WINDOW,
             budget_ms,
@@ -239,6 +427,10 @@ impl Costs {
             timing,
             prepare_unmeasured,
             preparation,
+            own_unmeasured,
+            own,
+            total_unmeasured,
+            total,
             last_7_days,
             last_30_days,
             changes: self.changes,
@@ -288,19 +480,36 @@ impl Report {
             statistic(self.preparation.median_ms),
             statistic(self.preparation.p90_ms)
         );
+        println!(
+            "  arc's own commands: {} unmeasured; median {}, p90 {}",
+            self.own_unmeasured,
+            statistic(self.own.median_ms),
+            statistic(self.own.p90_ms)
+        );
+        println!(
+            "  landing time (gate, preparation and arc's own): {} unmeasured; median {}, p90 {}; reported, not budgeted: the landing budget judges gate time",
+            self.total_unmeasured,
+            statistic(self.total.median_ms),
+            statistic(self.total.p90_ms)
+        );
         if let Some(warning) = &self.budget_warning {
             println!("{warning}");
         }
         for (days, period) in [(7, &self.last_7_days), (30, &self.last_30_days)] {
             println!(
-                "  {days} days: {} landings; paid {}; measured {}; {} unmeasured landings; preparation paid {}; measured {}; {} unmeasured",
+                "  {days} days: {} landings; paid {}; measured {}; {} unmeasured landings; preparation paid {}; measured {}; {} unmeasured; arc's own paid {}; measured {}; {} unmeasured; landing time paid {}; {} unmeasured",
                 period.landings,
                 ms(period.paid_ms),
                 ms(Some(period.measured_ms)),
                 period.unmeasured,
                 ms(period.prepare_paid_ms),
                 ms(Some(period.measured_prepare_ms)),
-                period.prepare_unmeasured
+                period.prepare_unmeasured,
+                ms(period.own_paid_ms),
+                ms(Some(period.measured_own_ms)),
+                period.own_unmeasured,
+                ms(period.total_paid_ms),
+                period.total_unmeasured
             );
         }
     }

@@ -611,7 +611,9 @@ enum Cmd {
     /// item's key and the file's digest, and each finding disposition it published inside
     /// its own event.
     /// With a registry file, bindings and author facts appear as
-    /// `review_context`; see `arc guide debt-clearance`.
+    /// `review_context`; see `arc guide debt-clearance`. An integrated change
+    /// states its landing time and parts (`landing_time` in JSON; without
+    /// `--at`); see `arc guide gate-costs`.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -728,8 +730,9 @@ enum Cmd {
     /// Lists declarations (arc guide gates), with runs, exact-tree
     /// reuses and selector skips counted separately. Timings prefer run_ms; older
     /// duration_ms samples are identified and excluded from budget shares. Lists budgets,
-    /// totals, recent landing costs with the preparation they paid, the latest
-    /// over-budget run and receipt cost kinds
+    /// totals, recent landing costs with the preparation they paid, arc's own
+    /// command time and landing time, the latest over-budget run and receipt
+    /// cost kinds
     /// (arc guide gate-costs). Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
     Gates {
@@ -4086,7 +4089,7 @@ enum WorkspaceCmd {
     /// Retired registrations are counted without observation; --retired lists them.
     /// Unreachable registrations and unreadable gates or ledgers are named, retaining
     /// readable rows and exiting 16 on partial collection. Lists budgets and declared totals,
-    /// and preparation paid beside gate time. Records no events; append policy need not parse. JSON: arc-workspace-gates/1.
+    /// and preparation, arc's own time and landing time beside gate time. Records no events; append policy need not parse. JSON: arc-workspace-gates/1.
     Gates {
         /// Report only projects beneath this canonical path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
