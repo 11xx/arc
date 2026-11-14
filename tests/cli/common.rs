@@ -617,7 +617,7 @@ pub(crate) fn path_without_git_replay(repo: &Repo) -> std::ffi::OsString {
     fs::write(
         &fake_git,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = replay ]; then\n  echo 'git: replay is not a git command' >&2\n  exit 1\nfi\nexec \"{}\" \"$@\"\n",
+            "#!/bin/sh\nis_replay() {{\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      -C|-c|--git-dir|--work-tree|--namespace|--config-env) [ \"$#\" -ge 2 ] || return 1; shift 2 ;;\n      -*) shift ;;\n      *) [ \"$1\" = replay ]; return ;;\n    esac\n  done\n  return 1\n}}\nif is_replay \"$@\"; then\n  echo 'git: replay is not a git command' >&2\n  exit 1\nfi\nexec \"{}\" \"$@\"\n",
             real_git.display()
         ),
     )

@@ -5919,6 +5919,9 @@ GATE CONFINEMENT
   when configuration dependencies, HEAD or hook
   directories change. Conditional include targets are inspected even while
   inactive, so changing branches cannot activate an unexamined hook command.
+  Every executable hook file is forwarded, including custom names. Explicit
+  native hook names must be single filenames. An empty inventory retains the
+  forwarding directory so missing names cannot fall back to native execution.
   Configuration-defined hook.<name>.command entries refuse the operation by
   name when confinement is declared; native execution beside wrappers is denied.
   Programs Git runs from configuration are the operator's configuration and

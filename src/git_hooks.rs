@@ -48,7 +48,7 @@ const NAMES: &[&str] = &[
 struct Inventory {
     common: PathBuf,
     directory: PathBuf,
-    names: Vec<&'static str>,
+    names: Vec<String>,
     configured_hooks: Vec<String>,
     watched: Vec<Stamp>,
 }
@@ -287,6 +287,68 @@ fn hook_free(arguments: &[OsString], index: usize) -> bool {
         }
         _ => false,
     }
+}
+
+fn validate_hook_command(arguments: &[OsString], index: usize) -> Result<()> {
+    if arguments
+        .get(index)
+        .is_none_or(|argument| argument != "hook")
+    {
+        return Ok(());
+    }
+    match arguments
+        .get(index + 1)
+        .and_then(|argument| argument.to_str())
+    {
+        Some("list") => return Ok(()),
+        Some("run") => {}
+        _ => bail!("cannot forward unsupported Git hook action; refusing Git invocation"),
+    }
+    let mut cursor = index + 2;
+    while let Some(argument) = arguments.get(cursor) {
+        let value = argument.to_string_lossy();
+        if value == "--" {
+            cursor += 1;
+            break;
+        }
+        if matches!(
+            value.as_ref(),
+            "--ignore-missing"
+                | "--no-ignore-missing"
+                | "--allow-unknown-hook-name"
+                | "--no-allow-unknown-hook-name"
+                | "--no-to-stdin"
+                | "--no-jobs"
+        ) {
+            cursor += 1;
+        } else if matches!(value.as_ref(), "--to-stdin" | "--jobs" | "-j") {
+            if arguments.get(cursor + 1).is_none() {
+                bail!("Git hook option {value} requires a value");
+            }
+            cursor += 2;
+        } else if value.starts_with("--to-stdin=")
+            || value.starts_with("--jobs=")
+            || (value.starts_with("-j") && value.len() > 2)
+        {
+            cursor += 1;
+        } else if value.starts_with('-') {
+            bail!("cannot forward unsupported Git hook option {value:?}; refusing Git invocation");
+        } else {
+            break;
+        }
+    }
+    let name = arguments
+        .get(cursor)
+        .context("Git hook run requires one filename")?;
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.as_encoded_bytes().contains(&b'/')
+        || name.as_encoded_bytes().contains(&0)
+    {
+        bail!("Git hook name {name:?} must be one filename; refusing Git invocation");
+    }
+    Ok(())
 }
 
 type FileIdentity = (u64, u64, u64, i64, i64, i64, i64, u32);
@@ -588,11 +650,36 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
         .into_iter()
         .map(Stamp::read)
         .collect::<Result<Vec<_>>>()?;
-    let names = NAMES
-        .iter()
-        .copied()
-        .filter(|name| configured_path || executable(&actual_directory.join(name)))
-        .collect();
+    let mut names = if configured_path {
+        NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    match fs::read_dir(&actual_directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if executable(&entry.path()) {
+                    names.push(entry.file_name().into_string().map_err(|_| {
+                        anyhow::anyhow!("Git hook filename is not UTF-8; refusing Git invocation")
+                    })?);
+                }
+            }
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(error) => {
+            return Err(error).context("cannot inspect Git hook directory; refusing Git invocation")
+        }
+    }
+    names.sort();
+    names.dedup();
     Ok(Some(Inventory {
         common,
         directory,
@@ -632,6 +719,22 @@ pub(crate) fn prepare(
         command.args(args);
         return Ok(None);
     }
+    let cwd = command
+        .get_current_dir()
+        .map(Path::to_path_buf)
+        .unwrap_or(std::env::current_dir()?);
+    let cwd = if cwd.is_absolute() {
+        cwd
+    } else {
+        std::env::current_dir()?.join(cwd)
+    };
+    if let Err(error) = validate_hook_command(args, index) {
+        if crate::confinement::declaration("native Git hook arguments", &cwd)?.is_none() {
+            command.args(args);
+            return Ok(None);
+        }
+        return Err(error);
+    }
     let authority = Authority {
         scope: crate::confinement::current(),
     };
@@ -649,15 +752,6 @@ pub(crate) fn prepare(
         }
     }
     command.env_clear().envs(effective);
-    let cwd = command
-        .get_current_dir()
-        .map(Path::to_path_buf)
-        .unwrap_or(std::env::current_dir()?);
-    let cwd = if cwd.is_absolute() {
-        cwd
-    } else {
-        std::env::current_dir()?.join(cwd)
-    };
     static INVENTORIES: OnceLock<Mutex<HashMap<Vec<OsString>, Inventory>>> = OnceLock::new();
     let mut key = vec![
         command.get_program().to_os_string(),
@@ -683,7 +777,16 @@ pub(crate) fn prepare(
     }) {
         Some(inventory) => Some(inventory),
         None => {
-            let inventory = discover(command, &cwd, &args[..index])?;
+            let inventory = match discover(command, &cwd, &args[..index]) {
+                Ok(inventory) => inventory,
+                Err(error) => {
+                    if crate::confinement::declaration("Git hook discovery", &cwd)?.is_none() {
+                        command.args(args);
+                        return Ok(None);
+                    }
+                    return Err(error);
+                }
+            };
             if let Some(inventory) = &inventory {
                 inventories
                     .lock()
@@ -704,10 +807,6 @@ pub(crate) fn prepare(
         command.args(args);
         return Ok(None);
     }
-    if inventory.names.is_empty() {
-        command.args(args);
-        return Ok(None);
-    }
     let parent = inventory.common.join("arc/command-hooks");
     fs::DirBuilder::new()
         .recursive(true)
@@ -721,7 +820,7 @@ pub(crate) fn prepare(
     let hooks = Hooks { directory };
     let executable = crate::context::shell_quote(&forwarder_executable()?.display().to_string());
     for name in inventory.names {
-        let target = inventory.directory.join(name);
+        let target = inventory.directory.join(&name);
         let script = format!(
             "#!/bin/sh\nexec {executable} {ENTRY} {} \"$@\"\n",
             crate::context::shell_quote(&target.display().to_string())
@@ -1271,5 +1370,133 @@ mod tests {
             );
         }
         assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
+    }
+
+    /// Claim I12: executable hook files outside the standard event inventory
+    /// still pass through confinement. Rejects a second allowlist of hook names.
+    #[test]
+    fn custom_hook_files_are_forwarded() {
+        if !supported() {
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        let hook = root.join(".git/hooks/custom-command");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let _scope = crate::confinement::Scope::new(&Some(crate::confinement::Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        }));
+        let output = custom_hook_command(root, "custom-command")
+            .output()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(decoy).unwrap(),
+            "retained",
+            "custom hook escaped"
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("ran confined"));
+    }
+
+    /// Claim I12: a native hook name cannot traverse out of forwarding controls.
+    /// Rejects treating an arbitrary relative path as a hook's filename.
+    #[test]
+    fn native_hook_names_cannot_traverse_directories() {
+        if !supported() {
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        let hook = root.join(".git/escaped-command");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let _scope = crate::confinement::Scope::new(&Some(crate::confinement::Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        }));
+        let result = custom_hook_command(root, "../escaped-command").output();
+        assert_eq!(
+            fs::read_to_string(decoy).unwrap(),
+            "retained",
+            "traversing hook escaped"
+        );
+        assert!(
+            result.is_err(),
+            "traversing hook name was admitted: {result:?}"
+        );
+        assert!(result.unwrap_err().to_string().contains("one filename"));
+    }
+
+    /// Claim: a destination without confinement keeps native hook authority
+    /// when the hook directory is executable but not readable. Rejects imposing
+    /// discovery requirements on a destination that grants ordinary authority.
+    #[test]
+    fn unconfined_destinations_keep_unreadable_hook_directories() {
+        // SAFETY: geteuid takes no arguments and has no side effects.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP hook-directory permissions: root bypasses read permissions");
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        let directory = root.join(".git/hooks");
+        fs::create_dir_all(&directory).unwrap();
+        let hook = directory.join("post-checkout");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf ordinary > '{}'\n", decoy.display()),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let permissions = fs::metadata(&directory).unwrap().permissions();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o111)).unwrap();
+        let _scope = crate::confinement::Scope::at(root, "HEAD");
+        let result = command(
+            root,
+            &["restore", "--source", "HEAD", "--worktree", "--", "."],
+        )
+        .output();
+        fs::set_permissions(directory, permissions).unwrap();
+        assert!(
+            result.as_ref().is_ok_and(|output| output.status.success()),
+            "ordinary hook was refused: {result:?}"
+        );
+        assert_eq!(fs::read_to_string(decoy).unwrap(), "ordinary");
+    }
+
+    fn custom_hook_command(root: &Path, name: &str) -> crate::project_command::Command {
+        let help = crate::child_command::command("git")
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["hook", "run", "-h"])
+            .output()
+            .unwrap();
+        let mut arguments = vec!["hook", "run"];
+        if String::from_utf8_lossy(&help.stdout).contains("allow-unknown-hook-name")
+            || String::from_utf8_lossy(&help.stderr).contains("allow-unknown-hook-name")
+        {
+            arguments.push("--allow-unknown-hook-name");
+        }
+        arguments.push(name);
+        command(root, &arguments)
     }
 }
