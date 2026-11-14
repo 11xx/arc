@@ -51,7 +51,12 @@ Started with `GIT_DIR` or `GIT_WORK_TREE` set, as Git sets them for hooks and
 variable. Every other variable through which Git selects a repository, index,
 object directory, common directory, namespace or configuration is removed from
 the harness's environment, so no fixture command, a helper's or one a test builds, can
-reach a repository the fixture did not create.
+reach a repository the fixture did not create. Git discovery never climbs into
+the checkout, the build's temporary directory or the system temporary directory
+from below, so Git in a directory a test forgot to initialize finds no
+repository; a test that means this checkout names it. Global configuration is a
+file of the harness process's own and system configuration is not read. A
+helper's own settings for its command still apply.
 
 CLI fixtures copy independent Git files with empty hooks and exclude locations,
 disable automatic maintenance and retain explicit collection and pruning. Child

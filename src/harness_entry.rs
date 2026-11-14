@@ -10,9 +10,19 @@
 //! process environment, which every helper and every test's own command
 //! inherits, so no command has to remove them itself.
 //!
+//! Two roads reach a real repository without a variable, and the entry closes
+//! both the same way. Git run in a directory that is not a repository walks
+//! up and adopts the first one it finds, so discovery never climbs into this
+//! checkout, the build's temporary directory or the system temporary
+//! directory from below: a test that means this checkout names it. And Git
+//! writes `--global` configuration to the invoking user's file, so the global
+//! file is one of this process's own and the system file is never read.
+//! Whatever a helper sets on its own command still applies.
+//!
 //! The unit harness and the CLI harness both compile this file.
 
 use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 /// Variables whose presence makes a harness refuse to start.
 pub(crate) const REFUSED: [&str; 2] = ["GIT_DIR", "GIT_WORK_TREE"];
@@ -67,6 +77,58 @@ extern "C" fn enter() {
     for name in inherited {
         std::env::remove_var(name);
     }
+    let ceilings = std::env::var_os("GIT_CEILING_DIRECTORIES")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(discovery_ceilings());
+    std::env::set_var(
+        "GIT_CEILING_DIRECTORIES",
+        std::env::join_paths(ceilings).expect("ceiling paths hold no separator"),
+    );
+    std::env::set_var("GIT_CONFIG_GLOBAL", own_global_config());
+    std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+}
+
+/// The directories Git discovery must not climb into from below, resolved,
+/// since Git compares them with the resolved working directory.
+fn discovery_ceilings() -> Vec<PathBuf> {
+    [
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()),
+        option_env!("CARGO_TARGET_TMPDIR").map(PathBuf::from),
+        Some(std::env::temp_dir()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| path.canonicalize().ok())
+    .collect()
+}
+
+/// A global configuration file belonging to this process, in a directory
+/// under the system temporary directory that the next harness to start
+/// removes once this process has exited.
+fn own_global_config() -> PathBuf {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let user = unsafe { libc::getuid() };
+    let parent = std::env::temp_dir().join(format!("arc-test-git-global-{user}"));
+    if let Ok(entries) = std::fs::read_dir(&parent) {
+        for entry in entries.flatten() {
+            let owner = entry.file_name().to_str().and_then(|n| n.parse().ok());
+            if owner.is_some_and(|pid| !process_exists(pid)) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let own = parent.join(std::process::id().to_string());
+    let _ = std::fs::remove_dir_all(&own);
+    std::fs::create_dir_all(&own).expect("the harness's global configuration directory");
+    own.join("gitconfig")
+}
+
+fn process_exists(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+    let signalled = unsafe { libc::kill(pid, 0) } == 0;
+    signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(test)]

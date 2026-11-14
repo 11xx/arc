@@ -134,3 +134,106 @@ fn inherited_git_selectors_never_reach_a_fixture_command() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The configuration file this checkout's repository shares with every one of
+/// its worktrees, named explicitly rather than discovered.
+fn checkout_config() -> PathBuf {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let common = git_out(
+        checkout,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    PathBuf::from(common).join("config")
+}
+
+/// Claim: Git run by a test in a plain directory inside this checkout, here
+/// under the build's `target/tmp`, finds no repository, so nothing it would
+/// write there can reach the checkout's shared configuration, which stays
+/// byte-identical. Rejects discovery climbing out of a directory a test forgot
+/// to initialize into the enclosing checkout.
+#[test]
+fn git_in_a_plain_directory_inside_the_checkout_finds_no_repository() {
+    let config = checkout_config();
+    let before = fs::read(&config).unwrap();
+    let plain = tempfile::Builder::new()
+        .prefix("plain-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let nested = plain.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    for cwd in [plain.path(), nested.as_path()] {
+        let found = Command::new("git")
+            .current_dir(cwd)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+        assert!(
+            !found.status.success(),
+            "Git in {cwd:?} found a repository: {}",
+            String::from_utf8_lossy(&found.stdout)
+        );
+    }
+    assert!(
+        fs::read(&config).unwrap() == before,
+        "the checkout's configuration changed"
+    );
+}
+
+/// Claim: `git config --global` from a test's own bare `git` writes a file of
+/// the harness's own, never the invoking user's global configuration, which
+/// stays byte-identical. The child harness runs under a stand-in home with no
+/// global configuration variable of its own, as a user's shell would start it.
+/// Rejects a test that forgets the helpers' `GIT_CONFIG_GLOBAL` rewriting the
+/// operator's identity or signing settings.
+#[test]
+fn git_config_global_from_a_bare_command_never_reaches_the_users_file() {
+    const NAME: &str =
+        "fixture_isolation::git_config_global_from_a_bare_command_never_reaches_the_users_file";
+    if std::env::var_os(CHILD).is_some() {
+        let own = TempDir::new().unwrap();
+        let written = Command::new("git")
+            .current_dir(own.path())
+            .args(["config", "--global", "user.name", "Fixture Global"])
+            .output()
+            .unwrap();
+        assert!(written.status.success(), "{written:?}");
+        return;
+    }
+    let real = std::env::var_os("HOME").map(PathBuf::from);
+    let real_files = |home: &Option<PathBuf>| {
+        home.iter()
+            .flat_map(|home| [home.join(".gitconfig"), home.join(".config/git/config")])
+            .map(|path| fs::read(&path).ok())
+            .collect::<Vec<_>>()
+    };
+    let real_before = real_files(&real);
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    fs::create_dir_all(home.join(".config/git")).unwrap();
+    fs::write(home.join(".gitconfig"), "[user]\n\tname = Operator\n").unwrap();
+    let stand_in = Some(home.clone());
+    let stand_in_before = real_files(&stand_in);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env(CHILD, "1")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .output()
+        .unwrap();
+    assert!(
+        real_files(&stand_in) == stand_in_before,
+        "a bare git config --global wrote the user's global configuration"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        real_files(&real) == real_before,
+        "the real global configuration changed"
+    );
+}
