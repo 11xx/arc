@@ -2840,12 +2840,12 @@ REVIEW COVERAGE AND DEBT
   `.arc/policy.toml` or the operator policy at
   `<git-common-dir>/arc/operator-policy.toml`. Both path lists apply, so a
   path declared dangerous by either file is dangerous. Integration reads
-  `.arc/policy.toml` from the change's target branch, wherever it is run. A change touching a declared
-  path needs a verdict from somebody other than its author; elsewhere a
-  self-recorded verdict satisfies the gate. `forbid_self_approval` refuses a
-  self-approval on those paths. `arc integrate --debt` still lands such a
-  change and leaves its review owed. Declare no danger paths and the
-  gate stays uniform. `arc begin --dangerous` raises a single change
+  `.arc/policy.toml` from the change's target branch, wherever it is run.
+  Under `forbid_self_approval`, a change touching a declared path needs a
+  verdict from somebody other than its author; elsewhere, or with it off, a
+  self-recorded verdict satisfies the gate. `arc integrate --debt` still
+  lands such a change and leaves its review owed. Declare no danger paths
+  and every change is in scope. `arc begin --dangerous` raises a single change
   whatever it turns out to touch, and nothing lowers it afterwards — a project
   decides its own gate in advance, rather than a change deciding it under
   pressure to ship. `arc check` names the rule that fired, and `arc doctor`
@@ -2997,22 +2997,24 @@ REVIEW COVERAGE AND DEBT
   present exactly when the independence is `ineligible`; in `/2` a file that
   clears is eligible on both answers, names no qualifier and names its
   reviewer's effort, and one that does not clear names a qualifier. An
-  `eligible` assessment is
-  refused on this kind, because there is no debt to record. A tier is
+  assessment whose `independence` is `eligible` is refused on this kind,
+  whatever its `findings` and `clears` say. A tier is
   routing's reading at the time it is read, so every read shows the record
   as its route version and basis say, never as current. Within the kind,
   `arc query --debt`, the inbox, catchup and the workspace backlog put a
   `below-floor` read first.
 
-  Under assessed ladder policy, a clearing agent audit discharges it without
+  Under assessed ladder policy, a clearing agent read discharges it without
   an assessment. Other cases retain the assessment requirements below; the
   clearance rule and all independent bars are in `arc guide debt-clearance`.
 
-  It clears with an audit that approves or requests changes:
-  `arc audit --assessment <file>` with `independence: eligible`, by an
-  auditor who is also independent of the
-  contributors and whom the assessment describes. This eligible, bound
-  assessment is required for a person's audit too. The assessment covers the
+  It clears with a read recorded since the declaration that approves or
+  requests changes under an assessment of its own with `independence:
+  eligible`: an audit (`arc audit --assessment <file>`) or a verdict on the
+  patchset that shipped (`arc review --assessment <file>`), by a reader who
+  is also independent of the contributors and whom the assessment
+  describes. This eligible, bound assessment is required for a person's read
+  too. The assessment covers the
   work: the `authors` it lists answer, through their `identities`,
   to the model of every `Implemented-by` line in the integrated range, at
   that line's effort. An author entry without an `effort` covers its model at
@@ -3040,8 +3042,8 @@ REVIEW COVERAGE AND DEBT
   named beside it) or `authors-unread` (the range's authors could not be read). An
   audit without an assessment, with an `ineligible` one, or
   whose binding is not `bound` is recorded, says why, and is listed beside the
-  obligation, which stays open; a verdict recorded since clears it only with
-  an eligible, bound assessment of its own (`arc review --assessment`).
+  obligation, which stays open; a verdict in the same case leaves it open
+  without being listed.
   `arc query --debt`, `arc catchup`, `arc inbox`, the workspace backlog, the
   debt advisory, `arc show` and `arc explain` show the qualifiers, the read's
   reviewer and model as its verdict recorded them, whether the assessment
@@ -3071,9 +3073,8 @@ REVIEW COVERAGE AND DEBT
   kept whole, the effort that string's trailing `#suffix` names, and the
   routing version `arc review --route-version` or `arc audit --route-version`
   declared. Production names who set the contract, who implemented it, and
-  the orchestrator and integrator the ledger records. Arc records coordinates
-  and holds no opinion: no score, no roster to join them against, and no
-  ordering between two models.
+  the orchestrator and integrator the ledger records. Arc records
+  coordinates; `arc guide boundaries` says what it never judges of them.
 
   A verdict can also be owed corroboration rather than absent. `arc review
   --verdict approved --provisional "<why>"` records one that gates like any
@@ -3179,10 +3180,10 @@ REVIEW COVERAGE AND DEBT
   head is its integrated commit, else the latest one recorded before the
   closure. Only a range with no patchset at all has nothing to compare: its
   read is recorded, and declared trailers alone neither discharge nor refuse
-  it. Outside assessed ladder clearance, ineligible-review additionally
-  requires an audit that approves or requests changes with an eligible,
-  bound assessment. Persons retain that requirement
-  under ladder clearance; `arc guide debt-obligations` owns the binding rule.
+  it. An ineligible-review debt also asks the read, audit or verdict alike,
+  for an eligible, bound assessment of its own: `arc guide debt-obligations`
+  states that rule, and `arc guide debt-clearance` the ladder agents it
+  exempts.
 
   Under `review_clearance = "assessed"` (`arc guide debt-clearance`) only a
   clearing read discharges a debt of any kind. Every other read since the
@@ -3346,7 +3347,7 @@ REVIEW CLEARANCE
 
   Persons are exempt from model-coordinate enforcement and capability floors;
   their identities must remain independent of the complete author set. A
-  person's audit of ineligible-review answers the assessment requirement in
+  person's read of ineligible-review answers the assessment requirement in
   `arc guide debt-obligations`. A clearing ladder agent needs no assessment to discharge that
   kind. No read before the debt declaration or without required coverage
   discharges it. An approval that only finds cannot gate integration;
@@ -6629,8 +6630,10 @@ WHAT ARC WILL NOT DO
     arc records declared identities and observed models, and holds no
       routing opinion.
     arc records the displaced owner and the reason a claim was taken over.
-    arc never scores the coordinates a debt records, joins them against a
-      roster, or orders two models against each other.
+    arc holds no ranking of its own: it never scores the coordinates a debt
+      records, and joins or orders models only against the dated ladder a
+      destination commits for assessed clearance (`arc guide
+      debt-clearance`).
     arc never infers an identity from a branch or a directory name.
     arc never claims a recipient read anything.
 

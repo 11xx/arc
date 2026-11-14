@@ -5994,7 +5994,7 @@ pub const CLEARANCE_REMEDY: &str = "agent-routing assess --purpose clearance --j
 /// read that approves or requests changes, recorded after it was declared, by an identity the ledger
 /// does not credit with the work, that routing did not assess `ineligible`;
 /// an `ineligible-review` debt also needs routing's eligible, bound
-/// assessment, which only an audit carries.
+/// assessment on that read, an audit's or a verdict's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DischargeBar {
     /// The read came from a replica this ledger grants no review authority.

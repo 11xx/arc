@@ -241,12 +241,19 @@ fn eligible_refusing_audit_discharges_ineligible_review() {
         output.contains("an audit that approves or requests changes"),
         "{output}"
     );
-    for topic in ["debt-obligations", "debt-recovery"] {
+    for (topic, remedy) in [
+        (
+            "debt-obligations",
+            "a read recorded since the declaration that approves or requests changes",
+        ),
+        (
+            "debt-recovery",
+            "that approves it or requests changes discharges it",
+        ),
+    ] {
         let guide = stdout(repo.arc(&repo.root).args(["guide", topic]));
-        assert!(
-            guide.contains("an audit that approves or requests changes"),
-            "{topic}: {guide}"
-        );
+        let prose = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(prose.contains(remedy), "{topic}: {guide}");
     }
 
     let output = audit(&repo, "ineligible", "Auditor", "changes-requested", &[]);

@@ -823,3 +823,50 @@ fn arc_debt_after_integration_takes_the_same_inputs() {
         serde_json::json!(["floor-unknown"])
     );
 }
+
+/// Claim: an `ineligible-review` declaration refuses an assessment whose
+/// `independence` is `eligible`, whatever its `/2` `findings` and `clears`
+/// answers say, and accepts a `/2` file whose `independence` is
+/// `ineligible`. Rejects a declaration that decides the refusal by `clears`.
+#[test]
+fn a_declaration_refuses_by_independence_whatever_clears_says() {
+    let repo = repo_forbidding_self_approval();
+    read_change(&repo, "independent");
+    let file = assessment_v2(
+        &repo,
+        "independent.json",
+        "eligible",
+        false,
+        &["below-clearance"],
+    );
+    integrate_ineligible(
+        &repo,
+        "independent",
+        &["--assessment", file.to_str().unwrap()],
+    )
+    .failure()
+    .stderr(predicates::str::contains("eligible"));
+    assert!(debt_of(&repo, "independent").is_null());
+
+    read_change(&repo, "dependent");
+    let file = assessment_v2(
+        &repo,
+        "dependent.json",
+        "ineligible",
+        false,
+        &["same-family"],
+    );
+    integrate_ineligible(
+        &repo,
+        "dependent",
+        &["--assessment", file.to_str().unwrap()],
+    )
+    .success();
+    let record = &debt_of(&repo, "dependent")["ineligible"];
+    assert_eq!(
+        record["qualifiers"],
+        serde_json::json!(["same-family"]),
+        "{record}"
+    );
+    assert_eq!(record["assessment"], "assessed", "{record}");
+}

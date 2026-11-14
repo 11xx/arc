@@ -1,4 +1,4 @@
-use super::common::{git, git_out, Repo};
+use super::common::{git, git_out, json_stdout, stdout, Repo};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -266,5 +266,55 @@ fn operator_policy_is_written_owner_only_whatever_the_umask() {
             0o600
         );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+/// Claim: a declared danger path requires a verdict from somebody other than
+/// the author only where `forbid_self_approval` is on; with it off, the
+/// author's own approval of a change touching that path satisfies the gate
+/// and the change integrates. Rejects a gate that treats danger alone as
+/// forbidding self-approval, and one that ignores danger under the policy.
+#[test]
+fn danger_requires_an_independent_verdict_only_under_forbid_self_approval() {
+    for forbid in [false, true] {
+        let repo = Repo::new();
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(
+            repo.root.join(".arc/policy.toml"),
+            format!(
+                "[policy]\nforbid_self_approval = {forbid}\n\n[danger]\npaths = [\"danger.txt\"]\n"
+            ),
+        )
+        .unwrap();
+        git(&repo.root, &["add", ".arc/policy.toml"]);
+        git(&repo.root, &["commit", "-m", "policy"]);
+        stdout(repo.arc(&repo.root).args(["begin", "risky"]));
+        let worktree = repo.home.join(".worktrees").join("repo-risky");
+        repo.commit(&worktree, "danger.txt", "danger\n", "feat: danger");
+        stdout(repo.arc(&worktree).args(["snapshot", "risky"]));
+        stdout(
+            repo.arc(&worktree)
+                .args(["review", "risky", "--verdict", "approved"]),
+        );
+
+        let status = json_stdout(repo.arc(&repo.root).args(["status", "risky", "--json"]));
+        assert_eq!(status["danger"]["dangerous"], true, "{status}");
+        assert_eq!(status["has_valid_approval"], !forbid, "{status}");
+        let integrated = repo
+            .arc(&repo.root)
+            .args(["integrate", "risky"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            integrated.status.success(),
+            !forbid,
+            "forbid={forbid}: {integrated:?}"
+        );
+        if forbid {
+            let reason = status["approval_rejection_reason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(reason.contains("self-approval"), "{status}");
+        }
     }
 }

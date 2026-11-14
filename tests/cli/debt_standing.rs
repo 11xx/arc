@@ -334,3 +334,50 @@ fn chain_reports_the_standing_beside_the_outstanding_flag() {
     );
     assert!(text.contains("audit: owed, not yet discharged"), "{text}");
 }
+
+/// Approve `slug` as `reviewer` at `fixture-other#high`, under an eligible
+/// assessment of that reviewer when `assessed`.
+fn review_at_other(repo: &Repo, slug: &str, reviewer: &str, assessed: bool) {
+    let mut command = repo.arc(&repo.root);
+    command.env("ARC_ACTOR", reviewer).args([
+        "--model",
+        "fixture-other#high",
+        "review",
+        slug,
+        "--verdict",
+        "approved",
+    ]);
+    if assessed {
+        let file = eligible_assessment(repo, &format!("{slug}-{reviewer}.json"));
+        command.arg("--assessment").arg(file);
+    }
+    command.assert().success();
+}
+
+/// Claim: an `ineligible-review` debt is discharged by a verdict on the
+/// shipped patchset, recorded after the declaration, that carries its own
+/// eligible, bound assessment, as an audit with one would; a verdict without
+/// one leaves the debt owed. Rejects a reader that only lets an audit
+/// discharge this kind, and one that lets any independent verdict do it.
+#[test]
+fn an_assessed_verdict_since_the_declaration_discharges_ineligible_review() {
+    let repo = repo_forbidding_self_approval();
+    let id = declared_ineligible(&repo, "verdict-cleared");
+    review_at_other(&repo, "verdict-cleared", "Plain", false);
+    review_at_other(&repo, "verdict-cleared", "Auditor", true);
+    integrate(&repo, "verdict-cleared");
+    assert_standing(&repo, "verdict-cleared", &id, Standing::Discharged);
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "verdict-cleared", "--json"]),
+    );
+    assert_eq!(
+        status["debt"]["discharged_by"]["reviewer"], "Auditor",
+        "{status}"
+    );
+
+    let id = declared_ineligible(&repo, "verdict-unassessed");
+    review_at_other(&repo, "verdict-unassessed", "Plain", false);
+    integrate(&repo, "verdict-unassessed");
+    assert_standing(&repo, "verdict-unassessed", &id, Standing::Owed);
+}
