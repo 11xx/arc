@@ -8701,13 +8701,16 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
 /// second. Consumption is what makes an artifact archivable, so anything that
 /// reads a body derived from the event stream must look in both: the events
 /// outlive the move and the reader would otherwise see the artifact vanish.
-fn artifact_body_path(hot: &Path, filename: &str) -> Option<PathBuf> {
-    let path = hot.join(filename);
-    if path.is_file() {
-        return Some(path);
-    }
-    let archived = archive_dir(hot).join(filename);
-    archived.is_file().then_some(archived)
+///
+/// Only a bare artifact filename names a body, judged from its characters
+/// before anything is read, and only a regular file there is one: a symbolic
+/// link is not followed. A name an event records, or a caller passes, never
+/// leads a reader out of the journal's directories.
+pub(crate) fn artifact_body_path(hot: &Path, filename: &str) -> Option<PathBuf> {
+    series::bare_artifact_kind(filename)?;
+    [hot.join(filename), archive_dir(hot).join(filename)]
+        .into_iter()
+        .find(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()))
 }
 
 fn question_text(
@@ -14925,7 +14928,7 @@ fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> Reconciliat
                     let successor = event.decision.as_deref().filter(|decision| {
                         outcome == "superseded"
                             && event.decision_project.is_none()
-                            && series::held_artifact(dir, decision).is_some()
+                            && artifact_body_path(dir, decision).is_some()
                     });
                     if let Some(successor) = successor {
                         facts

@@ -1937,3 +1937,141 @@ fn a_dispatch_shows_on_its_item_until_its_end_is_recorded() {
     );
     assert!(stage(&repo, &file, "i1").get("dispatch").is_none());
 }
+
+/// What a question body read outside a journal would print.
+const OUTSIDE_MARKER: &str = "OUTSIDE-THE-JOURNAL-MARKER";
+
+/// Append to the journal at `dir` one copy of its first `question` event per
+/// name in `files`, each naming that file and a question id of its own, and
+/// return the ids in order.
+fn forge_questions(dir: &Path, files: &[String]) -> Vec<String> {
+    let template = journal_event_log(dir)
+        .into_iter()
+        .find(|event| event["event"] == "question")
+        .unwrap();
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("events.jsonl"))
+        .unwrap();
+    files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let id = format!("q-forged{index}");
+            let mut event = template.clone();
+            event["file"] = file.as_str().into();
+            event["question_id"] = id.as_str().into();
+            use std::io::Write;
+            writeln!(log, "{event}").unwrap();
+            id
+        })
+        .collect()
+}
+
+/// A discussion-shaped file outside every journal whose questions all read
+/// as the marker, and the names a recorded question can reach it by from
+/// the journal at `dir`: its absolute path, a path climbing out of the
+/// journal, and a discussion-named symbolic link inside the journal.
+fn outside_discussions(repo: &Repo, dir: &Path, ids: &[&str]) -> Vec<String> {
+    let name = "20261114T000000Z-outside-discussion.md";
+    let mut body = String::from("# Outside\n");
+    for id in ids {
+        body.push_str(&format!("\n### Question {id}\n\n{OUTSIDE_MARKER}\n"));
+    }
+    let outside = repo.home.join(name);
+    fs::write(&outside, &body).unwrap();
+    fs::write(dir.parent().unwrap().join(name), &body).unwrap();
+    let linked = "20261114T000001Z-linked-discussion.md";
+    std::os::unix::fs::symlink(&outside, dir.join(linked)).unwrap();
+    vec![
+        outside.display().to_string(),
+        format!("../{name}"),
+        linked.to_string(),
+    ]
+}
+
+/// Claim: a question's body is read only from a bare artifact filename that
+/// is a regular file in its journal or that journal's cold archive. A
+/// recorded question naming an absolute path, a path climbing out of the
+/// journal or a symbolic link inside it is shown without a heading and
+/// fails nothing: `arc progress` in every form, `arc progress wait`, and the
+/// related-series projection of another project's waiting item print none
+/// of what such a file holds. Rejects a question body read through a name
+/// that leads out of the journal's directories.
+#[test]
+fn a_question_body_is_never_read_from_outside_its_journal() {
+    let repo = Repo::new();
+    start(&repo, &repo.root, "held", &["Blocked"]);
+    let (discussion, question) = open_question(&repo, "pick-a-store");
+    let dir = journal_dir(&repo, &repo.root);
+    let ids = ["q-forged0", "q-forged1", "q-forged2"];
+    let names = outside_discussions(&repo, &dir, &ids);
+    assert_eq!(forge_questions(&dir, &names), ids);
+
+    for form in [&[][..], &["--plain"], &["--json"]] {
+        let printed = progress(&repo, &repo.root, form);
+        assert!(!printed.contains(OUTSIDE_MARKER), "{printed}");
+        assert!(printed.contains("q-forged2"), "{printed}");
+    }
+    let waited = progress(
+        &repo,
+        &repo.root,
+        &["wait", "held", "i1", &discussion, "--question", &question],
+    );
+    assert!(!waited.contains(OUTSIDE_MARKER), "{waited}");
+
+    // Another project's item in flight that a forged event says waits on
+    // the question behind its symbolic link.
+    let other = sibling_project(&repo, "other");
+    let there = start(&repo, &other, "there", &["Remote"]);
+    let change = begin_change_in(&repo, &other, "remote-work");
+    progress(&repo, &other, &["link", "there", "i1", &change]);
+    let other_dir = journal_dir(&repo, &other);
+    fs::write(
+        other_dir.join("20261114T000002Z-real-discussion.md"),
+        "# Real\n",
+    )
+    .unwrap();
+    let mut seed = journal_event_log(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "question")
+        .unwrap();
+    seed["file"] = "20261114T000002Z-real-discussion.md".into();
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(other_dir.join("events.jsonl"))
+        .unwrap();
+    use std::io::Write;
+    writeln!(log, "{seed}").unwrap();
+    drop(log);
+    let names = outside_discussions(&repo, &other_dir, &ids);
+    forge_questions(&other_dir, &names);
+    let mut wait = journal_event_log(&other_dir)
+        .into_iter()
+        .find(|event| event["event"] == "item-linked")
+        .unwrap();
+    wait["event"] = "item-waiting".into();
+    wait.as_object_mut().unwrap().remove("change");
+    wait["waits_on"] = serde_json::json!({ "file": names[2], "question": "q-forged2" });
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(other_dir.join("events.jsonl"))
+        .unwrap();
+    writeln!(log, "{wait}").unwrap();
+    drop(log);
+    progress(&repo, &repo.root, &["relate", "held", "other::there"]);
+    for form in [&[][..], &["--plain"], &["--json"]] {
+        let printed = progress(&repo, &repo.root, form);
+        assert!(!printed.contains(OUTSIDE_MARKER), "{printed}");
+        assert!(printed.contains("Remote"), "{printed}");
+    }
+    let json = report(&repo, &repo.root, &[]);
+    let related = json["related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|related| related["file"] == there.as_str())
+        .unwrap();
+    assert_eq!(related["in_flight"][0]["waiting"]["question"], "q-forged2");
+    assert!(related["in_flight"][0]["waiting"]["heading"].is_null());
+}

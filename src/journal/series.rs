@@ -13,7 +13,7 @@
 //! whose `decision` names the conclusion.
 
 use super::{
-    append_event, archive_dir, create_artifact, heading_from_topic, lock_journal_transition,
+    append_event, create_artifact, heading_from_topic, lock_journal_transition,
     parse_artifact_name, resolve_dir, valid_topic, JournalEvent,
 };
 use crate::commands::Ctx;
@@ -725,15 +725,6 @@ pub(crate) fn bare_artifact_kind(name: &str) -> Option<String> {
     parse_artifact_name(name).map(|(_, _, kind)| kind)
 }
 
-/// Whether `name` is a bare artifact filename whose body is a regular file in
-/// the journal at `dir` or its cold archive. A symbolic link is not one.
-pub(crate) fn held_artifact(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
-    bare_artifact_kind(name)?;
-    [dir.join(name), archive_dir(dir).join(name)]
-        .into_iter()
-        .find(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()))
-}
-
 /// An artifact a write names on the command line, as a path inside this
 /// journal. Only a bare artifact filename of `kind` is accepted, decided from
 /// the name's characters before anything is read; the name must then be a
@@ -750,17 +741,12 @@ fn named_artifact(dir: &Path, name: &str, kind: &str, flag: &str) -> Result<std:
     if found != kind {
         bail!("{flag} takes a {kind} artifact's filename; {name} is a {found}");
     }
-    for candidate in [dir.join(name), archive_dir(dir).join(name)] {
-        match std::fs::symlink_metadata(&candidate) {
-            Ok(metadata) if metadata.is_file() => return Ok(candidate),
-            Ok(_) => bail!("{} is not a regular file", candidate.display()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", candidate.display()))
-            }
-        }
-    }
-    bail!("no {kind} {name} in {} or its cold archive", dir.display())
+    super::artifact_body_path(dir, name).with_context(|| {
+        format!(
+            "no {kind} {name} as a regular file in {} or its cold archive",
+            dir.display()
+        )
+    })
 }
 
 /// Where an added or moved item goes, checked against the list.
