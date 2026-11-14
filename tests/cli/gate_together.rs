@@ -783,3 +783,35 @@ fn landing_coalescing_preserves_lock_and_admission_requirements() {
         }
     }
 }
+
+/// I5: measured concurrent batches cannot excuse unattributed sibling CPU load.
+/// Rejects treating an accepted batch's own gates as independent host contention.
+#[test]
+fn a_measured_batch_cannot_excuse_its_own_cpu_load() {
+    let (repo, _, wt) = fixture("", "1s", "1s");
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "900")
+        .env(
+            "ARC_TEST_GATE_WORK",
+            super::gate_work::readings(Some(1000), 1000),
+        )
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success();
+    measure(&repo, &wt);
+    repo.arc(&wt)
+        .env("BATCH_MODE", "together")
+        .env("ARC_TEST_COMMAND_RUN_MS", "1100")
+        .env(
+            "ARC_TEST_GATE_WORK",
+            super::gate_work::readings(Some(1000), 5000),
+        )
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .code(1);
+    let state = show(&repo, &wt);
+    for entry in entries(&state).into_iter().rev().take(2) {
+        assert_eq!(entry["budget_at_run"]["verdict"], "over-budget");
+        assert_eq!(entry["work_conditions"]["concurrent_unattributed"], true);
+    }
+}

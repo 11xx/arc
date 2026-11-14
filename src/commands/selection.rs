@@ -270,6 +270,9 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         eprintln!("running: {}", gate.command);
         let started = std::time::Instant::now();
         let (limit, origin) = gate.execution_limit()?;
+        let before = gitio::worktree_tree(&scratch.path)?;
+        let clean =
+            before == tree && gitio::dirt(&scratch.path).is_ok_and(|d| !d.tracked && !d.untracked);
         let mut run = run_gate_budgeted(
             &gate.command,
             gate.timings.as_deref(),
@@ -282,13 +285,22 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
                 .map(|request| (request, st.change_id.as_str(), name.as_str())),
         )?;
         let duration_ms = started.elapsed().as_millis() as u64;
+        run.timing.work_tree = Some(Box::new(crate::gate_work::Tree {
+            tree: before.clone(),
+            revision: None,
+            clean,
+            unmoved: gitio::worktree_tree(&scratch.path)? == before,
+            parallel_probe: false,
+        }));
         work_references.attach(
             &store,
-            crate::gate_work::Identity {
-                gate: name.clone(),
-                declaration: crate::gates::declaration_identity(gate),
-                hostname: hostname.clone(),
-            },
+            &ctx.cwd,
+            crate::gate_work::Identity::new(
+                name.clone(),
+                crate::gates::declaration_identity(gate),
+                hostname.clone(),
+                &run.timing,
+            ),
             gate.budget,
             &mut run.timing,
         )?;

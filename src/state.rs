@@ -2033,6 +2033,9 @@ impl ChangeState {
         }
         for verification in &mut self.verifications {
             rewrites.advance(&mut verification.revision)?;
+            if let Some(tree) = &mut verification.timing.work_tree {
+                rewrites.advance_opt(&mut tree.revision)?;
+            }
             rewrites.advance_opt(&mut verification.against_target)?;
             if let Some(falsification) = &mut verification.falsification {
                 rewrites.advance(&mut falsification.revision)?;

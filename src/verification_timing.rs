@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerificationTiming {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub work_copied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_conditions: Option<Box<crate::gate_work::Conditions>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_tree: Option<Box<crate::gate_work::Tree>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_cpu: Option<Box<crate::gate_work::Host>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,4 +137,8 @@ pub(crate) fn physical_core_count() -> Option<usize> {
         ));
     }
     (!cores.is_empty()).then_some(cores.len())
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }

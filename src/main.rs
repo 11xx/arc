@@ -6489,6 +6489,7 @@ fn main() {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(exclusive::WAITER)) {
         exclusive::waiter_main();
     }
+    gate_work::begin_invocation();
     perf::start();
     let invocation = (|| -> Result<()> {
         let cwd = gitio::invocation_directory(&std::env::current_dir()?)?;

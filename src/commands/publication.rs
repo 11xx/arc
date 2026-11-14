@@ -159,6 +159,7 @@ pub fn publication(
         let result = if reused && clean_before {
             let receipt = &reusable.expect("reusable publication").0[name];
             timing = receipt.timing.clone();
+            timing.work_copied = true;
             hostname = receipt.hostname.clone();
             output_artifact = receipt.output_artifact.clone();
             println!("gate {name}: skipped (publication pass at target tree)");
@@ -177,21 +178,6 @@ pub fn publication(
                     .map(|request| (request, "publication", name.as_str())),
             )?;
             timing = run.timing;
-            work_references.attach(
-                &store,
-                crate::gate_work::Identity {
-                    gate: name.clone(),
-                    declaration: gates::declaration_identity(gate),
-                    hostname: super::local_hostname(),
-                },
-                gate.budget,
-                &mut timing,
-            )?;
-            timing.execution_limit_ms = limit;
-            timing.execution_limit_origin = origin;
-            timing.budget_at_run = gate
-                .budget
-                .map(|_| Box::new(gate.budget_judgement(&timing)));
             output_artifact = run.output_artifact;
             if let Some(tail) = run.output_tail {
                 if !tail.is_empty() {
@@ -203,6 +189,30 @@ pub fn publication(
                 &["status", "--porcelain=v1", "--untracked-files=normal"],
             )?
             .is_empty();
+            timing.work_tree = Some(Box::new(crate::gate_work::Tree {
+                tree: tree.clone(),
+                revision: Some(revision.clone()),
+                clean: clean_before,
+                unmoved: clean_after && gitio::head(&scratch.path)? == revision,
+                parallel_probe: false,
+            }));
+            work_references.attach(
+                &store,
+                &ctx.cwd,
+                crate::gate_work::Identity::new(
+                    name.clone(),
+                    gates::declaration_identity(gate),
+                    super::local_hostname(),
+                    &timing,
+                ),
+                gate.budget,
+                &mut timing,
+            )?;
+            timing.execution_limit_ms = limit;
+            timing.execution_limit_origin = origin;
+            timing.budget_at_run = gate
+                .budget
+                .map(|_| Box::new(gate.budget_judgement(&timing)));
             match VerifyResult::observed(run.status.success(), run.status.code(), run.timed_out) {
                 VerifyResult::Pass
                     if !(clean_before

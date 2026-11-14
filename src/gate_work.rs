@@ -6,20 +6,128 @@ use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Host {
+    pub logical_cpus: u64,
+    pub cpu_model: String,
+    pub unrestricted: bool,
+}
+impl Host {
+    pub fn read() -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+            let cpu_model = info
+                .lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| matches!(k.trim(), "model name" | "Processor"))?
+                .1
+                .trim()
+                .to_owned();
+            let logical_cpus =
+                u64::try_from(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }).ok()?;
+            let mut mask = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+            if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&mask), &mut mask) } != 0 {
+                return None;
+            }
+            Some(Self {
+                logical_cpus,
+                cpu_model,
+                unrestricted: unsafe { libc::CPU_COUNT(&mask) } as u64 == logical_cpus,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Identity {
     pub gate: String,
     pub declaration: String,
     pub hostname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Host>,
+}
+impl Identity {
+    pub fn new(
+        gate: String,
+        declaration: String,
+        hostname: String,
+        timing: &VerificationTiming,
+    ) -> Self {
+        Self {
+            gate,
+            declaration,
+            hostname,
+            host: timing.host_cpu.as_deref().cloned(),
+        }
+    }
 }
 
+/// Recorded thresholds belong to the rule that produced the receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Rule {
+    pub version: u64,
+    pub instruction_ceiling_basis_points: u64,
+    pub minimum_instruction_rate_basis_points: u64,
+    pub minimum_other_basis_points: u64,
+    pub wall_slack_basis_points: u64,
+    pub minimum_prior_window_ms: u64,
+}
+impl Default for Rule {
+    fn default() -> Self {
+        Self {
+            version: 2,
+            instruction_ceiling_basis_points: 10300,
+            minimum_instruction_rate_basis_points: 1000,
+            minimum_other_basis_points: 2500,
+            wall_slack_basis_points: 11000,
+            minimum_prior_window_ms: 100,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Window {
+    pub busy_ms: u64,
+    pub capacity_ms: u64,
+    pub arc_cpu_ms: u64,
+    pub elapsed_ms: u64,
+}
+impl Window {
+    fn share(&self) -> Option<u64> {
+        (self.capacity_ms > 0 && self.busy_ms <= self.capacity_ms).then(|| {
+            (u128::from(self.busy_ms.saturating_sub(self.arc_cpu_ms)) * 10000
+                / u128::from(self.capacity_ms)) as u64
+        })
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Conditions {
+    pub rule: Rule,
+    pub prior: Option<Window>,
+    pub concurrent_unattributed: bool,
+    pub invocation_cpu_ms: Option<u64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tree {
+    pub tree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub clean: bool,
+    pub unmoved: bool,
+    pub parallel_probe: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reference {
     pub execution: Box<Event>,
     pub digest: String,
     pub instructions: u64,
     pub run_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<[String; 2]>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Excuse {
     pub reference_event_id: String,
@@ -34,31 +142,81 @@ pub fn was_excused(timing: &VerificationTiming) -> bool {
         .as_ref()
         .is_some_and(|b| b.verdict == crate::gate_budget::BudgetVerdict::Excused)
 }
-
 pub fn other_cpu_basis_points(timing: &VerificationTiming) -> Option<u64> {
     let capacity = timing.host_capacity_ms?;
-    if capacity == 0 {
-        return None;
-    }
-    let own = timing.cpu_user_ms?.checked_add(timing.cpu_system_ms?)?;
+    let tree = timing.cpu_user_ms?.checked_add(timing.cpu_system_ms?)?;
+    let own = if let Some(conditions) = &timing.work_conditions {
+        tree.max(conditions.invocation_cpu_ms?)
+    } else {
+        tree
+    };
     let busy = timing.host_busy_ms?;
-    if busy > timing.host_capacity_ms? {
+    if capacity == 0 || busy > capacity {
         return None;
     }
-    let other = busy.saturating_sub(own);
-    Some((u128::from(other) * 10_000 / u128::from(capacity)) as u64)
+    Some((u128::from(busy.saturating_sub(own)) * 10000 / u128::from(capacity)) as u64)
+}
+
+fn plausible_rate(
+    count: u64,
+    reference_user: u64,
+    reference_count: u64,
+    user: u64,
+    floor: u64,
+) -> bool {
+    let left = u128::from(count)
+        .checked_mul(u128::from(reference_user))
+        .and_then(|n| n.checked_mul(10000));
+    let right = u128::from(reference_count)
+        .checked_mul(u128::from(user))
+        .and_then(|n| n.checked_mul(u128::from(floor)));
+    left.zip(right).is_some_and(|(l, r)| l >= r)
 }
 
 pub fn excuse(timing: &VerificationTiming, budget: u64) -> Option<Excuse> {
     let reference = timing.work_reference.as_ref()?;
     let instructions = timing.instructions?;
     let share = other_cpu_basis_points(timing)?;
-    if reference.run_ms > budget
-        || reference.instructions == 0
-        || u128::from(instructions) * 100 > u128::from(reference.instructions) * 103
-        || share < 2500
-    {
+    if reference.run_ms > budget || reference.instructions == 0 {
         return None;
+    }
+    if let Some(conditions) = &timing.work_conditions {
+        let rule = &conditions.rule;
+        let prior = conditions.prior.as_ref()?;
+        let identity = timing.work_identity.as_ref()?;
+        let host = identity.host.as_ref()?;
+        let source = reference_timing(&reference.execution, identity)?;
+        let user_ms = timing.cpu_user_ms.filter(|n| *n > 0)?;
+        let source_user_ms = source.cpu_user_ms.filter(|n| *n > 0)?;
+        if rule.version != 2
+            || !host.unrestricted
+            || conditions.concurrent_unattributed
+            || prior.elapsed_ms < rule.minimum_prior_window_ms
+            || prior.share()? < rule.minimum_other_basis_points
+            || share < rule.minimum_other_basis_points
+            || share >= 10000
+            || instructions == 0
+            || u128::from(instructions) * 10000
+                > u128::from(reference.instructions)
+                    * u128::from(rule.instruction_ceiling_basis_points)
+            || !plausible_rate(
+                instructions,
+                source_user_ms,
+                reference.instructions,
+                user_ms,
+                rule.minimum_instruction_rate_basis_points,
+            )
+            || u128::from(timing.run_ms?) * u128::from(10000 - share)
+                > u128::from(reference.run_ms) * u128::from(rule.wall_slack_basis_points)
+        {
+            return None;
+        }
+    } else {
+        // Version 1 receipts retain the rule that produced their judgement.
+        if u128::from(instructions) * 100 > u128::from(reference.instructions) * 103 || share < 2500
+        {
+            return None;
+        }
     }
     Some(Excuse {
         reference_event_id: reference.execution.event_id.clone(),
@@ -80,11 +238,21 @@ fn observations(event: &Event) -> Vec<(&str, &VerificationTiming)> {
             exit_code: Some(0),
             attested: false,
             timed_out: false,
+            tested_tree,
+            worktree_dirty,
+            tree_moved,
             ..
         } if timing.work_identity.as_ref().is_some_and(|id| {
             id.gate == *gate
                 && declaration.as_ref().is_none_or(|d| id.declaration == *d)
                 && id.hostname == *hostname
+                && (id.host.is_none()
+                    || (*worktree_dirty == Some(false)
+                        && !*tree_moved
+                        && timing
+                            .work_tree
+                            .as_ref()
+                            .is_some_and(|t| tested_tree.as_ref() == Some(&t.tree))))
         }) =>
         {
             vec![(gate, timing)]
@@ -122,7 +290,13 @@ fn reference_timing<'a>(event: &'a Event, identity: &Identity) -> Option<&'a Ver
     observations(event).into_iter().find_map(|(gate, timing)| {
         (gate == identity.gate
             && timing.work_identity.as_deref() == Some(identity)
-            && !was_excused(timing))
+            && !was_excused(timing)
+            && !timing.work_copied
+            && (identity.host.is_none()
+                || timing
+                    .work_tree
+                    .as_ref()
+                    .is_some_and(|t| t.clean && t.unmoved && !t.parallel_probe)))
         .then_some(timing)
     })
 }
@@ -137,6 +311,7 @@ impl References {
     pub fn attach(
         &mut self,
         store: &crate::store::Store,
+        cwd: &std::path::Path,
         identity: Identity,
         budget: Option<u64>,
         timing: &mut VerificationTiming,
@@ -156,6 +331,7 @@ impl References {
             for change in store.list_change_ids()? {
                 events.extend(store.load_events(&change)?);
             }
+            events.sort_by(|a, b| (b.created_at, &b.event_id).cmp(&(a.created_at, &a.event_id)));
             self.events = Some(events);
         }
         let best = self
@@ -163,23 +339,68 @@ impl References {
             .as_ref()
             .expect("loaded history")
             .iter()
-            .filter_map(|event| {
+            .find_map(|event| {
                 if event.created_at > chrono::Utc::now() {
                     return None;
                 }
                 let source = reference_timing(event, &identity)?;
                 let instructions = source.instructions.filter(|n| *n > 0)?;
                 let run_ms = source.run_ms.filter(|r| *r <= budget)?;
-                Some((instructions, &event.event_id, run_ms, event))
-            })
-            .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        if let Some((instructions, _, run_ms, event)) = best {
+                let ancestry = if identity.host.is_some() {
+                    let destination = timing.work_tree.as_ref()?;
+                    let origin = source.work_tree.as_ref()?;
+                    if origin.tree == destination.tree {
+                        None
+                    } else if crate::gitio::is_ancestor(
+                        cwd,
+                        &store
+                            .rewrites()
+                            .ok()?
+                            .current(origin.revision.as_deref()?)
+                            .ok()?,
+                        destination.revision.as_deref()?,
+                    )
+                    .unwrap_or(false)
+                    {
+                        Some([origin.revision.clone()?, destination.revision.clone()?])
+                    } else {
+                        return None;
+                    }
+                } else {
+                    None
+                };
+                Some((instructions, run_ms, event, ancestry))
+            });
+        if let Some((instructions, run_ms, event, ancestry)) = best {
             timing.work_reference = Some(Box::new(Reference {
                 execution: Box::new(event.clone()),
                 digest: event_digest(event),
                 instructions,
                 run_ms,
+                ancestry,
             }));
+        }
+        if let Some(reference) = &timing.work_reference {
+            if let (Some(c), Some(instructions), Some(user), Some(source_user)) = (
+                &timing.work_conditions,
+                timing.instructions,
+                timing.cpu_user_ms,
+                reference_timing(&reference.execution, &identity).and_then(|s| s.cpu_user_ms),
+            ) {
+                if instructions == 0
+                    || user == 0
+                    || source_user == 0
+                    || !plausible_rate(
+                        instructions,
+                        source_user,
+                        reference.instructions,
+                        user,
+                        c.rule.minimum_instruction_rate_basis_points,
+                    )
+                {
+                    timing.instructions = None;
+                }
+            }
         }
         Ok(())
     }
@@ -194,7 +415,11 @@ fn known_host(host: &str) -> bool {
 }
 
 pub fn payload_uses_work(payload: &Payload) -> bool {
-    let uses = |timing: &VerificationTiming| timing.work_reference.is_some() || was_excused(timing);
+    let uses = |timing: &VerificationTiming| {
+        (timing.work_copied && timing.work_identity.is_some())
+            || timing.work_reference.is_some()
+            || was_excused(timing)
+    };
     match payload {
         Payload::VerificationRecorded { timing, .. }
         | Payload::CandidateVerified { timing, .. } => uses(timing),
@@ -213,6 +438,16 @@ pub fn validate_timing(
     hostname: Option<&str>,
     timing: &VerificationTiming,
 ) -> Result<()> {
+    if let Some(tree) = &timing.work_tree {
+        ensure!(
+            crate::gitio::is_full_object_id(&tree.tree)
+                && tree
+                    .revision
+                    .as_deref()
+                    .is_none_or(crate::gitio::is_full_object_id),
+            "invalid work tree coordinate"
+        );
+    }
     if let Some(identity) = &timing.work_identity {
         ensure!(
             gate == Some(identity.gate.as_str())
@@ -229,6 +464,41 @@ pub fn validate_timing(
             .is_none_or(|(b, c)| b <= c),
         "invalid host CPU accounting"
     );
+    if let Some(conditions) = &timing.work_conditions {
+        let r = &conditions.rule;
+        ensure!(
+            r.version == 2
+                && r.instruction_ceiling_basis_points >= 10000
+                && r.minimum_instruction_rate_basis_points > 0
+                && r.minimum_instruction_rate_basis_points <= 10000
+                && r.minimum_other_basis_points > 0
+                && r.minimum_other_basis_points < 10000
+                && r.wall_slack_basis_points >= 10000
+                && r.minimum_prior_window_ms > 0,
+            "invalid busy-host rule thresholds"
+        );
+        ensure!(
+            conditions
+                .prior
+                .as_ref()
+                .is_none_or(|w| w.busy_ms <= w.capacity_ms),
+            "invalid prior host accounting"
+        );
+    }
+    if let Some(identity) = &timing.work_identity {
+        if let Some(host) = &identity.host {
+            ensure!(
+                timing.work_conditions.is_some(),
+                "host identity has no rule version"
+            );
+            ensure!(
+                host.logical_cpus > 0
+                    && !host.cpu_model.trim().is_empty()
+                    && timing.host_cpu.as_deref() == Some(host),
+                "invalid host CPU identity"
+            );
+        }
+    }
     if let Some(reference) = &timing.work_reference {
         let identity = timing
             .work_identity
@@ -252,6 +522,22 @@ pub fn validate_timing(
         let source_timing = reference_timing(source, identity).context(
             "work reference is not a direct unexcused pass of this declaration and host",
         )?;
+        if timing.work_conditions.is_some() {
+            let origin = source_timing
+                .work_tree
+                .as_ref()
+                .context("reference has no tree")?;
+            let destination = timing.work_tree.as_ref().context("run has no tree")?;
+            ensure!(
+                origin.tree == destination.tree
+                    || reference
+                        .ancestry
+                        .as_ref()
+                        .is_some_and(|a| Some(&a[0]) == origin.revision.as_ref()
+                            && Some(&a[1]) == destination.revision.as_ref()),
+                "work reference has no destination lineage"
+            );
+        }
         ensure!(
             source_timing.instructions == Some(reference.instructions)
                 && reference.instructions > 0
@@ -297,8 +583,25 @@ pub fn validate_event(event: &Event) -> Result<()> {
             hostname,
             timing,
             attested,
+            tested_tree,
+            revision,
+            worktree_dirty,
+            tree_moved,
             ..
         } => {
+            ensure!(
+                !timing.work_copied,
+                "direct verification marked as copied work"
+            );
+            if let Some(tree) = &timing.work_tree {
+                ensure!(
+                    tested_tree.as_ref().is_none_or(|t| t == &tree.tree)
+                        && tree.revision.as_ref() == Some(revision)
+                        && tree.clean == (*worktree_dirty == Some(false))
+                        && tree.unmoved == !*tree_moved,
+                    "work tree does not match execution"
+                );
+            }
             ensure!(
                 !*attested || timing.work_reference.is_none(),
                 "attestation has a work reference"
@@ -314,10 +617,29 @@ pub fn validate_event(event: &Event) -> Result<()> {
             gate,
             hostname,
             timing,
+            tree,
             ..
-        } => validate(Some(gate), None, Some(hostname), timing)?,
-        Payload::PublicationVerified { gates, .. } => {
+        } => {
+            ensure!(
+                timing.work_tree.as_ref().is_none_or(|t| &t.tree == tree),
+                "candidate work tree mismatch"
+            );
+            ensure!(
+                !timing.work_copied,
+                "candidate execution marked as copied work"
+            );
+            validate(Some(gate), None, Some(hostname), timing)?;
+        }
+        Payload::PublicationVerified { gates, tree, .. } => {
             for (gate, receipt) in gates {
+                ensure!(
+                    receipt
+                        .timing
+                        .work_tree
+                        .as_ref()
+                        .is_none_or(|t| &t.tree == tree),
+                    "publication work tree mismatch"
+                );
                 validate(
                     Some(gate),
                     None,
@@ -373,10 +695,15 @@ impl HostSample {
                 .count() as u64,
         })
     }
-    pub fn finish(self, timing: &mut VerificationTiming) {
+    pub fn finish(&self, timing: &mut VerificationTiming) {
         let Some(end) = Self::start() else {
             return;
         };
+        if timing.host_cpu.as_deref().is_some_and(|host| {
+            Some(host) != Host::read().as_ref() || host.logical_cpus != self.cores
+        }) {
+            return;
+        }
         if self.cores == 0
             || self.cores != end.cores
             || self.ticks_per_second != end.ticks_per_second
@@ -410,6 +737,8 @@ pub fn test_observations(timing: &mut VerificationTiming) -> Result<()> {
             host_capacity_ms: Option<u64>,
             cpu_user_ms: Option<u64>,
             cpu_system_ms: Option<u64>,
+            prior: Option<Window>,
+            host: Option<Host>,
         }
         let value: Readings =
             serde_json::from_str(&raw).context("invalid test gate work observations")?;
@@ -418,8 +747,74 @@ pub fn test_observations(timing: &mut VerificationTiming) -> Result<()> {
         timing.host_capacity_ms = value.host_capacity_ms;
         timing.cpu_user_ms = value.cpu_user_ms;
         timing.cpu_system_ms = value.cpu_system_ms;
+        timing.host_cpu = value.host.or_else(Host::read).map(Box::new);
+        timing.work_conditions = Some(Box::new(Conditions {
+            rule: Rule::default(),
+            prior: value.prior,
+            concurrent_unattributed: false,
+            invocation_cpu_ms: value
+                .cpu_user_ms
+                .zip(value.cpu_system_ms)
+                .and_then(|(u, s)| u.checked_add(s)),
+        }));
     }
     #[cfg(not(debug_assertions))]
     let _ = timing;
     Ok(())
+}
+
+struct Invocation {
+    host: HostSample,
+    arc_cpu_ms: u64,
+}
+static INVOCATION: std::sync::OnceLock<Option<Invocation>> = std::sync::OnceLock::new();
+pub fn arc_cpu_ms() -> Option<u64> {
+    let mut total = 0_u64;
+    for who in [libc::RUSAGE_SELF, libc::RUSAGE_CHILDREN] {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: getrusage initializes usage on success.
+        if unsafe { libc::getrusage(who, usage.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let usage = unsafe { usage.assume_init() };
+        for time in [usage.ru_utime, usage.ru_stime] {
+            total = total
+                .checked_add(u64::try_from(time.tv_sec).ok()?.checked_mul(1000)?)?
+                .checked_add(u64::try_from(time.tv_usec).ok()? / 1000)?;
+        }
+    }
+    Some(total)
+}
+pub fn begin_invocation() {
+    INVOCATION.get_or_init(|| {
+        Some(Invocation {
+            host: HostSample::start()?,
+            arc_cpu_ms: arc_cpu_ms()?,
+        })
+    });
+}
+pub fn conditions_before_spawn() -> Conditions {
+    let prior = INVOCATION.get().and_then(Option::as_ref).and_then(|start| {
+        let mut timing = VerificationTiming::default();
+        start.host.finish(&mut timing);
+        Some(Window {
+            busy_ms: timing.host_busy_ms?,
+            capacity_ms: timing.host_capacity_ms?,
+            arc_cpu_ms: arc_cpu_ms()?.checked_sub(start.arc_cpu_ms)?,
+            elapsed_ms: (crate::verification_timing::monotonic_ns()?
+                .checked_sub(start.host.started_ns)?)
+                / 1_000_000,
+        })
+    });
+    Conditions {
+        rule: Rule::default(),
+        prior,
+        concurrent_unattributed: false,
+        invocation_cpu_ms: None,
+    }
+}
+pub fn refuse_unattributed_batch(timing: &mut VerificationTiming) {
+    if let Some(c) = &mut timing.work_conditions {
+        c.concurrent_unattributed = true;
+    }
 }

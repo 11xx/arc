@@ -5684,39 +5684,42 @@ GATES
   absence, and separately records execution_limit_ms and its origin, timeout
   or budget-times-ten. A receipt's recorded budget is provenance; current
   judgement uses the budget in force when the receipt is read. Timed evidence
-  without work references needs no recorded budget judgement to count. Verify warns when the median of
-  up to 20 matching command-time observations in this change exceeds 80% of
-  its budget; legacy total durations are excluded.
+  without work references needs no recorded budget judgement to count. See
+  `arc guide gate-costs` for cost warnings.
 
-  Refusals include this change's per-change increment and maximum from its
-  destination budget, including the first observed refusal. They name command
-  time, effective budget and sources, excess, host,
-  start load averages and online cores, CPU where recorded, and excluded wait
-  and preparation. Missing observations stay missing. Load above the core count
-  may indicate possible host contention; start load alone grants no excuse.
+  Busy-host rule 2 excuses an overrun only with at most 3% more user-space
+  instructions than the newest eligible reference and at least 25% unrelated
+  CPU use both before and during the gate. Before means verification startup
+  to just before spawn, at least 100 ms; subtract arc's process CPU and every
+  earlier tree it ran. During means host busy CPU less the gate tree and arc's
+  other measured CPU. Unattributed concurrent batches get no excuse. Other
+  arc invocations' parallel lanes qualify only through the prior-load condition.
+  The clock must fit reference.run_ms / (1 - other_share), with 10% slack.
+  Zero counts and instruction rates below 10% of the reference's instructions
+  per tree user-CPU second are absent evidence. Missing or incomplete counters
+  and host readings grant no excuse.
 
-  A clock overrun is excused only when user-space retired instructions are at
-  most 3% above its reference and other processes used at least 25% of host CPU
-  capacity during the run. The reference is the earlier unexcused direct pass
-  of the same gate and declaration identity on the same known hostname with
-  the largest instruction count whose clock time fits the budget in force.
-  Hostnames identify hosts, not replica IDs. Unknown hosts cannot qualify.
-  The receipt carries that execution witness and its count. Lowering a budget
-  retires an excuse if its recorded reference stops fitting; readers neither
-  replace the reference nor consult live host load. Excused runs never become
-  references, budget-raise evidence or base-pass seeds, including after a raise.
+  A reference is a clean, unmoved, unexcused direct pass, outside parallel
+  probes, of the same gate and declaration on the same known hostname,
+  logical CPU count and CPU model. Its tree is this run's tree or its revision
+  leads to this run's destination. Its clock must fit the budget in force.
+  Cached receipts never supply references.
+  Legitimate added work becomes its own reference after one clock-fitting pass
+  on a quiet host. Restricted affinity or cpuset capacity gets no excuse.
+  The receipt carries its reference, rule version and thresholds. Readers use
+  those thresholds and the current budget, without replacing the reference or
+  consulting live load. A threshold change takes a new rule version; version 1
+  receipts retain their recorded rule. Lowering the budget retires an excuse
+  whose reference stops fitting. Excused runs never become references, raise
+  evidence or base-pass seeds, including after a raise.
 
-  Linux counts the whole command tree with perf_event_open inheritance,
-  excluding kernel and hypervisor instructions, before exec and reads after
-  every descendant exits. /proc/stat busy CPU excludes idle and I/O wait;
-  capacity is elapsed time times online logical CPUs. Other work is busy CPU
-  minus the tree's own user and system CPU. Missing, incomplete or multiplexed
-  counters and unavailable host readings grant no excuse. There is no flat
-  allowance. Known limit: added waiting first run on a busy host can be excused;
-  it shows on the next quiet run of a later change. `arc gates` counts excused
-  runs per gate and names the last; `gates measure` prints instructions and
-  other processes' share. A witness or excuse adopts store format 12 before
-  local publication or import; readers through format 11 refuse the ledger.
+  Kernel work is uncounted. Known limit: added waiting on an
+  already busy host can fit the measured delay allowance; a quiet run exposes
+  it. `arc gates` counts excused runs and names the last; `gates measure` prints
+  instructions and other processes' share. See `arc guide gate-costs` for CPU
+  accounting. Work references, excuses and copied work adopt store format 12
+  before publication
+  or import; readers through format 11 refuse it.
 
   A ledger adopts store format 9 before gate verification or reuse under any
   budget declaration, including a total with missing individual budgets,
@@ -5828,6 +5831,24 @@ GATE COSTS
   uses the invoking checkout's declarations.
   Each measure reports its sample count. Missing fields are unmeasured:
   legacy duration_ms never substitutes for command, CPU, wait or preparation.
+
+  Linux counts user-space instructions across inherited descendants with a
+  holder-owned perf_event_open counter installed before exec and read after
+  the tree exits. /proc/stat busy CPU excludes idle and I/O wait; capacity is elapsed time
+  times online logical CPUs. The holder samples across the command tree's
+  lifetime. Arc also samples from invocation startup to gate spawn, subtracting
+  its process and reaped-child CPU, and excludes its measured CPU during runs.
+  Incomplete, multiplexed or refused perf counters are absent measurements.
+
+  Refusals include this change's per-change increment and maximum from its
+  destination budget, including the first observed refusal. They name command
+  time, effective budget and sources, excess, host,
+  start load averages and online cores, CPU where recorded, and excluded wait
+  and preparation. Missing observations stay missing. Load above the core count
+  may indicate possible host contention; start load alone grants no excuse.
+
+  Verify warns when the median of up to 20 matching command-time observations
+  in this change exceeds 80% of its budget; legacy total durations are excluded.
 
   Budget shares use at most the latest 20 command-time observations for the
   current command and declared timeout, in the newest observed environment.

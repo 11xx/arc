@@ -1191,7 +1191,7 @@ fn candidate_busy_host_excuse_is_rejudged_before_promotion() {
     for ms in [900, 1100] {
         repo.arc(&repo.root)
             .env("ARC_TEST_COMMAND_RUN_MS", ms.to_string())
-            .env("ARC_TEST_GATE_WORK", r#"{"instructions":1000,"host_busy_ms":5100,"host_capacity_ms":10000,"cpu_user_ms":90,"cpu_system_ms":10}"#)
+            .env("ARC_TEST_GATE_WORK", r#"{"instructions":1000,"host_busy_ms":5100,"host_capacity_ms":10000,"cpu_user_ms":90,"cpu_system_ms":10,"prior":{"busy_ms":2600,"capacity_ms":10000,"arc_cpu_ms":100,"elapsed_ms":1000},"host":{"logical_cpus":10,"cpu_model":"fixture cpu","unrestricted":true}}"#)
             .args(["candidate", "verify", "alice"]).assert().success();
     }
     let evaluation = repository_events(repo, "candidate-verified").pop().unwrap()["event_id"]

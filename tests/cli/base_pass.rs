@@ -1360,6 +1360,10 @@ fn replay_refuses_base_pass_after_a_local_failure() {
     failure["revision"] = event["revision"].clone();
     failure["tree"] = event["tree"].clone();
     failure["tested_tree"] = event["tree"].clone();
+    if failure["work_tree"].is_object() {
+        failure["work_tree"]["tree"] = failure["tested_tree"].clone();
+        failure["work_tree"]["revision"] = failure["revision"].clone();
+    }
     failure["result"] = "fail".into();
     failure["exit_code"] = 1.into();
     failure["run_id"] = Value::Null;

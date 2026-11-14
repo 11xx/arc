@@ -2743,13 +2743,14 @@ fn verify_all_parallel(
     );
     let mut work_references = crate::gate_work::References::default();
     for item in &mut completed {
-        attach_work_reference(&mut work_references, store, item)?;
         item.tested_tree = Some(before.clone());
         // Boundary snapshots can miss a gate that changes and restores a file
         // while another gate is still running. Leave cleanliness unknown so
         // the shared batch cannot make a passing result look reproducible.
         item.worktree_dirty = None;
         item.tree_moved = tree_moved;
+        crate::gate_work::refuse_unattributed_batch(&mut item.timing);
+        attach_work_reference(&mut work_references, store, &ctx.cwd, item)?;
     }
     let current_state = store.state(change_id)?;
     let current = ctx.declarations(&current_state)?;
@@ -3004,14 +3005,25 @@ git worktree remove --force {quoted_path}",
 fn attach_work_reference(
     references: &mut crate::gate_work::References,
     store: &Store,
+    cwd: &Path,
     item: &mut CompletedVerification,
 ) -> Result<()> {
     if item.attested {
         return Ok(());
     }
     if let Some(identity) = item.timing.work_identity.as_deref().cloned() {
+        item.timing.work_tree = item.tested_tree.as_ref().map(|tree| {
+            Box::new(crate::gate_work::Tree {
+                tree: tree.clone(),
+                revision: Some(item.revision.clone()),
+                clean: item.worktree_dirty == Some(false),
+                unmoved: !item.tree_moved,
+                parallel_probe: item.worktree_dirty.is_none() || item.probe.is_some(),
+            })
+        });
         references.attach(
             store,
+            cwd,
             identity,
             item.timing.budget_at_run.as_ref().and_then(|b| b.budget_ms),
             &mut item.timing,
@@ -3074,7 +3086,6 @@ fn record_verification_at(
         &store.repository_id,
         change_id,
     )?;
-    attach_work_reference(&mut Default::default(), store, &mut completed)?;
     if !completed.attested {
         let post = gitio::head(command_cwd)?;
         if post != revision {
@@ -3103,6 +3114,7 @@ fn record_verification_at(
             completed.tested_tree = Some(before);
         }
     }
+    attach_work_reference(&mut Default::default(), store, command_cwd, &mut completed)?;
     let mut budget = completed.timing.budget_at_run.clone();
     if completed.landing.is_none() {
         if let Some(name) = completed.gate.as_deref() {
@@ -3234,11 +3246,12 @@ fn execute_verification(
     }
     if timing.instructions.is_some() {
         if let (Some(gate), Some(declaration)) = (&gate, work_declaration) {
-            timing.work_identity = Some(Box::new(crate::gate_work::Identity {
-                gate: gate.clone(),
+            timing.work_identity = Some(Box::new(crate::gate_work::Identity::new(
+                gate.clone(),
                 declaration,
-                hostname: hostname.clone(),
-            }));
+                hostname.clone(),
+                &timing,
+            )));
         }
     }
     timing.budget_at_run = budget
@@ -3459,6 +3472,7 @@ fn record_verifications(
                     if let Payload::VerificationRecorded {
                         tested_tree,
                         worktree_dirty,
+                        timing,
                         ..
                     } = &mut ev.payload
                     {
@@ -3466,6 +3480,9 @@ fn record_verifications(
                         // the boundary comparison found it clean.
                         *tested_tree = None;
                         *worktree_dirty = None;
+                        if let Some(tree) = &mut timing.work_tree {
+                            tree.clean = false;
+                        }
                     }
                     eprintln!(
                         "warning: could not keep tree {tree} reachable ({error:#}); recording this \
@@ -3686,6 +3703,8 @@ fn run_gate_in_shell(
     let mut deadline = timeout.and_then(|limit| Instant::now().checked_add(limit));
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
+    let mut work_conditions = crate::gate_work::conditions_before_spawn();
+    let arc_cpu_before = crate::gate_work::arc_cpu_ms();
     let mut child = shell.spawn().context("failed to run gate command")?;
     let stdout = child
         .child()
@@ -3751,6 +3770,10 @@ fn run_gate_in_shell(
         .unwrap_or_default();
     let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
     let mut timing = child.observation.timing.clone();
+    work_conditions.invocation_cpu_ms = arc_cpu_before
+        .zip(crate::gate_work::arc_cpu_ms())
+        .and_then(|(b, a)| a.checked_sub(b));
+    timing.work_conditions = Some(Box::new(work_conditions));
     timing.wait_ms = Some(wait_ms);
     timing.prepare_ms = Some(prepare_ms);
     timing.run_ms = child

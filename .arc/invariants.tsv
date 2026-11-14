@@ -124,3 +124,5 @@ I5	cli	gate_work::a_quiet_host_refuses_even_matching_work	matching instructions 
 I5	cli	gate_work::more_work_refuses_even_on_a_busy_host	a busy host cannot excuse work above the reference allowance	Integration cannot weaken the target's required evidence.
 I5	cli	gate_work::lowering_the_budget_retires_the_reference_without_rewriting_history	a lowered budget retires an excuse whose reference stops fitting	Integration cannot weaken the target's required evidence.
 I2	cli	gate_work::replay_refuses_forged_or_stale_work_witnesses	replay refuses inconsistent or later work reference facts	A reader never authorizes work using store semantics it does not understand.
+I5	cli	gate_work::self_load_without_prior_host_load_is_refused	load created during a gate cannot excuse its overrun without prior unrelated load	Integration cannot weaken the target's required evidence.
+I5	cli	gate_work::implausibly_low_instruction_counts_cannot_excuse	zero or dropped-out counters never excuse an overrun	Integration cannot weaken the target's required evidence.

@@ -6,9 +6,11 @@ fn declare(repo: &Repo, budget: u64) {
         "[gates.unit]\ncommand='true'\nbudget='{budget}ms'\n"
     ));
 }
-fn readings(instructions: Option<u64>, other: u64) -> String {
+pub(super) fn readings(instructions: Option<u64>, other: u64) -> String {
     json!({"instructions": instructions, "host_busy_ms": other + 100,
-        "host_capacity_ms": 10000, "cpu_user_ms": 90, "cpu_system_ms": 10})
+        "host_capacity_ms": 10000, "cpu_user_ms": 90, "cpu_system_ms": 10,
+        "prior": {"busy_ms":2600,"capacity_ms":10000,"arc_cpu_ms":100,"elapsed_ms":1000},
+        "host": {"logical_cpus":10,"cpu_model":"fixture cpu","unrestricted":true}})
     .to_string()
 }
 fn run(
@@ -57,15 +59,15 @@ fn verdict(repo: &Repo, wt: &Path, id: &str) -> Value {
 }
 
 /// I5: callers accept an over-clock pass at both inclusive thresholds and see
-/// its largest eligible reference. Rejects clock-only refusals and newest-only selection.
+/// its newest eligible reference. Rejects clock-only refusals and historical maximum selection.
 #[test]
-fn busy_host_acceptance_uses_the_largest_fitting_reference_and_is_visible() {
+fn busy_host_acceptance_uses_the_newest_fitting_reference_and_is_visible() {
     let (repo, id, wt) = fixture("busy-visible");
-    let reference = latest(&repo, &wt, &id);
     run(&repo, &wt, 800, Some(900), 1000, 0);
-    let text = run(&repo, &wt, 1100, Some(1030), 2500, 0);
+    let reference = latest(&repo, &wt, &id);
+    let text = run(&repo, &wt, 1100, Some(927), 2500, 0);
     assert!(
-        text.contains("accepted over budget: work 1030 instructions"),
+        text.contains("accepted over budget: work 927 instructions"),
         "{text}"
     );
     assert!(text.contains("other processes 25.00%"), "{text}");
@@ -247,7 +249,17 @@ fn an_excused_run_cannot_seed_a_base_pass() {
 /// rejudged by the receiver's budget. Rejects dependence on a missing source change.
 #[test]
 fn imported_excuses_preserve_the_reference_and_follow_receiver_budgets() {
-    let (source, _, first) = fixture("source-work-reference");
+    let (source, source_id, first) = fixture("source-work-reference");
+    source
+        .arc(&first)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .args(["integrate", &source_id])
+        .assert()
+        .success();
     let (id, wt, _) = change_with_patchset(&source, "transport-work");
     run(&source, &wt, 1100, Some(1000), 5000, 0);
     assert_ne!(
@@ -415,7 +427,7 @@ fn an_unbudgeted_pass_can_supply_a_later_work_reference() {
 
 /// Verify labels its pass using the budget in force when it returns, while the
 /// receipt retains its run-time budget. Rejects announcing an accepted excuse
-/// after a concurrent reduction has retired it, in serial and parallel output.
+/// after a concurrent reduction has retired it; parallel probes receive no excuse.
 #[test]
 fn verify_does_not_announce_a_retired_excuse_as_accepted() {
     for parallel in [false, true] {
@@ -447,7 +459,198 @@ fn verify_does_not_announce_a_retired_excuse_as_accepted() {
         );
         assert_eq!(
             latest(&repo, &wt, &id)["budget_at_run"]["verdict"],
-            "excused"
+            if parallel { "over-budget" } else { "excused" }
         );
     }
+}
+
+/// I5: load first produced during a gate cannot excuse that gate's overrun.
+/// Rejects calling self-created load unrelated contention without a prior window.
+#[test]
+fn self_load_without_prior_host_load_is_refused() {
+    let (repo, _, wt) = fixture("self-load");
+    let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+    facts["prior"]["busy_ms"] = json!(100);
+    controlled_run(&repo, &wt, 1100, facts, 1);
+}
+
+/// I5: a disabled or dropped-out counter is absent evidence, never less work.
+/// Rejects accepting zero or implausibly few instructions against measured CPU.
+#[test]
+fn implausibly_low_instruction_counts_cannot_excuse() {
+    let (repo, _, wt) = fixture("counter-dropped");
+    for instructions in [0, 1, 99] {
+        run(&repo, &wt, 1100, Some(instructions), 5000, 1);
+    }
+}
+
+fn controlled_run(repo: &Repo, wt: &Path, ms: u64, facts: Value, code: i32) {
+    repo.arc(wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", ms.to_string())
+        .env("ARC_TEST_GATE_WORK", facts.to_string())
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .code(code);
+}
+
+/// I5: prior load excludes arc's CPU and needs 100 ms of observation.
+/// Rejects attributing earlier gates or an unmeasurable startup window to outsiders.
+#[test]
+fn prior_load_excludes_arc_and_requires_a_measurable_window() {
+    let (repo, _, wt) = fixture("prior-load");
+    for (elapsed, arc_cpu) in [(99, 100), (1000, 101)] {
+        let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+        facts["prior"]["elapsed_ms"] = json!(elapsed);
+        facts["prior"]["arc_cpu_ms"] = json!(arc_cpu);
+        controlled_run(&repo, &wt, 1100, facts, 1);
+    }
+}
+
+/// I5: an excuse cannot exceed the delay explained by contention plus 10 percent.
+/// Rejects arbitrary waiting under a qualifying load, including one ms past the cap.
+#[test]
+fn the_clock_excuse_is_bounded_by_measured_load() {
+    let (repo, _, wt) = fixture("bounded-clock");
+    run(&repo, &wt, 1320, Some(1000), 2500, 0);
+    run(&repo, &wt, 1321, Some(1000), 2500, 1);
+}
+
+/// I5: CPU topology and model belong to host identity; restricted capacity refuses.
+/// Rejects shared-hostname calibration after resizing, changing CPU, or CPU pinning.
+#[test]
+fn host_identity_and_unrestricted_capacity_are_required() {
+    let (repo, _, wt) = fixture("host-capacity");
+    for (key, value) in [
+        ("logical_cpus", json!(4)),
+        ("cpu_model", json!("different cpu")),
+        ("unrestricted", json!(false)),
+    ] {
+        let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+        facts["host"][key] = value;
+        controlled_run(&repo, &wt, 1100, facts, 1);
+    }
+}
+
+/// I5: only clean, unmoved, non-probe source trees on the destination's lineage calibrate work.
+/// Rejects a throwaway, dirty or parallel pass inflating an unrelated change's reference.
+#[test]
+fn ineligible_trees_cannot_supply_work_references() {
+    for fault in ["dirty", "moved", "probe", "unrelated"] {
+        let (repo, id, wt) = fixture("reference-tree");
+        if fault == "unrelated" {
+            let (_, other, _) = change_with_patchset(&repo, "unrelated-work");
+            run(&repo, &other, 1100, Some(1000), 5000, 1);
+        } else {
+            rewrite_event(&repo, &id, "verification-recorded", |v| {
+                if fault == "dirty" {
+                    v["worktree_dirty"] = json!(true);
+                    v["work_tree"]["clean"] = json!(false);
+                }
+                if fault == "moved" {
+                    v["tree_moved"] = json!(true);
+                    v["work_tree"]["unmoved"] = json!(false);
+                }
+                if fault == "probe" {
+                    v["work_tree"]["parallel_probe"] = json!(true);
+                }
+            });
+            run(&repo, &wt, 1100, Some(1000), 5000, 1);
+        }
+    }
+}
+
+/// I2: a receipt's rule thresholds survive changes in reader defaults.
+/// Rejects replay recomputing an old judgement with the current default ceiling.
+#[test]
+fn replay_uses_the_receipts_rule_thresholds() {
+    let (repo, id, wt) = fixture("recorded-rule");
+    run(&repo, &wt, 1100, Some(1030), 5000, 0);
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        if v["run_ms"] == 1100 {
+            v["work_conditions"]["rule"]["instruction_ceiling_basis_points"] = json!(10400);
+            v["instructions"] = json!(1040);
+            v["budget_at_run"]["excuse"]["instructions"] = json!(1040);
+        }
+    });
+    assert_eq!(verdict(&repo, &wt, &id), "excused");
+}
+
+/// I5: a parallel probe's sibling work cannot authorize a clock overrun.
+/// Rejects accepting an unattributed batch even when both measured windows are busy.
+#[test]
+fn parallel_sibling_load_is_not_other_process_load() {
+    let (repo, id, wt) = fixture("sibling-work");
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1100")
+        .env("ARC_TEST_GATE_WORK", readings(Some(1000), 5000))
+        .args(["verify", "--all", "--parallel", "--rerun"])
+        .assert()
+        .code(1);
+    assert_eq!(verdict(&repo, &wt, &id), "over-budget");
+}
+
+/// I2: version-one receipts keep their original judgement and remain readable.
+/// Rejects applying a later delay cap to a historical, self-contained excuse.
+#[test]
+fn legacy_receipts_keep_their_version_one_rule() {
+    let (repo, id, wt) = fixture("legacy-rule");
+    run(&repo, &wt, 1100, Some(1000), 5000, 0);
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        v.as_object_mut().unwrap().remove("work_conditions");
+        v["work_identity"].as_object_mut().unwrap().remove("host");
+        if v["work_reference"].is_object() {
+            let source = &mut v["work_reference"]["execution"];
+            source.as_object_mut().unwrap().remove("work_conditions");
+            source["work_identity"]
+                .as_object_mut()
+                .unwrap()
+                .remove("host");
+            let bytes = serde_json::to_vec(source).unwrap();
+            v["work_reference"]["digest"] =
+                json!(format!("sha256:{}", hex::encode(Sha256::digest(bytes))));
+            v["run_ms"] = json!(9000);
+            v["budget_at_run"]["run_ms"] = json!(9000);
+        }
+    });
+    assert_eq!(verdict(&repo, &wt, &id), "excused");
+}
+
+/// I5: a cached publication pass retains its execution facts without becoming
+/// a fresh work reference. Rejects selecting a copied receipt as the newest direct pass.
+#[test]
+fn cached_publication_passes_cannot_supply_fresh_work_references() {
+    let repo = Repo::new();
+    repo.declare_gates_locally(
+        "[gates.unit]\ncommand='true'\nbudget='1s'\nevents=['publication']\n",
+    );
+    let publication = |ms: u64| {
+        repo.arc(&repo.root)
+            .env("ARC_TEST_COMMAND_RUN_MS", ms.to_string())
+            .env("ARC_TEST_GATE_WORK", readings(Some(1000), 5000))
+            .args(["publication", "--target", "master"])
+            .assert()
+            .success();
+    };
+    let last = || {
+        let mut events: Vec<Value> = fs::read_dir(repo.root.join(".git/arc/repository/events"))
+            .unwrap()
+            .map(|e| serde_json::from_slice(&fs::read(e.unwrap().path()).unwrap()).unwrap())
+            .filter(|e: &Value| e["event_type"] == "publication-verified")
+            .collect();
+        events.sort_by_key(|e| e["event_id"].as_str().unwrap().to_owned());
+        events.pop().unwrap()
+    };
+    publication(900);
+    let execution = last()["event_id"].clone();
+    repo.arc(&repo.root)
+        .args(["publication", "--target", "master", "--skip-green"])
+        .assert()
+        .success();
+    let copy = last()["event_id"].clone();
+    assert_ne!(execution, copy);
+    publication(1100);
+    assert_eq!(
+        last()["gates"]["unit"]["work_reference"]["execution"]["event_id"],
+        execution
+    );
 }

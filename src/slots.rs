@@ -821,7 +821,10 @@ pub fn holder_main() -> ! {
         std::process::exit(2);
     };
     let mut observation = CommandReport {
-        timing: host_at_start(),
+        timing: crate::verification_timing::VerificationTiming {
+            host_cpu: crate::gate_work::Host::read().map(Box::new),
+            ..host_at_start()
+        },
         started_ns: monotonic_ns(),
         ..Default::default()
     };

@@ -3630,7 +3630,10 @@ fn authorization_has_no_verdict(
 fn has_work_semantics(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
-            (key == "work_reference" && !value.is_null())
+            (key == "work_copied"
+                && value == true
+                && map.get("work_identity").is_some_and(|v| !v.is_null()))
+                || (key == "work_reference" && !value.is_null())
                 || (key == "verdict" && value == "excused")
                 || has_work_semantics(value)
         }),

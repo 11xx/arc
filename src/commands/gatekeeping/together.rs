@@ -137,13 +137,14 @@ fn batch(
     let mut passed = 0;
     let mut work_references = crate::gate_work::References::default();
     for item in &mut completed {
-        attach_work_reference(&mut work_references, store, item)?;
         item.tested_tree = Some(before.clone());
         item.worktree_dirty = Some(dirty);
         item.worktree_dirty_tracked = Some(dirt.tracked);
         item.worktree_dirty_untracked = Some(dirt.untracked);
         item.tree_moved = moved;
         item.timing.concurrent_batch = Some(receipt.clone());
+        crate::gate_work::refuse_unattributed_batch(&mut item.timing);
+        attach_work_reference(&mut work_references, store, &ctx.cwd, item)?;
         let gate = item
             .gate
             .as_ref()
