@@ -75,6 +75,54 @@ fn check(result: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// The directories that reach an open descriptor by path: `listing` reads
+/// an open directory's entries, `naming` says where it is now.
+struct DescriptorDirs {
+    listing: PathBuf,
+    naming: PathBuf,
+}
+
+impl DescriptorDirs {
+    fn get() -> DescriptorDirs {
+        let root = PathBuf::from("/");
+        // A debug build lets a test move both under a root where they are
+        // absent.
+        #[cfg(debug_assertions)]
+        let root = std::env::var_os("ARC_TEST_WORKBENCH_DESCRIPTOR_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or(root);
+        DescriptorDirs {
+            listing: root.join("dev/fd"),
+            naming: root.join("proc/self/fd"),
+        }
+    }
+}
+
+/// The error for a descriptor directory that is not there, or `None` when
+/// it is.
+fn unavailable(dir: &Path) -> Option<io::Error> {
+    (!dir.is_dir()).then(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{} is not available here, and arc reads and names the workbench directories it opens through /dev/fd and /proc/self/fd",
+                dir.display()
+            ),
+        )
+    })
+}
+
+/// Refuse, before anything is read or moved, where either descriptor
+/// directory is missing: a walk would fail partway, and a move could not
+/// say where an escaped directory went.
+pub(super) fn require_descriptor_dirs() -> io::Result<()> {
+    let dirs = DescriptorDirs::get();
+    match unavailable(&dirs.listing).or_else(|| unavailable(&dirs.naming)) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Whether an error says a name was a link or not a directory where a
 /// directory was required.
 pub(super) fn not_a_real_dir(error: &io::Error) -> bool {
@@ -169,13 +217,21 @@ impl Dir {
     pub(super) fn names(&self) -> io::Result<impl Iterator<Item = io::Result<OsString>>> {
         // The descriptor's own entry under /dev/fd opens this directory,
         // whatever path once led to it.
-        let entries = std::fs::read_dir(format!("/dev/fd/{}", self.fd.as_raw_fd()))?;
+        let listing = DescriptorDirs::get().listing;
+        let entries =
+            std::fs::read_dir(listing.join(self.fd.as_raw_fd().to_string())).map_err(|error| {
+                match unavailable(&listing) {
+                    Some(missing) => missing,
+                    None => error,
+                }
+            })?;
         Ok(entries.map(|entry| entry.map(|entry| entry.file_name())))
     }
 
     /// Where this directory is now, as far as the kernel can name it.
     pub(super) fn current_path(&self) -> Option<PathBuf> {
-        std::fs::read_link(format!("/proc/self/fd/{}", self.fd.as_raw_fd())).ok()
+        let naming = DescriptorDirs::get().naming;
+        std::fs::read_link(naming.join(self.fd.as_raw_fd().to_string())).ok()
     }
 
     /// Where the link `name` leads.

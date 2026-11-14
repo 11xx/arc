@@ -2175,3 +2175,90 @@ fn an_index_rewrite_leaves_the_old_index_whole_until_the_new_one_replaces_it() {
         before
     );
 }
+
+/// Claim: where `/dev/fd` or `/proc/self/fd` is missing, adopting, closing
+/// and archiving refuse before reading or moving anything, naming the
+/// missing directory, and leave the material and the records as they were;
+/// a listing gives the size as unknown, naming it. Rejects a failure deep in
+/// a walk that blames the material's own path, and a move made where arc
+/// could not say where an escaped directory went.
+#[test]
+fn without_descriptor_directories_workbench_acts_refuse_clearly() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let path = open_workbench(&repo, "finished", "finished work");
+    fs::write(path.join("result.txt"), "done\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    let source = dir.join("loose/sweep-20261009");
+    loose_entry(&source);
+    let before = digests(&source);
+
+    // Neither directory, then `/dev/fd` alone.
+    let bare = repo.home.join("bare-root");
+    let partial = repo.home.join("partial-root");
+    fs::create_dir_all(partial.join("dev")).unwrap();
+    std::os::unix::fs::symlink("/dev/fd", partial.join("dev/fd")).unwrap();
+    for (root, missing) in [(&bare, "dev/fd"), (&partial, "proc/self/fd")] {
+        let missing = format!("{} is not available here", root.join(missing).display());
+        let refused = |args: &[&str]| {
+            let output = repo
+                .arc(&repo.root)
+                .env("ARC_TEST_WORKBENCH_DESCRIPTOR_ROOT", root)
+                .args(args)
+                .assert()
+                .failure();
+            let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+            assert!(stderr.contains(&missing), "{args:?}: {stderr}");
+            assert!(!stderr.contains("cannot read"), "{args:?}: {stderr}");
+        };
+        refused(&[
+            "journal",
+            "workbench",
+            "adopt",
+            source.to_str().unwrap(),
+            "--purpose",
+            "old material",
+        ]);
+        refused(&["journal", "workbench", "close", &name, "--note", "done"]);
+    }
+    assert_eq!(digests(&source), before);
+    let kinds: Vec<_> = workbench_events(&dir)
+        .iter()
+        .map(|event| event["event"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kinds, ["workbench-opened"]);
+
+    let listing = json_stdout(
+        repo.arc(&repo.root)
+            .env("ARC_TEST_WORKBENCH_DESCRIPTOR_ROOT", &bare)
+            .args(["journal", "workbench", "list", "--json"]),
+    );
+    let row = &listing["workbenches"][0];
+    assert_eq!(row["files"], serde_json::Value::Null, "{row}");
+    assert!(
+        row["size_error"]
+            .as_str()
+            .unwrap()
+            .contains("dev/fd is not available here"),
+        "{row}"
+    );
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "workbench", "close", &name, "--note", "done"]),
+    );
+    let output = repo
+        .arc(&repo.root)
+        .env("ARC_TEST_WORKBENCH_DESCRIPTOR_ROOT", &partial)
+        .args(["journal", "archive", &name])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("proc/self/fd is not available here"),
+        "{stderr}"
+    );
+    assert!(path.join("result.txt").is_file());
+    assert_eq!(listed(&repo, true)[0]["storage"], "hot");
+}

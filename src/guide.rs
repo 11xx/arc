@@ -2254,6 +2254,10 @@ WORKBENCHES (working material in the journal)
   is the one arc wrote, and leaves any other `WORKBENCH.md` as it is. The
   rewrite is written beside it as `.WORKBENCH.md.arc-draft` and renamed over
   it, so a reader finds the old index or the new one whole.
+  Adopting, closing, archiving and unarchiving refuse before reading or
+  moving anything where `/dev/fd` or `/proc/self/fd` is missing, through
+  which arc reads and names the directories it opens; a listing then gives
+  each open workbench's size as unknown, naming the missing one.
   `journal doctor` reports a recorded workbench whose directory is gone, in
   the other storage, or reached through a link out of the journal, a
   `workbench/` or an archive root that is a link, and a directory under

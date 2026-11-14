@@ -190,7 +190,9 @@ pub enum WorkbenchCmd {
     /// The move is one rename that replaces nothing, made only while the
     /// material's path still leads to the object checked; material changed
     /// after its checks refuses, and a kernel or filesystem with no such
-    /// rename refuses the move. `arc guide journal-workbenches` says what
+    /// rename refuses the move. A system without `/dev/fd` or
+    /// `/proc/self/fd`, through which arc reads and names the directories it
+    /// opens, refuses before anything is read. `arc guide journal-workbenches` says what
     /// follows when the move is made and its record is not.
     ///
     /// A directory of the journal arc does not own, such as an entry of
@@ -1455,6 +1457,7 @@ fn close(ctx: &Ctx, address: &str, produced: &[String], note: Option<&str>) -> R
             "a close names what the workbench produced with --produced <change|artifact>, or says why it produced nothing with --note"
         );
     }
+    fsat::require_descriptor_dirs()?;
     let dir = resolve_dir(&ctx.cwd)?;
     let mut changes = Vec::new();
     let mut named_artifacts = Vec::new();
@@ -1525,6 +1528,7 @@ pub(super) fn unarchive(ctx: &Ctx, address: &str) -> Result<i32> {
 }
 
 fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -> Result<i32> {
+    fsat::require_descriptor_dirs()?;
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
     let events = read_events(&dir)?;
@@ -1663,6 +1667,7 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
     if let Some(slug) = slug {
         require_slug(slug)?;
     }
+    fsat::require_descriptor_dirs()?;
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
