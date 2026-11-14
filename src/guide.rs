@@ -2192,17 +2192,24 @@ WORKBENCHES (working material in the journal)
   journal that holds it. Workbench commands need the journal directory
   itself and never spool.
   Opening, adopting, archiving and unarchiving create or move the directory,
-  only ever a real directory of the journal or its archive and never through
-  a link, then record the act. When the record reports an error, arc reads
-  the journal: a record that stands keeps the change; a record prepared but
-  not published keeps the material where it puts it; with no record, the
-  change is taken back by a rename that replaces nothing. Whatever arc cannot
-  settle exits non-zero, saying where the material is and what `journal
-  doctor` reports. Arc never deletes or overwrites the material to undo an
-  act. `journal doctor` reports a recorded workbench whose directory is gone,
-  in the other storage, or reached through a link out of the journal, a
-  `workbench/` that is a link, and a directory under `workbench/` that no
-  event records; `adopt` records one where it stands.
+  only through real directories of the journal or its archive, never a
+  link, writing a new index only where no file of that name exists; then
+  they record the act. Once the directory is made or moved, nothing undoes
+  it, and the act ends one of two ways:
+    recorded              The act stands.
+    moved, not recorded   The material stays where it now is. The command
+                          exits non-zero naming that path, `journal doctor`
+                          reports the disagreement, and adopting the
+                          directory where it stands, or rerunning the
+                          archive or unarchive, records it.
+  An open says `created, not recorded`, and an act that moved nothing says
+  `nothing moved, not recorded`. A record prepared but not yet published is
+  the second until the next journal write publishes it. A later act rewrites the index only while it
+  is the one arc wrote, and leaves any other `WORKBENCH.md` as it is.
+  `journal doctor` reports a recorded workbench whose directory is gone, in
+  the other storage, or reached through a link out of the journal, a
+  `workbench/` or an archive root that is a link, and a directory under
+  `workbench/` that no event records; `adopt` records one where it stands.
 
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.

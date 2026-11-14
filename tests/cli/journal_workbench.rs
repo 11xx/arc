@@ -975,7 +975,8 @@ fn an_adoption_whose_record_is_only_prepared_keeps_the_material_where_it_names()
     let target = dir.join("workbench").join(&name);
     assert!(!source.exists(), "{stderr}");
     assert_eq!(material_digests(&target), before);
-    assert!(stderr.contains("prepared but not published"), "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(stderr.contains("Its record is prepared"), "{stderr}");
     assert!(stderr.contains(target.to_str().unwrap()), "{stderr}");
 
     open_workbench(&repo, "second", "publishes what was prepared");
@@ -1014,7 +1015,8 @@ fn an_archive_whose_record_is_only_prepared_keeps_the_workbench_archived() {
         .join(&name);
     assert!(!path.exists(), "{stderr}");
     assert!(cold.join("result.txt").is_file(), "{stderr}");
-    assert!(stderr.contains("prepared but not published"), "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(stderr.contains("Its record is prepared"), "{stderr}");
 
     open_workbench(&repo, "second", "publishes what was prepared");
     let rows = listed(&repo, true);
@@ -1026,40 +1028,117 @@ fn an_archive_whose_record_is_only_prepared_keeps_the_workbench_archived() {
     assert_eq!(doctor_codes(&repo), Vec::<String>::new());
 }
 
-/// Claim: when an adoption's record is never written, adoption exits
-/// non-zero and puts the material back where it was, every byte kept, and
-/// the journal records nothing. Rejects a failed adoption that strands the
-/// material in an unrecorded workbench.
+/// Claim: when an adoption's record is never written, the material stays
+/// where it moved, every byte kept; adoption exits non-zero naming that
+/// path, `journal doctor` reports it, and adopting it where it stands
+/// records it. Rejects taking a move back, which can destroy what another
+/// writer did meanwhile, and a failure that hides where the material went.
 #[test]
-fn an_adoption_with_no_record_puts_the_material_back() {
+fn an_adoption_left_unrecorded_stays_moved_until_adopted_in_place() {
     let repo = Repo::new();
     open_workbench(&repo, "first", "starts the exchange directory");
     let dir = journal_dir(&repo);
-    for source in [
-        material(&repo.home.join("loose-notes")),
-        repo.home.join("plan.md"),
-    ] {
-        if !source.exists() {
-            fs::write(&source, "# Plan\n").unwrap();
-        }
-        let before = fs::read_dir(dir.join("workbench")).unwrap().count();
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let directory = material(&repo.home.join("loose-notes"));
+    let file = repo.home.join("plan.md");
+    fs::write(&file, "# Plan\n").unwrap();
+    for (source, name) in [(directory, "loose-notes"), (file, "plan")] {
+        let before = if source.is_dir() {
+            digests(&source)
+        } else {
+            BTreeMap::from([("plan.md".to_string(), String::new())])
+        };
         let exchange = dir.join("exchange");
         fs::set_permissions(&exchange, fs::Permissions::from_mode(0o555)).unwrap();
         let stderr = adopt_refused(&repo, &source);
         fs::set_permissions(&exchange, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(source.exists(), "{stderr}");
-        assert_eq!(
-            fs::read_dir(dir.join("workbench")).unwrap().count(),
-            before,
-            "{stderr}"
-        );
-        assert!(stderr.contains("the change was taken back"), "{stderr}");
+        let target = dir.join("workbench").join(format!("{name}-{today}"));
+        assert!(!source.exists(), "{stderr}");
+        if source.extension().is_none() {
+            assert_eq!(material_digests(&target), before, "{stderr}");
+        } else {
+            assert_eq!(
+                fs::read_to_string(target.join("plan.md")).unwrap(),
+                "# Plan\n"
+            );
+        }
+        assert!(stderr.contains("moved, not recorded"), "{stderr}");
+        assert!(stderr.contains(target.to_str().unwrap()), "{stderr}");
+        assert_eq!(doctor_codes(&repo), ["unrecorded-workbench"]);
+
+        stdout(repo.arc(&repo.root).args([
+            "journal",
+            "workbench",
+            "adopt",
+            target.to_str().unwrap(),
+            "--purpose",
+            "recorded where it stands",
+        ]));
+        assert_eq!(doctor_codes(&repo), Vec::<String>::new());
     }
-    assert_eq!(workbench_events(&dir).len(), 1);
+    assert_eq!(workbench_events(&dir).len(), 3);
+}
+
+/// Claim: an archive whose record is never written leaves the workbench in
+/// the archive and exits non-zero naming it; doctor reports it misplaced,
+/// and rerunning the archive records it without moving it again. Rejects
+/// moving it back, and a retry that refuses because the directory already
+/// moved.
+#[test]
+fn an_archive_left_unrecorded_is_recorded_by_retrying_it() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "finished", "finished work");
+    fs::write(path.join("result.txt"), "done\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "close",
+        &name,
+        "--note",
+        "kept for reference",
+    ]));
+    let dir = journal_dir(&repo);
+    let exchange = dir.join("exchange");
+    fs::set_permissions(&exchange, fs::Permissions::from_mode(0o555)).unwrap();
+    let stderr = refused(&repo, &["journal", "archive", &name]);
+    fs::set_permissions(&exchange, fs::Permissions::from_mode(0o755)).unwrap();
+    let cold = PathBuf::from(format!("{}-archive", dir.display()))
+        .join("workbench")
+        .join(&name);
+    assert!(cold.join("result.txt").is_file(), "{stderr}");
+    assert!(!path.exists(), "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert_eq!(doctor_codes(&repo), ["misplaced-workbench"]);
+
+    stdout(repo.arc(&repo.root).args(["journal", "archive", &name]));
+    assert!(cold.join("result.txt").is_file());
+    assert_eq!(doctor_codes(&repo), Vec::<String>::new());
+    assert_eq!(listed(&repo, true)[0]["storage"], "archived");
+}
+
+/// Claim: a later act rewrites a workbench's index only while it is the
+/// index arc wrote; a `WORKBENCH.md` someone put in its place is left as it
+/// is, with a warning. Rejects replacing a file arc did not write.
+#[test]
+fn a_rewrite_never_replaces_an_index_arc_did_not_write() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "notes", "notes");
+    let index = fs::read_to_string(path.join("WORKBENCH.md")).unwrap();
+    assert!(index.starts_with("<!-- arc writes this index"), "{index}");
+    fs::write(path.join("WORKBENCH.md"), "my own index\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    let output = repo
+        .arc(&repo.root)
+        .args(["journal", "workbench", "close", &name, "--note", "done"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
     assert_eq!(
-        fs::read_to_string(repo.home.join("loose-notes/notes.txt")).unwrap(),
-        "loose notes\n"
+        fs::read_to_string(path.join("WORKBENCH.md")).unwrap(),
+        "my own index\n"
     );
+    assert!(stderr.contains("not the index arc writes"), "{stderr}");
 }
 
 /// Claim: arc moves and creates nothing through a `workbench/` that is a
@@ -1382,4 +1461,228 @@ fn adopt_refuses_a_filesystem_root_and_a_mount_point() {
     }
     let stderr = adopt_refused(&repo, mount);
     assert!(stderr.contains("is a mount point"), "{stderr}");
+}
+
+/// An adoption of `source` paused at `phase`, which `finish` resumes.
+fn adopt_paused_at(repo: &Repo, source: &Path, phase: &str) -> std::process::Child {
+    spawn_arc_at_rendezvous(
+        repo,
+        &repo.root,
+        &[
+            "journal",
+            "workbench",
+            "adopt",
+            source.to_str().unwrap(),
+            "--purpose",
+            "old material",
+        ],
+        phase,
+        &[],
+    )
+}
+
+/// Resume a paused command and return its success and stderr.
+fn finish(mut child: std::process::Child) -> (bool, String) {
+    release_lock_wait(&mut child);
+    let output = child.wait_with_output().unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// Claim: the index arc writes when a workbench is adopted never replaces
+/// a `WORKBENCH.md` that appeared in the material after its checks; the
+/// adoption stops as moved and not recorded, naming where the material is.
+/// Rejects an index that overwrites the only copy of a file of the
+/// material.
+#[test]
+fn the_first_index_never_replaces_a_file_made_during_adoption() {
+    let repo = Repo::new();
+    let source = material(&repo.home.join("loose-notes"));
+    let child = adopt_paused_at(&repo, &source, "workbench-adopt-checked");
+    fs::write(source.join("WORKBENCH.md"), "made meanwhile\n").unwrap();
+    let (succeeded, stderr) = finish(child);
+    let dir = journal_dir(&repo);
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let target = dir.join("workbench").join(format!("loose-notes-{today}"));
+    assert_eq!(
+        fs::read_to_string(target.join("WORKBENCH.md")).unwrap(),
+        "made meanwhile\n",
+        "{stderr}"
+    );
+    assert!(!succeeded, "{stderr}");
+    assert!(stderr.contains("moved, not recorded"), "{stderr}");
+    assert!(stderr.contains(target.to_str().unwrap()), "{stderr}");
+    assert!(workbench_events(&dir).is_empty());
+}
+
+/// Claim: archiving moves nothing through an archive root that is a link,
+/// and `journal doctor` reports that link. Rejects an archive that lands a
+/// workbench outside the journal's storage while its record says archived.
+#[test]
+fn archive_never_moves_through_a_linked_archive_root() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "finished", "finished work");
+    fs::write(path.join("result.txt"), "done\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "close",
+        &name,
+        "--note",
+        "kept for reference",
+    ]));
+    let dir = journal_dir(&repo);
+    let elsewhere = repo.home.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, format!("{}-archive", dir.display())).unwrap();
+    let stderr = refused(&repo, &["journal", "archive", &name]);
+    assert!(path.join("result.txt").is_file(), "{stderr}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{stderr}");
+    assert!(
+        stderr.contains("is not a directory of the journal"),
+        "{stderr}"
+    );
+    let codes = doctor_codes(&repo);
+    assert!(
+        codes.iter().any(|code| code == "workbench-outside-journal"),
+        "{codes:?}"
+    );
+}
+
+/// Claim: adoption checks the material as it stands once it holds the
+/// journal's transition lock, so a directory replaced by a link while it
+/// waited refuses as a link. Rejects checking one object and moving
+/// another, and writing the index through a link outside the journal.
+#[test]
+fn adopt_checks_the_source_as_it_stands_once_it_holds_the_lock() {
+    let repo = Repo::new();
+    open_workbench(&repo, "first", "starts this journal");
+    let dir = journal_dir(&repo);
+    let source = material(&repo.home.join("loose-notes"));
+    let outside = material(&repo.home.join("outside"));
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join(".locks/transition.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let child = adopt_paused_at(&repo, &source, "transition-contended");
+    fs::rename(&source, repo.home.join("moved-away")).unwrap();
+    std::os::unix::fs::symlink(&outside, &source).unwrap();
+    release_lock_wait_after(child, held, |succeeded, stderr| {
+        assert!(!outside.join("WORKBENCH.md").exists(), "{stderr}");
+        assert!(
+            fs::symlink_metadata(&source)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{stderr}"
+        );
+        assert!(!succeeded, "{stderr}");
+        assert!(stderr.contains("is a symbolic link"), "{stderr}");
+    });
+    assert_eq!(workbench_events(&dir).len(), 1);
+}
+
+/// Resume `child` paused at a lock rendezvous, release the lock it waits
+/// on, and check its outcome.
+fn release_lock_wait_after(
+    mut child: std::process::Child,
+    held: fs::File,
+    check: impl FnOnce(bool, &str),
+) {
+    release_lock_wait(&mut child);
+    drop(held);
+    let output = child.wait_with_output().unwrap();
+    check(
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Claim: adoption moves only the object it checked: material replaced
+/// after its checks refuses and nothing moves. Rejects moving a directory
+/// no refusal ever looked at.
+#[test]
+fn adopt_refuses_material_replaced_after_its_checks() {
+    let repo = Repo::new();
+    let source = material(&repo.home.join("loose-notes"));
+    let child = adopt_paused_at(&repo, &source, "workbench-adopt-checked");
+    fs::rename(&source, repo.home.join("moved-away")).unwrap();
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("other.txt"), "not checked\n").unwrap();
+    let (succeeded, stderr) = finish(child);
+    assert!(source.join("other.txt").is_file(), "{stderr}");
+    assert!(!succeeded, "{stderr}");
+    assert!(stderr.contains("changed after it was checked"), "{stderr}");
+    assert!(workbench_events(&journal_dir(&repo)).is_empty());
+}
+
+/// Claim: whether Git tracks the material is asked with repository
+/// discovery the caller's environment cannot steer. Rejects a
+/// `GIT_CEILING_DIRECTORIES` that hides the repository and lets a tracked
+/// file move out of its checkout.
+#[test]
+fn adopt_refuses_tracked_material_whatever_discovery_the_caller_set() {
+    let repo = Repo::new();
+    let nested = repo.root.join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("notes.txt"), "tracked\n").unwrap();
+    git(&repo.root, &["add", "a/b/notes.txt"]);
+    git(&repo.root, &["commit", "-qm", "add nested notes"]);
+    let output = repo
+        .arc(&repo.root)
+        .env("GIT_CEILING_DIRECTORIES", repo.root.join("a"))
+        .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
+        .args([
+            "journal",
+            "workbench",
+            "adopt",
+            "a/b/notes.txt",
+            "--purpose",
+            "notes",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(nested.join("notes.txt").is_file(), "{stderr}");
+    assert!(
+        stderr.contains("is tracked by the Git repository"),
+        "{stderr}"
+    );
+}
+
+/// Claim: a listing whose walk of an open workbench stopped at its entry
+/// bound leaves staleness unknown: it calls nothing stale or untouched and
+/// `catchup` counts nothing. Rejects declaring active material stale from
+/// the part of it a bounded walk happened to see.
+#[test]
+fn a_partial_walk_never_calls_a_workbench_stale() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "big-run", "a run with many files");
+    for index in 0..4 {
+        fs::write(path.join(format!("{index}.txt")), "x\n").unwrap();
+    }
+    let fifteen_days = 15 * 86_400;
+    age_journal_events(&journal_dir(&repo), fifteen_days as i64);
+    age_files(&path, fifteen_days);
+    let listing = json_stdout(
+        repo.arc(&repo.root)
+            .env("ARC_TEST_WORKBENCH_WALK_LIMIT", "2")
+            .args(["journal", "workbench", "list", "--json"]),
+    );
+    let row = &listing["workbenches"][0];
+    assert_eq!(row["size_partial"], true, "{row}");
+    assert_eq!(row["stale"], serde_json::Value::Null, "{row}");
+    let catchup = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_TEST_WORKBENCH_WALK_LIMIT", "2")
+            .args(["catchup"]),
+    );
+    assert!(!catchup.contains("(stale)"), "{catchup}");
+    assert!(!catchup.contains("untouched"), "{catchup}");
+    assert!(catchup.contains("staleness unknown"), "{catchup}");
 }

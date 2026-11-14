@@ -16,16 +16,20 @@ use super::{
     valid_topic, DoctorFinding, JournalEvent, RecordedIdentity,
 };
 use crate::commands::Ctx;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
+use fsat::{Dir, Stat};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::os::unix::fs::MetadataExt;
+use std::ffi::OsStr;
+use std::io::{BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 mod adoption;
+mod fsat;
 
 /// The directory under the journal, and under its cold archive, that holds
 /// workbenches.
@@ -34,6 +38,10 @@ const DIR: &str = "workbench";
 /// The index arc writes inside every workbench.
 const INDEX: &str = "WORKBENCH.md";
 
+/// The first line of every index arc writes: what makes a `WORKBENCH.md`
+/// arc's to rewrite.
+const INDEX_MARKER: &str = "<!-- arc writes this index from the journal's records -->";
+
 /// Days with no recorded act and no changed file after which an open
 /// workbench is stale: the threshold `journal filed` applies to open items.
 const STALE_DAYS: u64 = 14;
@@ -41,6 +49,18 @@ const STALE_DAYS: u64 = 14;
 /// The entries a listing walks in one workbench before it stops. Past it the
 /// listing's size is a lower bound and staleness is judged on what was walked.
 const WALK_LIMIT: u64 = 100_000;
+
+/// The listing's entry bound; a debug build lets a test lower it.
+fn walk_limit() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Some(limit) = std::env::var("ARC_TEST_WORKBENCH_WALK_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return limit;
+    }
+    WALK_LIMIT
+}
 
 #[derive(clap::Args)]
 pub struct WorkbenchArgs {
@@ -70,7 +90,9 @@ pub enum WorkbenchCmd {
     /// workbench is stale once 14 days pass with no recorded act and no file
     /// in it changed. The walk of an open workbench stops after 100,000
     /// entries: its size is then a lower bound, shown as `at least` and
-    /// marked by `size_partial`, and staleness is judged on what was walked.
+    /// marked by `size_partial`, and its staleness is unknown, `stale` null
+    /// and shown as `staleness unknown`, since what the walk did not see may
+    /// have changed.
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Include closed and archived workbenches
@@ -131,6 +153,8 @@ pub enum WorkbenchCmd {
     /// date. Records a `workbench-adopted` event with where the material was,
     /// its files and its bytes, and prints the new path as the last line.
     ///
+    /// The material is opened, without following a link, once the journal's
+    /// transition lock is held, and every check reads that opened object.
     /// Every refusal is decided before anything moves, and leaves the
     /// material as it was. By what the path names, adoption refuses a path
     /// that does not exist; a symbolic link, with or without a trailing
@@ -150,8 +174,14 @@ pub enum WorkbenchCmd {
     /// By what it holds: a Git repository, bare or not; a journal, registered
     /// or not, known by its bindings, its locks, or an event log beside
     /// artifacts; a mount point; a relative symbolic link leading out of it,
-    /// which would point elsewhere once moved; and `WORKBENCH.md` at its top.
-    /// A slug already open refuses too.
+    /// which would point elsewhere once moved; and a `WORKBENCH.md` at its
+    /// top that arc did not write. A slug already open refuses too.
+    ///
+    /// The move is one rename that replaces nothing, made only while the
+    /// material's path still leads to the object checked; material changed
+    /// after its checks refuses, and a kernel or filesystem with no such
+    /// rename refuses the move. `arc guide journal-workbenches` says what
+    /// follows when the move is made and its record is not.
     ///
     /// A directory of the journal arc does not own, such as an entry of
     /// `loose/`, may be adopted. A directory under `workbench/` that no event
@@ -381,70 +411,122 @@ fn cold_path(dir: &Path, name: &str) -> PathBuf {
     archive_dir(dir).join(DIR).join(name)
 }
 
-/// The workbench `name` under `root`, the journal or its archive, when it is
-/// a directory of it: `workbench/` and the workbench itself are real
-/// directories there, not links that lead somewhere else.
-fn contained(root: &Path, name: &str) -> Option<PathBuf> {
-    let real_dir = |path: &Path| {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+/// A path that should have been a directory of the journal was a link or
+/// a file.
+fn not_journal_dir(path: &Path, error: std::io::Error) -> anyhow::Error {
+    if fsat::not_a_real_dir(&error) {
+        anyhow!(
+            "{} is not a directory of the journal but a link or a file; arc moves nothing through it",
+            path.display()
+        )
+    } else {
+        anyhow::Error::new(error).context(format!("cannot open {}", path.display()))
+    }
+}
+
+/// The journal at `dir`, or its cold archive, opened: the journal as arc
+/// names it, the archive only when `<journal>-archive` is itself a
+/// directory, never a link. `create` makes an absent archive.
+fn open_root(dir: &Path, cold: bool, create: bool) -> Result<Dir> {
+    if !cold {
+        return Dir::open(dir).with_context(|| format!("cannot open {}", dir.display()));
+    }
+    let archive = archive_dir(dir);
+    let (Some(parent), Some(name)) = (archive.parent(), archive.file_name()) else {
+        bail!("{} has no directory above it", archive.display());
     };
-    let holding = root.join(DIR);
-    let path = holding.join(name);
-    (real_dir(&holding) && real_dir(&path)).then_some(path)
+    let above = Dir::open(parent).with_context(|| format!("cannot open {}", parent.display()))?;
+    match above.open_dir(name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            match above.make_dir(name) {
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                    return Err(error)
+                        .with_context(|| format!("cannot create {}", archive.display()))
+                }
+                _ => {}
+            }
+            above
+                .open_dir(name)
+                .map_err(|error| not_journal_dir(&archive, error))
+        }
+        opened => opened.map_err(|error| not_journal_dir(&archive, error)),
+    }
+}
+
+/// The directory that holds workbenches in the journal or its archive,
+/// made when absent, and refused unless it and the root above it are real
+/// directories, so nothing arc moves passes through a link.
+fn holding(dir: &Path, cold: bool) -> Result<Dir> {
+    let root = open_root(dir, cold, true)?;
+    let path = root_path(dir, cold).join(DIR);
+    match root.open_dir(OsStr::new(DIR)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match root.make_dir(OsStr::new(DIR)) {
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                    return Err(error).with_context(|| format!("cannot create {}", path.display()))
+                }
+                _ => {}
+            }
+            root.open_dir(OsStr::new(DIR))
+                .map_err(|error| not_journal_dir(&path, error))
+        }
+        opened => opened.map_err(|error| not_journal_dir(&path, error)),
+    }
+}
+
+fn root_path(dir: &Path, cold: bool) -> PathBuf {
+    if cold {
+        archive_dir(dir)
+    } else {
+        dir.to_path_buf()
+    }
+}
+
+/// The workbench `name` in the journal or its archive, opened, when the
+/// root, `workbench/` and the workbench are all real directories there.
+fn contained(dir: &Path, cold: bool, name: &str) -> Option<Dir> {
+    open_root(dir, cold, false)
+        .ok()?
+        .open_dir(OsStr::new(DIR))
+        .ok()?
+        .open_dir(OsStr::new(name))
+        .ok()
 }
 
 /// Where a workbench's directory is: where its records put it, else the
-/// other storage when it is found there, else `missing` at the recorded one.
-/// A directory reached through a link is not the journal's and is missing
-/// here; `journal doctor` names where it leads.
-fn located(dir: &Path, workbench: &Recorded<'_>) -> (PathBuf, &'static str) {
-    let cold = archive_dir(dir);
+/// other storage when it is found there, else `missing` at the recorded
+/// one, with the directory opened when it is found. A directory reached
+/// through a link is not the journal's and is missing here; `journal
+/// doctor` names where it leads.
+fn locate(dir: &Path, workbench: &Recorded<'_>) -> (PathBuf, &'static str, Option<Dir>) {
+    let name = &workbench.name;
     let (expected, other) = if workbench.archived {
-        ((cold.as_path(), "archived"), (dir, "hot"))
+        ((true, "archived"), (false, "hot"))
     } else {
-        ((dir, "hot"), (cold.as_path(), "archived"))
+        ((false, "hot"), (true, "archived"))
     };
-    if let Some(path) = contained(expected.0, &workbench.name) {
-        (path, expected.1)
-    } else if let Some(path) = contained(other.0, &workbench.name) {
-        (path, other.1)
-    } else {
-        (expected.0.join(DIR).join(&workbench.name), "missing")
-    }
-}
-
-/// The directory under `root` that holds workbenches, for a move or a
-/// creation into it: created when absent, refused unless it is a real
-/// directory there, so nothing arc moves passes through a link to somewhere
-/// outside the journal. `root` is created when absent and resolved.
-fn holding_dir(root: &Path) -> Result<PathBuf> {
-    match std::fs::create_dir(root) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot create {}", root.display()))
+    for (cold, storage) in [expected, other] {
+        if let Some(opened) = contained(dir, cold, name) {
+            return (
+                root_path(dir, cold).join(DIR).join(name),
+                storage,
+                Some(opened),
+            );
         }
     }
-    let root = std::fs::canonicalize(root)
-        .with_context(|| format!("cannot resolve {}", root.display()))?;
-    let holding = root.join(DIR);
-    match std::fs::symlink_metadata(&holding) {
-        Ok(metadata) if metadata.file_type().is_dir() => Ok(holding),
-        Ok(_) => bail!(
-            "{} is not a directory of the journal but a link or a file; arc moves nothing through it",
-            holding.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&holding)
-                .with_context(|| format!("cannot create {}", holding.display()))?;
-            Ok(holding)
-        }
-        Err(error) => Err(error).with_context(|| format!("cannot read {}", holding.display())),
-    }
+    (
+        root_path(dir, expected.0).join(DIR).join(name),
+        "missing",
+        None,
+    )
 }
 
-/// What a walk of a workbench found, from directory entries and their
-/// metadata alone.
+fn located(dir: &Path, workbench: &Recorded<'_>) -> (PathBuf, &'static str) {
+    let (path, storage, _) = locate(dir, workbench);
+    (path, storage)
+}
+
+/// What a walk of a workbench found, from directory entries alone.
 struct Measure {
     files: u64,
     bytes: u64,
@@ -454,40 +536,41 @@ struct Measure {
 }
 
 impl Measure {
-    fn touch(&mut self, metadata: &std::fs::Metadata) {
-        if let Ok(modified) = metadata.modified() {
-            self.newest = self.newest.max(Some(modified));
-        }
+    fn touch(&mut self, stat: &Stat) {
+        self.newest = self.newest.max(Some(stat.modified));
     }
 }
 
-/// Count the files and bytes under `root` and find the newest modification
-/// among its entries, without following a symbolic link or reading content,
-/// stopping after `limit` entries when one is given. The index at the root
-/// is arc's and is not counted. `visit` sees every other entry first and may
-/// refuse it.
+/// Count the files and bytes under the opened directory `root`, which lies
+/// at `root_path`, and find the newest modification among its entries,
+/// without following a link or reading content, stopping after `limit`
+/// entries when one is given. Each directory is opened from the one above
+/// it. The index at the root is arc's and is not counted. `visit` sees
+/// every other entry, with the directory holding it and its name, first,
+/// and may refuse it.
 fn walk(
-    root: &Path,
+    root: &Dir,
+    root_path: &Path,
     limit: Option<u64>,
-    mut visit: impl FnMut(&Path, &std::fs::Metadata) -> Result<()>,
+    mut visit: impl FnMut(&Path, &Dir, &OsStr, &Stat) -> Result<()>,
 ) -> Result<Measure> {
+    let cannot = |path: &Path| format!("cannot read {}", path.display());
     let mut measure = Measure {
         files: 0,
         bytes: 0,
         newest: None,
         partial: false,
     };
-    let metadata = std::fs::symlink_metadata(root)
-        .with_context(|| format!("cannot read {}", root.display()))?;
-    measure.touch(&metadata);
+    measure.touch(&root.stat().with_context(|| cannot(root_path))?);
+    let start = root
+        .open_dir(OsStr::new("."))
+        .with_context(|| cannot(root_path))?;
     let mut seen = 0u64;
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
-        {
-            let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
-            if dir == root && entry.file_name() == INDEX {
+    let mut queue: Vec<(Rc<Dir>, std::ffi::OsString, PathBuf)> = Vec::new();
+    let mut current = Some((Rc::new(start), root_path.to_path_buf(), true));
+    while let Some((dir, path, at_root)) = current.take() {
+        for name in dir.names().with_context(|| cannot(&path))? {
+            if at_root && name == INDEX {
                 continue;
             }
             if limit.is_some_and(|limit| seen >= limit) {
@@ -495,20 +578,27 @@ fn walk(
                 return Ok(measure);
             }
             seen += 1;
-            let path = entry.path();
-            let metadata = entry
-                .metadata()
-                .with_context(|| format!("cannot read {}", path.display()))?;
-            visit(&path, &metadata)?;
-            measure.touch(&metadata);
-            if metadata.is_dir() {
-                pending.push(path);
+            let entry_path = path.join(&name);
+            let Some(stat) = dir.entry(&name).with_context(|| cannot(&entry_path))? else {
+                continue;
+            };
+            visit(&entry_path, &dir, &name, &stat)?;
+            measure.touch(&stat);
+            if stat.is_dir() {
+                queue.push((Rc::clone(&dir), name, entry_path));
             } else {
                 measure.files += 1;
-                if metadata.is_file() {
-                    measure.bytes += metadata.len();
+                if stat.is_file() {
+                    measure.bytes += stat.size;
                 }
             }
+        }
+        drop(dir);
+        if let Some((parent, name, path)) = queue.pop() {
+            let child = parent
+                .open_dir(&name)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            current = Some((Rc::new(child), path, false));
         }
     }
     Ok(measure)
@@ -544,8 +634,10 @@ pub(crate) struct WorkbenchRow {
     /// The later of its last recorded act and, while it is open, the newest
     /// change to anything in it.
     last_activity: Option<String>,
-    /// Open, and untouched for longer than `stale_days`.
-    stale: bool,
+    /// Open, and untouched for longer than `stale_days`; null while the
+    /// walk of an open workbench did not see all of it, since what it did
+    /// not see may have changed.
+    stale: Option<bool>,
     changes: Vec<String>,
     artifacts: Vec<String>,
     closed: Option<Closure>,
@@ -574,33 +666,37 @@ fn rows(dir: &Path, events: &[JournalEvent], all: bool, now: DateTime<Utc>) -> V
 }
 
 fn row(dir: &Path, workbench: &Recorded<'_>, now: DateTime<Utc>) -> WorkbenchRow {
-    let (path, storage) = located(dir, workbench);
+    let (path, storage, opened) = locate(dir, workbench);
     let seconds_since =
         |at: DateTime<Utc>| now.signed_duration_since(at).num_seconds().max(0) as u64;
     let mut last_activity = workbench.last_act;
     let mut size_partial = false;
-    let (files, bytes, size_error) = if workbench.is_open() && storage == "missing" {
-        (
+    let mut walked_whole = false;
+    let (files, bytes, size_error) = match (workbench.is_open(), opened) {
+        (true, None) => (
             None,
             None,
             Some(format!("no directory at {}", path.display())),
-        )
-    } else if workbench.is_open() {
-        match walk(&path, Some(WALK_LIMIT), |_, _| Ok(())) {
-            Ok(measure) => {
-                last_activity = last_activity.max(measure.newest.map(DateTime::<Utc>::from));
-                size_partial = measure.partial;
-                (Some(measure.files), Some(measure.bytes), None)
+        ),
+        (true, Some(opened)) => {
+            match walk(&opened, &path, Some(walk_limit()), |_, _, _, _| Ok(())) {
+                Ok(measure) => {
+                    last_activity = last_activity.max(measure.newest.map(DateTime::<Utc>::from));
+                    size_partial = measure.partial;
+                    walked_whole = !measure.partial;
+                    (Some(measure.files), Some(measure.bytes), None)
+                }
+                Err(error) => (None, None, Some(format!("{error:#}"))),
             }
-            Err(error) => (None, None, Some(format!("{error:#}"))),
         }
-    } else {
-        let sized = workbench.sized;
-        (
-            sized.and_then(|event| event.files),
-            sized.and_then(|event| event.bytes),
-            None,
-        )
+        (false, _) => {
+            let sized = workbench.sized;
+            (
+                sized.and_then(|event| event.files),
+                sized.and_then(|event| event.bytes),
+                None,
+            )
+        }
     };
     let untouched_seconds = last_activity.map(seconds_since).unwrap_or_default();
     WorkbenchRow {
@@ -628,7 +724,11 @@ fn row(dir: &Path, workbench: &Recorded<'_>, now: DateTime<Utc>) -> WorkbenchRow
         size_error,
         last_activity: last_activity
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        stale: workbench.is_open() && untouched_seconds > STALE_DAYS * 86_400,
+        stale: match (workbench.is_open(), walked_whole) {
+            (false, _) => Some(false),
+            (true, true) => Some(untouched_seconds > STALE_DAYS * 86_400),
+            (true, false) => None,
+        },
         changes: workbench.changes.clone(),
         artifacts: workbench.artifacts.clone(),
         closed: workbench.closing.map(|event| Closure {
@@ -662,11 +762,17 @@ fn render_row(row: &WorkbenchRow) {
         _ => "size unknown".to_string(),
     };
     let mut facts = vec![size, format!("opened {} ago", format_age(row.age_seconds))];
-    if row.stale {
-        facts.push(format!(
+    match row.stale {
+        Some(true) => facts.push(format!(
             "untouched {} (stale)",
             format_age(row.untouched_seconds)
-        ));
+        )),
+        None if row.size_partial => facts.push(format!(
+            "staleness unknown: the walk stopped at {} entries",
+            walk_limit()
+        )),
+        None => facts.push("staleness unknown".to_string()),
+        Some(false) => {}
     }
     if row.storage != "hot" {
         facts.push(row.storage.to_string());
@@ -717,7 +823,7 @@ pub(super) fn render_catchup(rows: &[WorkbenchRow]) {
     for row in rows {
         render_row(row);
     }
-    let stale = rows.iter().filter(|row| row.stale).count();
+    let stale = rows.iter().filter(|row| row.stale == Some(true)).count();
     if stale > 0 {
         println!(
             "{stale} open workbenches untouched for >{STALE_DAYS} days: close each one that is done with `arc journal workbench close`"
@@ -860,81 +966,95 @@ fn require_artifact(dir: &Path, events: &[JournalEvent], file: &str) -> Result<(
     Ok(())
 }
 
-/// Append one act and rewrite the workbench's index from the records that
-/// now include it. The act stands once appended; an index that cannot be
-/// rewritten is reported and rewritten at the next act.
-fn record(
-    ctx: &Ctx,
-    dir: &Path,
-    events: &[JournalEvent],
-    event: JournalEvent,
-    path: &Path,
-) -> Result<()> {
-    append_event(ctx, dir, &event)?;
-    index_after(events, event, path);
-    Ok(())
-}
-
-fn index_after(events: &[JournalEvent], event: JournalEvent, path: &Path) {
+/// Rewrite a workbench's index from the records that now include `event`.
+/// The act stands once appended; an index that cannot be rewritten is
+/// reported and rewritten at the next act.
+fn reindex(events: &[JournalEvent], event: JournalEvent, opened: Option<&Dir>, at: &Path) {
+    let Some(opened) = opened else {
+        return;
+    };
     let mut events = events.to_vec();
     events.push(event);
-    if let Err(error) = write_index(&events, path) {
+    if let Err(error) = write_index(&events, opened, at, false) {
         eprintln!("warning: {error:#}; the next recorded act rewrites it");
     }
 }
 
-/// How to take back what an act changed on disk before its record was
-/// written, when the journal shows the record was not written.
-enum Undo {
-    /// Rename the material back from `to` to `from`, never replacing
-    /// anything at `from`, then remove `holder`, a directory arc made for a
-    /// moved file, which is empty once the file is back.
-    Rename {
-        from: PathBuf,
-        to: PathBuf,
-        holder: Option<PathBuf>,
-    },
-    /// Remove a directory arc created, which only succeeds while it is empty.
-    RemoveEmpty(PathBuf),
-}
-
-impl Undo {
-    fn apply(&self) -> Result<()> {
-        match self {
-            Undo::Rename { from, to, holder } => {
-                rename_new(to, from).with_context(|| {
-                    format!("cannot move {} back to {}", to.display(), from.display())
-                })?;
-                if let Some(holder) = holder {
-                    std::fs::remove_dir(holder)
-                        .with_context(|| format!("cannot remove {}", holder.display()))?;
-                }
-                Ok(())
+/// Write the index of the workbench opened as `opened`, which lies at
+/// `at`, from `events`. A fresh index is created and never replaces
+/// anything; a rewrite replaces only an index carrying arc's marker,
+/// writing into the file it read.
+fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) -> Result<()> {
+    let name = at
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("a workbench path ends in its name")?;
+    let recorded = recorded(events);
+    let workbench = recorded
+        .iter()
+        .find(|workbench| workbench.name == name)
+        .context("a recorded act names a recorded workbench")?;
+    let text = render_index(workbench);
+    let index = at.join(INDEX);
+    let create = || -> Result<()> {
+        let mut file = opened.create_new(OsStr::new(INDEX)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow!(
+                    "{} is there already, and arc writes no index over a file it did not write",
+                    index.display()
+                )
+            } else {
+                anyhow::Error::new(error).context(format!("cannot create {}", index.display()))
             }
-            Undo::RemoveEmpty(path) => std::fs::remove_dir(path)
-                .with_context(|| format!("cannot remove {}", path.display())),
-        }
+        })?;
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("cannot write {}", index.display()))
+    };
+    if fresh {
+        return create();
     }
+    let mut file = match opened.open_file(OsStr::new(INDEX), true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return create(),
+        Err(_) => bail!(
+            "{} is not a file arc wrote; arc leaves it as it is",
+            index.display()
+        ),
+    };
+    let mut existing = String::new();
+    let _ = (&mut file)
+        .take(INDEX_MARKER.len() as u64 + 1)
+        .read_to_string(&mut existing);
+    if existing.lines().next() != Some(INDEX_MARKER) {
+        bail!(
+            "{} is not the index arc writes; arc leaves it as it is",
+            index.display()
+        );
+    }
+    file.set_len(0)
+        .and_then(|()| file.rewind())
+        .and_then(|()| file.write_all(text.as_bytes()))
+        .with_context(|| format!("cannot write {}", index.display()))
 }
 
-/// An act that changed the disk before its record was appended: where its
-/// material is now, how to take the change back, and what `journal doctor`
-/// reports while the disk and the records disagree.
-struct Change {
-    at: PathBuf,
-    undo: Undo,
-    disagreement: String,
+/// Whether the index at the top of `opened` is one arc wrote.
+fn is_arc_index(opened: &Dir) -> bool {
+    let Ok(file) = opened.open_file(OsStr::new(INDEX), false) else {
+        return false;
+    };
+    let mut first = String::new();
+    std::io::BufReader::new(file.take(INDEX_MARKER.len() as u64 + 1))
+        .read_line(&mut first)
+        .is_ok()
+        && first.trim_end_matches('\n') == INDEX_MARKER
 }
 
 /// What the journal holds of one act after its append reported an error.
-/// An error does not prove nothing was written: the append may have been
-/// published, or prepared for the next journal write to publish.
-enum Fate {
+enum Outcome {
     Recorded,
-    /// Prepared and unpublished, with the command that publishes it.
+    /// Prepared and unpublished, with what publishes it.
     Prepared(String),
     Absent,
-    Unreadable(anyhow::Error),
 }
 
 /// The last record naming `name` in an event log.
@@ -946,147 +1066,75 @@ fn last_record<'a>(log: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-/// Read what the journal at `dir` holds of `event`: the last record naming
-/// its workbench, published or prepared, is exactly this one or it is not.
-/// The transition lock is held, so no other act on the workbench interleaves.
-fn fate(dir: &Path, event: &JournalEvent) -> Fate {
-    let (line, name) = match serde_json::to_string(event) {
-        Ok(line) => (line, event.workbench.clone().unwrap_or_default()),
-        Err(error) => return Fate::Unreadable(error.into()),
-    };
-    match std::fs::read_to_string(dir.join("events.jsonl")) {
-        Ok(log) if last_record(&log, &name) == Some(line.as_str()) => return Fate::Recorded,
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Fate::Unreadable(error.into()),
+/// Read what the journal at `dir` holds of `event`, to say what happened
+/// and nothing more. The prepared write is read before the event log, so a
+/// record published between the two reads is still found published.
+fn outcome(dir: &Path, event: &JournalEvent) -> Outcome {
+    let line = serde_json::to_string(event).unwrap_or_default();
+    let name = event.workbench.clone().unwrap_or_default();
+    let prepared = std::fs::read(super::exchange_pending_path(dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<super::ExchangeTransaction>(&bytes).ok());
+    let log = std::fs::read_to_string(dir.join("events.jsonl")).unwrap_or_default();
+    if last_record(&log, &name) == Some(line.as_str()) {
+        return Outcome::Recorded;
     }
-    let pending = super::exchange_pending_path(dir);
-    let bytes = match std::fs::read(&pending) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Fate::Absent,
-        Err(error) => return Fate::Unreadable(error.into()),
-    };
-    match serde_json::from_slice::<super::ExchangeTransaction>(&bytes) {
-        Ok(prepared) if last_record(&prepared.events, &name) == Some(line.as_str()) => {
-            Fate::Prepared(super::exchange_refusal(
+    match prepared {
+        Some(prepared) if last_record(&prepared.events, &name) == Some(line.as_str()) => {
+            Outcome::Prepared(super::exchange_refusal(
                 dir,
                 &prepared,
                 super::is_global_dir(dir).unwrap_or(false),
             ))
         }
-        Ok(_) => Fate::Absent,
-        Err(error) => Fate::Unreadable(error.into()),
+        _ => Outcome::Absent,
     }
 }
 
-/// Record an act that already changed the disk. On an append error the
-/// journal decides: a published act stands; a prepared one keeps the change,
-/// which its record names once published; an absent one is taken back
-/// without deleting or replacing a file. Whatever cannot be made consistent
-/// stops with where the material is and what `journal doctor` reports.
-fn record_change(
-    ctx: &Ctx,
-    dir: &Path,
-    events: &[JournalEvent],
-    event: JournalEvent,
-    index: &Path,
-    change: Change,
-) -> Result<()> {
-    let error = match append_event(ctx, dir, &event) {
-        Ok(()) => {
-            index_after(events, event, index);
-            return Ok(());
-        }
-        Err(error) => error,
-    };
-    let mut fate = fate(dir, &event);
-    if let Fate::Prepared(_) = fate {
-        if super::recover_journal_writes(dir).is_ok() {
-            fate = self::fate(dir, &event);
-        }
-    }
-    let at = change.at.display();
-    match fate {
-        Fate::Recorded => {
-            eprintln!("warning: the journal reported an error after recording this act: {error:#}");
-            index_after(events, event, index);
-            Ok(())
-        }
-        Fate::Prepared(remedy) => bail!(
-            "{error:#}\nthe record of this act is prepared but not published: {remedy}. \
-             The material is at {at}, where that record puts it; until it is published \
-             `arc journal doctor` reports {}.",
-            change.disagreement
-        ),
-        Fate::Absent => match change.undo.apply() {
-            Ok(()) => Err(error.context("nothing was recorded, and the change was taken back")),
-            Err(undo) => bail!(
-                "{error:#}\nnothing was recorded, and taking the change back failed: {undo:#}. \
-                 The material is at {at}; `arc journal doctor` reports {}.",
-                change.disagreement
-            ),
-        },
-        Fate::Unreadable(read) => bail!(
-            "{error:#}\nwhether this act was recorded cannot be read: {read:#}. The material \
-             is at {at}; `arc journal doctor` reports {} unless the record was written.",
-            change.disagreement
-        ),
-    }
+/// An act whose change on disk was made and whose record was not: the
+/// state the disk is left in, which nothing undoes.
+struct Unrecorded<'a> {
+    /// What happened on disk: `moved`, `created`, or `nothing moved`.
+    done: &'a str,
+    /// Where the material is now.
+    at: &'a Path,
+    /// What `journal doctor` reports meanwhile.
+    doctor: String,
+    /// The command that records the act where the material stands.
+    repair: String,
 }
 
-/// Rename `from` to `to`, refusing to replace anything already at `to`.
-fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = |path: &Path| {
-            std::ffi::CString::new(path.as_os_str().as_bytes())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+impl Unrecorded<'_> {
+    fn error(&self, detail: impl std::fmt::Display) -> anyhow::Error {
+        anyhow!(
+            "{}, not recorded: the material is at {}. {detail}. `arc journal doctor` reports {}; {}",
+            self.done,
+            self.at.display(),
+            self.doctor,
+            self.repair
+        )
+    }
+
+    /// Append `event`. Recorded, or this state: an append error does not
+    /// prove nothing was written, so the journal says which.
+    fn record(&self, ctx: &Ctx, dir: &Path, event: &JournalEvent) -> Result<()> {
+        let error = match append_event(ctx, dir, event) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
         };
-        let (from_c, to_c) = (c_path(from)?, c_path(to)?);
-        // SAFETY: both arguments are NUL-terminated paths that outlive the
-        // call, and renameat2 reads nothing else of this process's memory.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                from_c.as_ptr(),
-                libc::AT_FDCWD,
-                to_c.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        if !matches!(
-            error.raw_os_error(),
-            Some(libc::EINVAL) | Some(libc::ENOSYS)
-        ) {
-            return Err(error);
+        match outcome(dir, event) {
+            Outcome::Recorded => {
+                eprintln!(
+                    "warning: the journal reported an error after recording this act: {error:#}"
+                );
+                Ok(())
+            }
+            Outcome::Prepared(remedy) => Err(self.error(format_args!(
+                "Its record is prepared and not yet published ({remedy}); once published it records the material where it is: {error:#}"
+            ))),
+            Outcome::Absent => Err(self.error(format_args!("{error:#}"))),
         }
     }
-    if std::fs::symlink_metadata(to).is_ok() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{} already exists", to.display()),
-        ));
-    }
-    std::fs::rename(from, to)
-}
-
-fn write_index(events: &[JournalEvent], path: &Path) -> Result<()> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("a workbench path ends in its name")?;
-    let recorded = recorded(events);
-    let workbench = recorded
-        .iter()
-        .find(|workbench| workbench.name == name)
-        .context("a recorded act names a recorded workbench")?;
-    super::publish_exchange_file(&path.join(INDEX), render_index(workbench).as_bytes())
 }
 
 /// The index arc keeps in a workbench: what its records say, for a reader
@@ -1100,7 +1148,7 @@ fn render_index(workbench: &Recorded<'_>) -> String {
         }
     };
     let mut text = format!(
-        "# Workbench {}\n\nPurpose: {}\nOpened: {}{}\n",
+        "{INDEX_MARKER}\n# Workbench {}\n\nPurpose: {}\nOpened: {}{}\n",
         workbench.name,
         workbench.purpose(),
         workbench.opening.ts,
@@ -1174,14 +1222,28 @@ fn open(ctx: &Ctx, slug: &str, purpose: &str) -> Result<i32> {
     let mut event = JournalEvent::base(ctx, now, slug, "workbench-opened");
     event.workbench = Some(name.clone());
     event.purpose = Some(purpose);
-    let path = holding_dir(&dir)?.join(&name);
-    std::fs::create_dir(&path).with_context(|| format!("cannot create {}", path.display()))?;
-    let change = Change {
-        at: path.clone(),
-        undo: Undo::RemoveEmpty(path.clone()),
-        disagreement: format!("{} as unrecorded-workbench", path.display()),
+    let holding = holding(&dir, false)?;
+    let path = dir.join(DIR).join(&name);
+    holding
+        .make_dir(OsStr::new(&name))
+        .with_context(|| format!("cannot create {}", path.display()))?;
+    let state = Unrecorded {
+        done: "created",
+        at: &path,
+        doctor: format!("{} as unrecorded-workbench", path.display()),
+        repair: format!(
+            "`arc journal workbench adopt {} --purpose TEXT` records it where it stands",
+            path.display()
+        ),
     };
-    record_change(ctx, &dir, &events, event, &path, change)?;
+    let opened = holding
+        .open_dir(OsStr::new(&name))
+        .map_err(|error| state.error(error))?;
+    let mut with = events.clone();
+    with.push(event.clone());
+    write_index(&with, &opened, &path, true)
+        .map_err(|error| state.error(format_args!("{error:#}")))?;
+    state.record(ctx, &dir, &event)?;
     println!("opened: {name}");
     println!("{}", path.display());
     Ok(0)
@@ -1218,8 +1280,9 @@ fn link(ctx: &Ctx, address: &str, change: Option<&str>, artifact: Option<&str>) 
         }
         (None, None) => bail!("name a --change or an --artifact to link"),
     };
-    let (path, _) = located(&dir, workbench);
-    record(ctx, &dir, &events, event, &path)?;
+    append_event(ctx, &dir, &event)?;
+    let (path, _, opened) = locate(&dir, workbench);
+    reindex(&events, event, opened.as_ref(), &path);
     println!("linked: {} to {target}", workbench.name);
     Ok(0)
 }
@@ -1267,14 +1330,14 @@ fn close(ctx: &Ctx, address: &str, produced: &[String], note: Option<&str>) -> R
     if let Some(closing) = workbench.closing {
         bail!("{} was closed at {}", workbench.name, closing.ts);
     }
-    let (path, storage) = located(&dir, workbench);
+    let (path, _, opened) = locate(&dir, workbench);
     let mut event = JournalEvent::base(ctx, Utc::now(), &workbench.slug, "workbench-closed");
     event.workbench = Some(workbench.name.clone());
     event.changes = changes;
     event.artifacts = artifacts;
     event.note = note;
-    if storage != "missing" {
-        let measure = walk(&path, None, |_, _| Ok(()))?;
+    if let Some(opened) = &opened {
+        let measure = walk(opened, &path, None, |_, _, _, _| Ok(()))?;
         event.files = Some(measure.files);
         event.bytes = Some(measure.bytes);
     }
@@ -1283,11 +1346,8 @@ fn close(ctx: &Ctx, address: &str, produced: &[String], note: Option<&str>) -> R
     } else {
         targets(&event)
     };
-    if storage == "missing" {
-        append_event(ctx, &dir, &event)?;
-    } else {
-        record(ctx, &dir, &events, event, &path)?;
-    }
+    append_event(ctx, &dir, &event)?;
+    reindex(&events, event, opened.as_ref(), &path);
     println!("closed: {}, produced {produced}", workbench.name);
     Ok(0)
 }
@@ -1323,24 +1383,35 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
             if to_cold { "archived" } else { "live" }
         );
     }
-    let cold = archive_dir(&dir);
-    let (from_root, to_root) = if to_cold {
-        (dir.as_path(), cold.as_path())
-    } else {
-        (cold.as_path(), dir.as_path())
-    };
-    let Some(source) = contained(from_root, name) else {
-        bail!(
-            "{name} has no directory of the journal at {}; `arc journal doctor` says where it is",
-            from_root.join(DIR).join(name).display()
-        );
-    };
-    let measure = walk(&source, None, |_, _| Ok(()))?;
     let kind = if to_cold {
         "workbench-archived"
     } else {
         "workbench-unarchived"
     };
+    let command = if to_cold { "archive" } else { "unarchive" };
+    let from = root_path(&dir, !to_cold).join(DIR).join(name);
+    let destination = root_path(&dir, to_cold).join(DIR).join(name);
+    let state = Unrecorded {
+        done: "moved",
+        at: &destination,
+        doctor: format!("{name} as misplaced-workbench"),
+        repair: format!("`arc journal {command} {name}` records it where it is"),
+    };
+    let (opened, moving) = match contained(&dir, !to_cold, name) {
+        Some(opened) => (opened, true),
+        // A move whose record was not written: the directory is already
+        // where the act puts it, and only the record is missing.
+        None => match contained(&dir, to_cold, name) {
+            Some(opened) => (opened, false),
+            None => bail!(
+                "{name} has no directory of the journal at {}; `arc journal doctor` says where it is",
+                from.display()
+            ),
+        },
+    };
+    let at = if moving { &from } else { &destination };
+    let identity = opened.stat()?;
+    let measure = walk(&opened, at, None, |_, _, _, _| Ok(()))?;
     let mut event = JournalEvent::base(ctx, Utc::now(), &workbench.slug, kind);
     event.workbench = Some(name.clone());
     event.note = note;
@@ -1349,45 +1420,53 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
     if !event.known() {
         bail!("the record of this move would not be read back; nothing moved");
     }
-    let destination = holding_dir(to_root)?.join(name);
-    refuse_other_filesystem(&source, destination.parent().unwrap_or(to_root))?;
-    rename_new(&source, &destination).with_context(|| {
-        format!(
-            "cannot move {} to {}",
-            source.display(),
-            destination.display()
-        )
-    })?;
-    let change = Change {
-        at: destination.clone(),
-        undo: Undo::Rename {
-            from: source.clone(),
-            to: destination.clone(),
-            holder: None,
-        },
-        disagreement: format!("{name} as misplaced-workbench"),
-    };
-    record_change(ctx, &dir, &events, event, &destination, change)?;
-    println!(
-        "{}: {name}",
-        if to_cold { "archived" } else { "unarchived" }
-    );
+    if moving {
+        let target = holding(&dir, to_cold)?;
+        let source = open_root(&dir, !to_cold, false)?
+            .open_dir(OsStr::new(DIR))
+            .map_err(|error| not_journal_dir(&from, error))?;
+        refuse_other_filesystem(&identity, &from, &target.stat()?, &destination)?;
+        if !source
+            .entry(OsStr::new(name))?
+            .is_some_and(|entry| entry.same(&identity))
+        {
+            bail!(
+                "{} changed while it was measured; nothing moved",
+                from.display()
+            );
+        }
+        fsat::rename_new(&source, OsStr::new(name), &target, OsStr::new(name)).with_context(
+            || {
+                format!(
+                    "cannot move {} to {}; nothing moved",
+                    from.display(),
+                    destination.display()
+                )
+            },
+        )?;
+        state.record(ctx, &dir, &event)?;
+    } else {
+        Unrecorded {
+            done: "nothing moved",
+            ..state
+        }
+        .record(ctx, &dir, &event)?;
+    }
+    let reopened = contained(&dir, to_cold, name);
+    reindex(&events, event, reopened.as_ref(), &destination);
+    println!("{command}d: {name}");
     println!("{}", destination.display());
     Ok(0)
 }
 
-/// Refuse a move no single rename can make: `path` and `parent` on two
-/// filesystems.
-fn refuse_other_filesystem(path: &Path, parent: &Path) -> Result<()> {
-    let from = std::fs::symlink_metadata(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    let to =
-        std::fs::metadata(parent).with_context(|| format!("cannot read {}", parent.display()))?;
-    if from.dev() != to.dev() {
+/// Refuse a move no single rename can make: the material at `path` and the
+/// directory it would move into, at `to`, on two filesystems.
+fn refuse_other_filesystem(material: &Stat, path: &Path, into: &Stat, to: &Path) -> Result<()> {
+    if material.dev != into.dev {
         bail!(
             "{} is on another filesystem than {}, so no rename can move it there atomically; move it onto that filesystem first",
             path.display(),
-            parent.display()
+            to.parent().unwrap_or(to).display()
         );
     }
     Ok(())
@@ -1415,12 +1494,20 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
-    let source = adoption::resolve(ctx, raw)?;
+    // The material is opened and checked under the lock, so nothing another
+    // adoption or archive does can change it between the checks.
     let _transition = lock_journal_transition(&dir)?;
+    let source = adoption::resolve(ctx, raw)?;
     let events = read_events(&dir)?;
     let recorded = recorded(&events);
     let hot = std::fs::canonicalize(&dir)?;
-    let in_place = source.is_dir && source.path.parent() == Some(hot.join(DIR).as_path());
+    let journal = Dir::open(&dir).with_context(|| format!("cannot open {}", dir.display()))?;
+    let in_place = source.is_dir()
+        && source.path.parent() == Some(hot.join(DIR).as_path())
+        && journal
+            .open_dir(OsStr::new(DIR))
+            .and_then(|holding| holding.stat())
+            .is_ok_and(|holding| holding.same(&source.parent_stat));
     let material = source.name.to_string_lossy().to_string();
     if in_place && recorded.iter().any(|workbench| workbench.name == material) {
         bail!(
@@ -1431,11 +1518,11 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
     // Everything that can refuse is settled before anything moves.
     adoption::refuse_location(ctx, &dir, &hot, &source, in_place)?;
     if !in_place {
-        refuse_other_filesystem(&source.path, &hot)?;
+        refuse_other_filesystem(&source.stat, &source.path, &journal.stat()?, &hot.join(DIR))?;
     }
-    let measure = adoption::survey(&source)?;
+    let measure = adoption::survey(&source, in_place)?;
     adoption::refuse_tracked(&source)?;
-    let stem = if source.is_dir {
+    let stem = if source.is_dir() {
         material.as_str()
     } else {
         Path::new(&material)
@@ -1472,48 +1559,40 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
             source.path.display()
         );
     }
-    let (target, undo) = if in_place {
-        (source.path.clone(), None)
+    let mut with = events.clone();
+    with.push(event.clone());
+    #[cfg(debug_assertions)]
+    crate::import_authorization::test_rendezvous("workbench-adopt-checked")?;
+    let target = if in_place {
+        source.path.clone()
     } else {
-        let target = holding_dir(&dir)?.join(&name);
-        if source.is_dir {
-            rename_new(&source.path, &target)
-        } else {
-            std::fs::create_dir(&target).and_then(|()| {
-                rename_new(&source.path, &target.join(&source.name)).inspect_err(|_| {
-                    let _ = std::fs::remove_dir(&target);
-                })
-            })
-        }
-        .with_context(|| {
-            format!(
-                "cannot move {} to {}",
-                source.path.display(),
-                target.display()
-            )
-        })?;
-        let (to, holder) = if source.is_dir {
-            (target.clone(), None)
-        } else {
-            (target.join(&source.name), Some(target.clone()))
-        };
-        let undo = Undo::Rename {
-            from: source.path.clone(),
-            to,
-            holder,
-        };
-        (target, Some(undo))
+        dir.join(DIR).join(&name)
     };
-    match undo {
-        Some(undo) => {
-            let change = Change {
-                at: target.clone(),
-                undo,
-                disagreement: format!("{} as unrecorded-workbench", target.display()),
-            };
-            record_change(ctx, &dir, &events, event, &target, change)?;
-        }
-        None => record(ctx, &dir, &events, event, &target)?,
+    let state = Unrecorded {
+        done: if in_place { "nothing moved" } else { "moved" },
+        at: &target,
+        doctor: format!("{} as unrecorded-workbench", target.display()),
+        repair: format!(
+            "`arc journal workbench adopt {} --purpose TEXT` records it where it stands",
+            target.display()
+        ),
+    };
+    if in_place {
+        adoption::confirm(&source)?;
+        let opened = source
+            .dir
+            .as_ref()
+            .context("an in-place adoption is a directory")?;
+        let fresh = !is_arc_index(opened);
+        write_index(&with, opened, &target, fresh)
+            .map_err(|error| state.error(format_args!("{error:#}")))?;
+        state.record(ctx, &dir, &event)?;
+    } else {
+        let holding = holding(&dir, false)?;
+        let opened = move_material(&source, &holding, &name, &target, &state)?;
+        write_index(&with, &opened, &target, true)
+            .map_err(|error| state.error(format_args!("{error:#}")))?;
+        state.record(ctx, &dir, &event)?;
     }
     println!(
         "adopted: {} as {name}, {} in {} {}",
@@ -1524,6 +1603,62 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
     );
     println!("{}", target.display());
     Ok(0)
+}
+
+/// Move the checked material into the workbench `name` under `holding` by
+/// one rename that replaces nothing, confirming first that the material's
+/// path still leads to the object checked, and return the workbench
+/// opened. A file moves into a directory made for it. Once the rename is
+/// done nothing is taken back: a failure after it is `state`.
+fn move_material(
+    source: &adoption::Source,
+    holding: &Dir,
+    name: &str,
+    target: &Path,
+    state: &Unrecorded<'_>,
+) -> Result<Dir> {
+    let cannot = |error: std::io::Error| {
+        anyhow::Error::new(error).context(format!(
+            "cannot move {} to {}; nothing moved",
+            source.path.display(),
+            target.display()
+        ))
+    };
+    let name = OsStr::new(name);
+    if source.is_dir() {
+        adoption::confirm(source)?;
+        fsat::rename_new(&source.parent, &source.name, holding, name).map_err(cannot)?;
+        let opened = holding.open_dir(name).map_err(|error| state.error(error))?;
+        if !opened.stat()?.same(&source.stat) {
+            return Err(state.error("What arrived is not the material that was checked"));
+        }
+        return Ok(opened);
+    }
+    holding
+        .make_dir(name)
+        .with_context(|| format!("cannot create {}", target.display()))?;
+    let made = holding.open_dir(name);
+    let moved = made
+        .as_ref()
+        .map_err(|error| std::io::Error::from(error.kind()))
+        .and_then(|holder| {
+            adoption::confirm(source)
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+            fsat::rename_new(&source.parent, &source.name, holder, &source.name)
+        });
+    if let Err(error) = moved {
+        // Nothing moved: the directory made for the file is still empty.
+        let _ = holding.remove_empty_dir(name);
+        return Err(cannot(error));
+    }
+    let opened = made.map_err(|error| state.error(error))?;
+    if !opened
+        .entry(&source.name)?
+        .is_some_and(|entry| entry.same(&source.stat))
+    {
+        return Err(state.error("What arrived is not the material that was checked"));
+    }
+    Ok(opened)
 }
 
 /// Report workbenches whose directories and records disagree: a recorded
@@ -1542,6 +1677,22 @@ pub(super) fn inspect(
     let cold = archive_dir(dir);
     let mut holdings = Vec::new();
     for (root, is_cold) in [(dir, false), (cold.as_path(), true)] {
+        if is_cold {
+            match std::fs::symlink_metadata(root) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    problems.push(DoctorFinding {
+                        code: "workbench-outside-journal",
+                        detail: format!(
+                            "{}: {}, not a directory of the journal; arc moves nothing through it",
+                            root.display(),
+                            leads(root)
+                        ),
+                    });
+                    continue;
+                }
+                _ => {}
+            }
+        }
         let holding = root.join(DIR);
         match std::fs::symlink_metadata(&holding) {
             Ok(metadata) if metadata.file_type().is_dir() => holdings.push((holding, is_cold)),
@@ -1672,78 +1823,84 @@ mod tests {
         std::fs::write(path, serde_json::to_vec(&pending).unwrap()).unwrap();
     }
 
-    /// Claim: after an append error the journal's own files decide what was
-    /// recorded: the act's exact record, last for its workbench in the event
-    /// log, is recorded; the same in a prepared exchange is prepared; a
-    /// later record for the workbench, or none, is absent. Rejects reading
-    /// an append error as proof nothing was written, which takes back a
-    /// change whose record stands or will be published.
+    /// Claim: after an append error the journal's own files say what
+    /// happened: the act's exact record, last for its workbench in the
+    /// event log, is recorded, even while a prepared write still holds it;
+    /// the same only in a prepared write is prepared; a later record for
+    /// the workbench, or none, is absent. Rejects reading an append error
+    /// as proof nothing was written, and reporting a published record as
+    /// unpublished because the prepared write was read after the log.
     #[test]
-    fn the_journal_decides_whether_an_act_was_recorded() {
+    fn the_journal_says_whether_an_act_was_recorded() {
         let event = opened("notes-20260102");
         let mut later = opened("notes-20260102");
         later.event = "workbench-closed".to_string();
 
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(fate(dir.path(), &event), Fate::Absent));
-
+        assert!(matches!(outcome(dir.path(), &event), Outcome::Absent));
         std::fs::write(dir.path().join("events.jsonl"), line(&event)).unwrap();
-        assert!(matches!(fate(dir.path(), &event), Fate::Recorded));
-
+        assert!(matches!(outcome(dir.path(), &event), Outcome::Recorded));
+        prepare(dir.path(), line(&event));
+        assert!(matches!(outcome(dir.path(), &event), Outcome::Recorded));
         let log = format!("{}{}", line(&event), line(&later));
         std::fs::write(dir.path().join("events.jsonl"), log).unwrap();
-        assert!(matches!(fate(dir.path(), &event), Fate::Absent));
+        prepare(dir.path(), line(&opened("other-20260102")));
+        assert!(matches!(outcome(dir.path(), &event), Outcome::Absent));
 
         let dir = tempfile::tempdir().unwrap();
         prepare(dir.path(), line(&event));
-        assert!(matches!(fate(dir.path(), &event), Fate::Prepared(_)));
-        prepare(dir.path(), line(&opened("other-20260102")));
-        assert!(matches!(fate(dir.path(), &event), Fate::Absent));
+        assert!(matches!(outcome(dir.path(), &event), Outcome::Prepared(_)));
     }
 
-    /// Claim: taking a move back never replaces what stands at the
-    /// material's old path: it fails and leaves both entries as they were.
-    /// Rejects a rollback that overwrites a file another process made there
-    /// meanwhile.
+    /// Claim: arc's rename never replaces what stands at the destination:
+    /// it fails and leaves both entries as they were. Rejects a move that
+    /// overwrites a file another process made there.
     #[test]
-    fn taking_a_move_back_never_replaces_what_is_there() {
+    fn a_rename_never_replaces_what_is_there() {
         let dir = tempfile::tempdir().unwrap();
-        let from = dir.path().join("plan.md");
-        let holder = dir.path().join("plan-20260102");
-        std::fs::create_dir(&holder).unwrap();
-        let to = holder.join("plan.md");
-        std::fs::write(&to, "moved\n").unwrap();
-        std::fs::write(&from, "made meanwhile\n").unwrap();
-        let undo = Undo::Rename {
-            from: from.clone(),
-            to: to.clone(),
-            holder: Some(holder.clone()),
-        };
-        assert!(undo.apply().is_err());
-        assert_eq!(std::fs::read_to_string(&from).unwrap(), "made meanwhile\n");
-        assert_eq!(std::fs::read_to_string(&to).unwrap(), "moved\n");
-
-        std::fs::remove_file(&from).unwrap();
-        undo.apply().unwrap();
-        assert_eq!(std::fs::read_to_string(&from).unwrap(), "moved\n");
-        assert!(!holder.exists());
+        std::fs::write(dir.path().join("plan.md"), "moving\n").unwrap();
+        std::fs::write(dir.path().join("taken.md"), "made meanwhile\n").unwrap();
+        let opened = Dir::open(dir.path()).unwrap();
+        let error = fsat::rename_new(
+            &opened,
+            OsStr::new("plan.md"),
+            &opened,
+            OsStr::new("taken.md"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+        assert_eq!(read("plan.md"), "moving\n");
+        assert_eq!(read("taken.md"), "made meanwhile\n");
+        fsat::rename_new(
+            &opened,
+            OsStr::new("plan.md"),
+            &opened,
+            OsStr::new("new.md"),
+        )
+        .unwrap();
+        assert_eq!(read("new.md"), "moving\n");
     }
 
     /// Claim: a walk given a limit stops after that many entries and marks
-    /// its counts as lower bounds; without one it counts every file. Rejects
-    /// an unbounded listing walk of a huge workbench, and a bounded walk
-    /// presenting a partial count as the whole.
+    /// its counts as lower bounds; without one it counts every file, nested
+    /// ones included. Rejects an unbounded listing walk of a huge workbench,
+    /// and a bounded walk presenting a partial count as the whole.
     #[test]
     fn a_bounded_walk_stops_and_says_its_counts_are_partial() {
         let dir = tempfile::tempdir().unwrap();
-        for index in 0..5 {
+        for index in 0..4 {
             std::fs::write(dir.path().join(format!("{index}.txt")), "x").unwrap();
         }
-        let whole = walk(dir.path(), None, |_, _| Ok(())).unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/deep.txt"), "x").unwrap();
+        let root = Dir::open(dir.path()).unwrap();
+        let measure = |limit| walk(&root, dir.path(), limit, |_, _, _, _| Ok(())).unwrap();
+        let whole = measure(None);
         assert_eq!((whole.files, whole.bytes, whole.partial), (5, 5, false));
-        let bounded = walk(dir.path(), Some(3), |_, _| Ok(())).unwrap();
+        let bounded = measure(Some(3));
         assert_eq!((bounded.files, bounded.partial), (3, true));
-        let exact = walk(dir.path(), Some(5), |_, _| Ok(())).unwrap();
+        let exact = measure(Some(6));
         assert_eq!((exact.files, exact.partial), (5, false));
     }
 }

@@ -1,32 +1,46 @@
 //! What adoption may move, decided before anything moves.
 //!
-//! Adoption renames material somebody made into the journal. Everything that
-//! can refuse it is settled here from the material's path and directory
-//! entries: what the path names, where it lies, what it holds, and whether
-//! the record of it can be written. Nothing here reads a file's content.
+//! Adoption renames material somebody made into the journal. The material
+//! is opened once, without following a link, while the journal's transition
+//! lock is held; every check below reads that opened object, and the move
+//! confirms it is still the one at the material's path. Nothing here reads
+//! a file's content except the first line of an index arc may have written.
 
+use super::fsat::{Dir, Stat};
 use super::{walk, Measure, DIR, INDEX};
 use crate::commands::Ctx;
 use crate::config;
 use anyhow::{bail, Context, Result};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-/// The material an adoption names, resolved once.
+/// The material an adoption names, opened once.
 pub(super) struct Source {
-    /// Absolute, with every directory above the material resolved and the
-    /// material's own name kept, so neither a link nor a trailing slash is
-    /// followed in its place. Every check and the move itself use this path.
+    /// Absolute: the directory above the material resolved, the material's
+    /// own name kept, so neither a link nor a trailing slash is followed in
+    /// its place.
     pub(super) path: PathBuf,
+    parent_path: PathBuf,
+    pub(super) parent: Dir,
+    /// The directory above the material as it stood when opened.
+    pub(super) parent_stat: Stat,
     pub(super) name: OsString,
-    pub(super) is_dir: bool,
-    pub(super) metadata: std::fs::Metadata,
+    pub(super) stat: Stat,
+    /// The material itself, opened, when it is a directory.
+    pub(super) dir: Option<Dir>,
     /// The path as the adoption's record states it.
     pub(super) recorded: String,
 }
 
-/// Resolve the path an adoption names, refusing what it cannot be: no
+impl Source {
+    pub(super) fn is_dir(&self) -> bool {
+        self.dir.is_some()
+    }
+}
+
+/// Open the material an adoption names, refusing what it cannot be: no
 /// material, a link, anything but a file or a directory, or a path the
 /// record cannot state on one line of text.
 pub(super) fn resolve(ctx: &Ctx, raw: &str) -> Result<Source> {
@@ -50,29 +64,45 @@ pub(super) fn resolve(ctx: &Ctx, raw: &str) -> Result<Source> {
         Some(Component::Normal(name)) => name.to_os_string(),
         _ => bail!("{raw} is a filesystem root"),
     };
-    let parent: PathBuf = components[..components.len() - 1].iter().collect();
-    let parent = std::fs::canonicalize(&parent)
-        .with_context(|| format!("cannot resolve {}", parent.display()))?;
-    let path = parent.join(&name);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            bail!("{} does not exist", path.display())
-        }
-        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    let parent_path: PathBuf = components[..components.len() - 1].iter().collect();
+    let parent_path = std::fs::canonicalize(&parent_path)
+        .with_context(|| format!("cannot resolve {}", parent_path.display()))?;
+    let path = parent_path.join(&name);
+    let parent = Dir::open(&parent_path)
+        .with_context(|| format!("cannot open {}", parent_path.display()))?;
+    let parent_stat = parent.stat()?;
+    let Some(stat) = parent
+        .entry(&name)
+        .with_context(|| format!("cannot read {}", path.display()))?
+    else {
+        bail!("{} does not exist", path.display())
     };
-    if metadata.file_type().is_symlink() {
+    if stat.is_link() {
         bail!(
             "{} is a symbolic link; adopt the material it points to",
             path.display()
         );
     }
-    if !metadata.is_dir() && !metadata.is_file() {
+    if !stat.is_dir() && !stat.is_file() {
         bail!(
             "{} is neither a regular file nor a directory",
             path.display()
         );
     }
+    let dir = if stat.is_dir() {
+        let dir = parent
+            .open_dir(&name)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        if !dir.stat()?.same(&stat) {
+            bail!(
+                "{} changed while it was opened; nothing moved",
+                path.display()
+            );
+        }
+        Some(dir)
+    } else {
+        None
+    };
     let recorded = match path.to_str() {
         Some(text) if !text.chars().any(char::is_control) => text.to_string(),
         _ => bail!(
@@ -81,32 +111,52 @@ pub(super) fn resolve(ctx: &Ctx, raw: &str) -> Result<Source> {
         ),
     };
     Ok(Source {
-        is_dir: metadata.is_dir(),
         path,
+        parent_path,
+        parent,
+        parent_stat,
         name,
-        metadata,
+        stat,
+        dir,
         recorded,
     })
 }
 
-/// Whether `path` names an entry, a link or anything else, without
-/// following it.
-fn present(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
+/// Refuse unless the material's path still leads, through the directory
+/// opened above it, to the object every check read. Called immediately
+/// before the move.
+pub(super) fn confirm(source: &Source) -> Result<()> {
+    let parent_now = std::fs::metadata(&source.parent_path).ok();
+    let entry = source.parent.entry(&source.name)?;
+    let parent_same = parent_now.is_some_and(|metadata| {
+        metadata.dev() == source.parent_stat.dev && metadata.ino() == source.parent_stat.ino
+    });
+    if !parent_same || !entry.is_some_and(|entry| entry.same(&source.stat)) {
+        bail!(
+            "{} changed after it was checked; nothing moved",
+            source.path.display()
+        );
+    }
+    Ok(())
+}
+
+fn present(dir: &Dir, name: &str) -> bool {
+    dir.entry(OsStr::new(name))
+        .is_ok_and(|entry| entry.is_some())
 }
 
 /// What makes `dir` a Git repository by its entries: a `.git` entry of any
 /// kind, which a working tree holds, or `HEAD`, `objects` and `refs`
 /// together, which every repository directory holds, bare or not.
-fn repository(dir: &Path) -> Option<&'static str> {
-    if present(&dir.join(".git")) {
+fn repository(dir: &Dir) -> Option<&'static str> {
+    if present(dir, ".git") {
         return Some("a `.git` entry");
     }
     repository_directory(dir)
 }
 
-fn repository_directory(dir: &Path) -> Option<&'static str> {
-    (present(&dir.join("HEAD")) && present(&dir.join("objects")) && present(&dir.join("refs")))
+fn repository_directory(dir: &Dir) -> Option<&'static str> {
+    (present(dir, "HEAD") && present(dir, "objects") && present(dir, "refs"))
         .then_some("HEAD, objects and refs")
 }
 
@@ -114,42 +164,43 @@ fn repository_directory(dir: &Path) -> Option<&'static str> {
 /// holds `bindings.jsonl`, every journal arc has written holds its locks in
 /// `.locks/`, and a journal older than both holds `events.jsonl` beside
 /// artifacts. A session log named `events.jsonl` holds none of the others.
-/// A journal's cold archive is the sibling named `<journal>-archive`.
-fn journal(dir: &Path) -> Result<Option<String>> {
+/// A journal's cold archive is the sibling named `<journal>-archive`, read
+/// through `parent` when `dir` is its entry `name`.
+fn journal(dir: &Dir, parent: Option<(&Dir, &OsStr)>) -> Result<Option<String>> {
     if let Some(marker) = journal_entries(dir)? {
         return Ok(Some(marker.to_string()));
     }
-    let sibling = dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_suffix("-archive"))
-        .zip(dir.parent())
-        .map(|(stem, parent)| parent.join(stem));
-    if let Some(sibling) = sibling {
-        if journal_entries(&sibling)?.is_some() {
-            return Ok(Some(format!(
-                "the cold archive of the journal at {}",
-                sibling.display()
-            )));
+    let Some((parent, name)) = parent else {
+        return Ok(None);
+    };
+    let stem = name
+        .as_bytes()
+        .strip_suffix(b"-archive")
+        .filter(|stem| !stem.is_empty());
+    if let Some(stem) = stem {
+        if let Ok(sibling) = parent.open_dir(OsStr::from_bytes(stem)) {
+            if journal_entries(&sibling)?.is_some() {
+                return Ok(Some(format!(
+                    "the cold archive of the journal {}",
+                    OsStr::from_bytes(stem).to_string_lossy()
+                )));
+            }
         }
     }
     Ok(None)
 }
 
-fn journal_entries(dir: &Path) -> Result<Option<&'static str>> {
-    if present(&dir.join("bindings.jsonl")) {
+fn journal_entries(dir: &Dir) -> Result<Option<&'static str>> {
+    if present(dir, "bindings.jsonl") {
         return Ok(Some("bindings.jsonl"));
     }
-    let locks = dir.join(".locks");
-    if present(&locks.join("events.lock")) || present(&locks.join("transition.lock")) {
-        return Ok(Some("journal locks"));
+    if let Ok(locks) = dir.open_dir(OsStr::new(".locks")) {
+        if present(&locks, "events.lock") || present(&locks, "transition.lock") {
+            return Ok(Some("journal locks"));
+        }
     }
-    if present(&dir.join("events.jsonl")) {
-        let entries =
-            std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
-            let name = entry.file_name();
+    if present(dir, "events.jsonl") {
+        for name in dir.names()? {
             let artifact = name.to_str().and_then(crate::journal::parse_artifact_name);
             if artifact.is_some_and(|(_, _, kind)| super::super::known_kind(&kind)) {
                 return Ok(Some("an event log beside journal artifacts"));
@@ -159,13 +210,14 @@ fn journal_entries(dir: &Path) -> Result<Option<&'static str>> {
     Ok(None)
 }
 
-/// Refuse a directory that is a repository or a journal.
-fn refuse_kept(dir: &Path, root: &Path) -> Result<()> {
+/// Refuse a directory that is a repository or a journal. `at` is where it
+/// lies and `root` the material holding it.
+fn refuse_kept(dir: &Dir, parent: Option<(&Dir, &OsStr)>, at: &Path, root: &Path) -> Result<()> {
     let holds = |what: String| {
-        if dir == root {
+        if at == root {
             format!("{} is {what}", root.display())
         } else {
-            format!("{} holds {what} at {}", root.display(), dir.display())
+            format!("{} holds {what} at {}", root.display(), at.display())
         }
     };
     if let Some(marker) = repository(dir) {
@@ -174,7 +226,7 @@ fn refuse_kept(dir: &Path, root: &Path) -> Result<()> {
             holds(format!("a Git repository ({marker})"))
         );
     }
-    if let Some(marker) = journal(dir)? {
+    if let Some(marker) = journal(dir, parent)? {
         bail!(
             "{}; a journal's material is adopted from its own project",
             holds(format!("a journal ({marker})"))
@@ -226,11 +278,7 @@ pub(super) fn refuse_location(
             );
         }
     }
-    let parent = path.parent().context("adopted material has a parent")?;
-    let parent_dev = std::fs::metadata(parent)
-        .with_context(|| format!("cannot read {}", parent.display()))?
-        .dev();
-    if source.metadata.dev() != parent_dev {
+    if source.stat.dev != source.parent_stat.dev {
         bail!(
             "{} is a mount point; adopt material inside it",
             path.display()
@@ -292,7 +340,7 @@ pub(super) fn refuse_location(
         if first != DIR
             && (first.starts_with('.')
                 || first == super::super::EXCHANGE_DIR
-                || (inside.components().count() == 1 && !source.is_dir))
+                || (inside.components().count() == 1 && !source.is_dir()))
         {
             bail!(
                 "{} is part of the journal arc keeps; adopt material arc does not own, such as a directory under it",
@@ -322,18 +370,23 @@ pub(super) fn refuse_location(
             }
         }
     }
-    for ancestor in parent.ancestors() {
+    for ancestor in source.parent_path.ancestors() {
         if ancestor == hot {
             continue;
         }
-        if let Some(marker) = journal(ancestor)? {
+        let Ok(opened) = Dir::open(ancestor) else {
+            continue;
+        };
+        let above = ancestor.parent().and_then(|above| Dir::open(above).ok());
+        let parent = above.as_ref().zip(ancestor.file_name());
+        if let Some(marker) = journal(&opened, parent)? {
             bail!(
                 "{} lies inside the journal at {} ({marker}); adopt it from that journal's own project",
                 path.display(),
                 ancestor.display()
             );
         }
-        if let Some(marker) = repository_directory(ancestor) {
+        if let Some(marker) = repository_directory(&opened) {
             bail!(
                 "{} lies inside the Git repository at {} ({marker})",
                 path.display(),
@@ -345,41 +398,31 @@ pub(super) fn refuse_location(
 }
 
 /// Refuse material a Git repository tracks: moving it would delete files
-/// from that repository's checkout. Names are matched literally, so no
-/// pathspec magic in a file's name changes what is looked up.
+/// from that repository's checkout. Names are matched literally, and no
+/// variable of the caller's environment steers which repository Git finds;
+/// anything but a clear answer refuses.
 pub(super) fn refuse_tracked(source: &Source) -> Result<()> {
-    let (probe, spec) = if source.is_dir {
+    let (probe, spec) = if source.is_dir() {
         (source.path.clone(), OsString::from("."))
     } else {
-        (
-            source
-                .path
-                .parent()
-                .context("adopted material has a parent")?
-                .to_path_buf(),
-            source.name.clone(),
-        )
+        (source.parent_path.clone(), source.name.clone())
     };
-    let git = |args: &[&std::ffi::OsStr]| -> Result<std::process::Output> {
+    let git = |args: &[&OsStr]| -> Result<std::process::Output> {
         let mut command = crate::gitio::git_command();
+        let fixed: Vec<OsString> = command
+            .get_envs()
+            .map(|(name, _)| name.to_os_string())
+            .collect();
+        for (name, _) in std::env::vars_os() {
+            if name.as_bytes().starts_with(b"GIT_") && !fixed.contains(&name) {
+                command.env_remove(&name);
+            }
+        }
         command
             .current_dir(&probe)
             .env("LC_ALL", "C")
             .arg("--literal-pathspecs")
             .args(args);
-        for name in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_COMMON_DIR",
-            "GIT_NAMESPACE",
-            "GIT_LITERAL_PATHSPECS",
-            "GIT_GLOB_PATHSPECS",
-            "GIT_NOGLOB_PATHSPECS",
-            "GIT_ICASE_PATHSPECS",
-        ] {
-            command.env_remove(name);
-        }
         crate::gitio::bounded_output(&mut command)
             .with_context(|| format!("cannot run git in {}", probe.display()))
     };
@@ -434,55 +477,65 @@ fn lexical(path: &Path) -> PathBuf {
     resolved
 }
 
-/// Walk the material, refusing what the move would break or what is not
-/// the caller's to move, and measure it. Arc writes an index only into a
-/// recorded workbench, so an index already present is never arc's.
-pub(super) fn survey(source: &Source) -> Result<Measure> {
+/// Walk the opened material, refusing what the move would break or what is
+/// not the caller's to move, and measure it. An index already at its top
+/// is refused unless the material is a directory adopted where it stands
+/// and the index is one arc wrote.
+pub(super) fn survey(source: &Source, in_place: bool) -> Result<Measure> {
     if source.name == INDEX {
         bail!(
             "{} is named like the index arc writes in every workbench; rename it before adopting",
             source.path.display()
         );
     }
-    if !source.is_dir {
+    let Some(root) = &source.dir else {
         let mut measure = Measure {
             files: 1,
-            bytes: source.metadata.len(),
+            bytes: source.stat.size,
             newest: None,
             partial: false,
         };
-        measure.touch(&source.metadata);
+        measure.touch(&source.stat);
         return Ok(measure);
-    }
-    let root = &source.path;
-    if present(&root.join(INDEX)) {
+    };
+    let root_path = &source.path;
+    if root.entry(OsStr::new(INDEX))?.is_some() && !(in_place && super::is_arc_index(root)) {
         bail!(
-            "{} already holds {INDEX}, the index arc writes in every workbench; rename it before adopting",
-            root.display()
+            "{} already holds {INDEX}, and arc did not write it; rename it before adopting",
+            root_path.display()
         );
     }
-    refuse_kept(root, root)?;
-    let device = source.metadata.dev();
-    walk(root, None, |path, metadata| {
-        if metadata.dev() != device {
+    refuse_kept(
+        root,
+        Some((&source.parent, &source.name)),
+        root_path,
+        root_path,
+    )?;
+    let device = source.stat.dev;
+    walk(root, root_path, None, |path, parent, name, stat| {
+        if stat.dev != device {
             bail!(
                 "{} holds a mount point at {}; adopt material on one filesystem",
-                root.display(),
+                root_path.display(),
                 path.display()
             );
         }
-        if metadata.is_dir() {
-            refuse_kept(path, root)?;
+        if stat.is_dir() {
+            let child = parent
+                .open_dir(name)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            refuse_kept(&child, Some((parent, name)), path, root_path)?;
         }
-        if metadata.file_type().is_symlink() {
-            let target = std::fs::read_link(path)
+        if stat.is_link() {
+            let target = parent
+                .read_link(name)
                 .with_context(|| format!("cannot read link {}", path.display()))?;
-            let parent = path.parent().unwrap_or(root);
-            if target.is_relative() && !lexical(&parent.join(&target)).starts_with(root) {
+            let holder = path.parent().unwrap_or(root_path);
+            if target.is_relative() && !lexical(&holder.join(&target)).starts_with(root_path) {
                 bail!(
                     "{} is a relative link leading out of {}, which would point elsewhere once moved",
                     path.display(),
-                    root.display()
+                    root_path.display()
                 );
             }
         }
