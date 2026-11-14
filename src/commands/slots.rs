@@ -80,11 +80,12 @@ pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
     }
     let pool = Pool::existing(&ctx.cwd, &root)?;
     let top = gitio::toplevel(&ctx.cwd)?;
+    // A checkout with no established destination shows the pool without an
+    // identity comparison: the identity command never runs unscoped.
     let confinement = declaration
         .identity
         .as_ref()
-        .map(|_| crate::confinement::for_checkout(&top))
-        .transpose()?;
+        .and_then(|_| crate::confinement::for_checkout(&top).ok());
     let _confinement = confinement.as_ref().map(crate::confinement::Scope::new);
     let identity = slots::identity(&top, &declaration).ok();
     let target = gitio::primary_worktree_branch(&ctx.cwd)

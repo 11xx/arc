@@ -258,6 +258,19 @@ fn integrate_cleanup_keeps_the_slot_detached_and_free() {
     assert!(events.contains("slot-released"), "{events}");
 }
 
+/// Claim: `arc slots status` from a free, detached slot shows the pool even
+/// when the pool declares an identity command. Rejects failing the read
+/// because the checkout has no destination to confine that command by.
+#[test]
+fn status_from_a_detached_slot_shows_the_pool() {
+    let repo = pool(1, "identity = 'printf fixed'\n");
+    let (change, worktree) = begin(&repo, "passing");
+    integrate(&repo, &change, &worktree, &["--cleanup"]);
+    assert!(detached(&worktree), "the slot stayed on a branch");
+    let slots = json_stdout(repo.arc(&worktree).args(["slots", "status", "--json"]));
+    assert!(slots["slots"][0]["lease"].is_null(), "{slots}");
+}
+
 /// Claim: integration cannot take over a slot while a command uses it.
 /// Rejects switching the checkout or advancing the target under shared use.
 #[test]
