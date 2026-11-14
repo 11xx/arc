@@ -13,7 +13,9 @@ budget = "20s"
 command = "python3 .arc/test-binary.py invariants"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
-timings = ".arc/invariant-timings.tsv"
+# Written beside the build output, which slots retain: an ignored file anywhere
+# else in the checkout would stop a slot being reused.
+timings = "target/invariant-timings.tsv"
 
 [gates.lint]
 command = "cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check"

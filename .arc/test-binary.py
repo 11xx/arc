@@ -98,7 +98,9 @@ def run_invariants(rows, binaries, env):
         print(f'{row["invariant"]} {name}: {"pass" if passed else "FAIL"} ({ms}ms)')
         if not passed:
             print(output, file=sys.stderr)
-    (ROOT / ".arc/invariant-timings.tsv").write_text("\n".join(timings) + "\n")
+    report = ROOT / "target/invariant-timings.tsv"
+    report.parent.mkdir(exist_ok=True)
+    report.write_text("\n".join(timings) + "\n")
     return 0 if all(r[2] for r in results) else 1
 
 
