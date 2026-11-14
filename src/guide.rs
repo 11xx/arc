@@ -5970,8 +5970,9 @@ GATE COSTS
   version's exactly, and by the current budget, without replacing the
   reference or consulting live load. A threshold change takes a new rule
   version. Unattributed concurrent batches, a holder or leader with
-  restricted CPUs, and missing or incomplete counters, tree clock or host
-  readings get no excuse. Other arc invocations' parallel lanes qualify
+  restricted CPUs, missing or incomplete counters or host readings, and
+  under version 2 a missing tree clock on the run or its reference, get no
+  excuse. Other arc invocations' parallel lanes qualify
   only through the before condition.
 
   A reference is a clean, unmoved, unexcused direct pass, outside parallel
@@ -6037,11 +6038,13 @@ GATE COSTS
   branch, or the current branch without a matching change, combined with the
   operator's landing declaration by minimum; change-head additions do not bind.
   A detached checkout without a matching destination reports it unobserved.
-  A [budget] table enforces unless `landing` is its only key: one holding
-  `total`, `raise`, `raise_per` or `exclude`, or no key at all, in any layer
-  of the effective suite makes every required integration gate need a
-  budget, in every profile. Per-gate budgets without such a table require
-  none of the others. The gates needing one include a gate the destination
+  A [budget] table enforces when it has no `landing` key, the empty table
+  included, or when beside `landing` it sets `total`, `raise`, `raise_per`
+  or `exclude` to other than its default; `landing` alone, or with those
+  keys at their defaults such as an empty `exclude`, does not. An enforcing
+  table in any layer of the effective suite makes every required
+  integration gate need a budget, in every profile. Per-gate budgets
+  without such a table require none of the others. The gates needing one include a gate the destination
   declares and a change's head removes, since the change still owes it. A
   removed gate that has a budget on the
   destination keeps it; one that has none cannot be given one, so a change
