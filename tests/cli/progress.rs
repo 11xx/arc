@@ -268,7 +268,7 @@ fn list_edits_keep_earlier_events_and_the_report_counts_the_list_as_it_stands() 
     assert_eq!(counts["since_start"]["dropped"], 1);
     assert_eq!(counts["since_start"]["split"], 1);
 
-    let text = progress(&repo, &repo.root, &[]);
+    let text = progress(&repo, &repo.root, &["--plain"]);
     assert!(
         text.contains("4 items; 3 declared at the start; since then 1 added, 1 dropped, 1 split"),
         "{text}"
@@ -295,7 +295,7 @@ fn a_dropped_item_leaves_the_share_and_stays_visible() {
     assert_eq!(series["counts"]["percent"], 100);
     assert_eq!(series["items"][1]["stage"], "dropped");
     assert_eq!(series["items"][1]["note"], "out of scope");
-    let text = progress(&repo, &repo.root, &[]);
+    let text = progress(&repo, &repo.root, &["--plain"]);
     assert!(text.contains("1 of 1 complete"), "{text}");
     assert!(text.contains("dropped  Lose  [out of scope]"), "{text}");
 }
@@ -415,7 +415,7 @@ fn two_active_series_print_in_full_with_independent_counts() {
         (2.into(), 3.into())
     );
 
-    let text = progress(&repo, &repo.root, &[]);
+    let text = progress(&repo, &repo.root, &["--plain"]);
     for header in [
         format!("== first ({first})"),
         format!("== second ({second})"),
@@ -452,7 +452,7 @@ fn a_relation_is_one_sided_until_made_in_the_other_project() {
     assert_eq!(relation["file"], there.as_str());
     assert_eq!(relation["project"], "other");
     assert_eq!(relation["mutual"], false);
-    assert!(progress(&repo, &repo.root, &[]).contains("(one-sided)"));
+    assert!(progress(&repo, &repo.root, &["--plain"]).contains("(one-sided)"));
     assert_eq!(
         series(&report(&repo, &other, &[]), &there)["related"]
             .as_array()
@@ -470,7 +470,7 @@ fn a_relation_is_one_sided_until_made_in_the_other_project() {
     assert!(back.contains("(mutual)"), "{back}");
     let mutual = report(&repo, &repo.root, &[]);
     assert_eq!(series(&mutual, &here)["related"][0]["mutual"], true);
-    let text = progress(&repo, &repo.root, &[]);
+    let text = progress(&repo, &repo.root, &["--plain"]);
     let header = text
         .lines()
         .position(|line| line.starts_with("== here"))
@@ -502,7 +502,7 @@ fn a_related_series_prints_compact_and_an_unreadable_one_prints_one_line() {
     progress(&repo, &other, &["link", "there", "i2", &change]);
     progress(&repo, &repo.root, &["relate", "here", "other::there"]);
 
-    let text = progress(&repo, &repo.root, &[]);
+    let text = progress(&repo, &repo.root, &["--plain"]);
     let block = text
         .find(&format!("-- other: there ({there})"))
         .unwrap_or_else(|| panic!("{text}"));
@@ -519,7 +519,11 @@ fn a_related_series_prints_compact_and_an_unreadable_one_prints_one_line() {
 
     let other_journal = journal_dir(&repo, &other);
     fs::remove_dir_all(&other_journal).unwrap();
-    let output = repo.arc(&repo.root).arg("progress").output().unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["progress", "--plain"])
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8_lossy(&output.stdout);
     let unavailable: Vec<&str> = text
@@ -1018,7 +1022,7 @@ fn a_corrected_series_title_is_the_one_reported() {
     ]));
     let report = report(&repo, &repo.root, &[&file]);
     assert_eq!(series(&report, &file)["title"], "Titled, corrected");
-    assert!(progress(&repo, &repo.root, &[&file])
+    assert!(progress(&repo, &repo.root, &[&file, "--plain"])
         .starts_with(&format!("== Titled, corrected ({file})")));
 }
 
@@ -1099,7 +1103,11 @@ fn a_related_series_with_an_unreadable_ledger_is_unavailable() {
     assert!(config.is_file(), "{}", config.display());
     fs::write(&config, "{ not json").unwrap();
 
-    let output = repo.arc(&repo.root).arg("progress").output().unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["progress", "--plain"])
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("== here"), "{text}");
@@ -1242,4 +1250,66 @@ fn an_item_whose_change_the_ledger_does_not_hold_reads_unknown() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("not a directory of this ledger"));
+}
+
+/// Claim: without a form flag `arc progress` prints the view for a person,
+/// unpainted when standard output is not a terminal, and `--plain` prints
+/// the complete text with the series' filename; `arc workspace progress`
+/// takes the same forms. Rejects escape bytes reaching a pipe, a default
+/// that is still the complete text, and a `--plain` that lost a filename
+/// or a note.
+#[test]
+fn the_default_is_the_unpainted_view_and_plain_keeps_every_fact() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "forms", &["Keep", "Wait"]);
+    progress(
+        &repo,
+        &repo.root,
+        &["done", "forms", "i1", "--note", "by hand"],
+    );
+
+    let view = progress(&repo, &repo.root, &[]);
+    assert!(!view.contains('\u{1b}'), "{view:?}");
+    let lines: Vec<&str> = view.lines().collect();
+    assert_eq!(
+        &lines[..7],
+        [
+            "forms",
+            "██████████░░░░░░░░░░  1 of 2 · 50%   1 open",
+            "forms",
+            "",
+            "  ✓ i1  Keep  done",
+            "        by hand",
+            "  ○ i2  Wait",
+        ],
+        "{view}"
+    );
+    assert!(!view.contains(&file), "{view}");
+
+    let plain = progress(&repo, &repo.root, &["--plain"]);
+    assert!(plain.contains(&format!("== forms ({file})")), "{plain}");
+    assert!(plain.contains("done  Keep  [by hand]"), "{plain}");
+    assert!(plain.is_ascii(), "{plain}");
+
+    repo.arc(&repo.root)
+        .args(["progress", "--plain", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+
+    let workspace = |form: &[&str]| {
+        stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "progress", "--here"])
+                .args(form),
+        )
+    };
+    let view = workspace(&[]);
+    assert!(view.contains("  ✓ i1  Keep  done"), "{view}");
+    assert!(view.contains("(1 series)"), "{view}");
+    assert!(!view.contains('\u{1b}'), "{view:?}");
+    assert!(
+        workspace(&["--plain"]).contains(&format!("== forms ({file})")),
+        "{view}"
+    );
 }

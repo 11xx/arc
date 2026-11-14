@@ -78,6 +78,7 @@ mod state;
 mod status;
 mod store;
 mod style;
+mod terminal;
 mod trailers;
 mod verification_output;
 mod verification_timing;
@@ -3640,7 +3641,10 @@ enum Cmd {
     /// events in this project's ledger record; `arc status` is the live
     /// reading. Without an argument, every series not
     /// retired, each in full, then each related series of another project in
-    /// compact form. Versioned `arc-progress/1`. See `arc guide progress`.
+    /// compact form. The default is a view for a person, painted when
+    /// standard output is a terminal; `--plain` prints every recorded fact
+    /// as text and `--json` the versioned `arc-progress/1`. See
+    /// `arc guide progress`.
     Progress(commands::progress::ProgressArgs),
     /// Cross-harness project and operator journals over plain Markdown.
     ///
@@ -4178,8 +4182,8 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Every project's active progress series, each in full as `arc progress`
-    /// prints it, grouped by project.
+    /// Every project's active progress series, each in full in the forms
+    /// `arc progress` prints, grouped by project.
     ///
     /// It accepts the same `--under`/`--here`/`--global` scope. Retired
     /// registrations are skipped; relations are named without reading the
@@ -4197,6 +4201,10 @@ enum WorkspaceCmd {
         /// Report every registered project, the default when no scope is set
         #[arg(long, conflicts_with_all = ["under", "here"])]
         global: bool,
+        /// Print the complete text, one fact per line and never painted,
+        /// instead of the terminal view
+        #[arg(long, conflicts_with = "json")]
+        plain: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -8816,10 +8824,12 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     under,
                     here,
                     global: _,
+                    plain,
                     json,
                 } => (
                     commands::WorkspaceView::Progress {
                         scope: workspace_scope(under, here)?,
+                        plain,
                     },
                     json,
                 ),

@@ -19,6 +19,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+mod view;
+
 /// The schema `arc progress --json` prints.
 const PROGRESS_SCHEMA: &str = "arc-progress/1";
 /// The schema `arc workspace progress --json` prints.
@@ -32,9 +34,34 @@ pub struct ProgressArgs {
     /// A series, by filename or topic. Omitted, every series of this project
     /// that is not retired
     series: Option<String>,
+    /// Print the complete text, one fact per line and never painted,
+    /// instead of the terminal view
+    #[arg(long, conflicts_with = "json")]
+    plain: bool,
     /// Emit structured JSON (arc-progress/1) instead of text
     #[arg(long)]
     json: bool,
+}
+
+/// The form a report is printed in.
+#[derive(Clone, Copy)]
+pub(crate) enum Form {
+    /// For a person at a terminal: shortened, and painted when standard
+    /// output is one.
+    Terminal,
+    /// Every recorded fact as line-oriented text.
+    Plain,
+    Json,
+}
+
+impl Form {
+    pub(crate) fn of(plain: bool, json: bool) -> Self {
+        match (json, plain) {
+            (true, _) => Self::Json,
+            (false, true) => Self::Plain,
+            (false, false) => Self::Terminal,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -215,7 +242,7 @@ fn placement<'a>(before: &'a Option<String>, after: &'a Option<String>) -> Place
 
 pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
     let Some(command) = args.command else {
-        return report(ctx, args.series.as_deref(), args.json);
+        return report(ctx, args.series.as_deref(), Form::of(args.plain, args.json));
     };
     match command {
         ProgressCmd::Start {
@@ -1068,12 +1095,21 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
     })
 }
 
-fn report(ctx: &Ctx, name: Option<&str>, json: bool) -> Result<i32> {
+fn report(ctx: &Ctx, name: Option<&str>, form: Form) -> Result<i32> {
     let report = build(ctx, name)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(0);
+    match form {
+        Form::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Form::Plain => render_report(&report),
+        Form::Terminal => {
+            let mut view = view::View::new(crate::terminal::Look::of_stdout(), Utc::now());
+            view.project(&report);
+            println!("{}", view.finish());
+        }
     }
+    Ok(0)
+}
+
+fn render_report(report: &ProgressReport) {
     if report.series.is_empty() {
         println!("no active progress series; start one with `arc progress start <topic> --title <title>`");
     }
@@ -1103,7 +1139,6 @@ fn report(ctx: &Ctx, name: Option<&str>, json: bool) -> Result<i32> {
             );
         }
     }
-    Ok(0)
 }
 
 fn render_series(series: &SeriesReport) {
@@ -1298,7 +1333,7 @@ struct ProgressFailure {
 pub(crate) fn workspace(
     includes: impl Fn(Option<&Path>) -> bool,
     scope: impl Serialize,
-    json: bool,
+    form: Form,
 ) -> Result<i32> {
     let now = Utc::now();
     let cfg = crate::config::load()?;
@@ -1359,8 +1394,8 @@ pub(crate) fn workspace(
             }),
         }
     }
-    if json {
-        println!(
+    match form {
+        Form::Json => println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": WORKSPACE_PROGRESS_SCHEMA,
@@ -1368,19 +1403,25 @@ pub(crate) fn workspace(
                 "projects": projects,
                 "failures": failures,
             }))?
-        );
-    } else {
-        if projects.is_empty() {
-            println!("no active progress series");
+        ),
+        Form::Plain => {
+            if projects.is_empty() {
+                println!("no active progress series");
+            }
+            for (index, project) in projects.iter().enumerate() {
+                if index > 0 {
+                    println!();
+                }
+                println!("{} ({}):", project.project, project.series.len());
+                for series in &project.series {
+                    render_series(series);
+                }
+            }
         }
-        for (index, project) in projects.iter().enumerate() {
-            if index > 0 {
-                println!();
-            }
-            println!("{} ({}):", project.project, project.series.len());
-            for series in &project.series {
-                render_series(series);
-            }
+        Form::Terminal => {
+            let mut view = view::View::new(crate::terminal::Look::of_stdout(), now);
+            view.workspace(&projects);
+            println!("{}", view.finish());
         }
     }
     for failure in &failures {

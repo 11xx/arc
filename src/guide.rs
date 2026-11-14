@@ -221,10 +221,11 @@ FROM A WORKSPACE ROOT (outside a project)
                        project, and the operator journal's when unscoped
                        (arc guide journal-references). Exits 16 when a
                        journal cannot be read. `arc-workspace-pins/1`.
-  arc workspace progress [--here|--under PATH] [--json]
-                       Each project's active progress series in full
-                       (arc guide progress). Exits 16 when a journal cannot
-                       be read. `arc-workspace-progress/1`.
+  arc workspace progress [--here|--under PATH] [--plain|--json]
+                       Each project's active progress series in full, in
+                       the forms `arc progress` prints (arc guide progress).
+                       Exits 16 when a journal cannot be read.
+                       `arc-workspace-progress/1`.
   arc workspace report [--previous FILE] [--library] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
@@ -6758,9 +6759,27 @@ PROGRESS
   the start and how many were added, dropped and split since.
 
   `arc progress` prints every series of this project that is not retired, in
-  full, one block per series under a `==` header line; `arc progress
-  <series>` narrows to one and reads a retired series too. After the local
-  blocks come any open journal questions that wait on a person. A report
+  full, one block per series; `arc progress <series>` narrows to one and
+  reads a retired series too. After the local blocks come any open journal
+  questions that wait on a person.
+
+  One report prints in three forms. The default is a view for a person. A
+  series is its title, a bar of twenty cells shared in proportion between
+  the complete, in-flight and remaining items, and one line per item: a
+  mark, the id and title, then the stage and beside it the change, or the
+  revision and age of the integration. The marks are `✓` complete, `○`
+  open, a circle that fills from `opened` to `reviewed`, `×` dropped or
+  closed, `÷` split and `?` unknown. The view names a series by its topic
+  and gives a time as an age; a title wider than its column continues on
+  the next line, and nothing is cut. It is painted only when standard output
+  is a terminal, `NO_COLOR` is unset and `TERM` is not `dumb`; its words are
+  the same unpainted. `--plain` prints
+  every recorded fact as line-oriented text that is never painted:
+  filenames, change ids, full times and revisions, each series under a `==`
+  header line. `--json` prints the versioned shape. A reader that acts on
+  the report takes `--plain` or `--json`.
+
+  A report
   reads one event log per journal it shows and reduces only the linked
   changes; finding a stage starts no Git process of its own. So what it
   reads follows its series, linked items and related series. Git runs to
@@ -6776,11 +6795,11 @@ PROGRESS
   in this journal only, that a series relates to one in another registered
   project, named by slug or label as other cross-project journal references
   are; `unrelate` with the same arguments removes it here. The same call in
-  the other project makes it mutual; until then the block's `related:` line,
-  directly under its header, says `one-sided`. Each related series then
-  prints after the local ones as a compact `--` block: its counts, last
-  integration and in-flight items, read from that project's journal events and
-  ledger only. A related journal that cannot be read prints one line and
+  the other project makes it mutual; until then the block names the relation
+  directly under its header as `one-sided`. Each related series then prints
+  after the local ones in compact form, in `--plain` under a `--` header
+  line: its counts, last integration and in-flight items, read from that
+  project's journal events and ledger only. A related journal that cannot be read prints one line and
   fails nothing. Relations share no items and roll up no percentage.
 
   `arc progress retire <series> --by <conclusion>` records the series as
@@ -6793,8 +6812,8 @@ PROGRESS
   amendments still apply: `arc journal correct` replaces its recorded title,
   which the report then shows, and `arc journal retract` withdraws evidence
   or a position filed on it. `arc workspace progress` prints every registered
-  project's active series. `--json` prints `arc-progress/1` and
-  `arc-workspace-progress/1`.
+  project's active series in the same three forms. `--json` prints
+  `arc-progress/1` and `arc-workspace-progress/1`.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape

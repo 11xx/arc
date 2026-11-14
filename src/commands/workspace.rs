@@ -74,6 +74,7 @@ pub enum WorkspaceView {
     },
     Progress {
         scope: WorkspaceScope,
+        plain: bool,
     },
     Backlog {
         since: Option<String>,
@@ -399,9 +400,13 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             show_retired,
         } => workspace_inventory(ctx, scope, storage, show_retired, json),
         WorkspaceView::Pins { scope } => workspace_pins(scope, json),
-        WorkspaceView::Progress { scope } => {
+        WorkspaceView::Progress { scope, plain } => {
             let scope = ResolvedWorkspaceScope::resolve(scope)?;
-            super::progress::workspace(|anchor| scope.includes(anchor), scope.view(), json)
+            super::progress::workspace(
+                |anchor| scope.includes(anchor),
+                scope.view(),
+                super::progress::Form::of(plain, json),
+            )
         }
         WorkspaceView::Backlog {
             since,
