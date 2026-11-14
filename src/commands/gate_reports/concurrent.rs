@@ -90,10 +90,7 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
             println!(
                 "{name} {round}/5: wall {}; CPU {}; wait {}; load {:?}; {}",
                 ms(timing.run_ms),
-                ms(timing
-                    .cpu_user_ms
-                    .zip(timing.cpu_system_ms)
-                    .map(|(u, s)| u.saturating_add(s))),
+                ms(crate::gate_work::observed_tree_cpu_ms(&timing)),
                 ms(timing.wait_ms),
                 timing.load_average,
                 if run.admission_expired {

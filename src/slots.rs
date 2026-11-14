@@ -677,7 +677,7 @@ pub fn shell(cwd: &Path) -> Result<Shell> {
             _exclusive: None,
         });
     };
-    held_shell(Some(UseLease::shared(&checkout)?), None)
+    held_shell(Some(UseLease::shared(&checkout)?), None, false)
 }
 
 /// A command holder that accounts for the command's entire descendant tree.
@@ -694,7 +694,7 @@ pub fn measured_shell_with_lock(cwd: &Path, exclusive: Option<File>) -> Result<(
         }
         None => (None, 0),
     };
-    Ok((held_shell(lease, exclusive)?, wait_ms))
+    Ok((held_shell(lease, exclusive, true)?, wait_ms))
 }
 
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
@@ -713,16 +713,23 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
 }
 
 const STOP_FD: &str = "ARC_COMMAND_STOP_FD";
+const STOP_ON_DISCONNECT: &str = "ARC_COMMAND_STOP_ON_DISCONNECT";
 
-fn held_shell(lease: Option<UseLease>, exclusive: Option<File>) -> Result<Shell> {
+fn held_shell(lease: Option<UseLease>, exclusive: Option<File>, measured: bool) -> Result<Shell> {
     let (read, write) = pipe_pair()?;
-    let control = exclusive.as_ref().map(|_| pipe_pair()).transpose()?;
+    let control = (measured || exclusive.is_some())
+        .then(pipe_pair)
+        .transpose()?;
     let mut command =
         crate::child_command::command(std::env::current_exe().context("cannot locate arc")?);
     command
         .arg(HOLDER)
         .arg("sh")
         .env_remove(STOP_FD)
+        .env(
+            STOP_ON_DISCONNECT,
+            if exclusive.is_some() { "1" } else { "0" },
+        )
         .env(STATUS_FD, write.as_raw_fd().to_string());
     let mut inherited = vec![write.as_raw_fd()];
     if let Some(lease) = &lease {
@@ -786,6 +793,7 @@ pub fn holder_main() -> ! {
     let report = std::env::var(STATUS_FD)
         .ok()
         .and_then(|value| value.parse::<i32>().ok());
+    let stop_on_disconnect = std::env::var(STOP_ON_DISCONNECT).is_ok_and(|v| v == "1");
     let control = std::env::var(STOP_FD)
         .ok()
         .and_then(|value| value.parse::<i32>().ok());
@@ -829,7 +837,11 @@ pub fn holder_main() -> ! {
         ..Default::default()
     };
     let mut command = crate::child_command::command(program);
-    command.args(rest).env_remove(STATUS_FD).env_remove(STOP_FD);
+    command
+        .args(rest)
+        .env_remove(STATUS_FD)
+        .env_remove(STOP_FD)
+        .env_remove(STOP_ON_DISCONNECT);
     if control.is_some() {
         command.process_group(0);
     }
@@ -862,14 +874,18 @@ pub fn holder_main() -> ! {
             // SAFETY: the launcher passed ownership of this pipe descriptor.
             let mut pipe = unsafe { File::from_raw_fd(control) };
             let mut byte = [0];
-            loop {
+            let explicit = loop {
                 match std::io::Read::read(&mut pipe, &mut byte) {
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    _ => break,
+                    Ok(n) => break n > 0,
+                    Err(_) => break false,
                 }
-            }
+            };
             // The command remains unreaped until this thread has used its group ID.
-            let _ = process_group::kill_process_group(pid);
+            if explicit || stop_on_disconnect {
+                let _ = process_group::kill_process_group(pid);
+            }
+            explicit
         });
         let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
         // SAFETY: waitid initializes info and leaves the command's PID reserved.
@@ -885,15 +901,19 @@ pub fn holder_main() -> ! {
             // SAFETY: waitid initialized info.
             let info = unsafe { info.assume_init() };
             let status = unsafe { info.si_status() };
+            crate::gate_work::check_gate_affinity(&mut observation.timing, pid);
             observation.status = Some(if info.si_code == libc::CLD_EXITED {
                 status << 8
             } else {
                 status
             });
             send(&observation);
+        } else if let Some(host) = &mut observation.timing.host_cpu {
+            host.unrestricted = false;
         }
         let _ = stop.join();
     }
+    let command_group = spawned.as_ref().ok().map(std::process::Child::id);
     let (raw, mut user, mut system, mut complete) =
         match spawned.and_then(|child| wait_usage(child.id() as i32, 0)) {
             Ok(Some((raw, user, system))) => (raw, user, system, subreaper),
@@ -908,10 +928,32 @@ pub fn holder_main() -> ! {
             Ok(Some((_, child_user, child_system))) => {
                 user += child_user;
                 system += child_system;
+                flags = libc::WNOHANG;
             }
             Ok(None) => {
-                observation.stopped = control.is_some();
-                send(&observation);
+                let escaped_only = command_group.is_some_and(|group| {
+                    std::fs::read_to_string("/proc/thread-self/children")
+                        .ok()
+                        .is_some_and(|children| {
+                            let pids = children
+                                .split_whitespace()
+                                .filter_map(|p| p.parse::<i32>().ok())
+                                .collect::<Vec<_>>();
+                            !pids.is_empty()
+                                && pids.iter().all(|pid| {
+                                    crate::gate_work::check_gate_affinity(
+                                        &mut observation.timing,
+                                        *pid as u32,
+                                    );
+                                    // SAFETY: the adopted, unreaped child still owns this PID.
+                                    unsafe { libc::getpgid(*pid) != group as i32 }
+                                })
+                        })
+                });
+                if escaped_only {
+                    observation.stopped = control.is_some();
+                    send(&observation);
+                }
                 flags = 0;
             }
             Err(error) => {
@@ -923,9 +965,29 @@ pub fn holder_main() -> ! {
     if complete {
         observation.timing.cpu_user_ms = Some(user / 1000);
         observation.timing.cpu_system_ms = Some(system / 1000);
+        observation.timing.tree_cpu_ms = counter
+            .as_ref()
+            .and_then(|counter| counter.cpu_ms())
+            .map(Box::new);
         observation.timing.instructions = counter.and_then(|counter| counter.finish());
+        if observation
+            .timing
+            .tree_cpu_ms
+            .as_deref()
+            .is_some_and(|cpu| cpu.saturating_add(2) < user / 1000)
+        {
+            observation.timing.instructions = None;
+            observation.timing.tree_cpu_ms = None;
+        }
         if let Some(sample) = host_sample {
             sample.finish(&mut observation.timing);
+        }
+    }
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var("ARC_TEST_HOLDER_FINAL_SOCKET") {
+        if let Ok(mut socket) = std::os::unix::net::UnixStream::connect(path) {
+            let _ = socket.write_all(b"+");
+            let _ = std::io::Read::read_exact(&mut socket, &mut [0_u8]);
         }
     }
     observation.stopped = control.is_some();
@@ -1591,7 +1653,7 @@ fn empty_outbox(path: &Path) -> bool {
 fn invalidate(path: &Path, declaration: &Declaration, cwd: &Path) -> Result<()> {
     if let Some(script) = &declaration.invalidate {
         let lease = UseLease::exclusive(path)?.context("slot is in use")?;
-        let mut shell = held_shell(Some(lease), None)?;
+        let mut shell = held_shell(Some(lease), None, false)?;
         let _storage = crate::warm_worktree::configure_invalidation(&mut shell.command, path)?;
         let (code, _, err) = captured(&mut shell, path, script, INVALIDATE_TIMEOUT)?;
         if code != 0 {

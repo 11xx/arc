@@ -42,6 +42,21 @@ impl Host {
     }
 }
 
+/// A leader that narrows its inherited CPU set cannot use whole-host capacity.
+pub fn check_gate_affinity(timing: &mut VerificationTiming, pid: u32) {
+    #[cfg(target_os = "linux")]
+    if let Some(host) = &mut timing.host_cpu {
+        let mut mask = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+        // SAFETY: the unreaped command still owns its PID; sched_getaffinity initializes mask.
+        host.unrestricted &=
+            unsafe { libc::sched_getaffinity(pid as i32, std::mem::size_of_val(&mask), &mut mask) }
+                == 0
+                && unsafe { libc::CPU_COUNT(&mask) } as u64 == host.logical_cpus;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (timing, pid);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Identity {
     pub gate: String,
@@ -76,8 +91,8 @@ pub struct Rule {
     pub wall_slack_basis_points: u64,
     pub minimum_prior_window_ms: u64,
 }
-impl Default for Rule {
-    fn default() -> Self {
+impl Rule {
+    fn version_two() -> Self {
         Self {
             version: 2,
             instruction_ceiling_basis_points: 10300,
@@ -86,6 +101,16 @@ impl Default for Rule {
             wall_slack_basis_points: 11000,
             minimum_prior_window_ms: 100,
         }
+    }
+}
+impl Default for Rule {
+    fn default() -> Self {
+        Self::version_two()
+    }
+}
+impl Rule {
+    fn supported(&self) -> bool {
+        self == &Self::version_two()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,7 +169,7 @@ pub fn was_excused(timing: &VerificationTiming) -> bool {
 }
 pub fn other_cpu_basis_points(timing: &VerificationTiming) -> Option<u64> {
     let capacity = timing.host_capacity_ms?;
-    let tree = timing.cpu_user_ms?.checked_add(timing.cpu_system_ms?)?;
+    let tree = observed_tree_cpu_ms(timing)?;
     let own = if let Some(conditions) = &timing.work_conditions {
         tree.max(conditions.invocation_cpu_ms?)
     } else {
@@ -188,7 +213,7 @@ pub fn excuse(timing: &VerificationTiming, budget: u64) -> Option<Excuse> {
         let source = reference_timing(&reference.execution, identity)?;
         let user_ms = timing.cpu_user_ms.filter(|n| *n > 0)?;
         let source_user_ms = source.cpu_user_ms.filter(|n| *n > 0)?;
-        if rule.version != 2
+        if !rule.supported()
             || !host.unrestricted
             || conditions.concurrent_unattributed
             || prior.elapsed_ms < rule.minimum_prior_window_ms
@@ -345,6 +370,9 @@ impl References {
                 }
                 let source = reference_timing(event, &identity)?;
                 let instructions = source.instructions.filter(|n| *n > 0)?;
+                if identity.host.is_some() && source.cpu_user_ms.is_none_or(|n| n == 0) {
+                    return None;
+                }
                 let run_ms = source.run_ms.filter(|r| *r <= budget)?;
                 let ancestry = if identity.host.is_some() {
                     let destination = timing.work_tree.as_ref()?;
@@ -388,15 +416,15 @@ impl References {
                 reference_timing(&reference.execution, &identity).and_then(|s| s.cpu_user_ms),
             ) {
                 if instructions == 0
-                    || user == 0
-                    || source_user == 0
-                    || !plausible_rate(
-                        instructions,
-                        source_user,
-                        reference.instructions,
-                        user,
-                        c.rule.minimum_instruction_rate_basis_points,
-                    )
+                    || (user > 0
+                        && source_user > 0
+                        && !plausible_rate(
+                            instructions,
+                            source_user,
+                            reference.instructions,
+                            user,
+                            c.rule.minimum_instruction_rate_basis_points,
+                        ))
                 {
                     timing.instructions = None;
                 }
@@ -467,15 +495,8 @@ pub fn validate_timing(
     if let Some(conditions) = &timing.work_conditions {
         let r = &conditions.rule;
         ensure!(
-            r.version == 2
-                && r.instruction_ceiling_basis_points >= 10000
-                && r.minimum_instruction_rate_basis_points > 0
-                && r.minimum_instruction_rate_basis_points <= 10000
-                && r.minimum_other_basis_points > 0
-                && r.minimum_other_basis_points < 10000
-                && r.wall_slack_basis_points >= 10000
-                && r.minimum_prior_window_ms > 0,
-            "invalid busy-host rule thresholds"
+            r.supported(),
+            "thresholds do not match busy-host rule version"
         );
         ensure!(
             conditions
@@ -699,10 +720,19 @@ impl HostSample {
         let Some(end) = Self::start() else {
             return;
         };
-        if timing.host_cpu.as_deref().is_some_and(|host| {
-            Some(host) != Host::read().as_ref() || host.logical_cpus != self.cores
-        }) {
-            return;
+        if let Some(host) = &mut timing.host_cpu {
+            let Some(current) = Host::read() else {
+                host.unrestricted = false;
+                return;
+            };
+            if host.logical_cpus != current.logical_cpus
+                || host.cpu_model != current.cpu_model
+                || host.logical_cpus != self.cores
+            {
+                host.unrestricted = false;
+                return;
+            }
+            host.unrestricted &= current.unrestricted;
         }
         if self.cores == 0
             || self.cores != end.cores
@@ -733,12 +763,15 @@ pub fn test_observations(timing: &mut VerificationTiming) -> Result<()> {
         #[serde(deny_unknown_fields)]
         struct Readings {
             instructions: Option<u64>,
+            tree_cpu_ms: Option<u64>,
             host_busy_ms: Option<u64>,
             host_capacity_ms: Option<u64>,
             cpu_user_ms: Option<u64>,
             cpu_system_ms: Option<u64>,
             prior: Option<Window>,
             host: Option<Host>,
+            rule: Option<Rule>,
+            invocation_cpu_ms: Option<u64>,
         }
         let value: Readings =
             serde_json::from_str(&raw).context("invalid test gate work observations")?;
@@ -747,15 +780,30 @@ pub fn test_observations(timing: &mut VerificationTiming) -> Result<()> {
         timing.host_capacity_ms = value.host_capacity_ms;
         timing.cpu_user_ms = value.cpu_user_ms;
         timing.cpu_system_ms = value.cpu_system_ms;
-        timing.host_cpu = value.host.or_else(Host::read).map(Box::new);
+        timing.tree_cpu_ms = value
+            .tree_cpu_ms
+            .or_else(|| {
+                value
+                    .cpu_user_ms
+                    .zip(value.cpu_system_ms)
+                    .and_then(|(u, s)| u.checked_add(s))
+            })
+            .map(Box::new);
+        timing.host_cpu = value
+            .host
+            .map(Box::new)
+            .or_else(|| timing.host_cpu.take())
+            .or_else(|| Host::read().map(Box::new));
         timing.work_conditions = Some(Box::new(Conditions {
-            rule: Rule::default(),
+            rule: value.rule.unwrap_or_default(),
             prior: value.prior,
             concurrent_unattributed: false,
-            invocation_cpu_ms: value
-                .cpu_user_ms
-                .zip(value.cpu_system_ms)
-                .and_then(|(u, s)| u.checked_add(s)),
+            invocation_cpu_ms: value.invocation_cpu_ms.or_else(|| {
+                value
+                    .cpu_user_ms
+                    .zip(value.cpu_system_ms)
+                    .and_then(|(u, s)| u.checked_add(s))
+            }),
         }));
     }
     #[cfg(not(debug_assertions))]
@@ -763,14 +811,17 @@ pub fn test_observations(timing: &mut VerificationTiming) -> Result<()> {
     Ok(())
 }
 
-struct Invocation {
-    host: HostSample,
-    arc_cpu_ms: u64,
+#[derive(Clone, Copy)]
+pub struct ArcCpu {
+    own: u64,
+    children: u64,
 }
-static INVOCATION: std::sync::OnceLock<Option<Invocation>> = std::sync::OnceLock::new();
-pub fn arc_cpu_ms() -> Option<u64> {
-    let mut total = 0_u64;
-    for who in [libc::RUSAGE_SELF, libc::RUSAGE_CHILDREN] {
+pub fn arc_cpu() -> Option<ArcCpu> {
+    let mut values = [0_u64; 2];
+    for (value, who) in values
+        .iter_mut()
+        .zip([libc::RUSAGE_SELF, libc::RUSAGE_CHILDREN])
+    {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
         // SAFETY: getrusage initializes usage on success.
         if unsafe { libc::getrusage(who, usage.as_mut_ptr()) } != 0 {
@@ -778,29 +829,87 @@ pub fn arc_cpu_ms() -> Option<u64> {
         }
         let usage = unsafe { usage.assume_init() };
         for time in [usage.ru_utime, usage.ru_stime] {
-            total = total
+            *value = value
                 .checked_add(u64::try_from(time.tv_sec).ok()?.checked_mul(1000)?)?
                 .checked_add(u64::try_from(time.tv_usec).ok()? / 1000)?;
         }
     }
-    Some(total)
+    Some(ArcCpu {
+        own: values[0],
+        children: values[1],
+    })
+}
+pub fn observed_tree_cpu_ms(timing: &VerificationTiming) -> Option<u64> {
+    let waited = timing
+        .cpu_user_ms
+        .zip(timing.cpu_system_ms)
+        .and_then(|(u, s)| u.checked_add(s));
+    match (timing.tree_cpu_ms.as_deref().copied(), waited) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+fn tree_cpu(timing: &VerificationTiming) -> Option<u64> {
+    timing.tree_cpu_ms.as_ref()?;
+    observed_tree_cpu_ms(timing)
+}
+pub fn cpu_during(before: Option<ArcCpu>, timing: &VerificationTiming) -> Option<u64> {
+    let before = before?;
+    let after = arc_cpu()?;
+    after.own.checked_sub(before.own)?.checked_add(
+        after
+            .children
+            .checked_sub(before.children)?
+            .max(tree_cpu(timing)?),
+    )
+}
+struct Invocation {
+    host: HostSample,
+    cpu: ArcCpu,
+    trees: std::sync::atomic::AtomicU64,
+    complete: std::sync::atomic::AtomicBool,
+}
+static INVOCATION: std::sync::OnceLock<Option<Invocation>> = std::sync::OnceLock::new();
+pub fn record_tree_cpu(timing: &VerificationTiming) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let Some(Some(invocation)) = INVOCATION.get() {
+        if let Some(cpu) = tree_cpu(timing) {
+            let _ = invocation
+                .trees
+                .fetch_update(Relaxed, Relaxed, |n| Some(n.saturating_add(cpu)));
+        } else {
+            invocation.complete.store(false, Relaxed);
+        }
+    }
 }
 pub fn begin_invocation() {
     INVOCATION.get_or_init(|| {
         Some(Invocation {
             host: HostSample::start()?,
-            arc_cpu_ms: arc_cpu_ms()?,
+            cpu: arc_cpu()?,
+            trees: std::sync::atomic::AtomicU64::new(0),
+            complete: std::sync::atomic::AtomicBool::new(true),
         })
     });
 }
 pub fn conditions_before_spawn() -> Conditions {
     let prior = INVOCATION.get().and_then(Option::as_ref).and_then(|start| {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !start.complete.load(Relaxed) {
+            return None;
+        }
+        let current = arc_cpu()?;
         let mut timing = VerificationTiming::default();
         start.host.finish(&mut timing);
         Some(Window {
             busy_ms: timing.host_busy_ms?,
             capacity_ms: timing.host_capacity_ms?,
-            arc_cpu_ms: arc_cpu_ms()?.checked_sub(start.arc_cpu_ms)?,
+            arc_cpu_ms: current.own.checked_sub(start.cpu.own)?.checked_add(
+                current
+                    .children
+                    .checked_sub(start.cpu.children)?
+                    .max(start.trees.load(Relaxed)),
+            )?,
             elapsed_ms: (crate::verification_timing::monotonic_ns()?
                 .checked_sub(start.host.started_ns)?)
                 / 1_000_000,

@@ -234,6 +234,7 @@ impl OwnedGroup {
                     crate::exclusive::wait_readable(pipe.as_raw_fd(), None)?;
                     self.leader_exited()?;
                     if self.leader_finished()? {
+                        self.leader_exited()?;
                         break;
                     }
                 }

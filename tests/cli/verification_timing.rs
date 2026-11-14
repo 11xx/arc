@@ -190,10 +190,10 @@ time.sleep(0.05)
     }
 }
 
-/// Claim: incomplete descendant accounting supplies no CPU figure. Rejects
-/// reporting partial leader usage when cleanup kills an unjoined child.
+/// Claim: group cleanup reaps descendants before recording complete CPU usage.
+/// Rejects returning without the final CPU facts after stopping the whole group.
 #[test]
-fn cleanup_with_live_descendants_has_no_cpu_figure() {
+fn group_cleanup_records_cpu_after_reaping_descendants() {
     for slot in [false, true] {
         let repo = Repo::new();
         declare(
@@ -204,7 +204,7 @@ fn cleanup_with_live_descendants_has_no_cpu_figure() {
         let (_, wt) = begin(&repo, slot);
         let event = receipt(&repo, &wt);
         for field in ["cpu_user_ms", "cpu_system_ms"] {
-            assert!(event.get(field).is_none(), "partial CPU recorded: {event}");
+            assert!(event[field].is_u64(), "final CPU missing: {event}");
         }
         assert!(event["run_ms"].is_u64(), "{event}");
     }
@@ -224,8 +224,8 @@ fn command_timing_includes_output_drain() {
     );
 }
 
-/// Claim: timeout receipts omit incomplete CPU, and attestations invent no
-/// observations. Rejects partial CPU at timeout or measured-looking attestations.
+/// Claim: reaped timeout trees retain complete CPU, and attestations invent no
+/// observations. Rejects missing final timeout CPU or measured-looking attestations.
 #[test]
 fn timeouts_and_attestations_do_not_invent_observations() {
     let repo = Repo::new();
@@ -248,8 +248,8 @@ fn timeouts_and_attestations_do_not_invent_observations() {
     assert!(timed["run_ms"].as_u64().unwrap() >= 900, "{shown}");
     for field in ["cpu_user_ms", "cpu_system_ms"] {
         assert!(
-            timed.get(field).is_none(),
-            "partial CPU at timeout: {shown}"
+            timed[field].is_u64(),
+            "final CPU at timeout missing: {shown}"
         );
     }
     let head = repo.head(&wt);

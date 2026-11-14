@@ -10,7 +10,8 @@ pub(super) fn readings(instructions: Option<u64>, other: u64) -> String {
     json!({"instructions": instructions, "host_busy_ms": other + 100,
         "host_capacity_ms": 10000, "cpu_user_ms": 90, "cpu_system_ms": 10,
         "prior": {"busy_ms":2600,"capacity_ms":10000,"arc_cpu_ms":100,"elapsed_ms":1000},
-        "host": {"logical_cpus":10,"cpu_model":"fixture cpu","unrestricted":true}})
+        "host": {"logical_cpus":10,"cpu_model":"fixture cpu","unrestricted":true},
+        "rule": {"version":2,"instruction_ceiling_basis_points":10300,"minimum_instruction_rate_basis_points":1000,"minimum_other_basis_points":2500,"wall_slack_basis_points":11000,"minimum_prior_window_ms":100}})
     .to_string()
 }
 fn run(
@@ -559,17 +560,19 @@ fn ineligible_trees_cannot_supply_work_references() {
     }
 }
 
-/// I2: a receipt's rule thresholds survive changes in reader defaults.
-/// Rejects replay recomputing an old judgement with the current default ceiling.
+/// I2: valid archived rule-two facts survive changes in reader defaults.
+/// Rejects replay replacing the recorded rule and making historical acceptance unreadable.
 #[test]
 fn replay_uses_the_receipts_rule_thresholds() {
     let (repo, id, wt) = fixture("recorded-rule");
-    run(&repo, &wt, 1100, Some(1030), 5000, 0);
+    run(&repo, &wt, 1100, Some(1031), 5000, 1);
     rewrite_event(&repo, &id, "verification-recorded", |v| {
         if v["run_ms"] == 1100 {
-            v["work_conditions"]["rule"]["instruction_ceiling_basis_points"] = json!(10400);
-            v["instructions"] = json!(1040);
-            v["budget_at_run"]["excuse"]["instructions"] = json!(1040);
+            v["instructions"] = json!(1030);
+            v["budget_at_run"]["verdict"] = json!("excused");
+            v["budget_at_run"]["excuse"] = json!({
+                "reference_event_id":v["work_reference"]["execution"]["event_id"],
+                "reference_instructions":1000,"instructions":1030,"other_cpu_basis_points":5000});
         }
     });
     assert_eq!(verdict(&repo, &wt, &id), "excused");
@@ -652,5 +655,267 @@ fn cached_publication_passes_cannot_supply_fresh_work_references() {
     assert_eq!(
         last()["gates"]["unit"]["work_reference"]["execution"]["event_id"],
         execution
+    );
+}
+
+/// I12: a completed run waits for final tree CPU and counter accounting.
+/// Rejects a stopped acknowledgement letting the runner return with an incomplete receipt.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_waits_for_final_tree_accounting() {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixListener;
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.unit]\ncommand='sleep 30 >/dev/null 2>&1 &'\n");
+    let (id, wt, _) = change_with_patchset(&repo, "final-accounting");
+    let path = repo.home.join("final.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let child = repo.spawn_arc_piped_with_env(
+        &wt,
+        &["verify", "--all", "--rerun"],
+        &[("ARC_TEST_HOLDER_FINAL_SOCKET", &path)],
+    );
+    // SAFETY: the child PID is reserved until wait; pidfd_open returns an owned descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) } as i32;
+    assert!(
+        fd >= 0,
+        "pidfd_open failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut readiness = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // SAFETY: poll borrows the two live descriptors.
+    let ready = unsafe { libc::poll(readiness.as_mut_ptr(), readiness.len() as _, 30_000) };
+    if ready <= 0 || readiness[0].revents & libc::POLLIN == 0 {
+        drop(listener);
+        // SAFETY: the unreaped fixture child owns this PID.
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGTERM);
+        }
+        let output = child.wait_with_output().unwrap();
+        panic!("runner exited before final tree accounting: {output:?}");
+    }
+    let (mut socket, _) = listener.accept().unwrap();
+    socket.read_exact(&mut [0_u8]).unwrap();
+    let mut event = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let exited = unsafe { libc::poll(&mut event, 1, 100) };
+    socket.write_all(b"+").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(exited, 0, "runner returned before final tree accounting");
+    assert!(output.status.success(), "{output:?}");
+    let receipt = latest(&repo, &wt, &id);
+    assert!(
+        receipt["cpu_user_ms"].is_u64() && receipt["cpu_system_ms"].is_u64(),
+        "final CPU facts missing: {receipt}"
+    );
+}
+
+/// I2: a rule version fixes its thresholds, including on imported historical facts.
+/// Rejects relabelling a four-percent allowance as the three-percent rule.
+#[test]
+fn a_rule_version_refuses_relabelled_thresholds() {
+    let (repo, id, wt) = fixture("relabelled-rule");
+    run(&repo, &wt, 1100, Some(1030), 5000, 0);
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        if v["run_ms"] == 1100 {
+            v["work_conditions"]["rule"]["instruction_ceiling_basis_points"] = json!(10400);
+        }
+    });
+    repo.arc(&wt)
+        .args(["show", &id, "--json"])
+        .assert()
+        .failure();
+}
+
+/// I5: other-process share excludes arc's own process CPU as well as its trees.
+/// Rejects passing the 25-percent threshold by charging arc's capture work to outsiders.
+#[test]
+fn other_process_share_excludes_the_invocation_cpu() {
+    let (repo, _, wt) = fixture("own-process-cpu");
+    let mut facts: Value = serde_json::from_str(&readings(Some(1000), 2500)).unwrap();
+    facts["invocation_cpu_ms"] = json!(200);
+    controlled_run(&repo, &wt, 1100, facts, 1);
+}
+
+/// I5: a gate leader pinned after exec cannot excuse its run using whole-host capacity.
+/// Rejects measuring only arc's inherited affinity while the command uses fewer CPUs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_gate_leaders_restricted_affinity_refuses_an_excuse() {
+    let mut mask = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    assert_eq!(
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&mask), &mut mask) },
+        0
+    );
+    let cpus: Vec<_> = (0..libc::CPU_SETSIZE as usize)
+        .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu, &mask) })
+        .collect();
+    if cpus.len() <= 1
+        || cpus.len() != unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize
+    {
+        return;
+    }
+    let repo = Repo::new();
+    let command = r#"exec python3 -c 'import os; os.sched_setaffinity(0,{int(c) for c in os.environ["W1_CPUS"].split(",")})'"#;
+    repo.declare_gates_locally(&format!(
+        "[gates.unit]\ncommand={}\nbudget='1s'\n",
+        serde_json::to_string(command).unwrap()
+    ));
+    let (id, wt, _) = change_with_patchset(&repo, "pinned-command");
+    let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+    facts.as_object_mut().unwrap().remove("host");
+    for (allowed, ms, code) in [
+        (
+            cpus.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            900,
+            0,
+        ),
+        (cpus[0].to_string(), 1100, 1),
+    ] {
+        repo.arc(&wt)
+            .env("W1_CPUS", allowed)
+            .env("ARC_TEST_COMMAND_RUN_MS", ms.to_string())
+            .env("ARC_TEST_GATE_WORK", facts.to_string())
+            .args(["verify", "--all", "--rerun"])
+            .assert()
+            .code(code);
+    }
+    assert_eq!(
+        latest(&repo, &wt, &id)["work_identity"]["host"]["unrestricted"],
+        false
+    );
+}
+
+/// I12: escaped descendants retain their lifetime and leave incomplete work absent.
+/// Rejects killing escaped work or reporting a complete count before its tree exits.
+#[cfg(target_os = "linux")]
+#[test]
+fn escaped_descendants_leave_work_absent_until_their_tree_exits() {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixListener;
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    repo.commit(
+        &repo.root,
+        ".arc/escape.py",
+        r#"import os,socket,time
+r,w=os.pipe()
+if os.fork()==0:
+ os.setsid()
+ s=socket.socket(socket.AF_UNIX);s.connect(os.environ['W1_ESCAPE_SOCKET'])
+ s.sendall((str(os.getpid())+'\n').encode());s.recv(1);s.close()
+ os.close(1);os.close(2);os.write(w,b'+');os.close(w)
+ time.sleep(30)
+ os._exit(0)
+os.close(w);os.read(r,1);os._exit(0)
+"#,
+        "test: add escaped child fixture",
+    );
+    repo.declare_gates_locally("[gates.unit]\ncommand='exec python3 .arc/escape.py'\n");
+    let (id, wt, _) = change_with_patchset(&repo, "escaped-accounting");
+    let path = repo.home.join("escaped.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let child = repo.spawn_arc_piped_with_env(
+        &wt,
+        &["verify", "--all", "--rerun"],
+        &[("W1_ESCAPE_SOCKET", &path)],
+    );
+    let (mut socket, _) = listener.accept().unwrap();
+    let mut text = String::new();
+    BufReader::new(&mut socket).read_line(&mut text).unwrap();
+    let pid: i32 = text.trim().parse().unwrap();
+    // SAFETY: this descendant is blocked on the fixture socket while its PID is captured.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+    assert!(fd >= 0);
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    socket.write_all(b"+").unwrap();
+    let mut event = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let output = child.wait_with_output().unwrap();
+    let exited = unsafe { libc::poll(&mut event, 1, 0) };
+    // SAFETY: the pidfd identifies only the fixture descendant, even after PID reuse.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        );
+        libc::poll(&mut event, 1, 5000);
+    }
+    assert_eq!(
+        exited, 0,
+        "escaped descendant killed by cleanup: {output:?}"
+    );
+    assert!(output.status.success(), "{output:?}");
+    let raw = latest(&repo, &wt, &id);
+    for field in [
+        "instructions",
+        "cpu_user_ms",
+        "cpu_system_ms",
+        "tree_cpu_ms",
+    ] {
+        assert!(raw[field].is_null(), "incomplete tree work recorded: {raw}");
+    }
+}
+
+/// I5: an exec that drops inherited counters cannot establish a work reference.
+/// Rejects treating startup-only instructions as the full work of a CPU-bound command.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_execute_only_command_cannot_seed_a_dropped_counter_reference() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let opaque = repo.home.join("opaque-python");
+    fs::copy("/usr/bin/python3", &opaque).unwrap();
+    fs::set_permissions(&opaque, fs::Permissions::from_mode(0o111)).unwrap();
+    let command = r#"exec "$W1_PYTHON" -c 'sum(range(4000000))'"#;
+    repo.declare_gates_locally(&format!(
+        "[gates.unit]\ncommand={}\nbudget='10s'\n",
+        serde_json::to_string(command).unwrap()
+    ));
+    let (id, wt, _) = change_with_patchset(&repo, "exec-counter-drop");
+    repo.arc(&wt)
+        .env("W1_PYTHON", "/usr/bin/python3")
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success();
+    let ordinary = latest(&repo, &wt, &id);
+    if ordinary["instructions"].is_null() || ordinary["tree_cpu_ms"].is_null() {
+        return;
+    }
+    repo.arc(&wt)
+        .env("W1_PYTHON", &opaque)
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .success();
+    let dropped = latest(&repo, &wt, &id);
+    assert!(
+        dropped["instructions"].is_null(),
+        "detached counter treated as work: {dropped}"
     );
 }

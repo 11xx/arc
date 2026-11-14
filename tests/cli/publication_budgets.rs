@@ -68,15 +68,17 @@ fn publication_budget_fresh_run_refuses_without_moving_target() {
 }
 
 /// Claim: cached publication rejudges the newest matching receipt after a reduction,
-/// preserving its timing without fallback or execution. Rejects frozen cost acceptance,
-/// an older faster pass, and an implicit retry of an over-budget cached pass.
+/// preserving its timing and marking the copy without execution. Rejects frozen cost acceptance,
+/// an older faster pass, an unmarked copy, and an implicit retry of a cached pass.
 #[test]
 fn publication_budget_cached_acceptance_rejudges_without_retry() {
     let repo = Repo::new();
     declare(&repo, "20s", true);
     run(&repo, 5000, false, 0);
     run(&repo, 11300, false, 0);
-    let original = receipt(&repo)["gates"]["unit"].clone();
+    let mut original = receipt(&repo)["gates"]["unit"].clone();
+    assert!(original["work_copied"].is_null());
+    original["work_copied"] = json!(true);
     declare(&repo, "10s", true);
     let before = repo.head(&repo.root);
     for _ in 0..2 {

@@ -3704,7 +3704,7 @@ fn run_gate_in_shell(
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
     let mut work_conditions = crate::gate_work::conditions_before_spawn();
-    let arc_cpu_before = crate::gate_work::arc_cpu_ms();
+    let arc_cpu_before = crate::gate_work::arc_cpu();
     let mut child = shell.spawn().context("failed to run gate command")?;
     let stdout = child
         .child()
@@ -3757,10 +3757,10 @@ fn run_gate_in_shell(
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let finished_ns = crate::verification_timing::monotonic_ns();
     let status = child
         .stop()
         .context("failed to stop the gate's process group")?;
+    let finished_ns = crate::verification_timing::monotonic_ns();
     crate::interruption::check()?;
 
     let (output, output_artifact) = join_before_deadline(reader, deadline, "gate output reader")?
@@ -3770,9 +3770,8 @@ fn run_gate_in_shell(
         .unwrap_or_default();
     let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
     let mut timing = child.observation.timing.clone();
-    work_conditions.invocation_cpu_ms = arc_cpu_before
-        .zip(crate::gate_work::arc_cpu_ms())
-        .and_then(|(b, a)| a.checked_sub(b));
+    work_conditions.invocation_cpu_ms = crate::gate_work::cpu_during(arc_cpu_before, &timing);
+    crate::gate_work::record_tree_cpu(&timing);
     timing.work_conditions = Some(Box::new(work_conditions));
     timing.wait_ms = Some(wait_ms);
     timing.prepare_ms = Some(prepare_ms);

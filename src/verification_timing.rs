@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerificationTiming {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_cpu_ms: Option<Box<u64>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub work_copied: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

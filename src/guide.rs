@@ -5679,8 +5679,8 @@ GATES
 
   Without a declared timeout, a budgeted command has an execution limit of
   ten times its effective budget, computed in checked milliseconds. The clock
-  starts with the command and includes output drain, excluding admission and
-  preparation. Evidence keeps timeout_seconds exactly as declared, including
+  starts with the command and includes output drain and process-group cleanup,
+  excluding admission and preparation. Evidence keeps timeout_seconds exactly as declared, including
   absence, and separately records execution_limit_ms and its origin, timeout
   or budget-times-ten. A receipt's recorded budget is provenance; current
   judgement uses the budget in force when the receipt is read. Timed evidence
@@ -5706,6 +5706,7 @@ GATES
   Cached receipts never supply references.
   Legitimate added work becomes its own reference after one clock-fitting pass
   on a quiet host. Restricted affinity or cpuset capacity gets no excuse.
+  Thresholds must match the named version.
   The receipt carries its reference, rule version and thresholds. Readers use
   those thresholds and the current budget, without replacing the reference or
   consulting live load. A threshold change takes a new rule version; version 1
@@ -5713,7 +5714,7 @@ GATES
   whose reference stops fitting. Excused runs never become references, raise
   evidence or base-pass seeds, including after a raise.
 
-  Kernel work is uncounted. Known limit: added waiting on an
+  Kernel instructions are uncounted. Known limit: added waiting on an
   already busy host can fit the measured delay allowance; a quiet run exposes
   it. `arc gates` counts excused runs and names the last; `gates measure` prints
   instructions and other processes' share. See `arc guide gate-costs` for CPU
@@ -5834,10 +5835,13 @@ GATE COSTS
 
   Linux counts user-space instructions across inherited descendants with a
   holder-owned perf_event_open counter installed before exec and read after
-  the tree exits. /proc/stat busy CPU excludes idle and I/O wait; capacity is elapsed time
+  the tree exits. An inherited task-clock counter supplies total tree CPU,
+  including auto-reaped children; waited user/system time stays separate.
+  CPU masks are checked at entry and the unreaped leader's exit.
+  /proc/stat busy CPU excludes idle and I/O wait; capacity is elapsed time
   times online logical CPUs. The holder samples across the command tree's
   lifetime. Arc also samples from invocation startup to gate spawn, subtracting
-  its process and reaped-child CPU, and excludes its measured CPU during runs.
+  its process and known child-tree CPU, and excludes its measured CPU during runs.
   Incomplete, multiplexed or refused perf counters are absent measurements.
 
   Refusals include this change's per-change increment and maximum from its

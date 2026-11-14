@@ -654,7 +654,7 @@ fn run_hook(
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(timeout))
         .context("worktree preparation timeout is too large")?;
-    let mut shell = crate::slots::shell(path)?;
+    let (mut shell, _) = crate::slots::measured_shell(path)?;
     let command = &mut shell.command;
     command
         .args(["-c", hook_command])
@@ -710,6 +710,7 @@ fn run_hook(
     let status = child
         .stop()
         .context("cannot stop worktree preparation's process group")?;
+    crate::gate_work::record_tree_cpu(&child.observation.timing);
     let out =
         process_group::join_before_deadline(out, Some(deadline), "preparation stdout reader")?
             .transpose()?

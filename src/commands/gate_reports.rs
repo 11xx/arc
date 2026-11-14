@@ -665,10 +665,7 @@ pub fn measure_gates(
                 }
                 continue;
             }
-            let cpu_ms = timing
-                .cpu_user_ms
-                .zip(timing.cpu_system_ms)
-                .map(|(u, s)| u.saturating_add(s));
+            let cpu_ms = crate::gate_work::observed_tree_cpu_ms(&timing);
             println!(
                 "{name} {round}/{runs}: wall {}; CPU {}; wait {}; {}{}",
                 ms(timing.run_ms),
