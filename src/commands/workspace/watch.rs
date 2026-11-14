@@ -367,6 +367,25 @@ impl<'a> Watch<'a> {
             }
             stale.extend(journals.iter().cloned());
         }
+        // A series item linked into another project reads that project's
+        // ledger, so a write there leaves every row linking into it stale.
+        let written: BTreeSet<&str> = self
+            .registered
+            .iter()
+            .filter(|project| stale.contains(&project.journal_dir))
+            .map(|project| project.slug.as_str())
+            .collect();
+        let linking: Vec<PathBuf> = self
+            .rows
+            .iter()
+            .filter(|(_, row)| {
+                row.progress
+                    .as_ref()
+                    .is_some_and(|series| super::super::progress::links_into(series, &written))
+            })
+            .map(|(dir, _)| dir.clone())
+            .collect();
+        stale.extend(linking);
         for dir in dirty.journals {
             crate::journal::forget_projection(&dir);
             stale.insert(dir);

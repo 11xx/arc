@@ -1,4 +1,6 @@
-use crate::common::{journal_artifact, json_stdout_any_status, opened_change_id, stdout, Repo};
+use crate::common::{
+    git, journal_artifact, json_stdout_any_status, opened_change_id, stdout, Repo,
+};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::mpsc;
@@ -338,6 +340,85 @@ fn watch_progress_emits_item_edits_and_linked_ledger_writes() {
     let snapshotted = next("after the linked change recorded a patchset");
     assert_eq!(snapshotted, fresh());
     assert_eq!(items(&snapshotted)[0]["stage"], "snapshotted");
+
+    drop(stdin);
+    drop(watch);
+    reader.join().unwrap();
+}
+
+/// Claim: a watch given `--progress` re-reads a project whose series item is
+/// linked into another project's ledger when that ledger is written, so the
+/// item's stage in the next report equals a fresh report's. Rejects a watch
+/// that re-reads only the project whose ledger was written and keeps the
+/// linking project's earlier stage.
+#[test]
+fn watch_progress_follows_an_item_linked_into_another_project() {
+    let repo = Repo::new();
+    let other = repo.root.parent().unwrap().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    for args in [
+        &["init", "-b", "master"][..],
+        &["config", "user.name", "Tester"],
+        &["config", "user.email", "tester@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+    ] {
+        git(&other, args);
+    }
+    repo.commit(&other, "README.md", "other\n", "init");
+    let other = std::fs::canonicalize(other).unwrap();
+    git(&other, &["branch", "arc/remote", "HEAD"]);
+    let change = opened_change_id(&stdout(repo.arc(&other).args([
+        "begin",
+        "remote",
+        "--adopt",
+        "arc/remote",
+    ])));
+    repo.arc(&repo.root)
+        .args(["progress", "start", "linked", "--title", "Linked"])
+        .args(["--item", "Remote"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["progress", "link", "linked", "i1"])
+        .arg(format!("other::{change}"))
+        .assert()
+        .success();
+
+    let mut watch =
+        RunningWatch(repo.spawn_arc_piped(&repo.root, &["workspace", "watch", "--progress"]));
+    let stdin = watch.0.stdin.take().unwrap();
+    let (lines, reports) = mpsc::channel::<String>();
+    let output = BufReader::new(watch.0.stdout.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        for line in output.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let next = |what: &str| -> Value {
+        let line = reports
+            .recv_timeout(OWED)
+            .unwrap_or_else(|_| panic!("the progress watch printed no report {what}"));
+        bare(serde_json::from_str(&line).expect("one JSON report per line"))
+    };
+    let stage = |report: &Value| -> Value {
+        report["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|project| &project["progress"][0]["items"][0])
+            .find(|item| item.get("project_slug").is_some())
+            .map(|item| item["stage"].clone())
+            .unwrap_or_else(|| panic!("no linked item in {report}"))
+    };
+    assert_eq!(stage(&next("at start")), "opened");
+
+    git(&other, &["checkout", "arc/remote"]);
+    repo.commit(&other, "remote.txt", "one\n", "feat: remote");
+    stdout(repo.arc(&other).args(["snapshot", "remote"]));
+    let snapshotted = next("after the other project's change recorded a patchset");
+    assert_eq!(stage(&snapshotted), "snapshotted");
 
     drop(stdin);
     drop(watch);

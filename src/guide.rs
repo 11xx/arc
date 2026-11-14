@@ -6730,7 +6730,7 @@ PROGRESS
     add <title> [--before|--after <item>]   rename <item> <title>
     move <item> --before|--after <item>     drop <item> --reason R
     done <item> [--note N]                  reopen <item> [--note N]
-    link <item> <change>                    unlink <item>
+    link <item> [<project>::]<change>       unlink <item>
     split <item> --into T --into T... --reason R
   Items take no generic correction; each edit has its reversal. `reopen`
   undoes `drop` and `done` alike, for any item; a reopened linked item reads
@@ -6740,12 +6740,19 @@ PROGRESS
 
   `done` is for an item no change carries; a linked item's stage is the
   ledger's. `arc begin <slug> --item <series>:<item>` links when the change
-  opens, checking the item before anything is written. A link replaces an
-  item's link only when that change closed without integrating, and only
-  while the link is still the one the command read.
+  opens, checking the item before anything is written; `start` ends by
+  naming that call. `link` names a change of this project, or
+  `<project>::<change>` one of another registered project by slug or label;
+  the link records that project's slug, and the item then reads that
+  project's ledger exactly as a local link reads this one's, the row naming
+  the project beside the change. An unregistered project, or a ledger of it
+  that cannot be read, makes that item `unknown` and fails nothing. A link
+  replaces an item's link only when that change closed without integrating,
+  judged from the ledger holding it, and only while the link is still the
+  one the command read.
 
   Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, as the
-  change's own events in this project's ledger record it: `opened`;
+  change's own events in the ledger holding it record it: `opened`;
   `snapshotted` (a patchset is recorded); `verified` (at the newest
   patchset's head at least one gate has a recorded run and every gate's most
   recent run there is a pass; a run that was not admitted is passed over, and
@@ -6772,8 +6779,9 @@ PROGRESS
   series is its title, a bar of twenty cells shared in proportion between
   the complete, in-flight and remaining items, and one line per item: a
   mark, the id and title, then the stage and beside it the change, or the
-  revision and age of the integration. The marks are `✓` complete, `○`
-  open, a circle that fills from `opened` to `reviewed`, `×` dropped or
+  revision and age of the integration; a change of another project prints
+  as `<project>::<change>`. The marks are `✓` complete,
+  `○` open, a circle that fills from `opened` to `reviewed`, `×` dropped or
   closed, `÷` split and `?` unknown. The view names a series by its topic
   and gives a past time as an age; the title of an item past `open`
   continues on the next line when wider than the column before its stage,
@@ -6792,9 +6800,12 @@ PROGRESS
   change does, as when the ledger checks a reused base pass. Opening a
   ledger, which happens only for a project with a linked item, pays the
   store's shared cost once: its repository-wide records, the import batches
-  among them, which grow with the ledger. A ledger that cannot be read fails the
-  report, puts its project among `arc workspace progress`'s failures, and
-  makes a related series unavailable.
+  among them, which grow with the ledger. Each other project an item links into or a related series lives
+  in opens its ledger at most once per report, and the registry is read
+  once, only when an item or relation names another project. A ledger of
+  this project that cannot be read fails the report, puts its project among
+  `arc workspace progress`'s failures, and makes a related series
+  unavailable.
 
   Related series. `arc progress relate <series> <project>::<series>` records,
   in this journal only, that a series relates to one in another registered

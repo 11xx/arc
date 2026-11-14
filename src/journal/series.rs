@@ -49,9 +49,13 @@ pub(crate) struct SeriesFields {
     /// The items an `item-split` puts in place of its item, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     parts: Vec<SplitPart>,
-    /// The change of this project's ledger an `item-linked` event names.
+    /// The change an `item-linked` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     change: Option<String>,
+    /// On an `item-linked` event, the registry slug of the project whose
+    /// ledger holds the change; absent for this project's ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    change_project: Option<String>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
@@ -62,6 +66,23 @@ pub(crate) struct SeriesFields {
 pub(crate) struct SplitPart {
     pub(crate) item: String,
     pub(crate) title: String,
+}
+
+/// The change an item follows: one of this project's ledger, or of the
+/// registered project `project` names by its slug.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ItemLink {
+    pub(crate) project: Option<String>,
+    pub(crate) change: String,
+}
+
+impl std::fmt::Display for ItemLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.project {
+            Some(project) => write!(f, "{project}::{}", self.change),
+            None => f.write_str(&self.change),
+        }
+    }
 }
 
 /// A series in another project, named by that project's registry slug and
@@ -100,7 +121,10 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         .flatten()
         .collect::<Vec<_>>();
     let placed = placements.iter().all(|anchor| valid_item_id(anchor));
-    let bare = fields.parts.is_empty() && fields.change.is_none() && fields.related.is_none();
+    let bare = fields.parts.is_empty()
+        && fields.change.is_none()
+        && fields.change_project.is_none()
+        && fields.related.is_none();
     if !on_series {
         return false;
     }
@@ -118,6 +142,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         "item-linked" => {
             names_item
                 && fields.change.as_deref().is_some_and(single_line)
+                && fields.change_project.as_deref().is_none_or(single_line)
                 && placements.is_empty()
                 && fields.parts.is_empty()
                 && fields.related.is_none()
@@ -132,6 +157,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                     .iter()
                     .all(|part| valid_item_id(&part.item) && single_line(&part.title))
                 && fields.change.is_none()
+                && fields.change_project.is_none()
                 && fields.related.is_none()
         }
         "series-related" | "series-unrelated" => {
@@ -139,6 +165,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && placements.is_empty()
                 && fields.parts.is_empty()
                 && fields.change.is_none()
+                && fields.change_project.is_none()
                 && fields.related.as_ref().is_some_and(|related| {
                     single_line(&related.project) && is_series_file(&related.file)
                 })
@@ -162,7 +189,12 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
         "item-done" => format!("marked item {item} of {file} done"),
         "item-reopened" => format!("reopened item {item} of {file}"),
         "item-linked" => format!(
-            "linked item {item} of {file} to change {}",
+            "linked item {item} of {file} to change {}{}",
+            fields
+                .change_project
+                .as_deref()
+                .map(|project| format!("{project}::"))
+                .unwrap_or_default(),
             fields.change.as_deref().unwrap_or_default()
         ),
         "item-unlinked" => format!("unlinked item {item} of {file}"),
@@ -216,6 +248,9 @@ pub(crate) struct Item {
     pub(crate) state: ItemState,
     /// The change the item is linked to, when it is.
     pub(crate) change: Option<String>,
+    /// The registry slug of the project whose ledger holds `change`; absent
+    /// for this project's ledger.
+    pub(crate) project: Option<String>,
     /// The reason or note recorded with the item's latest state.
     pub(crate) note: Option<String>,
     /// When the item reached its latest state.
@@ -226,6 +261,14 @@ pub(crate) struct Item {
 }
 
 impl Item {
+    /// The change the item follows, when it is linked.
+    pub(crate) fn link(&self) -> Option<ItemLink> {
+        self.change.as_ref().map(|change| ItemLink {
+            project: self.project.clone(),
+            change: change.clone(),
+        })
+    }
+
     /// Whether the item counts in the list as it stands. A dropped or split
     /// item stays visible and leaves the count.
     pub(crate) fn stands(&self) -> bool {
@@ -356,6 +399,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     title: event.title.clone().unwrap_or_default(),
                     state: ItemState::Open,
                     change: None,
+                    project: None,
                     note: None,
                     state_at: at,
                     split_into: Vec::new(),
@@ -408,6 +452,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             title: part.title.clone(),
                             state: ItemState::Open,
                             change: None,
+                            project: None,
                             note: None,
                             state_at: at.clone(),
                             split_into: Vec::new(),
@@ -449,8 +494,14 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
-                    "item-linked" => item.change = fields.change.clone(),
-                    "item-unlinked" => item.change = None,
+                    "item-linked" => {
+                        item.change = fields.change.clone();
+                        item.project = fields.change_project.clone();
+                    }
+                    "item-unlinked" => {
+                        item.change = None;
+                        item.project = None;
+                    }
                     _ => {}
                 }
             }
@@ -480,23 +531,26 @@ pub(crate) fn series_files(events: &[JournalEvent]) -> Vec<String> {
     files
 }
 
-/// Every series in the journal at `dir` that is not retired.
-pub(crate) fn active_series(dir: &Path) -> Result<Vec<Series>> {
-    let events = super::read_events(dir)?;
-    Ok(series_files(&events)
+/// Every series `events` started that is not retired.
+pub(crate) fn active_in(events: &[JournalEvent]) -> Vec<Series> {
+    series_files(events)
         .iter()
-        .filter_map(|file| replay(&events, file))
+        .filter_map(|file| replay(events, file))
         .filter(|series| series.retired.is_none())
-        .collect())
+        .collect()
 }
 
 /// One series in the journal at `dir`, by filename or by topic. A topic
 /// several series share resolves to the one not yet retired, and is refused
 /// when that does not narrow it to one.
 pub(crate) fn named_series(dir: &Path, name: &str) -> Result<Series> {
-    let events = super::read_events(dir)?;
-    let file = resolve_name(&events, name, dir)?;
-    replay(&events, &file).with_context(|| format!("{file} was never started as a series"))
+    named_in(&super::read_events(dir)?, dir, name)
+}
+
+/// [`named_series`] among the events of the journal at `dir`, already read.
+pub(crate) fn named_in(events: &[JournalEvent], dir: &Path, name: &str) -> Result<Series> {
+    let file = resolve_name(events, name, dir)?;
+    replay(events, &file).with_context(|| format!("{file} was never started as a series"))
 }
 
 fn resolve_name(events: &[JournalEvent], name: &str, dir: &Path) -> Result<String> {
@@ -806,7 +860,7 @@ pub(crate) fn reopen(ctx: &Ctx, name: &str, id: &str, note: Option<&str>) -> Res
 }
 
 /// The item a link would act on, for a caller that checks the ledger first.
-pub(crate) fn linkable(ctx: &Ctx, name: &str, id: &str) -> Result<(String, Option<String>)> {
+pub(crate) fn linkable(ctx: &Ctx, name: &str, id: &str) -> Result<(String, Option<ItemLink>)> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = super::read_events(&dir)?;
     let file = resolve_name(&events, name, &dir)?;
@@ -818,7 +872,7 @@ pub(crate) fn linkable(ctx: &Ctx, name: &str, id: &str) -> Result<(String, Optio
     if !item.stands() || item.state == ItemState::Done {
         bail!("item {id} of {file} is {}", state_word(item.state));
     }
-    Ok((file, item.change.clone()))
+    Ok((file, item.link()))
 }
 
 /// Link an item to a change. `expected` is the link the caller read before
@@ -829,23 +883,26 @@ pub(crate) fn link(
     ctx: &Ctx,
     name: &str,
     id: &str,
-    change: &str,
-    expected: Option<&str>,
+    link: &ItemLink,
+    expected: Option<&ItemLink>,
     replaceable: bool,
 ) -> Result<()> {
     let open = open_for_write(ctx, name)?;
     let item = open.standing(id)?;
-    if item.change.as_deref() != expected {
+    let current = item.link();
+    if current.as_ref() != expected {
         bail!(
             "item {id} is linked to {} since this command read it; read the series again",
-            item.change.as_deref().unwrap_or("nothing")
+            current
+                .as_ref()
+                .map_or_else(|| "nothing".to_string(), ToString::to_string)
         );
     }
     if item.state == ItemState::Done {
         bail!("item {id} is done; reopen it before linking a change");
     }
-    match item.change.as_deref() {
-        Some(current) if current == change => bail!("item {id} is already linked to {change}"),
+    match current {
+        Some(current) if &current == link => bail!("item {id} is already linked to {link}"),
         Some(current) if !replaceable => bail!(
             "item {id} is linked to change {current}, which is still open or integrated; \
              unlink it first"
@@ -853,17 +910,18 @@ pub(crate) fn link(
         _ => {}
     }
     let mut event = open.event(ctx, "item-linked", Some(id));
-    event.series.change = Some(change.to_string());
+    event.series.change = Some(link.change.clone());
+    event.series.change_project = link.project.clone();
     open.append(ctx, &event)
 }
 
-pub(crate) fn unlink(ctx: &Ctx, name: &str, id: &str) -> Result<String> {
+pub(crate) fn unlink(ctx: &Ctx, name: &str, id: &str) -> Result<ItemLink> {
     let open = open_for_write(ctx, name)?;
-    let Some(change) = open.series.require_item(id)?.change.clone() else {
+    let Some(link) = open.series.require_item(id)?.link() else {
         bail!("item {id} is not linked to a change");
     };
     open.append(ctx, &open.event(ctx, "item-unlinked", Some(id)))?;
-    Ok(change)
+    Ok(link)
 }
 
 /// Split one item into several; returns the new items' ids.
@@ -943,15 +1001,21 @@ pub(crate) fn retire(ctx: &Ctx, name: &str, conclusion: &str) -> Result<String> 
     Ok(open.series.file.clone())
 }
 
-/// Open questions in the journal at `dir` that a person must settle.
-pub(crate) fn person_questions(dir: &Path) -> Result<Vec<super::OpenQuestion>> {
-    Ok(super::open_questions(dir)?
+/// Open questions among the events of the journal at `dir` that a person
+/// must settle.
+pub(crate) fn person_questions_in(
+    dir: &Path,
+    events: &[JournalEvent],
+) -> Result<Vec<super::OpenQuestion>> {
+    Ok(super::questions_from(dir, events, false)?
         .into_iter()
-        .filter(|question| {
-            question
-                .settle_by
-                .as_deref()
-                .is_none_or(|by| by == "person")
-        })
+        .filter(waits_on_person)
         .collect())
+}
+
+fn waits_on_person(question: &super::OpenQuestion) -> bool {
+    question
+        .settle_by
+        .as_deref()
+        .is_none_or(|by| by == "person")
 }

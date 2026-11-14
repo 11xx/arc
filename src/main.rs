@@ -3638,8 +3638,9 @@ enum Cmd {
     ///
     /// A series is a `progress` journal artifact whose items are journal
     /// events, one per edit. A linked item's stage is what its change's
-    /// events in this project's ledger record; `arc status` is the live
-    /// reading. Without an argument, every series not
+    /// events in the ledger holding it record, this project's or another
+    /// registered project's; `arc status` is the live reading. Without an
+    /// argument, every series not
     /// retired, each in full, then each related series of another project in
     /// compact form. The default is a view for a person, painted when
     /// standard output is a terminal; `--plain` prints every recorded fact

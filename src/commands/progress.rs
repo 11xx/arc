@@ -7,7 +7,9 @@
 //! reading. Nothing here runs unless a caller asks for it.
 
 use super::Ctx;
-use crate::journal::series::{self, ItemState, Placement, RelatedSeries, Series, SinceStart};
+use crate::journal::series::{
+    self, ItemLink, ItemState, Placement, RelatedSeries, Series, SinceStart,
+};
 use crate::model::{Closure, Verdict};
 use crate::state::ChangeState;
 use crate::store::Store;
@@ -157,19 +159,20 @@ pub enum ProgressCmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Link an item to a change of this project's ledger
+    /// Link an item to a change, of this project's ledger or another's
     ///
-    /// The item's stage then follows the change. An item already linked
-    /// takes a new link only when its change closed without integrating, and
-    /// only while its link is still the one this command read.
-    /// `arc begin <slug> --item <series>:<item>` links at the moment a change
-    /// is opened.
+    /// The item's stage then follows the change, read from the ledger that
+    /// holds it. An item already linked takes a new link only when its
+    /// change closed without integrating, and only while its link is still
+    /// the one this command read. `arc begin <slug> --item <series>:<item>`
+    /// links at the moment a change of this project is opened.
     Link {
         /// Series filename or topic
         series: String,
         /// Item id, such as i3
         item: String,
-        /// Change ID or unique prefix
+        /// Change ID or unique prefix; `<project>::<change>` names a change
+        /// of another registered project, by slug or label
         change: String,
     },
     /// Remove an item's link to its change
@@ -314,20 +317,20 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             change,
         } => {
             let target = preflight_item(ctx, &name, &item)?;
-            let change = ctx.store()?.resolve_change(&change)?;
+            let (link, shown) = resolve_link(ctx, &change)?;
             series::link(
                 ctx,
                 &target.series,
                 &target.item,
-                &change,
-                target.expected.as_deref(),
+                &link,
+                target.expected.as_ref(),
                 target.replaceable,
             )?;
-            println!("linked {item} to {change}");
+            println!("linked {item} to {shown}");
         }
         ProgressCmd::Unlink { series: name, item } => {
-            let change = series::unlink(ctx, &name, &item)?;
-            println!("unlinked {item} from {change}");
+            let link = series::unlink(ctx, &name, &item)?;
+            println!("unlinked {item} from {link}");
         }
         ProgressCmd::Split {
             series: name,
@@ -364,21 +367,30 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
 pub(crate) struct ItemTarget {
     series: String,
     item: String,
-    expected: Option<String>,
+    expected: Option<ItemLink>,
     replaceable: bool,
 }
 
-/// Check an item for a link. Only the journal is read, and the ledger only
-/// when the item already carries a link, through discovery that creates
-/// nothing: a refused item leaves no ledger behind.
+/// Check an item for a link. Only the journal is read, and a ledger only
+/// when the item already carries a link: the one holding that link's
+/// change, through discovery that creates nothing, so a refused item leaves
+/// no ledger behind.
 fn preflight_item(ctx: &Ctx, name: &str, item: &str) -> Result<ItemTarget> {
     let (file, current) = series::linkable(ctx, name, item)?;
-    let replaceable = match current.as_deref() {
+    let replaceable = match &current {
         None => true,
-        Some(change) => Store::discover_existing_for_reading(&ctx.cwd)?
-            .and_then(|store| store.state(change).ok())
-            .and_then(|state| state.closure)
-            .is_some_and(|closure| closure.outcome != Closure::Integrated),
+        Some(link) => {
+            let state = match &link.project {
+                None => Store::discover_existing_for_reading(&ctx.cwd)?
+                    .and_then(|store| store.state(&link.change).ok()),
+                Some(slug) => Registry::read()?
+                    .get(slug)
+                    .and_then(|project| project.ledger.state(&link.change).ok().flatten()),
+            };
+            state
+                .and_then(|state| state.closure)
+                .is_some_and(|closure| closure.outcome != Closure::Integrated)
+        }
     };
     Ok(ItemTarget {
         series: file,
@@ -406,16 +418,57 @@ pub(crate) fn preflight_begin_item(ctx: &Ctx, spec: &str) -> Result<ItemTarget> 
 
 /// Link the item a `begin --item` named to the change it opened.
 pub(crate) fn link_opened(ctx: &Ctx, target: &ItemTarget, change_id: &str) -> Result<()> {
+    let link = ItemLink {
+        project: None,
+        change: change_id.to_string(),
+    };
     series::link(
         ctx,
         &target.series,
         &target.item,
-        change_id,
-        target.expected.as_deref(),
+        &link,
+        target.expected.as_ref(),
         target.replaceable,
     )?;
     println!("item: {}:{}", target.series, target.item);
     Ok(())
+}
+
+/// The change a `link` names, and how to print it: a change of this
+/// project's ledger, or `<project>::<change>` for one of another registered
+/// project's, resolved in that project's ledger.
+fn resolve_link(ctx: &Ctx, spec: &str) -> Result<(ItemLink, String)> {
+    let Some((prefix, change)) = spec.split_once("::") else {
+        let change = ctx.store()?.resolve_change(spec)?;
+        return Ok((
+            ItemLink {
+                project: None,
+                change: change.clone(),
+            },
+            change,
+        ));
+    };
+    let here = crate::journal::resolve_dir(&ctx.cwd)?;
+    let project = crate::journal::registered_project(prefix)?;
+    if same_dir(&project.journal_dir, &here) {
+        bail!("{prefix} is this project; name its change without a project");
+    }
+    let store = project
+        .anchor
+        .as_deref()
+        .map(|anchor| Ledger::at(anchor).opened())
+        .transpose()?
+        .flatten()
+        .with_context(|| format!("{} has no ledger to hold {change}", project.label()))?;
+    let change = store.resolve_change(change)?;
+    let shown = format!("{}::{change}", project.label());
+    Ok((
+        ItemLink {
+            project: Some(project.slug),
+            change,
+        },
+        shown,
+    ))
 }
 
 fn relate(ctx: &Ctx, name: &str, target: &str) -> Result<()> {
@@ -533,11 +586,19 @@ struct ItemRow {
     /// One word. Unlinked: `open`, `done`, `dropped` or `split`. Linked,
     /// as the change's events record it: `opened`, `snapshotted`,
     /// `verified`, `reviewed`, `integrated`, or `closed` for a change closed
-    /// without integrating; `unknown` when this project's ledger has no such
-    /// change.
+    /// without integrating; `unknown` when the ledger holding it has no such
+    /// change, or cannot be read for a change of another project.
     stage: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     change: Option<String>,
+    /// For a change of another project's ledger, that project's label, as
+    /// `arc workspace` names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    /// For a change of another project's ledger, that project's registry
+    /// slug, which the link records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_slug: Option<String>,
     /// For a `reviewed` item, the verdict on the newest patchset:
     /// `approved`, `changes-requested` or `comment-only`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -565,6 +626,30 @@ fn is_zero(value: &usize) -> bool {
 }
 
 impl ItemRow {
+    /// The item as its series leaves it, before any ledger is read.
+    fn of(item: &series::Item) -> Self {
+        Self {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            stage: match item.state {
+                ItemState::Open => "open",
+                ItemState::Done => "done",
+                ItemState::Dropped => "dropped",
+                ItemState::Split => "split",
+            },
+            change: item.change.clone(),
+            project: None,
+            project_slug: None,
+            verdict: None,
+            held_by: None,
+            changes_requested_rounds: 0,
+            integrated_at: None,
+            revision: None,
+            note: item.note.clone(),
+            split_into: item.split_into.clone(),
+        }
+    }
+
     fn in_flight(&self) -> bool {
         self.change.is_some()
             && !matches!(
@@ -728,6 +813,11 @@ impl Ledger {
         }
     }
 
+    /// The store itself, for a caller that writes nothing through this read.
+    fn opened(self) -> Result<Option<Store>> {
+        (self.opener)()
+    }
+
     fn store(&self) -> Result<Option<&Store>> {
         match self
             .store
@@ -757,27 +847,10 @@ impl Ledger {
             .with_context(|| format!("cannot read change {change} in {}", self.label))
     }
 
-    /// The item as the ledger leaves it. An unlinked item's stage is what
+    /// The item as this ledger leaves it. An unlinked item's stage is what
     /// the series recorded; a linked one's is what the change last recorded.
     fn row(&self, item: &series::Item, now: DateTime<Utc>) -> Result<ItemRow> {
-        let mut row = ItemRow {
-            id: item.id.clone(),
-            title: item.title.clone(),
-            stage: match item.state {
-                ItemState::Open => "open",
-                ItemState::Done => "done",
-                ItemState::Dropped => "dropped",
-                ItemState::Split => "split",
-            },
-            change: item.change.clone(),
-            verdict: None,
-            held_by: None,
-            changes_requested_rounds: 0,
-            integrated_at: None,
-            revision: None,
-            note: item.note.clone(),
-            split_into: item.split_into.clone(),
-        };
+        let mut row = ItemRow::of(item);
         let Some(change) = item.change.as_deref() else {
             return Ok(row);
         };
@@ -801,13 +874,123 @@ impl Ledger {
         row.stage = recorded_stage(&state, &mut row);
         Ok(row)
     }
+}
 
-    fn rows(&self, series: &Series, now: DateTime<Utc>) -> Result<Vec<ItemRow>> {
-        series
-            .items
+/// A registered project as a report reads it.
+struct Registered {
+    slug: String,
+    label: String,
+    journal_dir: PathBuf,
+    /// Opened only when an item links into the project or a related series
+    /// of it is read.
+    ledger: Ledger,
+}
+
+/// The registered projects one report reads through: the registry, read once
+/// and only when an item or a relation names another project. Each project's
+/// ledger opens at most once, when something read needs it.
+#[derive(Default)]
+struct Registry {
+    projects: Vec<Registered>,
+}
+
+impl Registry {
+    fn of(projects: Vec<crate::registry::Project>) -> Self {
+        Self {
+            projects: projects
+                .into_iter()
+                .map(|project| Registered {
+                    label: project.label(),
+                    ledger: match project.anchor.as_deref() {
+                        Some(anchor) => Ledger::at(anchor),
+                        None => Ledger::none(&project.journal_dir),
+                    },
+                    slug: project.slug,
+                    journal_dir: project.journal_dir,
+                })
+                .collect(),
+        }
+    }
+
+    /// The registry as the journals record it. One that cannot be read
+    /// leaves every other project unread rather than failing the report.
+    fn read() -> Result<Self> {
+        let cfg = crate::config::load()?;
+        Ok(Self::of(
+            crate::registry::journal_projects(&cfg).unwrap_or_default(),
+        ))
+    }
+
+    fn get(&self, slug: &str) -> Option<&Registered> {
+        self.projects.iter().find(|project| project.slug == slug)
+    }
+
+    /// The slug the registry gives the journal at `dir`.
+    fn slug_of(&self, dir: &Path) -> Option<&str> {
+        self.projects
             .iter()
-            .map(|item| self.row(item, now))
-            .collect()
+            .find(|project| same_dir(&project.journal_dir, dir))
+            .map(|project| project.slug.as_str())
+    }
+
+    fn label(&self, slug: &str) -> String {
+        self.get(slug)
+            .map_or_else(|| slug.to_string(), |project| project.label.clone())
+    }
+}
+
+/// Whether reading `series` needs the registry: an item linked into another
+/// project, or a relation to one.
+fn needs_registry(series: &[Series]) -> bool {
+    series.iter().any(|series| {
+        !series.related.is_empty() || series.items.iter().any(|item| item.project.is_some())
+    })
+}
+
+/// What one series' items are read through: the ledger of the project whose
+/// series it is, and the registry for an item linked into another project.
+struct Reader<'a> {
+    home: &'a Ledger,
+    home_slug: Option<&'a str>,
+    registry: &'a Registry,
+    now: DateTime<Utc>,
+}
+
+impl Reader<'_> {
+    /// One item, read from the ledger that holds its change. A change of
+    /// another project whose ledger is not registered or cannot be read is
+    /// `unknown` and fails nothing.
+    fn row(&self, item: &series::Item) -> Result<ItemRow> {
+        let foreign = item
+            .project
+            .as_deref()
+            .filter(|slug| Some(*slug) != self.home_slug);
+        let mut row = match foreign {
+            None => self.home.row(item, self.now)?,
+            Some(slug) => match self
+                .registry
+                .get(slug)
+                .map(|project| project.ledger.row(item, self.now))
+            {
+                Some(Ok(row)) => row,
+                _ => {
+                    let mut row = ItemRow::of(item);
+                    if item.stands() {
+                        row.stage = "unknown";
+                    }
+                    row
+                }
+            },
+        };
+        if let Some(slug) = &item.project {
+            row.project = Some(self.registry.label(slug));
+            row.project_slug = Some(slug.clone());
+        }
+        Ok(row)
+    }
+
+    fn rows(&self, series: &Series) -> Result<Vec<ItemRow>> {
+        series.items.iter().map(|item| self.row(item)).collect()
     }
 }
 
@@ -916,11 +1099,10 @@ fn last_integration(rows: &[ItemRow]) -> Option<Integration> {
 
 fn series_report(
     series: &Series,
-    ledger: &Ledger,
+    reader: &Reader,
     relations: Vec<Relation>,
-    now: DateTime<Utc>,
 ) -> Result<SeriesReport> {
-    let rows = ledger.rows(series, now)?;
+    let rows = reader.rows(series)?;
     Ok(SeriesReport {
         file: series.file.clone(),
         title: series.title.clone(),
@@ -934,46 +1116,34 @@ fn series_report(
     })
 }
 
-/// One related series, read once from its own journal and ledger.
+/// One related series, read once from its own journal.
 struct RelatedRead {
     slug: String,
     label: String,
-    result: Result<(Series, Option<PathBuf>), String>,
+    result: Result<(Series, PathBuf), String>,
 }
 
-fn read_related(journals: &[(String, PathBuf)], relation: &RelatedSeries) -> RelatedRead {
-    let journal_dir = journals
-        .iter()
-        .find(|(slug, _)| slug == &relation.project)
-        .map(|(_, dir)| dir.clone());
-    let anchor = journal_dir
-        .as_deref()
-        .and_then(|dir| crate::journal::recorded_anchor(dir).ok().flatten())
-        .map(PathBuf::from);
-    let label = anchor
-        .as_deref()
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| relation.project.clone());
+fn read_related(registry: &Registry, relation: &RelatedSeries) -> RelatedRead {
+    let project = registry.get(&relation.project);
     let result = (|| -> Result<_> {
-        let dir = journal_dir
-            .as_deref()
+        let dir = project
+            .map(|project| project.journal_dir.clone())
             .with_context(|| format!("no journal is registered as {}", relation.project))?;
-        let events = crate::journal::read_events(dir)?;
+        let events = crate::journal::read_events(&dir)?;
         let series = series::replay(&events, &relation.file)
             .with_context(|| format!("{} holds no series {}", relation.project, relation.file))?;
-        Ok((series, anchor.clone()))
+        Ok((series, dir))
     })()
     .map_err(|error| format!("{error:#}").replace(['\n', '\r'], " "));
     RelatedRead {
         slug: relation.project.clone(),
-        label,
+        label: registry.label(&relation.project),
         result,
     }
 }
 
 fn related_report(
-    ctx: &Ctx,
+    registry: &Registry,
     read: RelatedRead,
     file: &str,
     from: Vec<String>,
@@ -993,14 +1163,20 @@ fn related_report(
     };
     match read.result {
         Err(reason) => report.unavailable = Some(reason),
-        Ok((series, anchor)) => {
-            let ledger = match anchor.as_deref() {
-                Some(anchor) => Ledger::at(anchor),
-                None => Ledger::none(&ctx.cwd),
+        Ok((series, dir)) => {
+            let none = Ledger::none(&dir);
+            let home = registry
+                .get(&report.slug)
+                .map_or(&none, |project| &project.ledger);
+            let reader = Reader {
+                home,
+                home_slug: Some(&report.slug),
+                registry,
+                now,
             };
             // A related series is read on the way, never relied on: a ledger
             // that cannot be read makes it unavailable, not the report.
-            let rows = match ledger.rows(&series, now) {
+            let rows = match reader.rows(&series) {
                 Ok(rows) => rows,
                 Err(error) => {
                     report.unavailable = Some(format!("{error:#}").replace(['\n', '\r'], " "));
@@ -1022,22 +1198,23 @@ fn related_report(
 fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
     let now = Utc::now();
     let dir = crate::journal::resolve_dir(&ctx.cwd)?;
+    let events = crate::journal::read_events(&dir)?;
     let chosen = match name {
-        Some(name) => vec![series::named_series(&dir, name)?],
-        None => series::active_series(&dir)?,
+        Some(name) => vec![series::named_in(&events, &dir, name)?],
+        None => series::active_in(&events),
     };
     let ledger = Ledger::local(ctx);
-    let has_relations = chosen.iter().any(|series| !series.related.is_empty());
-    let (journals, own) = if has_relations {
-        let cfg = crate::config::load()?;
-        let journals = crate::registry::known_journals(&cfg).unwrap_or_default();
-        let own = journals
-            .iter()
-            .find(|(_, journal)| same_dir(journal, &dir))
-            .map(|(slug, _)| slug.clone());
-        (journals, own)
+    let registry = if needs_registry(&chosen) {
+        Registry::read()?
     } else {
-        (Vec::new(), None)
+        Registry::default()
+    };
+    let own = registry.slug_of(&dir).map(str::to_string);
+    let reader = Reader {
+        home: &ledger,
+        home_slug: own.as_deref(),
+        registry: &registry,
+        now,
     };
     let mut reads: Vec<(RelatedSeries, RelatedRead, Vec<String>)> = Vec::new();
     let mut reports = Vec::new();
@@ -1049,7 +1226,7 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
                 None => {
                     reads.push((
                         relation.clone(),
-                        read_related(&journals, relation),
+                        read_related(&registry, relation),
                         Vec::new(),
                     ));
                     reads.len() - 1
@@ -1072,13 +1249,13 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
                 mutual,
             });
         }
-        reports.push(series_report(series, &ledger, relations, now)?);
+        reports.push(series_report(series, &reader, relations)?);
     }
     let related = reads
         .into_iter()
-        .map(|(relation, read, from)| related_report(ctx, read, &relation.file, from, now))
+        .map(|(relation, read, from)| related_report(&registry, read, &relation.file, from, now))
         .collect();
-    let waiting_on_person = series::person_questions(&dir)?
+    let waiting_on_person = series::person_questions_in(&dir, &events)?
         .into_iter()
         .map(|question| WaitingQuestion {
             file: question.file,
@@ -1193,7 +1370,12 @@ fn render_series(series: &SeriesReport) {
 fn render_row(row: &ItemRow, width: usize) {
     let mut detail = Vec::new();
     if let Some(change) = &row.change {
-        detail.push(format!("change {change}"));
+        match (&row.project, &row.project_slug) {
+            (Some(project), Some(slug)) => {
+                detail.push(format!("change {project}::{change} (project {slug})"))
+            }
+            _ => detail.push(format!("change {change}")),
+        }
     }
     if row.changes_requested_rounds > 0 {
         detail.push(format!(
@@ -1332,37 +1514,58 @@ struct ProgressFailure {
 
 /// One project's active series as the workspace reports them: each in full
 /// from the project's own journal and ledger, its relations named without
-/// reading the related series. `labels` gives the label a registry slug is
-/// shown by; without it the registry is read, and only when a series has a
-/// relation.
+/// reading the related series, so whether one is mutual is left absent.
 pub(crate) fn project_series(
     journal_dir: &Path,
     anchor: Option<&Path>,
-    labels: Option<&BTreeMap<String, String>>,
     now: DateTime<Utc>,
 ) -> Result<Vec<SeriesReport>> {
-    let active = series::active_series(journal_dir)?;
+    series_of(journal_dir, anchor, None, now)
+}
+
+/// [`project_series`] through `shared`, the registry the caller already
+/// read with this project's slug in it. Without it the registry is read, and
+/// only when an item or a relation names another project.
+fn series_of(
+    journal_dir: &Path,
+    anchor: Option<&Path>,
+    shared: Option<(&Registry, &str)>,
+    now: DateTime<Utc>,
+) -> Result<Vec<SeriesReport>> {
+    let events = crate::journal::read_events(journal_dir)?;
+    let active = series::active_in(&events);
     if active.is_empty() {
         return Ok(Vec::new());
     }
-    let registered;
-    let labels = match labels {
-        Some(labels) => labels,
+    let read;
+    let (registry, home_slug) = match shared {
+        Some((registry, slug)) => (registry, Some(slug.to_string())),
         None => {
-            registered = if active.iter().any(|series| !series.related.is_empty()) {
-                crate::registry::journal_projects(&crate::config::load()?)?
-                    .iter()
-                    .map(|project| (project.slug.clone(), project.label()))
-                    .collect()
+            read = if needs_registry(&active) {
+                Registry::read()?
             } else {
-                BTreeMap::new()
+                Registry::default()
             };
-            &registered
+            let slug = read.slug_of(journal_dir).map(str::to_string);
+            (&read, slug)
         }
     };
-    let ledger = match anchor {
-        Some(anchor) => Ledger::at(anchor),
-        None => Ledger::none(journal_dir),
+    let own;
+    let home = match home_slug.as_deref().and_then(|slug| registry.get(slug)) {
+        Some(project) => &project.ledger,
+        None => {
+            own = match anchor {
+                Some(anchor) => Ledger::at(anchor),
+                None => Ledger::none(journal_dir),
+            };
+            &own
+        }
+    };
+    let reader = Reader {
+        home,
+        home_slug: home_slug.as_deref(),
+        registry,
+        now,
     };
     active
         .iter()
@@ -1371,18 +1574,35 @@ pub(crate) fn project_series(
                 .related
                 .iter()
                 .map(|relation| Relation {
-                    project: labels
-                        .get(&relation.project)
-                        .cloned()
-                        .unwrap_or_else(|| relation.project.clone()),
+                    project: registry.label(&relation.project),
                     slug: relation.project.clone(),
                     file: relation.file.clone(),
                     mutual: None,
                 })
                 .collect();
-            series_report(series, &ledger, relations, now)
+            series_report(series, &reader, relations)
         })
         .collect()
+}
+
+/// Whether any item of `series`, as [`project_series`] reports them, follows
+/// a change of one of `projects`, named by registry slug.
+pub(crate) fn links_into(
+    series: &serde_json::Value,
+    projects: &std::collections::BTreeSet<&str>,
+) -> bool {
+    !projects.is_empty()
+        && series.as_array().into_iter().flatten().any(|series| {
+            series["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|item| {
+                    item["project_slug"]
+                        .as_str()
+                        .is_some_and(|slug| projects.contains(slug))
+                })
+        })
 }
 
 /// `arc workspace progress`: every registered project's active series.
@@ -1396,18 +1616,15 @@ pub(crate) fn workspace(
     let mut projects = Vec::new();
     let mut failures = Vec::new();
     let registered = crate::registry::journal_projects(&cfg)?;
-    let labels: BTreeMap<String, String> = registered
-        .iter()
-        .map(|project| (project.slug.clone(), project.label()))
-        .collect();
+    let registry = Registry::of(registered.clone());
     for project in registered {
         if project.retired.is_some() || !includes(project.anchor.as_deref()) {
             continue;
         }
-        let read = project_series(
+        let read = series_of(
             &project.journal_dir,
             project.anchor.as_deref(),
-            Some(&labels),
+            Some((&registry, &project.slug)),
             now,
         );
         match read {

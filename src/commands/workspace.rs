@@ -1767,7 +1767,6 @@ fn project_row(
                     super::progress::project_series(
                         &project.journal_dir,
                         Some(anchor),
-                        None,
                         chrono::Utc::now(),
                     )
                 }),

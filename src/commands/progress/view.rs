@@ -280,8 +280,9 @@ impl View {
             .unwrap_or(0)
             .min(column);
         for row in rows {
-            let (mark, style) = mark(row.stage);
-            let title = if row.stage != "open" && row.title.chars().count() > titles {
+            let stage = row.stage;
+            let (mark, style) = mark(stage);
+            let title = if stage != "open" && row.title.chars().count() > titles {
                 fill(&row.title, titles)
             } else {
                 vec![row.title.clone()]
@@ -297,13 +298,13 @@ impl View {
                 " ".repeat(ids - row.id.len()),
                 faded(&title[0])
             );
-            if row.stage != "open" {
+            if stage != "open" {
                 line.push_str(&" ".repeat(titles.saturating_sub(title[0].chars().count())));
                 line.push_str("  ");
-                line.push_str(&self.look.paint(style, row.stage));
+                line.push_str(&self.look.paint(style, stage));
                 let detail = self.detail(row);
                 if !detail.is_empty() {
-                    line.push_str(&" ".repeat(stages - row.stage.len()));
+                    line.push_str(&" ".repeat(stages - stage.len()));
                     line.push_str("  ");
                     line.push_str(&detail);
                 }
@@ -335,7 +336,10 @@ impl View {
         } else {
             parts.extend(row.verdict.map(str::to_string));
             if let Some(change) = &row.change {
-                parts.push(self.dim(change));
+                parts.push(self.dim(&match &row.project {
+                    Some(project) => format!("{project}::{change}"),
+                    None => change.clone(),
+                }));
             }
             match row.changes_requested_rounds {
                 0 => {}
@@ -460,6 +464,8 @@ mod tests {
             title: title.to_string(),
             stage,
             change: None,
+            project: None,
+            project_slug: None,
             verdict: None,
             held_by: None,
             changes_requested_rounds: 0,

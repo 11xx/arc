@@ -752,12 +752,22 @@ fn reads(record: &serde_json::Value) -> serde_json::Value {
 /// Claim: a report reads the ledger only for its linked items: a second
 /// change that no item links, however many events it holds, changes neither
 /// the ledger files the report opens and decodes, the changes it reduces,
-/// nor the Git processes it starts. Rejects a report whose cost follows the
-/// size of the ledger rather than its own items.
+/// nor the Git processes it starts. An item linked into another project
+/// adds that change's reduction and at most the two Git processes that open
+/// one more ledger; a second item linked into the same project adds its
+/// change's reduction and no Git process, and that project's unlinked
+/// changes are not read either. Rejects a report whose cost follows the size
+/// of any ledger rather than its own items, and one whose Git processes
+/// grow with the items linked into one project.
 #[test]
 fn a_report_reads_only_the_changes_its_items_link() {
     let repo = Repo::new();
-    start(&repo, &repo.root, "bounded", &["Linked", "Free"]);
+    start(
+        &repo,
+        &repo.root,
+        "bounded",
+        &["Linked", "Free", "Remote", "Remote too"],
+    );
     let linked = begin_change(&repo, "linked", None);
     progress(&repo, &repo.root, &["link", "bounded", "i1", &linked]);
     let before = reads(&traced_progress(&repo));
@@ -777,6 +787,52 @@ fn a_report_reads_only_the_changes_its_items_link() {
     assert_eq!(
         before, after,
         "an unlinked change changed what the report read"
+    );
+
+    let other = sibling_project(&repo, "other");
+    let remote = begin_change_in(&repo, &other, "remote");
+    progress(
+        &repo,
+        &repo.root,
+        &["link", "bounded", "i3", &format!("other::{remote}")],
+    );
+    let foreign = reads(&traced_progress(&repo));
+    let count = |reads: &serde_json::Value, key: &str| reads[key].as_u64().unwrap();
+    assert_eq!(
+        count(&foreign, "changes_reduced"),
+        count(&after, "changes_reduced") + 1
+    );
+    assert!(
+        count(&foreign, "git") <= count(&after, "git") + 2,
+        "{after} then {foreign}"
+    );
+    let second = begin_change_in(&repo, &other, "remote-too");
+    progress(
+        &repo,
+        &repo.root,
+        &["link", "bounded", "i4", &format!("other::{second}")],
+    );
+    let both = reads(&traced_progress(&repo));
+    assert_eq!(count(&both, "git"), count(&foreign, "git"), "{both}");
+    assert_eq!(
+        count(&both, "changes_reduced"),
+        count(&foreign, "changes_reduced") + 1
+    );
+    let idle = begin_change_in(&repo, &other, "remote-idle");
+    for index in 0..12 {
+        stdout(repo.arc(&other).args([
+            "keep",
+            &idle,
+            "--kind",
+            "constraint",
+            "--body",
+            &format!("fact {index}"),
+        ]));
+    }
+    assert_eq!(
+        reads(&traced_progress(&repo)),
+        both,
+        "an unlinked change of the other project changed what the report read"
     );
 }
 
@@ -1425,4 +1481,92 @@ fn start_ends_naming_how_a_change_joins_the_series() {
         lines[2],
         "a change joins as it opens: arc begin <slug> --item ship:<item>"
     );
+}
+
+/// The last `item-linked` event the journal at `dir` holds.
+fn last_link(dir: &Path) -> serde_json::Value {
+    journal_event_log(dir)
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "item-linked")
+        .unwrap()
+}
+
+/// Claim: `link <series> <item> <project>::<change>` records the other
+/// project's registry slug on the link, and the item's stage then follows
+/// that project's ledger exactly as a local link follows this one's,
+/// through `opened`, `snapshotted` and `integrated` with that ledger's time
+/// and revision, with no progress write after the link; the row names the
+/// project beside the change in every form. A link is replaced only as the
+/// other ledger allows. Once the project is no longer registered the item
+/// reads `unknown` and the report still succeeds. Rejects a foreign link
+/// read from this project's ledger (`unknown` from the start), a stage that
+/// stops following the other ledger, a row that drops the project, and an
+/// unregistered project failing the report.
+#[test]
+fn a_link_into_another_project_follows_that_ledger() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    start(&repo, &other, "there", &["Remote"]);
+    let file = start(&repo, &repo.root, "cross", &["Remote slice", "Local"]);
+    let change = begin_change_in(&repo, &other, "remote-slice");
+    let linked = progress(
+        &repo,
+        &repo.root,
+        &["link", "cross", "i1", &format!("other::{change}")],
+    );
+    assert_eq!(linked.trim(), format!("linked i1 to other::{change}"));
+    let dir = journal_dir(&repo, &repo.root);
+    let writes = item_events(&dir);
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "opened", "{row}");
+    assert_eq!(row["change"], change.as_str());
+    assert_eq!(row["project"], "other");
+    let slug = row["project_slug"].as_str().unwrap().to_string();
+    assert_eq!(last_link(&dir)["change_project"], slug.as_str());
+    assert_eq!(
+        series(&report(&repo, &repo.root, &[]), &file)["counts"]["in_flight"],
+        1
+    );
+    let view = progress(&repo, &repo.root, &[]);
+    assert!(view.contains(&format!("opened  other::{change}")), "{view}");
+    let plain = progress(&repo, &repo.root, &["--plain"]);
+    assert!(
+        plain.contains(&format!("change other::{change} (project {slug})")),
+        "{plain}"
+    );
+
+    let local = begin_change(&repo, "local-work", None);
+    repo.arc(&repo.root)
+        .args(["progress", "link", "cross", "i1", &local])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("still open or integrated"));
+
+    git(&other, &["checkout", "arc/remote-slice"]);
+    repo.commit(&other, "slice.txt", "one\n", "feat: slice");
+    stdout(repo.arc(&other).args(["snapshot", "remote-slice"]));
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "snapshotted");
+
+    git(&other, &["checkout", "master"]);
+    stdout(
+        repo.arc(&other)
+            .args(["review", "remote-slice", "--verdict", "approved"]),
+    );
+    stdout(repo.arc(&other).args(["integrate", "remote-slice"]));
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "integrated", "{row}");
+    assert_eq!(row["revision"], repo.head(&other).as_str());
+    assert!(row["integrated_at"].is_string(), "{row}");
+    assert_eq!(
+        item_events(&dir),
+        writes,
+        "a progress write moved the stage"
+    );
+
+    fs::remove_dir_all(journal_dir(&repo, &other)).unwrap();
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "unknown", "{row}");
+    assert_eq!(row["project_slug"], slug.as_str());
+    assert_eq!(stage(&repo, &file, "i2")["stage"], "open");
 }
