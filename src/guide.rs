@@ -5842,24 +5842,30 @@ GATE CONFINEMENT
     writes = ["target", "${CARGO_HOME:-~/.cargo}/registry"]
     required = true                    default; false permits unavailable fallback
 
-  Project commands run under the committed destination's declaration:
-  gates, selectors, environment probes, preparation, slot identity, invalidate
-  and warm commands, changelog renderers, and commands in acceptance and
+  Project commands run under the declaration in force, below: gates,
+  selectors, environment probes, preparation, slot identity, invalidate and
+  warm commands, changelog renderers, and commands in acceptance and
   publication scratch checkouts. Every launch needs
   an explicit destination scope; a missing scope refuses and names the site.
-  The checkout being evaluated cannot select its own authority. Without the
-  table, an explicitly scoped command retains ordinary write authority; doctor
+  A checkout's uncommitted table never applies. Without a
+  table in force, an explicitly scoped command retains ordinary write authority; doctor
   advises `gates-unconfined` when gates have no confinement declaration.
 
-  Operator [confine] roots supplement destination roots; either layer can
-  require enforcement. A change can adopt confinement when the destination has
-  none, or require enforcement, but cannot widen an existing destination's
-  roots. Declaration differences name both sides. Confinement participates in
-  execution identity, so a pass under another declaration, including an
-  unconfined pass, cannot silently remain green. Measurement and budget init
-  can run working-copy commands, but use the associated open or closed change's destination
-  confinement. A free checkout can use the primary checkout's recorded owner's
-  destination, never that owner's head. An unowned primary checkout uses its
+  Operator [confine] roots supplement destination roots. For an open change,
+  the declaration in force is the destination's combined with the operator's,
+  and the change head's committed table counts only in two ways. When neither
+  the destination nor the operator declares a table, the head's table governs,
+  roots and `required` as written. Otherwise the head's roots are ignored,
+  never refused, whether they widen or narrow, and `required = true` on any
+  side requires enforcement, which `required = false` elsewhere cannot lift.
+  Status and check note a difference between the destination's and the
+  head's tables, naming both. The declaration in force, adopted or required
+  by the head included, is what a gate's evidence identity and receipts carry
+  before the change lands, so a pass under another declaration, including an
+  unconfined pass, cannot silently remain green. A closed change uses its
+  destination branch's current table. Measurement and budget init can run working-copy commands,
+  but use the associated change's declaration in force. A free checkout uses
+  the one in force for the primary checkout's recorded owner. An unowned primary checkout uses its
   committed branch. Otherwise destination resolution refuses and asks for a
   run from the destination checkout or `arc verify <change>`.
 
