@@ -39,6 +39,10 @@ const INDEX: &str = "WORKBENCH.md";
 /// workbench is stale: the threshold `journal filed` applies to open items.
 const STALE_DAYS: u64 = 14;
 
+/// The entries a listing walks in one workbench before it stops. Past it the
+/// listing's size is a lower bound and staleness is judged on what was walked.
+const WALK_LIMIT: u64 = 100_000;
+
 #[derive(clap::Args)]
 pub struct WorkbenchArgs {
     #[command(subcommand)]
@@ -65,7 +69,9 @@ pub enum WorkbenchCmd {
     /// An open workbench is measured from its directory entries; a closed one
     /// reports the size recorded when it was closed or last moved. An open
     /// workbench is stale once 14 days pass with no recorded act and no file
-    /// in it changed.
+    /// in it changed. The walk of an open workbench stops after 100,000
+    /// entries: its size is then a lower bound, shown as `at least` and
+    /// marked by `size_partial`, and staleness is judged on what was walked.
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Include closed and archived workbenches
@@ -388,6 +394,8 @@ struct Measure {
     files: u64,
     bytes: u64,
     newest: Option<SystemTime>,
+    /// The walk stopped at its entry limit: the counts are lower bounds.
+    partial: bool,
 }
 
 impl Measure {
@@ -399,21 +407,25 @@ impl Measure {
 }
 
 /// Count the files and bytes under `root` and find the newest modification
-/// among its entries, without following a symbolic link or reading content.
-/// The index at the root is arc's and is not counted. `visit` sees every
-/// other entry first and may refuse it.
+/// among its entries, without following a symbolic link or reading content,
+/// stopping after `limit` entries when one is given. The index at the root
+/// is arc's and is not counted. `visit` sees every other entry first and may
+/// refuse it.
 fn walk(
     root: &Path,
+    limit: Option<u64>,
     mut visit: impl FnMut(&Path, &std::fs::Metadata) -> Result<()>,
 ) -> Result<Measure> {
     let mut measure = Measure {
         files: 0,
         bytes: 0,
         newest: None,
+        partial: false,
     };
     let metadata = std::fs::symlink_metadata(root)
         .with_context(|| format!("cannot read {}", root.display()))?;
     measure.touch(&metadata);
+    let mut seen = 0u64;
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in
@@ -423,6 +435,11 @@ fn walk(
             if dir == root && entry.file_name() == INDEX {
                 continue;
             }
+            if limit.is_some_and(|limit| seen >= limit) {
+                measure.partial = true;
+                return Ok(measure);
+            }
+            seen += 1;
             let path = entry.path();
             let metadata = entry
                 .metadata()
@@ -463,6 +480,9 @@ pub(crate) struct WorkbenchRow {
     /// for a closed one; null when neither is available.
     files: Option<u64>,
     bytes: Option<u64>,
+    /// The walk of an open workbench stopped at its entry limit: `files` and
+    /// `bytes` are lower bounds, and staleness is judged on what was walked.
+    size_partial: bool,
     /// Why an open workbench could not be measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     size_error: Option<String>,
@@ -503,6 +523,7 @@ fn row(dir: &Path, workbench: &Recorded<'_>, now: DateTime<Utc>) -> WorkbenchRow
     let seconds_since =
         |at: DateTime<Utc>| now.signed_duration_since(at).num_seconds().max(0) as u64;
     let mut last_activity = workbench.last_act;
+    let mut size_partial = false;
     let (files, bytes, size_error) = if workbench.is_open() && storage == "missing" {
         (
             None,
@@ -510,9 +531,10 @@ fn row(dir: &Path, workbench: &Recorded<'_>, now: DateTime<Utc>) -> WorkbenchRow
             Some(format!("no directory at {}", path.display())),
         )
     } else if workbench.is_open() {
-        match walk(&path, |_, _| Ok(())) {
+        match walk(&path, Some(WALK_LIMIT), |_, _| Ok(())) {
             Ok(measure) => {
                 last_activity = last_activity.max(measure.newest.map(DateTime::<Utc>::from));
+                size_partial = measure.partial;
                 (Some(measure.files), Some(measure.bytes), None)
             }
             Err(error) => (None, None, Some(format!("{error:#}"))),
@@ -547,6 +569,7 @@ fn row(dir: &Path, workbench: &Recorded<'_>, now: DateTime<Utc>) -> WorkbenchRow
             .unwrap_or_default(),
         files,
         bytes,
+        size_partial,
         size_error,
         last_activity: last_activity
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
@@ -572,6 +595,10 @@ pub(crate) fn open_rows(dir: &Path) -> Result<Vec<WorkbenchRow>> {
 
 fn render_row(row: &WorkbenchRow) {
     let size = match (row.files, row.bytes) {
+        (Some(files), Some(bytes)) if row.size_partial => format!(
+            "at least {} in {files}+ files",
+            crate::worktree_usage::human(bytes)
+        ),
         (Some(files), Some(bytes)) => format!(
             "{} in {files} {}",
             crate::worktree_usage::human(bytes),
@@ -997,7 +1024,7 @@ fn close(ctx: &Ctx, address: &str, produced: &[String], note: Option<&str>) -> R
     event.artifacts = artifacts;
     event.note = note;
     if storage != "missing" {
-        let measure = walk(&path, |_, _| Ok(()))?;
+        let measure = walk(&path, None, |_, _| Ok(()))?;
         event.files = Some(measure.files);
         event.bytes = Some(measure.bytes);
     }
@@ -1073,7 +1100,7 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
             destination.display()
         )
     })?;
-    let measure = walk(&destination, |_, _| Ok(()));
+    let measure = walk(&destination, None, |_, _| Ok(()));
     let kind = if to_cold {
         "workbench-archived"
     } else {
@@ -1302,6 +1329,7 @@ fn survey(source: &Source, in_place: bool) -> Result<Measure> {
             files: 1,
             bytes: source.metadata.len(),
             newest: None,
+            partial: false,
         };
         measure.touch(&source.metadata);
         return Ok(measure);
@@ -1313,7 +1341,7 @@ fn survey(source: &Source, in_place: bool) -> Result<Measure> {
             root.display()
         );
     }
-    walk(root, |path, metadata| {
+    walk(root, None, |path, metadata| {
         if path.file_name().is_some_and(|name| name == ".git") {
             bail!(
                 "{} holds a Git repository at {}; adopt material no repository tracks",
@@ -1523,4 +1551,27 @@ pub(super) fn inspect(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claim: a walk given a limit stops after that many entries and marks
+    /// its counts as lower bounds; without one it counts every file. Rejects
+    /// an unbounded listing walk of a huge workbench, and a bounded walk
+    /// presenting a partial count as the whole.
+    #[test]
+    fn a_bounded_walk_stops_and_says_its_counts_are_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..5 {
+            std::fs::write(dir.path().join(format!("{index}.txt")), "x").unwrap();
+        }
+        let whole = walk(dir.path(), None, |_, _| Ok(())).unwrap();
+        assert_eq!((whole.files, whole.bytes, whole.partial), (5, 5, false));
+        let bounded = walk(dir.path(), Some(3), |_, _| Ok(())).unwrap();
+        assert_eq!((bounded.files, bounded.partial), (3, true));
+        let exact = walk(dir.path(), Some(5), |_, _| Ok(())).unwrap();
+        assert_eq!((exact.files, exact.partial), (5, false));
+    }
 }

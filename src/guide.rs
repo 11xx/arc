@@ -2182,9 +2182,10 @@ WORKBENCHES (working material in the journal)
                          back.
   A subcommand names a workbench by its name, or by its slug while one
   workbench of that slug is open. `catchup` and `journal open` list each open
-  workbench with its purpose, size and age. One open 14 days with no recorded
-  act and no file in it changed is stale: the listing marks it and `catchup`
-  counts it, as `journal filed` marks open items untouched that long.
+  workbench with its purpose, size and age, measured as `journal workbench
+  list --help` says. One open 14 days with no recorded act and no file in it
+  changed is stale: the listing marks it and `catchup` counts it, as
+  `journal filed` marks open items untouched that long.
   Journal exchange and its bundles carry no workbench: not its directory, its
   index, or its events. An artifact a workbench links or produced travels as
   any artifact does, without the link, and the workbench stays with the
