@@ -10,3 +10,13 @@ retain = ["target"]
 # integration.
 warm = "cargo test --locked --profile dev --no-run"
 warm_after_integrate = true
+
+# The crate is built before a gate runs, as preparation: timed on its own and
+# outside the gate's budget, so the budget judges the witnesses and not how
+# much of the crate a change made the compiler rebuild.
+[prepare]
+mode = "path-stable"
+# Preparation runs in storage arc manages, outside the checkout, so the
+# command names the checkout it builds.
+command = "cargo test --locked --profile dev --no-run --manifest-path \"$ARC_WORKTREE_PATH/Cargo.toml\""
+timeout = "10m"

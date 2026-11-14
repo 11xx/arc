@@ -117,6 +117,9 @@ paths = [
   ".arc/policy.toml",
   # Gate declarations decide which commands and probes can satisfy integration.
   ".arc/gates.toml",
+  # Preparation runs before a gate and outside its budget, and is read from
+  # the change's own tree: work moved here from a gate escapes the budget.
+  ".arc/worktrees.toml",
   # The invariant gate is this runner executing this list: an edit to either
   # can make the gate pass without proving anything.
   ".arc/test-binary.py",

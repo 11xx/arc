@@ -7,7 +7,9 @@ unexecuted witnesses fail. It selects the spawned executable from Cargo's artifa
 receipts. Development artifacts share one profile: the crate is unoptimized, so
 an incremental rebuild after a source edit stays short, and dependencies are
 optimized. Debug symbols are disabled; debug assertions and integer overflow
-checks stay enabled. The invariant gate builds the artifacts it runs. Build
+checks stay enabled. Preparation declared in `.arc/worktrees.toml` builds the
+artifacts before a gate runs; the invariant gate's own build step then finds
+them current. Build
 metadata reads preserve the watched Git index.
 
 Run the invariant gate:
