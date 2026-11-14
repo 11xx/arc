@@ -6842,10 +6842,13 @@ PROGRESS
   amendments still apply: `arc journal correct` replaces its recorded title,
   which the report then shows, and `arc journal retract` withdraws evidence
   or a position filed on it. `arc workspace progress` prints every registered
-  project's active series in the same three forms. `--json` prints
+  project's active series in the same three forms, and says whether a
+  relation is mutual from the series it read itself: absent only when the
+  related series was not read by that command. `--json` prints
   `arc-progress/1` and `arc-workspace-progress/1`. `arc workspace report`
   and `arc workspace watch`, given `--progress`, carry the same series per
-  project as `projects[].progress`, for a page that draws the workspace; a
+  project as `projects[].progress`, for a page that draws the workspace,
+  each project read alone, so no relation's `mutual` is filled there; a
   series that cannot be read is a failed `progress` component there.
 
 SCHEMAS

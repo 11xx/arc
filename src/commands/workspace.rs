@@ -3849,7 +3849,8 @@ mod report {
         #[serde(skip_serializing_if = "Option::is_none")]
         library: Option<super::Library>,
         /// The project's active progress series, as `arc workspace progress
-        /// --json` reports them, when the report was asked for them.
+        /// --json` reports them but with no relation's `mutual` filled, when
+        /// the report was asked for them.
         #[serde(skip_serializing_if = "Option::is_none")]
         progress: Option<Value>,
         project: String,

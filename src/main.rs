@@ -4188,7 +4188,9 @@ enum WorkspaceCmd {
     ///
     /// It accepts the same `--under`/`--here`/`--global` scope. Retired
     /// registrations are skipped; relations are named without reading the
-    /// related series, which the workspace lists in its own project. A
+    /// related series, which the workspace lists in its own project, and a
+    /// relation is `mutual` when the series it names was read here and
+    /// relates back, absent when that series was not read. A
     /// journal or ledger that cannot be read is named on stderr and the
     /// command exits 16, keeping the projects it did read. Versioned
     /// `arc-workspace-progress/1`. Records no events.
@@ -4343,8 +4345,9 @@ enum WorkspaceCmd {
         #[arg(long)]
         library: bool,
         /// Include each project's active progress series in JSON, each as
-        /// `arc workspace progress --json` reports it (arc guide progress). A
-        /// project with no active series carries none
+        /// `arc workspace progress --json` reports it with no relation's
+        /// `mutual` filled (arc guide progress). A project with no active
+        /// series carries none
         #[arg(long)]
         progress: bool,
     },
@@ -4400,7 +4403,8 @@ enum WorkspaceCmd {
         #[arg(long)]
         library: bool,
         /// Include each project's active progress series in JSON, each as
-        /// `arc workspace progress --json` reports it (arc guide progress); an
+        /// `arc workspace progress --json` reports it with no relation's
+        /// `mutual` filled (arc guide progress); an
         /// item edit or a write to a linked change emits a report
         #[arg(long)]
         progress: bool,

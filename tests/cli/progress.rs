@@ -1765,3 +1765,96 @@ fn a_wait_names_only_an_open_question_of_this_journal() {
     refused(&discussion, &question, "is answered");
     assert_eq!(item_events(&dir), before);
 }
+
+/// The relation `series` in `project` of a workspace progress report
+/// records to `file`.
+fn workspace_relation<'a>(
+    report: &'a serde_json::Value,
+    project: &str,
+    series: &str,
+    file: &str,
+) -> &'a serde_json::Value {
+    report["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["project"] == project)
+        .and_then(|row| {
+            row["series"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["file"] == series)
+        })
+        .and_then(|row| {
+            row["related"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|relation| relation["file"] == file)
+        })
+        .unwrap_or_else(|| panic!("no relation {project}::{series} -> {file} in {report}"))
+}
+
+/// Claim: `arc workspace progress` fills a relation's `mutual` from the
+/// series it read itself: `true` when the related series relates back,
+/// `false` when that series was read and does not, and absent when this
+/// command did not read it (out of its scope); the plain form says the
+/// same. Rejects every relation reported unread in a workspace view that
+/// read both ends, and a guess about a series it did not read.
+#[test]
+fn workspace_progress_knows_whether_a_relation_is_mutual() {
+    let repo = Repo::new();
+    let label = repo.root.file_name().unwrap().to_string_lossy().to_string();
+    let here = start(&repo, &repo.root, "here", &["Local"]);
+    let other = sibling_project(&repo, "other");
+    let there = start(&repo, &other, "there", &["Remote"]);
+    let third = sibling_project(&repo, "third");
+    let far = start(&repo, &third, "far", &["Far"]);
+    progress(&repo, &repo.root, &["relate", "here", "other::there"]);
+    progress(&repo, &repo.root, &["relate", "here", "third::far"]);
+    progress(
+        &repo,
+        &other,
+        &["relate", "there", &format!("{label}::here")],
+    );
+
+    let all = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "progress", "--json"]),
+    );
+    assert_eq!(
+        workspace_relation(&all, &label, &here, &there)["mutual"],
+        true
+    );
+    assert_eq!(
+        workspace_relation(&all, &label, &here, &far)["mutual"],
+        false
+    );
+    assert_eq!(
+        workspace_relation(&all, "other", &there, &here)["mutual"],
+        true
+    );
+    let plain = stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "progress", "--plain"]),
+    );
+    assert!(
+        plain.contains(&format!("other::{there} (mutual)")),
+        "{plain}"
+    );
+    assert!(
+        plain.contains(&format!("third::{far} (one-sided)")),
+        "{plain}"
+    );
+
+    let scoped =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "progress", "--here", "--json"]),
+        );
+    for file in [&there, &far] {
+        let relation = workspace_relation(&scoped, &label, &here, file);
+        assert!(relation.get("mutual").is_none(), "{relation}");
+    }
+}

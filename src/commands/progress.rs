@@ -753,8 +753,8 @@ struct Relation {
     /// The other project's registry slug, which the relation records.
     slug: String,
     file: String,
-    /// Whether the other series relates back; absent when its journal could
-    /// not be read.
+    /// Whether the other series relates back; absent when this command did
+    /// not read it.
     #[serde(skip_serializing_if = "Option::is_none")]
     mutual: Option<bool>,
 }
@@ -1714,6 +1714,52 @@ fn series_of(
         .collect()
 }
 
+/// Fill each relation's `mutual` from the series this command read: `true`
+/// when the related series relates back, `false` when it was read and does
+/// not, and absent when it was not read here.
+fn settle_mutual(projects: &mut [ProjectProgress]) {
+    let read: std::collections::BTreeSet<(String, String)> = projects
+        .iter()
+        .flat_map(|project| {
+            project
+                .series
+                .iter()
+                .map(|series| (project.slug.clone(), series.file.clone()))
+        })
+        .collect();
+    let relates: std::collections::BTreeSet<(String, String, String, String)> = projects
+        .iter()
+        .flat_map(|project| {
+            project.series.iter().flat_map(move |series| {
+                series.related.iter().map(move |relation| {
+                    (
+                        project.slug.clone(),
+                        series.file.clone(),
+                        relation.slug.clone(),
+                        relation.file.clone(),
+                    )
+                })
+            })
+        })
+        .collect();
+    for project in projects.iter_mut() {
+        for series in &mut project.series {
+            for relation in &mut series.related {
+                relation.mutual = read
+                    .contains(&(relation.slug.clone(), relation.file.clone()))
+                    .then(|| {
+                        relates.contains(&(
+                            relation.slug.clone(),
+                            relation.file.clone(),
+                            project.slug.clone(),
+                            series.file.clone(),
+                        ))
+                    });
+            }
+        }
+    }
+}
+
 /// Whether any item of `series`, as [`project_series`] reports them, follows
 /// a change of one of `projects`, named by registry slug.
 pub(crate) fn links_into(
@@ -1773,6 +1819,7 @@ pub(crate) fn workspace(
             }),
         }
     }
+    settle_mutual(&mut projects);
     match form {
         Form::Json => println!(
             "{}",
