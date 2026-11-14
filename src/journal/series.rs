@@ -56,6 +56,9 @@ pub(crate) struct SeriesFields {
     /// ledger holds the change; absent for this project's ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     change_project: Option<String>,
+    /// The journal question an `item-waiting` event says the item waits on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    waits_on: Option<ItemWait>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
@@ -66,6 +69,14 @@ pub(crate) struct SeriesFields {
 pub(crate) struct SplitPart {
     pub(crate) item: String,
     pub(crate) title: String,
+}
+
+/// A question in the series' own journal: the discussion that holds it and
+/// its id there.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ItemWait {
+    pub(crate) file: String,
+    pub(crate) question: String,
 }
 
 /// The change an item follows: one of this project's ledger, or of the
@@ -124,6 +135,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
     let bare = fields.parts.is_empty()
         && fields.change.is_none()
         && fields.change_project.is_none()
+        && fields.waits_on.is_none()
         && fields.related.is_none();
     if !on_series {
         return false;
@@ -133,7 +145,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
         "item-dropped" => names_item && line(&event.note) && placements.is_empty() && bare,
-        "item-done" | "item-reopened" | "item-unlinked" => {
+        "item-done" | "item-reopened" | "item-unlinked" | "item-unwaited" => {
             names_item
                 && event.note.as_deref().is_none_or(single_line)
                 && placements.is_empty()
@@ -145,7 +157,20 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.change_project.as_deref().is_none_or(single_line)
                 && placements.is_empty()
                 && fields.parts.is_empty()
+                && fields.waits_on.is_none()
                 && fields.related.is_none()
+        }
+        "item-waiting" => {
+            names_item
+                && event.note.is_none()
+                && placements.is_empty()
+                && fields.parts.is_empty()
+                && fields.change.is_none()
+                && fields.change_project.is_none()
+                && fields.related.is_none()
+                && fields.waits_on.as_ref().is_some_and(|wait| {
+                    bare_artifact_kind(&wait.file).is_some() && single_line(&wait.question)
+                })
         }
         "item-split" => {
             names_item
@@ -158,6 +183,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                     .all(|part| valid_item_id(&part.item) && single_line(&part.title))
                 && fields.change.is_none()
                 && fields.change_project.is_none()
+                && fields.waits_on.is_none()
                 && fields.related.is_none()
         }
         "series-related" | "series-unrelated" => {
@@ -166,6 +192,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.parts.is_empty()
                 && fields.change.is_none()
                 && fields.change_project.is_none()
+                && fields.waits_on.is_none()
                 && fields.related.as_ref().is_some_and(|related| {
                     single_line(&related.project) && is_series_file(&related.file)
                 })
@@ -198,6 +225,18 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
             fields.change.as_deref().unwrap_or_default()
         ),
         "item-unlinked" => format!("unlinked item {item} of {file}"),
+        "item-waiting" => format!(
+            "item {item} of {file} waits on question {} of {}",
+            fields
+                .waits_on
+                .as_ref()
+                .map_or("", |wait| wait.question.as_str()),
+            fields
+                .waits_on
+                .as_ref()
+                .map_or("", |wait| wait.file.as_str())
+        ),
+        "item-unwaited" => format!("item {item} of {file} waits on no question"),
         "item-split" => format!(
             "split item {item} of {file} into {}: {note}",
             fields
@@ -251,6 +290,9 @@ pub(crate) struct Item {
     /// The registry slug of the project whose ledger holds `change`; absent
     /// for this project's ledger.
     pub(crate) project: Option<String>,
+    /// The journal question the item was last said to wait on. Whether it
+    /// still waits is the question's to say: only while it is open.
+    pub(crate) waits_on: Option<ItemWait>,
     /// The reason or note recorded with the item's latest state.
     pub(crate) note: Option<String>,
     /// When the item reached its latest state.
@@ -400,6 +442,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     state: ItemState::Open,
                     change: None,
                     project: None,
+                    waits_on: None,
                     note: None,
                     state_at: at,
                     split_into: Vec::new(),
@@ -453,6 +496,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             state: ItemState::Open,
                             change: None,
                             project: None,
+                            waits_on: None,
                             note: None,
                             state_at: at.clone(),
                             split_into: Vec::new(),
@@ -502,6 +546,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                         item.change = None;
                         item.project = None;
                     }
+                    "item-waiting" => item.waits_on = fields.waits_on.clone(),
+                    "item-unwaited" => item.waits_on = None,
                     _ => {}
                 }
             }
@@ -588,6 +634,7 @@ fn resolve_name(events: &[JournalEvent], name: &str, dir: &Path) -> Result<Strin
 /// retired series is a closed record and refuses every write.
 struct Open {
     dir: std::path::PathBuf,
+    events: Vec<JournalEvent>,
     series: Series,
     topic: String,
     _lock: super::JournalTransitionLock,
@@ -614,6 +661,7 @@ fn open_for_write(ctx: &Ctx, name: &str) -> Result<Open> {
         .unwrap_or_default();
     Ok(Open {
         dir,
+        events,
         series,
         topic,
         _lock: lock,
@@ -922,6 +970,56 @@ pub(crate) fn unlink(ctx: &Ctx, name: &str, id: &str) -> Result<ItemLink> {
     };
     open.append(ctx, &open.event(ctx, "item-unlinked", Some(id)))?;
     Ok(link)
+}
+
+/// Record that a standing item waits on a question of this journal. The
+/// discussion is named by its bare filename and must hold the question,
+/// asked and still open, for a person to settle; both are checked before
+/// anything is written. A wait replaces the item's earlier one.
+pub(crate) fn wait(ctx: &Ctx, name: &str, id: &str, file: &str, question: &str) -> Result<()> {
+    let open = open_for_write(ctx, name)?;
+    let item = open.standing(id)?;
+    named_artifact(&open.dir, file, "discussion", "wait")?;
+    let target = ItemWait {
+        file: file.to_string(),
+        question: question.to_string(),
+    };
+    if item.waits_on.as_ref() == Some(&target) {
+        bail!("item {id} already waits on {question} of {file}");
+    }
+    let asked = open.events.iter().any(|event| {
+        event.event == "question"
+            && event.known()
+            && event.file.as_deref() == Some(file)
+            && event.question_id.as_deref() == Some(question)
+    });
+    if !asked {
+        bail!("{file} holds no question {question}");
+    }
+    let waiting = super::questions_from(&open.dir, &open.events, false)?
+        .into_iter()
+        .find(|open| open.file == file && open.question == question);
+    match waiting {
+        None => bail!("question {question} of {file} is answered; nothing waits on it"),
+        Some(open) if !waits_on_person(&open) => bail!(
+            "question {question} of {file} is settled by {}, not by a person",
+            open.settle_by.as_deref().unwrap_or_default()
+        ),
+        Some(_) => {}
+    }
+    let mut event = open.event(ctx, "item-waiting", Some(id));
+    event.series.waits_on = Some(target);
+    open.append(ctx, &event)
+}
+
+/// Remove the question an item was said to wait on; returns it.
+pub(crate) fn unwait(ctx: &Ctx, name: &str, id: &str) -> Result<ItemWait> {
+    let open = open_for_write(ctx, name)?;
+    let Some(wait) = open.series.require_item(id)?.waits_on.clone() else {
+        bail!("item {id} waits on no question");
+    };
+    open.append(ctx, &open.event(ctx, "item-unwaited", Some(id)))?;
+    Ok(wait)
 }
 
 /// Split one item into several; returns the new items' ids.

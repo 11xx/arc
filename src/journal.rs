@@ -10002,8 +10002,8 @@ impl JournalEvent {
             | "workbench-archived"
             | "workbench-unarchived" => workbench::well_formed(self),
             "item-added" | "item-renamed" | "item-moved" | "item-dropped" | "item-done"
-            | "item-reopened" | "item-linked" | "item-unlinked" | "item-split"
-            | "series-related" | "series-unrelated" => series::well_formed(self),
+            | "item-reopened" | "item-linked" | "item-unlinked" | "item-split" | "item-waiting"
+            | "item-unwaited" | "series-related" | "series-unrelated" => series::well_formed(self),
             _ => false,
         }
     }

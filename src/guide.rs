@@ -6731,11 +6731,12 @@ PROGRESS
     move <item> --before|--after <item>     drop <item> --reason R
     done <item> [--note N]                  reopen <item> [--note N]
     link <item> [<project>::]<change>       unlink <item>
+    wait <item> <discussion> --question Q   unwait <item>
     split <item> --into T --into T... --reason R
   Items take no generic correction; each edit has its reversal. `reopen`
   undoes `drop` and `done` alike, for any item; a reopened linked item reads
   its derived stage again. A rename is undone by another rename, a move by
-  another move, a link by `unlink`. A split is final: its parts are items of
+  another move, a link by `unlink`, a wait by `unwait`. A split is final: its parts are items of
   their own. A dropped or split item stays visible and leaves the count.
 
   `done` is for an item no change carries; a linked item's stage is the
@@ -6750,6 +6751,16 @@ PROGRESS
   replaces an item's link only when that change closed without integrating,
   judged from the ledger holding it, and only while the link is still the
   one the command read.
+
+  An item waits on a person through a journal question: pose it on a
+  discussion (`arc journal question`), then tie it to the item with
+  `wait <item> <discussion> --question <id>`. The discussion is a bare
+  filename of this journal and must hold that question, still open for a
+  person; both are checked before anything is written. The wait is derived,
+  never cleared by hand: while the question is open the row carries it
+  (file, id and heading) and the series counts it as waiting, and once the
+  question is answered the row shows nothing of it. A wait leaves the stage
+  as it is.
 
   Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, as the
   change's own events in the ledger holding it record it: `opened`;
@@ -6782,7 +6793,10 @@ PROGRESS
   revision and age of the integration; a change of another project prints
   as `<project>::<change>`. The marks are `✓` complete,
   `○` open, a circle that fills from `opened` to `reviewed`, `×` dropped or
-  closed, `÷` split and `?` unknown. The view names a series by its topic
+  closed, `÷` split and `?` unknown. An open item that waits reads
+  `waiting` with a `?`; any other item that waits keeps its stage with
+  `waiting` beside it. The question's heading takes a faint line under the
+  title, and the bar counts the waiting items. The view names a series by its topic
   and gives a past time as an age; the title of an item past `open`
   continues on the next line when wider than the column before its stage,
   and nothing is cut. It is painted only when standard output is a terminal,

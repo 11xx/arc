@@ -1570,3 +1570,198 @@ fn a_link_into_another_project_follows_that_ledger() {
     assert_eq!(row["project_slug"], slug.as_str());
     assert_eq!(stage(&repo, &file, "i2")["stage"], "open");
 }
+
+/// A discussion in `repo`'s journal holding one open question that waits on
+/// a person: its filename and the question's id.
+fn open_question(repo: &Repo, topic: &str) -> (String, String) {
+    let (_, file) = journal_artifact(repo, topic, "discussion", "# Pick a store\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "files",
+            "--option",
+            "sqlite",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which store holds the cache?\n")
+        .assert()
+        .success();
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    let id = summary["questions"][0]["id"].as_str().unwrap().to_string();
+    (file, id)
+}
+
+/// Claim: an item said to wait on a journal question carries the wait (file,
+/// question id, heading) while the question is open and waits on a person,
+/// whatever its stage, and the series counts it as waiting; an open item
+/// reads `waiting` with the `?` mark and the question under its title, a
+/// linked one keeps its stage and gains `waiting` beside it. Once the
+/// question is answered the rows show nothing of it, with no progress event
+/// written, and `unwait` removes a wait. Rejects a wait that changes a
+/// stage, one that outlives its answer, one that takes a progress write to
+/// clear, and a view that hides the wait.
+#[test]
+fn a_wait_shows_while_its_question_is_open() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "held", &["Blocked", "Linked", "Free"]);
+    let (discussion, question) = open_question(&repo, "pick-a-store");
+    let waits = progress(
+        &repo,
+        &repo.root,
+        &["wait", "held", "i1", &discussion, "--question", &question],
+    );
+    assert_eq!(
+        waits.trim(),
+        format!("i1 waits on {question} of {discussion}")
+    );
+    let change = begin_change(&repo, "linked-work", None);
+    progress(&repo, &repo.root, &["link", "held", "i2", &change]);
+    progress(
+        &repo,
+        &repo.root,
+        &["wait", "held", "i2", &discussion, "--question", &question],
+    );
+    let dir = journal_dir(&repo, &repo.root);
+    let writes = item_events(&dir);
+
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "open");
+    assert_eq!(row["waiting"]["file"], discussion.as_str());
+    assert_eq!(row["waiting"]["question"], question.as_str());
+    let heading = row["waiting"]["heading"].as_str().unwrap().to_string();
+    let linked = stage(&repo, &file, "i2");
+    assert_eq!(linked["stage"], "opened");
+    assert_eq!(linked["waiting"]["question"], question.as_str());
+    assert!(stage(&repo, &file, "i3").get("waiting").is_none());
+    let json = report(&repo, &repo.root, &[]);
+    let counts = &series(&json, &file)["counts"];
+    assert_eq!(counts["waiting"], 2);
+    assert_eq!(counts["open"], 2);
+    assert_eq!(counts["in_flight"], 1);
+
+    let view = progress(&repo, &repo.root, &[]);
+    let lines: Vec<&str> = view.lines().collect();
+    let blocked = lines
+        .iter()
+        .position(|line| line.starts_with("  ? i1  Blocked"))
+        .unwrap_or_else(|| panic!("{view}"));
+    assert!(lines[blocked].contains("waiting"), "{view}");
+    assert_eq!(lines[blocked + 1].trim(), heading, "{view}");
+    assert!(
+        lines.iter().any(|line| line.contains("i2  Linked")
+            && line.contains("opened")
+            && line.contains("waiting")),
+        "{view}"
+    );
+    assert!(
+        lines[1].contains("1 in flight · 2 waiting · 2 open"),
+        "{view}"
+    );
+    let plain = progress(&repo, &repo.root, &["--plain"]);
+    assert!(
+        plain.contains(&format!("waiting on {discussion} {question}: {heading}")),
+        "{plain}"
+    );
+    assert!(plain.contains("; 2 waiting; 2 open"), "{plain}");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &discussion,
+            "--question",
+            &question,
+            "--option",
+            "files",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Files.\n")
+        .assert()
+        .success();
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "open");
+    assert!(row.get("waiting").is_none(), "{row}");
+    assert!(stage(&repo, &file, "i2").get("waiting").is_none());
+    let json = report(&repo, &repo.root, &[]);
+    assert!(series(&json, &file)["counts"].get("waiting").is_none());
+    let view = progress(&repo, &repo.root, &[]);
+    assert!(!view.contains("waiting"), "{view}");
+    assert!(view.contains("  ○ i1  Blocked"), "{view}");
+    assert_eq!(
+        item_events(&dir),
+        writes,
+        "a progress write cleared the wait"
+    );
+
+    let unwaited = progress(&repo, &repo.root, &["unwait", "held", "i1"]);
+    assert!(unwaited.contains("i1 waits no longer"), "{unwaited}");
+    repo.arc(&repo.root)
+        .args(["progress", "unwait", "held", "i1"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("waits on no question"));
+}
+
+/// Claim: `wait` takes only a discussion of this journal named by its bare
+/// filename, and only a question that discussion holds and that is still
+/// open for a person; a question id the file does not hold, a path out of
+/// the journal, an absolute path, another kind of artifact and an answered
+/// question are each refused and record nothing. Rejects a wait on a
+/// question nobody asked, and a name that reaches outside the journal.
+#[test]
+fn a_wait_names_only_an_open_question_of_this_journal() {
+    let repo = Repo::new();
+    start(&repo, &repo.root, "held", &["Blocked"]);
+    let (discussion, question) = open_question(&repo, "pick-a-store");
+    let (_, note) = journal_artifact(&repo, "plain-note", "note", "# A note\n");
+    let dir = journal_dir(&repo, &repo.root);
+    let outside = repo.home.join("20261114T000000Z-outside-discussion.md");
+    fs::write(&outside, "# Outside\n").unwrap();
+    let climbing = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+    let before = item_events(&dir);
+    let refused = |file: &str, id: &str, why: &str| {
+        repo.arc(&repo.root)
+            .args(["progress", "wait", "held", "i1", file, "--question", id])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(why.to_string()));
+    };
+    refused(&discussion, "q-none", "holds no question q-none");
+    refused(&climbing, &question, "bare discussion artifact filename");
+    refused(
+        outside.to_str().unwrap(),
+        &question,
+        "bare discussion artifact filename",
+    );
+    refused(&note, &question, "is a note");
+    assert_eq!(item_events(&dir), before);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &discussion,
+            "--question",
+            &question,
+            "--option",
+            "files",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Files.\n")
+        .assert()
+        .success();
+    refused(&discussion, &question, "is answered");
+    assert_eq!(item_events(&dir), before);
+}

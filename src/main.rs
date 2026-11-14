@@ -9060,6 +9060,8 @@ mod tests {
             "progress reopen",
             "progress link",
             "progress unlink",
+            "progress wait",
+            "progress unwait",
             "progress split",
             "progress relate",
             "progress unrelate",

@@ -243,6 +243,12 @@ impl View {
                     .paint(YELLOW, &format!("{} in flight", counts.in_flight)),
             );
         }
+        if counts.waiting > 0 {
+            rest.push(
+                self.look
+                    .paint(YELLOW, &format!("{} waiting", counts.waiting)),
+            );
+        }
         if counts.open > 0 {
             rest.push(format!("{} open", counts.open));
         }
@@ -261,14 +267,15 @@ impl View {
     }
 
     /// One line per item: a mark, its id and title, then the stage and what
-    /// the ledger records beside it. An open item carries its mark alone. A
-    /// title wider than its column continues under itself, and a note takes
-    /// lines of its own there.
+    /// the ledger records beside it. An open item carries its mark alone,
+    /// and an open item that waits on a question reads `waiting`. A title
+    /// wider than its column continues under itself, and the question an
+    /// item waits on and a note each take lines of their own there.
     fn rows(&mut self, rows: &[ItemRow]) {
         let ids = rows.iter().map(|row| row.id.len()).max().unwrap_or(0);
         let indent = ids + 6;
-        let staged = || rows.iter().filter(|row| row.stage != "open");
-        let stages = staged().map(|row| row.stage.len()).max().unwrap_or(0);
+        let staged = || rows.iter().filter(|row| shown(row) != "open");
+        let stages = staged().map(|row| shown(row).len()).max().unwrap_or(0);
         let column = self.look.width.map_or(TITLE_COLUMN, |width| {
             width
                 .saturating_sub(indent + stages + DETAIL + 4)
@@ -280,7 +287,7 @@ impl View {
             .unwrap_or(0)
             .min(column);
         for row in rows {
-            let stage = row.stage;
+            let stage = shown(row);
             let (mark, style) = mark(stage);
             let title = if stage != "open" && row.title.chars().count() > titles {
                 fill(&row.title, titles)
@@ -313,10 +320,16 @@ impl View {
             for text in &title[1..] {
                 lines.push(format!("{}{}", " ".repeat(indent), faded(text)));
             }
-            for text in row
-                .note
+            let question = row.waiting.as_ref().map(|waiting| {
+                waiting
+                    .heading
+                    .clone()
+                    .unwrap_or_else(|| format!("question {} of {}", waiting.question, waiting.file))
+            });
+            for text in question
                 .iter()
-                .flat_map(|note| self.look.wrap(note, indent))
+                .chain(&row.note)
+                .flat_map(|text| self.look.wrap(text, indent))
             {
                 lines.push(format!("{}{}", " ".repeat(indent), self.dim(&text)));
             }
@@ -349,6 +362,9 @@ impl View {
             if let Some(holder) = &row.held_by {
                 parts.push(self.dim(&format!("held by {holder}")));
             }
+        }
+        if row.waiting.is_some() && row.stage != "open" {
+            parts.push(self.look.paint(YELLOW, "waiting"));
         }
         if !row.split_into.is_empty() {
             parts.push(self.dim(&format!("into {}", row.split_into.join(", "))));
@@ -403,10 +419,20 @@ fn topic(file: &str) -> String {
         .unwrap_or_else(|| file.to_string())
 }
 
+/// The stage an item's line shows: `waiting` for an open item that waits on
+/// a question, else its stage.
+fn shown(row: &ItemRow) -> &'static str {
+    match row.stage {
+        "open" if row.waiting.is_some() => "waiting",
+        stage => stage,
+    }
+}
+
 /// The mark that stands for a stage, and the colour the mark and the stage
 /// take. A linked item's mark fills as its change moves on.
 fn mark(stage: &str) -> (&'static str, &'static str) {
     match stage {
+        "waiting" => ("?", YELLOW),
         "integrated" | "done" => ("✓", GREEN),
         "opened" => ("◔", YELLOW),
         "snapshotted" => ("◑", YELLOW),
@@ -471,6 +497,7 @@ mod tests {
             changes_requested_rounds: 0,
             integrated_at: None,
             revision: None,
+            waiting: None,
             note: None,
             split_into: Vec::new(),
         }
@@ -501,6 +528,7 @@ mod tests {
                 in_flight: count(&["opened", "snapshotted", "verified", "reviewed"]),
                 open: count(&["open"]),
                 closed: count(&["closed"]),
+                waiting: items.iter().filter(|row| row.waiting.is_some()).count(),
                 percent: (total > 0).then(|| complete * 100 / total),
                 since_start: SinceStart {
                     declared: total,

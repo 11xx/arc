@@ -8,8 +8,9 @@
 
 use super::Ctx;
 use crate::journal::series::{
-    self, ItemLink, ItemState, Placement, RelatedSeries, Series, SinceStart,
+    self, ItemLink, ItemState, ItemWait, Placement, RelatedSeries, Series, SinceStart,
 };
+use crate::journal::JournalEvent;
 use crate::model::{Closure, Verdict};
 use crate::state::ChangeState;
 use crate::store::Store;
@@ -182,6 +183,30 @@ pub enum ProgressCmd {
         /// Item id, such as i3
         item: String,
     },
+    /// Say an item waits on a question of this journal
+    ///
+    /// The item shows the wait while the question is open and waits on a
+    /// person, and nothing of it once the question is settled; its stage is
+    /// unchanged either way. A new wait replaces the item's earlier one.
+    Wait {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+        /// The discussion holding the question, by its bare filename in this
+        /// journal
+        discussion: String,
+        /// The question's id in that discussion
+        #[arg(long)]
+        question: String,
+    },
+    /// Remove the question an item was said to wait on
+    Unwait {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+    },
     /// Split an item into several; the original shows as split and leaves the count
     Split {
         /// Series filename or topic
@@ -331,6 +356,22 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
         ProgressCmd::Unlink { series: name, item } => {
             let link = series::unlink(ctx, &name, &item)?;
             println!("unlinked {item} from {link}");
+        }
+        ProgressCmd::Wait {
+            series: name,
+            item,
+            discussion,
+            question,
+        } => {
+            series::wait(ctx, &name, &item, &discussion, &question)?;
+            println!("{item} waits on {question} of {discussion}");
+        }
+        ProgressCmd::Unwait { series: name, item } => {
+            let wait = series::unwait(ctx, &name, &item)?;
+            println!(
+                "{item} waits no longer on {} of {}",
+                wait.question, wait.file
+            );
         }
         ProgressCmd::Split {
             series: name,
@@ -614,11 +655,24 @@ struct ItemRow {
     integrated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     revision: Option<String>,
+    /// The journal question the item waits on, while it is open and waits
+    /// on a person.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting: Option<Waiting>,
     /// The reason or note recorded with a done, dropped, split or reopened item.
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     split_into: Vec<String>,
+}
+
+/// An open question an item waits on.
+#[derive(Serialize)]
+struct Waiting {
+    file: String,
+    question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading: Option<String>,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -645,6 +699,7 @@ impl ItemRow {
             changes_requested_rounds: 0,
             integrated_at: None,
             revision: None,
+            waiting: None,
             note: item.note.clone(),
             split_into: item.split_into.clone(),
         }
@@ -673,6 +728,10 @@ struct Counts {
     open: usize,
     /// Linked items whose change closed without integrating.
     closed: usize,
+    /// Standing items waiting on an open question, each also counted by its
+    /// stage.
+    #[serde(skip_serializing_if = "is_zero")]
+    waiting: usize,
     /// `complete` over `items`, rounded down; absent with no items.
     #[serde(skip_serializing_if = "Option::is_none")]
     percent: Option<usize>,
@@ -947,12 +1006,54 @@ fn needs_registry(series: &[Series]) -> bool {
     })
 }
 
+/// The questions of one journal that wait on a person, found from events
+/// already read and only when something asks for them.
+struct PersonQuestions<'a> {
+    dir: &'a Path,
+    events: &'a [JournalEvent],
+    found: std::cell::OnceCell<Vec<crate::journal::OpenQuestion>>,
+}
+
+impl<'a> PersonQuestions<'a> {
+    fn new(dir: &'a Path, events: &'a [JournalEvent]) -> Self {
+        Self {
+            dir,
+            events,
+            found: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn all(&self) -> Result<&[crate::journal::OpenQuestion]> {
+        if self.found.get().is_none() {
+            let found = series::person_questions_in(self.dir, self.events)?;
+            let _ = self.found.set(found);
+        }
+        Ok(self.found.get().map(Vec::as_slice).unwrap_or_default())
+    }
+
+    /// The wait as it stands: the question, while it is open and waits on a
+    /// person.
+    fn waiting(&self, wait: &ItemWait) -> Result<Option<Waiting>> {
+        Ok(self
+            .all()?
+            .iter()
+            .find(|open| open.file == wait.file && open.question == wait.question)
+            .map(|open| Waiting {
+                file: open.file.clone(),
+                question: open.question.clone(),
+                heading: open.heading.clone(),
+            }))
+    }
+}
+
 /// What one series' items are read through: the ledger of the project whose
-/// series it is, and the registry for an item linked into another project.
+/// series it is, the registry for an item linked into another project, and
+/// the questions of its own journal.
 struct Reader<'a> {
     home: &'a Ledger,
     home_slug: Option<&'a str>,
     registry: &'a Registry,
+    questions: &'a PersonQuestions<'a>,
     now: DateTime<Utc>,
 }
 
@@ -985,6 +1086,11 @@ impl Reader<'_> {
         if let Some(slug) = &item.project {
             row.project = Some(self.registry.label(slug));
             row.project_slug = Some(slug.clone());
+        }
+        if item.stands() {
+            if let Some(wait) = &item.waits_on {
+                row.waiting = self.questions.waiting(wait)?;
+            }
         }
         Ok(row)
     }
@@ -1071,6 +1177,9 @@ fn counts(series: &Series, rows: &[ItemRow]) -> Counts {
             continue;
         }
         counts.items += 1;
+        if row.waiting.is_some() {
+            counts.waiting += 1;
+        }
         match row.stage {
             "integrated" => counts.integrated += 1,
             "done" => counts.done += 1,
@@ -1120,7 +1229,7 @@ fn series_report(
 struct RelatedRead {
     slug: String,
     label: String,
-    result: Result<(Series, PathBuf), String>,
+    result: Result<(Series, Vec<JournalEvent>, PathBuf), String>,
 }
 
 fn read_related(registry: &Registry, relation: &RelatedSeries) -> RelatedRead {
@@ -1132,7 +1241,7 @@ fn read_related(registry: &Registry, relation: &RelatedSeries) -> RelatedRead {
         let events = crate::journal::read_events(&dir)?;
         let series = series::replay(&events, &relation.file)
             .with_context(|| format!("{} holds no series {}", relation.project, relation.file))?;
-        Ok((series, dir))
+        Ok((series, events, dir))
     })()
     .map_err(|error| format!("{error:#}").replace(['\n', '\r'], " "));
     RelatedRead {
@@ -1163,15 +1272,17 @@ fn related_report(
     };
     match read.result {
         Err(reason) => report.unavailable = Some(reason),
-        Ok((series, dir)) => {
+        Ok((series, events, dir)) => {
             let none = Ledger::none(&dir);
             let home = registry
                 .get(&report.slug)
                 .map_or(&none, |project| &project.ledger);
+            let questions = PersonQuestions::new(&dir, &events);
             let reader = Reader {
                 home,
                 home_slug: Some(&report.slug),
                 registry,
+                questions: &questions,
                 now,
             };
             // A related series is read on the way, never relied on: a ledger
@@ -1210,10 +1321,12 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
         Registry::default()
     };
     let own = registry.slug_of(&dir).map(str::to_string);
+    let questions = PersonQuestions::new(&dir, &events);
     let reader = Reader {
         home: &ledger,
         home_slug: own.as_deref(),
         registry: &registry,
+        questions: &questions,
         now,
     };
     let mut reads: Vec<(RelatedSeries, RelatedRead, Vec<String>)> = Vec::new();
@@ -1234,7 +1347,7 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
             };
             let (_, read, from) = &mut reads[index];
             from.push(series.file.clone());
-            let mutual = read.result.as_ref().ok().map(|(other, _)| {
+            let mutual = read.result.as_ref().ok().map(|(other, _, _)| {
                 own.as_deref().is_some_and(|slug| {
                     other
                         .related
@@ -1255,13 +1368,14 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
         .into_iter()
         .map(|(relation, read, from)| related_report(&registry, read, &relation.file, from, now))
         .collect();
-    let waiting_on_person = series::person_questions_in(&dir, &events)?
-        .into_iter()
+    let waiting_on_person = questions
+        .all()?
+        .iter()
         .map(|question| WaitingQuestion {
-            file: question.file,
-            question: question.question,
-            heading: question.heading,
-            asked_at: question.asked_at,
+            file: question.file.clone(),
+            question: question.question.clone(),
+            heading: question.heading.clone(),
+            asked_at: question.asked_at.clone(),
         })
         .collect();
     Ok(ProgressReport {
@@ -1403,6 +1517,18 @@ fn render_row(row: &ItemRow, width: usize) {
                 .unwrap_or_default()
         ));
     }
+    if let Some(waiting) = &row.waiting {
+        detail.push(format!(
+            "waiting on {} {}{}",
+            waiting.file,
+            waiting.question,
+            waiting
+                .heading
+                .as_deref()
+                .map(|heading| format!(": {heading}"))
+                .unwrap_or_default()
+        ));
+    }
     if !row.split_into.is_empty() {
         detail.push(format!("into {}", row.split_into.join(", ")));
     }
@@ -1428,10 +1554,11 @@ fn render_counts(counts: &Counts, since: bool) {
     if let Some(percent) = counts.percent {
         line.push_str(&format!(", {percent}% by count of items"));
     }
-    line.push_str(&format!(
-        "; {} in flight; {} open",
-        counts.in_flight, counts.open
-    ));
+    line.push_str(&format!("; {} in flight", counts.in_flight));
+    if counts.waiting > 0 {
+        line.push_str(&format!("; {} waiting", counts.waiting));
+    }
+    line.push_str(&format!("; {} open", counts.open));
     if counts.closed > 0 {
         line.push_str(&format!("; {} closed without integrating", counts.closed));
     }
@@ -1561,10 +1688,12 @@ fn series_of(
             &own
         }
     };
+    let questions = PersonQuestions::new(journal_dir, &events);
     let reader = Reader {
         home,
         home_slug: home_slug.as_deref(),
         registry,
+        questions: &questions,
         now,
     };
     active
