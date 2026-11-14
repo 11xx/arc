@@ -56,6 +56,9 @@ pub fn divergence_guidance(st: &ChangeState, target: &str) -> String {
 
 pub const PLAN_SCHEMA: &str = "arc-integration-plan/1";
 
+/// Said ahead of an error raised while the destination was moving.
+const DESTINATION_MOVED: &str = "the integration target moved while preparing the merge; \
+    nothing was written; re-run once it has settled";
 const CONFIGURATION_MOVED: &str = "integration target, merge tree, gate or policy configuration \
                                    changed while preparing the merge; nothing was written; \
                                    re-run once the worktree has settled";
@@ -574,7 +577,22 @@ fn decision(facts: IntegrationFacts) -> Decision {
     // Agreement between the two readings is what keeps the merge from
     // proceeding under one configuration and recording another.
     let confirmation = observed!(facts.confirmation);
-    let confirmed = observed!(confirmation.basis);
+    let confirmed = match confirmation.basis {
+        Ok(basis) => basis,
+        // A confirming basis that failed while the destination moved under it
+        // keeps its own error and is told as that move: the error may be the
+        // new destination's policy, which the caller has to act on.
+        Err(error) => {
+            let moved = matches!(&facts.target_revision, Ok(target)
+                if facts.readiness.target_revision.as_ref() != Some(target)
+                    || confirmation.readiness.target_revision.as_ref() != Some(target));
+            return Decision::Refused(Refusal::Failed(if moved {
+                error.context(DESTINATION_MOVED)
+            } else {
+                error
+            }));
+        }
+    };
     if confirmed != authorization || !confirmation.ready {
         return Decision::Refused(Refusal::ConfigurationMoved);
     }
@@ -1455,5 +1473,35 @@ mod tests {
             accepted.is_empty(),
             "mismatched readiness accepted: {accepted:?}"
         );
+    }
+
+    /// Claim: an error raised while the destination moved is reported with
+    /// the move and keeps its own text. Rejects a refusal that names only
+    /// missing evidence, and one that drops a destination policy error.
+    #[test]
+    fn a_moved_destination_is_named_beside_the_error_it_caused() {
+        for cause in [
+            "gate unit is green at head with no evidence",
+            "the destination requires a declared actor",
+        ] {
+            let mut facts = ready();
+            let confirmation = facts.confirmation.as_mut().unwrap();
+            confirmation.readiness.target_revision = Some("different".into());
+            confirmation.basis = Err(anyhow!(cause));
+            let Decision::Refused(Refusal::Failed(error)) = decide(facts, None).decision else {
+                panic!("a failed confirming basis must refuse with its error");
+            };
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("target moved") && text.contains(cause),
+                "{text}"
+            );
+        }
+        let mut facts = ready();
+        facts.confirmation.as_mut().unwrap().basis = Err(anyhow!("unrelated failure"));
+        let Decision::Refused(Refusal::Failed(error)) = decide(facts, None).decision else {
+            panic!("a failed confirming basis must refuse with its error");
+        };
+        assert_eq!(format!("{error:#}"), "unrelated failure");
     }
 }
