@@ -1366,3 +1366,43 @@ fn the_workspace_report_carries_series_only_when_asked() {
     }
     assert_eq!(without, plain, "--progress changed the rest of the report");
 }
+
+/// Claim: with `--progress`, each project of the report carries its own
+/// series even when two registered projects share a label. Rejects series
+/// attached by label, which shows one project another's stages and leaves
+/// the other without any.
+#[test]
+fn projects_sharing_a_label_each_carry_their_own_series() {
+    let repo = Repo::new();
+    let label = repo.root.file_name().unwrap().to_str().unwrap();
+    let twin = sibling_project(&repo, &format!("nested/{label}"));
+    start(&repo, &repo.root, "first-here", &["Here"]);
+    start(&repo, &twin, "then-there", &["There"]);
+
+    let report =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--json", "--progress"]),
+        );
+    let carried: std::collections::BTreeMap<String, String> = report["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|project| project["project"] == label)
+        .map(|project| {
+            let series = project["progress"].as_array().unwrap();
+            assert_eq!(series.len(), 1, "{project}");
+            (
+                project["anchor"].as_str().unwrap().to_string(),
+                series[0]["title"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        std::collections::BTreeMap::from([
+            (repo.root.display().to_string(), "first-here".to_string()),
+            (twin.display().to_string(), "then-there".to_string()),
+        ])
+    );
+}

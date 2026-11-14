@@ -2901,11 +2901,11 @@ fn build_report(
         .collect();
     report.attach_libraries(&libraries);
     report.attach_progress(
-        collected
+        &collected
             .backlog
             .projects
             .iter()
-            .filter_map(|project| Some((project.project.as_str(), project.progress.as_ref()?)))
+            .filter_map(|project| Some((project.journal_dir.as_str(), project.progress.as_ref()?)))
             .collect(),
     );
     report.attach_git_health(health);
@@ -4661,9 +4661,15 @@ mod report {
             }
         }
 
-        pub(super) fn attach_progress(&mut self, mut series: BTreeMap<&str, &Value>) {
+        /// Give each project its series, found by journal directory: two
+        /// projects may share a label, and none shares a journal.
+        pub(super) fn attach_progress(&mut self, series: &BTreeMap<&str, &Value>) {
             for project in &mut self.projects {
-                project.progress = series.remove(project.project.as_str()).cloned();
+                project.progress = project
+                    .journal_dir
+                    .as_deref()
+                    .and_then(|dir| series.get(dir))
+                    .map(|series| (*series).clone());
             }
         }
 

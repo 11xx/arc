@@ -2773,13 +2773,15 @@ impl Store {
 
     /// A change's state as the process already holds it: from the ledger's
     /// readable states once read, else from an earlier read of the change.
+    /// A change forgotten since the readable states were held is not served
+    /// from them: its entry there is the one the forgetting made stale.
     fn held_state(&self, change_id: &str) -> Option<HeldState> {
         if !self.shares_reads() {
             return None;
         }
         shared::with(&self.root, |memo| {
             if let Some((states, _)) = &memo.states {
-                if states.contains_key(change_id) {
+                if !memo.stale.contains(change_id) && states.contains_key(change_id) {
                     return Some(HeldState::InMap(Arc::clone(states), change_id.to_string()));
                 }
             }

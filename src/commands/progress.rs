@@ -4,8 +4,7 @@
 //! else a report shows is what the ledger has recorded when it is asked: a
 //! linked item's stage, who holds its change, and when it was integrated. A
 //! stage is a record, never a live judgement; `arc status` is the live
-//! reading. Nothing here runs unless a caller asks; no other command prints
-//! it.
+//! reading. Nothing here runs unless a caller asks for it.
 
 use super::Ctx;
 use crate::journal::series::{self, ItemState, Placement, RelatedSeries, Series, SinceStart};
