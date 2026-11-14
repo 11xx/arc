@@ -143,8 +143,10 @@ changes, refs and worktrees at the same revision: `status`, `verify` and
 `integrate` launch the same number of Git processes with or without them.
 
 Arc declares project-command write confinement in `.arc/gates.toml`: `target`
-and the existing Cargo cache named by `CARGO_HOME`. Arc-managed preparation
-storage and system temporary directories are implicit writable roots. `arc guide gate-confinement` defines
+and Cargo's registry, Git caches and cache database/lock files. Installed Cargo
+executables and configuration remain read-only. `${CARGO_HOME:-~/.cargo}`
+selects the configured or default cache home. Arc-owned preparation storage
+and safe temporary directories are implicit writable roots. `arc guide gate-confinement` defines
 the enforcement and its limits. Confinement tests put decoys beneath build
 output, outside automatic temporary roots, and print a skip reason when the
 host lacks Landlock ABI 3.
