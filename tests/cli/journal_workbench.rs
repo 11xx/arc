@@ -1865,3 +1865,161 @@ fn an_archive_that_moved_a_replacement_records_nothing() {
     );
     assert_eq!(archived_events(&journal_dir(&repo)), 0);
 }
+
+/// The project row a workspace view gives this fixture's repository.
+fn workspace_project<'a>(view: &'a serde_json::Value, repo: &Repo) -> &'a serde_json::Value {
+    let anchor = fs::canonicalize(&repo.root).unwrap();
+    view["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["anchor"] == anchor.to_str().unwrap())
+        .unwrap_or_else(|| panic!("no row for {}: {view}", anchor.display()))
+}
+
+/// Claim: `journal catchup`, `workspace backlog` and `workspace report`
+/// each list an open workbench with its purpose, its size counted from its
+/// files, and its age, in text and in JSON, and a project whose only fact
+/// is an open workbench is not empty. Rejects a cross-project or journal
+/// view that leaves working material in progress out.
+#[test]
+fn journal_catchup_and_the_workspace_views_list_an_open_workbench() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "walltime", "gate walltime notebook");
+    fs::write(path.join("notebook.org"), vec![b'x'; 2048]).unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+
+    let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    let section = catchup
+        .find("workbenches (1 open):")
+        .unwrap_or_else(|| panic!("{catchup}"));
+    assert!(
+        catchup[section..].contains(&format!("{name}  2K in 1 file, opened ")),
+        "{catchup}"
+    );
+    assert!(
+        catchup[section..].contains("purpose: gate walltime notebook"),
+        "{catchup}"
+    );
+    let catchup = json_stdout(repo.arc(&repo.root).args(["journal", "catchup", "--json"]));
+    let row = &catchup["workbenches"][0];
+    assert_eq!(row["name"], name.as_str(), "{catchup}");
+    assert_eq!(row["files"], 1, "{row}");
+    assert_eq!(row["bytes"], 2048, "{row}");
+    assert!(row["age_seconds"].is_u64(), "{row}");
+
+    let backlog = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    let project = workspace_project(&backlog, &repo);
+    assert_eq!(
+        project["workbenches"][0]["name"],
+        name.as_str(),
+        "{project}"
+    );
+    assert_eq!(project["workbenches"][0]["bytes"], 2048, "{project}");
+    assert_eq!(backlog["summary"]["workbenches"], 1, "{backlog}");
+    assert_eq!(backlog["summary"]["stale_workbenches"], 0, "{backlog}");
+    let backlog = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(
+        backlog.contains(&format!("  workbench     {name}  2K in 1 file, opened ")),
+        "{backlog}"
+    );
+    assert!(backlog.contains("; gate walltime notebook"), "{backlog}");
+    assert!(backlog.contains("; 1 open workbenches;"), "{backlog}");
+
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert_eq!(report["schema"], "arc-workspace-report/3");
+    let row = &report["sections"]["workbenches"][0];
+    assert_eq!(row["name"], name.as_str(), "{report}");
+    assert_eq!(row["purpose"], "gate walltime notebook", "{row}");
+    assert_eq!(row["bytes"], 2048, "{row}");
+    assert_eq!(row["age_days"], 0, "{row}");
+    assert_eq!(row["stale"], false, "{row}");
+    assert_eq!(report["tallies"]["workbenches"]["value"], 1, "{report}");
+    assert_eq!(workspace_project(&report, &repo)["workbenches"], 1);
+    let report = stdout(repo.arc(&repo.root).args(["workspace", "report"]));
+    assert!(report.contains("open workbenches 1 (0 stale)"), "{report}");
+}
+
+/// Claim: a stale open workbench is surfaced as stale by `journal catchup`,
+/// counted by `workspace backlog`, and raised as `stale-workbench` by
+/// `workspace report`; one whose walk stopped short shows its staleness as
+/// unknown in each and raises nothing. Rejects stale material the
+/// cross-project views keep quiet about, and a partial walk read as fresh
+/// or as stale.
+#[test]
+fn the_workspace_views_surface_a_stale_workbench_and_an_unknown_one() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "old-run", "a run left behind");
+    for index in 0..4 {
+        fs::write(path.join(format!("{index}.txt")), "x\n").unwrap();
+    }
+    let fifteen_days = 15 * 86_400;
+    age_journal_events(&journal_dir(&repo), fifteen_days as i64);
+    age_files(&path, fifteen_days);
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+
+    let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    assert!(catchup.contains("untouched 15d (stale)"), "{catchup}");
+    assert!(
+        catchup.contains("1 open workbenches untouched for >14 days"),
+        "{catchup}"
+    );
+    let backlog = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    assert_eq!(backlog["summary"]["stale_workbenches"], 1, "{backlog}");
+    let backlog = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(backlog.contains("untouched 15d (stale)"), "{backlog}");
+    assert!(
+        backlog.contains("; 1 open workbenches (1 stale);"),
+        "{backlog}"
+    );
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert_eq!(report["sections"]["workbenches"][0]["stale"], true);
+    let raised: Vec<&serde_json::Value> = report["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["rule"] == "stale-workbench")
+        .collect();
+    assert_eq!(raised.len(), 1, "{report}");
+    assert_eq!(raised[0]["subject"], name.as_str());
+    let report = stdout(repo.arc(&repo.root).args(["workspace", "report"]));
+    assert!(report.contains("open workbenches 1 (1 stale)"), "{report}");
+    assert!(report.contains("attention  stale-workbench  "), "{report}");
+
+    let partial = |args: &[&str]| {
+        let mut command = repo.arc(&repo.root);
+        command.env("ARC_TEST_WORKBENCH_WALK_LIMIT", "2").args(args);
+        command
+    };
+    let catchup = stdout(&mut partial(&["journal", "catchup"]));
+    assert!(!catchup.contains("(stale)"), "{catchup}");
+    assert!(catchup.contains("staleness unknown"), "{catchup}");
+    let backlog = stdout(&mut partial(&["workspace", "backlog"]));
+    assert!(!backlog.contains("(stale)"), "{backlog}");
+    assert!(backlog.contains("staleness unknown"), "{backlog}");
+    let backlog = json_stdout(&mut partial(&["workspace", "backlog", "--json"]));
+    assert_eq!(backlog["summary"]["stale_workbenches"], 0, "{backlog}");
+    let report = json_stdout(&mut partial(&["workspace", "report", "--json"]));
+    let row = &report["sections"]["workbenches"][0];
+    assert_eq!(row["stale"], serde_json::Value::Null, "{row}");
+    assert_eq!(row["size_partial"], true, "{row}");
+    assert!(
+        !report["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["rule"] == "stale-workbench"),
+        "{report}"
+    );
+    let report = stdout(&mut partial(&["workspace", "report"]));
+    assert!(
+        report.contains("open workbenches 1 (0 stale, 1 staleness unknown)"),
+        "{report}"
+    );
+}

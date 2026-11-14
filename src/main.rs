@@ -4171,7 +4171,9 @@ enum WorkspaceCmd {
     ///
     /// Debt rows carry their verbatim `reason` and optional `patchset_id`, and list only
     /// debt that is owed: one declared on a change that has not integrated, or already
-    /// discharged, is not backlog. A partial collection keeps the projects it did read,
+    /// discharged, is not backlog. Each project lists its open workbenches with purpose,
+    /// size, age and staleness, as `journal workbench list` measures them, whatever
+    /// `--since` says. A partial collection keeps the projects it did read,
     /// names each failure, and exits 16. A retired registration is counted as
     /// `collection.retired`, never observed, failed, or unreachable Change observations
     /// name unreadable changes with their errors on stderr and retain readable changes
@@ -4218,8 +4220,9 @@ enum WorkspaceCmd {
     /// The backlog classified by named rules: each artifact's status, the
     /// section it belongs to, and the facts that deserve attention. Review-owed
     /// rows carry the effective `kind`, declared `reason`, nullable
-    /// `patchset_id`, `declared_at`, and `declared_by`. Versioned
-    /// `arc-workspace-report/3`.
+    /// `patchset_id`, `declared_at`, and `declared_by`. Open workbenches form
+    /// their own section with purpose, size, age and staleness, null when the
+    /// listing's walk stopped short. Versioned `arc-workspace-report/3`.
     /// With `--previous`, tallies carry their
     /// earlier values when both collections are complete, new rows are marked
     /// when their project was observed both times, and every artifact that left

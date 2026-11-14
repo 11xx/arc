@@ -923,7 +923,7 @@ fn render_debts(summary: &DebtSummary) {
 /// cannot be resolved is not an error here: the inbox reports ledger state
 /// either way.
 pub(crate) fn journal_backlog(ctx: &Ctx) -> Option<crate::inbox::JournalBacklog> {
-    let items = crate::journal::collect_open(ctx, None).ok()?;
+    let items = crate::journal::collect_open(ctx, None, false).ok()?;
     let (open, later, feature_requests) = items.tier_counts();
     Some(crate::inbox::JournalBacklog {
         dir: items.dir().to_string(),

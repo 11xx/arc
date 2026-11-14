@@ -39,6 +39,7 @@ mod page;
 mod pins;
 mod private_text;
 mod workbench;
+pub(crate) use workbench::WorkbenchRow;
 
 pub(crate) use pins::{pin_rows, render_pin_row, PinRow};
 
@@ -1344,6 +1345,8 @@ pub enum JournalCmd {
     /// Newest-first artifacts plus the most recently appended journal tail (read-only)
     /// Incomplete successors carry availability `pending-transition` in
     /// arc-journal-catchup/9.
+    /// Open workbenches are listed beside the lanes, as `journal workbench
+    /// list` lists them; `--archived` lists none.
     /// Text warns when the running build revision differs from an arc checkout.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
@@ -5932,7 +5935,7 @@ fn claim_label(state: &ChangeState, now: DateTime<Utc>) -> String {
 /// How many actionable items the journal queue is carrying, which says how
 /// much a successor is walking into beyond this artifact.
 fn journal_queue_depth(ctx: &Ctx) -> Option<usize> {
-    let (open, _, _) = collect_open(ctx, None).ok()?.tier_counts();
+    let (open, _, _) = collect_open(ctx, None, false).ok()?.tier_counts();
     Some(open)
 }
 
@@ -12954,6 +12957,8 @@ struct Catchup {
     claims: Vec<ArtifactClaim>,
     /// Standing references, as `journal pins` lists them.
     pins: Vec<pins::PinRow>,
+    /// Open workbenches, as `journal workbench list` lists them.
+    workbenches: Vec<WorkbenchRow>,
     memories: Vec<ArtifactEntry>,
     files: Vec<ArtifactEntry>,
     journal_tail: Vec<String>,
@@ -13362,6 +13367,11 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     } else {
         pins::pin_rows(&hot_dir)?
     };
+    let workbenches = if archived {
+        Vec::new()
+    } else {
+        workbench::open_rows_in(&hot_dir, &journal)
+    };
 
     if json {
         let out = Catchup {
@@ -13370,6 +13380,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
             lanes,
             claims,
             pins,
+            workbenches,
             memories,
             files,
             journal_tail,
@@ -13381,6 +13392,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
             pins::render_pins(&pins, now);
         }
         render_lanes(&lanes, now);
+        workbench::render_catchup(&workbenches);
         render_catchup_claims(&claims, now);
         if !archived {
             render_memories(&memories);
@@ -14014,6 +14026,10 @@ pub(crate) struct OpenItems {
     pending: Vec<ArtifactEntry>,
     #[serde(skip)]
     pub(crate) questions: Vec<WorkspaceQuestion>,
+    /// The open workbenches, read from the same events as the queue when the
+    /// view asked for them.
+    #[serde(skip)]
+    pub(crate) workbenches: Vec<WorkbenchRow>,
 }
 
 impl OpenItems {
@@ -14126,11 +14142,12 @@ impl<'a> TierSelection<'a> {
 
 /// The actionable journal queue, split into its three tiers. Shared by
 /// `journal open` and by every view that surfaces the backlog beside
-/// ledger state.
-pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
+/// ledger state. `workbenches` adds the open workbenches, measured, from the
+/// same read of the events.
+pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>, workbenches: bool) -> Result<OpenItems> {
     let resolution = resolve(&ctx.cwd)?;
     let project = resolution.anchor.unwrap_or_else(|| ctx.cwd.clone());
-    collect_open_in(ctx, &resolution.directory, &project, kind)
+    collect_open_in(ctx, &resolution.directory, &project, kind, workbenches)
 }
 
 /// The same queue for an explicitly named journal directory and project, so a
@@ -14140,6 +14157,7 @@ pub(crate) fn collect_open_in(
     dir: &Path,
     project: &Path,
     kind: Option<&str>,
+    workbenches: bool,
 ) -> Result<OpenItems> {
     let report = project_inventory(ctx, dir, project, None, false, kind, false)?;
     let mut result = OpenItems {
@@ -14149,6 +14167,11 @@ pub(crate) fn collect_open_in(
         feature_requests: Vec::new(),
         pending: Vec::new(),
         questions: report.questions,
+        workbenches: if workbenches {
+            workbench::open_rows_in(dir, &report.events)
+        } else {
+            Vec::new()
+        },
     };
     for item in report.items {
         if item.availability == Some(Availability::PendingTransition) {
@@ -14165,12 +14188,9 @@ pub(crate) fn collect_open_in(
 }
 
 fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
-    let items = collect_open(ctx, kind.as_deref())?;
     // A kind filter selects artifacts; a workbench is not one.
-    let workbenches = match kind {
-        None => workbench::open_rows(Path::new(items.dir()))?,
-        Some(_) => Vec::new(),
-    };
+    let items = collect_open(ctx, kind.as_deref(), kind.is_none())?;
+    let workbenches = &items.workbenches;
     if json {
         #[derive(Serialize)]
         struct OpenReport<'a> {
@@ -14184,7 +14204,7 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
             serde_json::to_string_pretty(&OpenReport {
                 schema: "arc-journal-open/1",
                 items: &items,
-                workbenches: &workbenches,
+                workbenches,
             })?
         );
     } else {
@@ -14218,7 +14238,7 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
             render_open_entry(f);
         }
         if kind.is_none() {
-            workbench::render_open(&workbenches);
+            workbench::render_open(workbenches);
         }
     }
     Ok(0)
@@ -14239,6 +14259,10 @@ struct JournalInventory {
     patchset_citations: BTreeMap<String, Vec<PatchsetCitation>>,
     #[serde(skip)]
     questions: Vec<WorkspaceQuestion>,
+    /// The events the inventory was read from, for a view that derives more
+    /// from the same read.
+    #[serde(skip)]
+    events: Vec<JournalEvent>,
 }
 
 #[derive(Clone, Serialize)]
@@ -14670,6 +14694,7 @@ fn project_inventory(
         items,
         patchset_citations,
         questions: question_rows,
+        events,
     })
 }
 
@@ -19691,15 +19716,15 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
         Ok((
             pins::pin_rows(&dir)?,
             lanes_from_journal(&read_events(&dir)?, now),
-            workbench::open_rows(&dir)?,
             live_memories(&dir)?,
             open_questions(&dir)?,
-            collect_open(ctx, None)?,
+            collect_open(ctx, None, true)?,
         ))
     })();
     let (pins, lanes, workbenches, memories, open_questions, queue, project_journal_error) =
         match project {
-            Ok((pins, lanes, workbenches, memories, questions, queue)) => {
+            Ok((pins, lanes, memories, questions, mut queue)) => {
+                let workbenches = std::mem::take(&mut queue.workbenches);
                 (pins, lanes, workbenches, memories, questions, queue, None)
             }
             Err(error) => {
@@ -19713,6 +19738,7 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
                     feature_requests: Vec::new(),
                     pending: Vec::new(),
                     questions: Vec::new(),
+                    workbenches: Vec::new(),
                 };
                 (
                     Vec::new(),

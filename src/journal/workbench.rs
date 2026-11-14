@@ -749,42 +749,68 @@ fn row(dir: &Path, workbench: &Recorded<'_>, now: DateTime<Utc>) -> WorkbenchRow
     }
 }
 
-/// The open workbenches of the journal at `dir`, newest first, for the views
-/// that list them beside the queue.
-pub(crate) fn open_rows(dir: &Path) -> Result<Vec<WorkbenchRow>> {
-    Ok(rows(dir, &read_events(dir)?, false, Utc::now()))
+/// The open workbenches of the journal at `dir`, newest first, from the
+/// events a view has already read, for the views that list them beside the
+/// queue.
+pub(super) fn open_rows_in(dir: &Path, events: &[JournalEvent]) -> Vec<WorkbenchRow> {
+    rows(dir, events, false, Utc::now())
+}
+
+impl WorkbenchRow {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn purpose(&self) -> &str {
+        &self.purpose
+    }
+
+    pub(crate) fn is_stale(&self) -> bool {
+        self.stale == Some(true)
+    }
+
+    /// Its size, age and staleness, as every listing states them.
+    pub(crate) fn facts(&self) -> String {
+        let mut facts = vec![
+            self.size(),
+            format!("opened {} ago", format_age(self.age_seconds)),
+        ];
+        match self.stale {
+            Some(true) => facts.push(format!(
+                "untouched {} (stale)",
+                format_age(self.untouched_seconds)
+            )),
+            None if self.size_partial => facts.push(format!(
+                "staleness unknown: the walk stopped at {} entries",
+                walk_limit()
+            )),
+            None => facts.push("staleness unknown".to_string()),
+            Some(false) => {}
+        }
+        if self.storage != "hot" {
+            facts.push(self.storage.to_string());
+        }
+        facts.join(", ")
+    }
+
+    fn size(&self) -> String {
+        match (self.files, self.bytes) {
+            (Some(files), Some(bytes)) if self.size_partial => format!(
+                "at least {} in {files}+ files",
+                crate::worktree_usage::human(bytes)
+            ),
+            (Some(files), Some(bytes)) => format!(
+                "{} in {files} {}",
+                crate::worktree_usage::human(bytes),
+                if files == 1 { "file" } else { "files" }
+            ),
+            _ => "size unknown".to_string(),
+        }
+    }
 }
 
 fn render_row(row: &WorkbenchRow) {
-    let size = match (row.files, row.bytes) {
-        (Some(files), Some(bytes)) if row.size_partial => format!(
-            "at least {} in {files}+ files",
-            crate::worktree_usage::human(bytes)
-        ),
-        (Some(files), Some(bytes)) => format!(
-            "{} in {files} {}",
-            crate::worktree_usage::human(bytes),
-            if files == 1 { "file" } else { "files" }
-        ),
-        _ => "size unknown".to_string(),
-    };
-    let mut facts = vec![size, format!("opened {} ago", format_age(row.age_seconds))];
-    match row.stale {
-        Some(true) => facts.push(format!(
-            "untouched {} (stale)",
-            format_age(row.untouched_seconds)
-        )),
-        None if row.size_partial => facts.push(format!(
-            "staleness unknown: the walk stopped at {} entries",
-            walk_limit()
-        )),
-        None => facts.push("staleness unknown".to_string()),
-        Some(false) => {}
-    }
-    if row.storage != "hot" {
-        facts.push(row.storage.to_string());
-    }
-    println!("  {}  {}", row.name, facts.join(", "));
+    println!("  {}  {}", row.name, row.facts());
     println!("    purpose: {}", row.purpose);
     if let Some(from) = &row.adopted_from {
         println!("    adopted from: {from}");

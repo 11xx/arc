@@ -743,6 +743,10 @@ struct BacklogSummary {
     /// Active forks across every project. Orientation only: a fork is work
     /// somebody chose to keep unintegrated, not a queue waiting to merge.
     fork_count: usize,
+    /// Open workbenches across every project, and those of them untouched
+    /// for longer than `journal workbench list` calls stale.
+    workbenches: usize,
+    stale_workbenches: usize,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -788,6 +792,15 @@ impl BacklogSummary {
                 .map(|project| project.open_questions.len() - project.decision_questions)
                 .sum(),
             fork_count: projects.iter().map(|project| project.fork_count).sum(),
+            workbenches: projects
+                .iter()
+                .map(|project| project.workbenches.len())
+                .sum(),
+            stale_workbenches: projects
+                .iter()
+                .flat_map(|project| project.workbenches.iter())
+                .filter(|workbench| workbench.is_stale())
+                .count(),
             deferred: projects
                 .iter()
                 .map(|project| project.changes.deferred.len())
@@ -836,8 +849,13 @@ impl BacklogSummary {
         } else {
             String::new()
         };
+        let workbenches = match (self.workbenches, self.stale_workbenches) {
+            (0, _) => String::new(),
+            (open, 0) => format!("; {open} open workbenches"),
+            (open, stale) => format!("; {open} open workbenches ({stale} stale)"),
+        };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{pending}{unknown}{questions}; {} deferred; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{pending}{unknown}{questions}{workbenches}; {} deferred; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
@@ -1080,6 +1098,11 @@ struct ProjectBacklog {
     #[serde(skip_serializing_if = "TierIsEmpty::forks_empty")]
     forks: Vec<crate::commands::fork::ForkEntry>,
     fork_count: usize,
+    /// Open workbenches, as `journal workbench list` lists them: working
+    /// material in progress, reported in full whatever the cutoff, like
+    /// questions and forks.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    workbenches: Vec<crate::journal::WorkbenchRow>,
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
@@ -1137,6 +1160,7 @@ impl ProjectBacklog {
             && self.pending_transitions == 0
             && self.open_questions.is_empty()
             && self.fork_count == 0
+            && self.workbenches.is_empty()
     }
 }
 
@@ -1692,7 +1716,7 @@ fn project_row(
     let ((queues, changes), (open_queue, forks, library)) = std::thread::scope(|scope| {
         let beside = scope.spawn(|| {
             (
-                crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None),
+                crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None, true),
                 fork_inventory(ctx, anchor),
                 journal
                     .library
@@ -1741,7 +1765,7 @@ fn project_row(
         (ledger, beside)
     });
 
-    let open_queue = match open_queue {
+    let mut open_queue = match open_queue {
         Ok(queue) => queue,
         Err(error) => {
             failures.push(ComponentFailure {
@@ -1866,6 +1890,7 @@ fn project_row(
         closing_question_count,
         forks,
         fork_count,
+        workbenches: std::mem::take(&mut open_queue.workbenches),
         // Age is a property of the whole queue, so it would contradict
         // counts that mean "filed since". A delta reports arrivals only.
         oldest_open_days: cutoff
@@ -2353,6 +2378,14 @@ fn workspace_backlog(
                     question.question.heading.as_deref().unwrap_or(""),
                 );
             }
+        }
+        for workbench in &project.workbenches {
+            println!(
+                "  workbench     {}  {}; {}",
+                workbench.name(),
+                workbench.facts(),
+                workbench.purpose()
+            );
         }
         for fork in &project.forks {
             let ahead = fork
@@ -3482,6 +3515,9 @@ mod report {
         /// A promoted candidate whose sibling registrations, answering the
         /// same brief version, nobody has judged
         CandidatesUnjudged,
+        /// An open workbench with no recorded act and no file in it changed
+        /// for longer than 14 days
+        StaleWorkbench,
     }
 
     impl Rule {
@@ -3610,7 +3646,26 @@ mod report {
         work: Vec<Row>,
         proposals: Vec<Row>,
         parked: Vec<Row>,
+        workbenches: Vec<WorkbenchRow>,
         departed_since_previous: Vec<DepartedRow>,
+    }
+
+    /// One open workbench: working material in progress.
+    #[derive(Debug, Serialize)]
+    struct WorkbenchRow {
+        project: String,
+        name: String,
+        purpose: String,
+        /// Lower bounds when `size_partial`; null when it could not be
+        /// measured.
+        files: Option<u64>,
+        bytes: Option<u64>,
+        size_partial: bool,
+        age_days: Option<u64>,
+        last_activity: Option<String>,
+        /// Null when the walk did not see all of it.
+        stale: Option<bool>,
+        path: String,
     }
 
     /// One journal artifact, in whichever section its status places it.
@@ -3726,6 +3781,7 @@ mod report {
         in_flight: u64,
         review_owed: u64,
         questions: u64,
+        workbenches: u64,
     }
 
     /// One `shared-plan-slice` fact per group of two or more open changes
@@ -3986,6 +4042,7 @@ mod report {
                 in_flight: 0,
                 review_owed: 0,
                 questions: 0,
+                workbenches: 0,
             };
 
             for tier in ["open", "later", "feature_requests", "pending"] {
@@ -4108,6 +4165,38 @@ mod report {
                     delivery: opt_text(question, "delivery"),
                     settle_by,
                 });
+            }
+
+            for workbench in array(project, "workbenches") {
+                let row = WorkbenchRow {
+                    project: name.clone(),
+                    name: text(workbench, "name"),
+                    purpose: text(workbench, "purpose"),
+                    files: workbench.get("files").and_then(Value::as_u64),
+                    bytes: workbench.get("bytes").and_then(Value::as_u64),
+                    size_partial: workbench
+                        .get("size_partial")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    age_days: age_days(workbench.get("age_seconds").and_then(Value::as_u64)),
+                    last_activity: opt_text(workbench, "last_activity"),
+                    stale: workbench.get("stale").and_then(Value::as_bool),
+                    path: text(workbench, "path"),
+                };
+                if row.stale == Some(true) {
+                    attention.push(Attention {
+                        rule: Rule::StaleWorkbench,
+                        project: name.clone(),
+                        subject: row.name.clone(),
+                        evidence: format!(
+                            "open, with no recorded act and no file changed since {}: {}",
+                            row.last_activity.as_deref().unwrap_or("it was opened"),
+                            row.purpose
+                        ),
+                    });
+                }
+                summary.workbenches += 1;
+                sections.workbenches.push(row);
             }
 
             let changes = project.get("changes").unwrap_or(&Value::Null);
@@ -4379,6 +4468,9 @@ mod report {
         sections.proposals.sort_by_key(order);
         sections.parked.sort_by_key(order);
         sections
+            .workbenches
+            .sort_by(|a, b| (&a.project, &a.name).cmp(&(&b.project, &b.name)));
+        sections
             .in_flight
             .sort_by(|a, b| (&a.project, &a.change_id).cmp(&(&b.project, &b.change_id)));
         sections
@@ -4421,6 +4513,7 @@ mod report {
             ("proposals", count(sections.proposals.len())),
             ("parked", count(sections.parked.len())),
             ("delivered", count(delivered)),
+            ("workbenches", count(sections.workbenches.len())),
             ("projects", count(projects.len())),
             ("attention", count(attention.len())),
         ] {
@@ -4553,6 +4646,24 @@ mod report {
                 tally("delivered"),
                 tally("projects")
             );
+            if !self.sections.workbenches.is_empty() {
+                let of = |stale: Option<bool>| {
+                    self.sections
+                        .workbenches
+                        .iter()
+                        .filter(|row| row.stale == stale)
+                        .count()
+                };
+                let unknown = match of(None) {
+                    0 => String::new(),
+                    count => format!(", {count} staleness unknown"),
+                };
+                println!(
+                    "open workbenches {} ({} stale{unknown})",
+                    tally("workbenches"),
+                    of(Some(true))
+                );
+            }
             let retired = self.collection["retired"].as_u64().unwrap_or(0);
             if retired > 0 {
                 println!("retired registrations {retired} (--retired lists them)");
