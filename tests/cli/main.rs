@@ -71,6 +71,7 @@ mod gate_reports;
 mod gate_reuse;
 mod gate_tiers;
 mod gate_together;
+mod gate_work;
 mod git_environment;
 mod guide_bounds;
 mod guide_topics;

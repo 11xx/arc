@@ -1179,3 +1179,68 @@ fn retired_bypass_does_not_authorize_candidates() {
     assert_eq!(branch_head(repo, &f.change), before);
     assert!(repository_events(repo, "candidate-selected").is_empty());
 }
+
+/// I5: candidate execution, selection and promotion accept a measured busy-host
+/// excuse and rejudge its reference after tightening. Rejects clock-only candidate
+/// refusal and promoting a previously selected excuse under an incompatible budget.
+#[test]
+fn candidate_busy_host_excuse_is_rejudged_before_promotion() {
+    let f = fixture(Some("never"), &[], false);
+    let repo = &f.repo;
+    budget_declaration(repo, "1s");
+    for ms in [900, 1100] {
+        repo.arc(&repo.root)
+            .env("ARC_TEST_COMMAND_RUN_MS", ms.to_string())
+            .env("ARC_TEST_GATE_WORK", r#"{"instructions":1000,"host_busy_ms":5100,"host_capacity_ms":10000,"cpu_user_ms":90,"cpu_system_ms":10}"#)
+            .args(["candidate", "verify", "alice"]).assert().success();
+    }
+    let evaluation = repository_events(repo, "candidate-verified").pop().unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        repository_events(repo, "candidate-verified").pop().unwrap()["budget_at_run"]["verdict"],
+        "excused"
+    );
+    let target = target(repo);
+    let release = repo.home.join("busy-promotion-release");
+    let mut child = repo.spawn_arc_piped_with_env(
+        &repo.root,
+        &[
+            "candidate",
+            "select",
+            "--chosen",
+            "alice",
+            "--into",
+            &f.change,
+            "--target",
+            &target,
+            "--evaluation",
+            &evaluation,
+            "--rationale",
+            "answer",
+        ],
+        &[("ARC_SELECT_PAUSE", &release)],
+    );
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let selection = loop {
+        let mut line = String::new();
+        assert!(
+            output.read_line(&mut line).unwrap() > 0,
+            "selection not recorded"
+        );
+        if let Some(id) = line.trim().strip_prefix("selection: ") {
+            break id.to_owned();
+        }
+    };
+    budget_declaration(repo, "899ms");
+    fs::write(&release, "").unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(result.status.code(), Some(1), "{:?}", result);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("promotion refused"));
+    repo.arc(&repo.root)
+        .args(["candidate", "promote", &selection])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("promotion refused"));
+}
