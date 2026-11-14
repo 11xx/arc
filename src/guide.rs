@@ -3080,7 +3080,11 @@ REVIEW COVERAGE AND DEBT
   eligible`: an audit (`arc audit --assessment <file>`) or a verdict on the
   patchset that shipped (`arc review --assessment <file>`), by a reader who
   is also independent of the contributors and whom the assessment
-  describes. This eligible, bound assessment is required for a person's read
+  describes. `arc review` records only on an open change and `arc audit` only
+  on an integrated one, so a debt `arc debt` declares before integration
+  clears with a verdict recorded since on the patchset that then ships, or an
+  audit after integration, and a debt `arc integrate --debt` declares clears
+  only with an audit. This eligible, bound assessment is required for a person's read
   too. The assessment covers the
   work: the `authors` it lists answer, through their `identities`,
   to the model of every `Implemented-by` line in the integrated range, at
