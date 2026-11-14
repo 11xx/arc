@@ -1406,3 +1406,23 @@ fn projects_sharing_a_label_each_carry_their_own_series() {
         ])
     );
 }
+
+/// Claim: `arc progress start` ends with one line naming how a change joins
+/// the series as it opens, in the series' own topic, after the filename and
+/// one line per item. Rejects a start that leaves the `begin --item` habit
+/// unsaid, and one that names a series other than the one it started.
+#[test]
+fn start_ends_naming_how_a_change_joins_the_series() {
+    let repo = Repo::new();
+    let out = progress(
+        &repo,
+        &repo.root,
+        &["start", "ship", "--title", "Ship", "--item", "One"],
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert_eq!(
+        lines[2],
+        "a change joins as it opens: arc begin <slug> --item ship:<item>"
+    );
+}

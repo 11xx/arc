@@ -67,9 +67,10 @@ impl Form {
 pub enum ProgressCmd {
     /// Start a series: write a `progress` artifact and declare its items
     ///
-    /// Prints the series' filename, then one line per declared item with its
-    /// id. Items declared here are the start that later edits are counted
-    /// from. A series needs no plan; `--follows` records the plan it
+    /// Prints the series' filename, one line per declared item with its id,
+    /// and last the `arc begin` call that links a change to an item as the
+    /// change opens. Items declared here are the start that later edits are
+    /// counted from. A series needs no plan; `--follows` records the plan it
     /// follows when there is one.
     Start {
         /// Kebab-case topic slug
@@ -255,6 +256,7 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             for (index, item) in items.iter().enumerate() {
                 println!("  i{}  {}", index + 1, item.trim());
             }
+            println!("a change joins as it opens: arc begin <slug> --item {topic}:<item>");
         }
         ProgressCmd::Add {
             series: name,
