@@ -135,7 +135,9 @@ fn batch(
         .as_ref()
         .is_some_and(|local| local.reference().same_claim(&receipt.acceptance));
     let mut passed = 0;
+    let mut work_references = crate::gate_work::References::default();
     for item in &mut completed {
+        attach_work_reference(&mut work_references, store, item)?;
         item.tested_tree = Some(before.clone());
         item.worktree_dirty = Some(dirty);
         item.worktree_dirty_tracked = Some(dirt.tracked);
@@ -149,8 +151,9 @@ fn batch(
         let judgement = if item.landing.is_some() {
             item.timing.budget_at_run.clone()
         } else {
-            gate.map(|gate| gate.budget_judgement(item.timing.run_ms))
+            gate.map(|gate| Box::new(gate.budget_judgement(&item.timing)))
         };
+        item.display_budget = judgement.clone();
         if let Some(reason) = judgement
             .as_ref()
             .and_then(|budget| budget.reason(&item.timing, &item.hostname))

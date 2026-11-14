@@ -987,6 +987,7 @@ pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
     let envelope = event_envelope(value)?;
     let event: Event = serde_json::from_value(value.clone())
         .with_context(|| format!("event {} is malformed", envelope.event_id))?;
+    crate::gate_work::validate_event(&event)?;
     if matches!(&event.payload, Payload::Unknown) {
         return Ok(None);
     }

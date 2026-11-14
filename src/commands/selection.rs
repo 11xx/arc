@@ -265,6 +265,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
     let hostname = super::local_hostname();
     let total = selected.len();
     let mut passed = 0;
+    let mut work_references = crate::gate_work::References::default();
     for (name, gate) in selected {
         eprintln!("running: {}", gate.command);
         let started = std::time::Instant::now();
@@ -281,11 +282,21 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
                 .map(|request| (request, st.change_id.as_str(), name.as_str())),
         )?;
         let duration_ms = started.elapsed().as_millis() as u64;
+        work_references.attach(
+            &store,
+            crate::gate_work::Identity {
+                gate: name.clone(),
+                declaration: crate::gates::declaration_identity(gate),
+                hostname: hostname.clone(),
+            },
+            gate.budget,
+            &mut run.timing,
+        )?;
         run.timing.execution_limit_ms = limit;
         run.timing.execution_limit_origin = origin;
         run.timing.budget_at_run = gate
             .budget
-            .map(|_| gate.budget_judgement(run.timing.run_ms));
+            .map(|_| Box::new(gate.budget_judgement(&run.timing)));
         let current = candidate_declarations(ctx, &st, &tree)?;
         if current.gates.has_budgets() {
             store.adopt_budgets()?;
@@ -295,7 +306,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
             .gates
             .get(name)
             .context("candidate gate declaration disappeared while checks ran")?
-            .budget_judgement(run.timing.run_ms);
+            .budget_judgement(&run.timing);
         if let Some(reason) = judgement.reason(&run.timing, &hostname) {
             eprintln!("gate {name}: {reason}");
         }
@@ -661,7 +672,8 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
             .iter()
             .find(|selected| &selected.gate == name)
             .and_then(|selected| ledger.evaluation(&selected.event_id));
-        let judgement = gate.budget_judgement(evaluation.and_then(|e| e.timing.run_ms));
+        let judgement =
+            gate.budget_judgement(evaluation.map(|e| &e.timing).unwrap_or(&Default::default()));
         if !judgement.accepted() {
             let timing = evaluation.map(|e| e.timing.clone()).unwrap_or_default();
             let host = evaluation

@@ -47,6 +47,8 @@ pub(super) struct GateRow {
     budget_share_percent: Option<f64>,
     budget_timing: Distribution,
     last_over_budget: Option<OverRun>,
+    excused_runs: usize,
+    last_excused: Option<OverRun>,
     history: History,
     diagnosis: crate::gate_diagnostics::Diagnosis,
     checks: crate::gate_diagnostics::Checks,
@@ -230,6 +232,8 @@ fn collect_declarations(
                 budget_share_percent: None,
                 budget_timing: Distribution::default(),
                 last_over_budget: None,
+                excused_runs: 0,
+                last_excused: None,
                 history: History::default(),
                 diagnosis: Default::default(),
                 checks: Default::default(),
@@ -329,6 +333,26 @@ fn collect_declarations(
                                 environment.as_ref().map(|e| e.identity.clone()),
                                 timing,
                             );
+                            if *result == VerifyResult::Pass
+                                && crate::gate_work::was_excused(timing)
+                            {
+                                row.excused_runs += 1;
+                                if row
+                                    .last_excused
+                                    .as_ref()
+                                    .is_none_or(|r| event.created_at > r.at)
+                                {
+                                    row.last_excused = Some(OverRun {
+                                        change_id: id.clone(),
+                                        event_id: event.event_id.clone(),
+                                        at: event.created_at,
+                                        run_ms: timing.run_ms.unwrap(),
+                                        hostname: hostname.clone(),
+                                        timing: timing.clone(),
+                                        output_artifact: output_artifact.clone(),
+                                    });
+                                }
+                            }
                             if let Some(ms) = timing.run_ms {
                                 budget_samples.entry(row.name.clone()).or_default().push((
                                     event.created_at,
@@ -338,7 +362,7 @@ fn collect_declarations(
                                 if crate::gate_budget::judge(
                                     row.budget_ms,
                                     &row.budget_sources,
-                                    Some(ms),
+                                    timing,
                                 )
                                 .verdict
                                     == crate::gate_budget::BudgetVerdict::OverBudget
@@ -511,6 +535,16 @@ pub(super) fn render(report: &GateReport) {
                 );
             }
         }
+        println!("  excused runs: {}", gate.excused_runs);
+        if let Some(run) = &gate.last_excused {
+            println!(
+                "  last excused: {} {} ran {} on {}",
+                run.change_id,
+                run.event_id,
+                ms(Some(run.run_ms)),
+                run.hostname
+            );
+        }
         let timing = &h.timing;
         let failure = h.last_failed_first.as_ref().map_or_else(
             || "-".into(),
@@ -642,6 +676,16 @@ pub fn measure_gates(
                 ms(timing.wait_ms),
                 result.as_str(),
                 if run.timed_out { " (timed out)" } else { "" }
+            );
+            println!(
+                "  instructions {}; other processes {} of host CPU capacity",
+                timing
+                    .instructions
+                    .map_or_else(|| "unmeasured".into(), |n| n.to_string()),
+                crate::gate_work::other_cpu_basis_points(&timing).map_or_else(
+                    || "unmeasured".into(),
+                    |n| format!("{:.2}%", n as f64 / 100.0)
+                )
             );
             wall.extend(timing.run_ms);
             cpu.extend(cpu_ms);
@@ -991,7 +1035,7 @@ pub fn over_budgets(ctx: &Ctx, reference: Option<&str>, selected: Option<&str>) 
             if !status::matches_declaration(entry, gate) {
                 continue;
             }
-            let judgement = gate.budget_judgement(entry.timing.run_ms);
+            let judgement = gate.budget_judgement(&entry.timing);
             if judgement.verdict == crate::gate_budget::BudgetVerdict::OverBudget {
                 runs.push((
                     entry.created_at,

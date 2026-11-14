@@ -2585,6 +2585,7 @@ pub fn reduce_with_repository(
     }
     let mut legacy_checks_binding = false;
     for ev in iter {
+        crate::gate_work::validate_event(ev)?;
         let projection_error =
             crate::forge_observation::projection_error(&ev.payload, &state.forge);
         if let Some(message) = &projection_error {

@@ -868,6 +868,9 @@ fn landing_cost_counts_executions_and_preserves_missing_measurements() {
         .success();
     copy_event(&repo, &id, "verification-recorded", |v| {
         v["gate"] = json!("removed-gate");
+        if v["work_identity"].is_object() {
+            v["work_identity"]["gate"] = json!("removed-gate");
+        }
         v.as_object_mut().unwrap().remove("run_id");
         v["result"] = json!("fail");
         v["run_ms"] = json!(30);

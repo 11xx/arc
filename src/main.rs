@@ -33,6 +33,7 @@ mod gate_budget;
 mod gate_concurrency;
 mod gate_diagnostics;
 mod gate_raise;
+mod gate_work;
 mod gates;
 mod git_health;
 mod gitio;
@@ -42,6 +43,7 @@ mod harness_entry;
 mod ids;
 mod import_authorization;
 mod inbox;
+mod instruction_counter;
 mod intake;
 mod integration;
 mod interruption;
@@ -2225,7 +2227,8 @@ enum Cmd {
     /// `load_average` and `core_count` describe the host at command start.
     /// These fields appear in `show --json` and `status`; attestations carry none.
     /// Budgets judge command run_ms under arc guide gates. An over-budget raw pass
-    /// exits 1; reuse refuses it until --rerun. Untimed evidence is unmeasured.
+    /// exits 1 unless the busy-host rule accepts it; a refusal needs --rerun.
+    /// Untimed evidence is unmeasured.
     /// Declared timeout_seconds and effective execution_limit_ms are recorded apart.
     /// See `arc guide change-gates` for accounting boundaries.
     Verify {
@@ -4038,7 +4041,8 @@ enum GatesCmd {
     },
     /// Measure declared gates; accept a concurrent batch after five successful rounds
     ///
-    /// Prints command wall and child CPU time, spread, and physical/logical host cores.
+    /// Prints command wall and tree CPU time, instructions, other processes' CPU share,
+    /// spread, and physical/logical host cores.
     /// Wall far above CPU indicates waiting inside the command; spread indicates load sensitivity.
     /// Execution and admission follow arc guide gates. Runs every gate unless --gate selects one.
     /// --concurrent follows arc guide gates-together and records local acceptance.

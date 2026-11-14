@@ -144,7 +144,13 @@ pub fn gate_line(gate: &GateStatus) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{status}{base}{batch}{}", gate_declaration_suffix(gate))
+    let work = crate::gate_budget::excuse_line(&gate.budget)
+        .map(|line| format!(" ({line})"))
+        .unwrap_or_default();
+    format!(
+        "{status}{base}{batch}{work}{}",
+        gate_declaration_suffix(gate)
+    )
 }
 
 /// Which declarations readiness evaluated, and where they disagree with the
@@ -1122,6 +1128,8 @@ pub fn markdown(
             {
                 if let Some(reason) = gate.budget.reason(&v.timing, &v.hostname) {
                     let _ = writeln!(w, "  - current budget applicability: {reason}");
+                } else if let Some(line) = crate::gate_budget::excuse_line(&gate.budget) {
+                    let _ = writeln!(w, "  - current budget applicability: {line}");
                 }
             }
             if let Some(reason) =

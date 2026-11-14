@@ -1221,11 +1221,8 @@ fn budget_refusal(
             });
             match receipt {
                 Some(receipt) => {
-                    let judgement = crate::gate_budget::judge(
-                        Some(budget),
-                        &gate.sources,
-                        receipt.timing.run_ms,
-                    );
+                    let judgement =
+                        crate::gate_budget::judge(Some(budget), &gate.sources, &receipt.timing);
                     if let Some(reason) = judgement.reason(&receipt.timing, &receipt.hostname) {
                         return Some(BudgetRefusal::Observed(format!(
                             "{}: gate {name}: {reason}",

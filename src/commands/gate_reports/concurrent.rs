@@ -102,6 +102,16 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
                     result.as_str()
                 }
             );
+            println!(
+                "  instructions {}; other processes {} of host CPU capacity",
+                timing
+                    .instructions
+                    .map_or_else(|| "unmeasured".into(), |n| n.to_string()),
+                crate::gate_work::other_cpu_basis_points(&timing).map_or_else(
+                    || "unmeasured".into(),
+                    |n| format!("{:.2}%", n as f64 / 100.0)
+                )
+            );
             wall_by_gate
                 .entry(name.clone())
                 .or_default()

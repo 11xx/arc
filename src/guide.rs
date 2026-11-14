@@ -1566,8 +1566,8 @@ RUN A CHANGE
   attempts are outside that bound. Before authorization, every shared receipt
   is judged against every requiring member's budget. A budgeted gate refuses
   authorization if its selected receipt cannot be resolved on the top member.
-  Missing run_ms or an
-  over-budget pass refuses with the member, gate, run time and budget, leaves
+  Missing run_ms or a
+  budget refusal under `arc guide gates` names the member, gate, run time and budget, leaves
   the target unmoved and does not trigger splitting or an implicit retry.
   Effective budgets, totals and sources are pinned, confirmed and retained in
   each member's authorization.
@@ -4266,7 +4266,8 @@ CANDIDATES
   lock and the repository-events lock, never the target's, and in order:
   refuses `basis-moved`, recording nothing, when the destination head or the
   target differs from the basis; rejudges the selected evaluations against
-  current budgets, refusing over-budget or unmeasured evidence; refuses a checkout of the destination with
+  current budgets under `arc guide gates`, refusing evidence rejected by the budget judge;
+  refuses a checkout of the destination with
   tracked modifications or untracked paths in the way; commits the shipped
   tree onto the destination head with the selector as committer and keeps it
   at `refs/arc/candidate-promotion/<candidate>/<selection>`; moves the branch
@@ -5603,37 +5604,9 @@ GATES
   or null; protected inputs follow `arc guide base-passes`.
   Inert paths are not unclaimed.
 
-  Budget shares use at most the latest 20 command-time observations for the
-  current command and declared timeout, in the newest observed environment.
-  Legacy duration_ms samples remain in the named historical distribution and
-  never enter budget shares. A median above 80% is labelled in the report.
-
-  `arc gates init [--runs N]` measures six serial rounds by default. A budget
-  is worst run_ms plus spread (max minus min), at least 105% of worst, rounded
-  up to two significant digits (minimum 1ms). Total is their sum, with no
-  batch discount. Every other byte of .arc/gates.toml is kept. Operator-only
-  gates are copied into the project. Existing budgets, failed or unmeasured
-  rounds, or declaration edits during measurement refuse without writing.
-  `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
-  the applicable budget, its history sources, host observations and output
-  artifact, cost kinds and slowest recorded checks, followed by the order of
-  work in `arc guide gate-rounds`.
-  `arc guide gate-raises` defines raising and its trusted counting rules.
-
-  `arc gates measure --concurrent` accepts a batch under `arc guide gates-together`.
-  `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
-  this tree, five times by default, honoring timeouts. Each round follows the
-  `exclusive` and `admission` contract below. It prints command wall and child
-  CPU time with admission wait separately, the wall min, max and spread, and
-  physical and logical host cores. Missing topology is unmeasured.
-  Wall far above CPU indicates waiting inside the command; a wide spread
-  indicates load sensitivity. A round not admitted prints
-  `not measured (not-admitted)` and contributes no timing sample. Summaries
-  count measured and unmeasured rounds. It records no evidence and writes no
-  ledger or output artifacts; the gate commands may write their own build
-  outputs. A failed, timed-out or unmeasured round makes the command exit 1.
-  Unknown gates and zero runs are refused. Every declared gate runs unless
-  `--gate` selects one.
+  Budget history, initialization, measurement and overrun reports are specified
+  in `arc guide gate-costs`; the rules and method are in `arc guide gate-rounds`;
+  raises are specified in `arc guide gate-raises`.
 
   `arc workspace gates [--json] [--under PATH|--here|--global] [--retired]`
   lists each registered project's declarations and its own ledger's costs,
@@ -5686,17 +5659,18 @@ GATES
   and basis digests are confirmed before integration. See `arc guide gate-raises`.
   Budgets are outside execution identity. Reuse selects the same structurally
   eligible receipt and then judges its command time, with no search for an
-  older faster receipt and no implicit rerun. An over-budget selected receipt
-  is refused until explicit verify --rerun. The integration queue stops on a
+  older faster receipt and no implicit rerun. A selected receipt refused by
+  the budget judge needs explicit verify --rerun. The integration queue stops on a
   recorded budget refusal. Reduction and replay read structural facts only.
 
   A command outcome remains pass in the ledger even when its run_ms exceeds
-  the budget in force. Equality passes; one millisecond over fails. Ordinary
+  the budget in force. Clock equality passes. An overrun passes only under
+  the busy-host rule below. Ordinary
   verify exits 1 for a budget refusal, including parallel preflight whose
   receipts retain unknown cleanliness. Status, check and show project current
   budget applicability beside the raw result. Show JSON adds gate_status beside
   raw verifications; status gate rows carry budget.verdict, budget_ms, run_ms,
-  excess_ms and sources. budget_rules.total is milliseconds in JSON.
+  excess_ms, sources and any busy-host excuse. budget_rules.total is milliseconds in JSON.
   Missing run_ms is unmeasured
   and cannot satisfy a budget, including legacy local, imported and attested
   evidence. duration_ms never substitutes for run_ms. Explain labels historical
@@ -5710,7 +5684,7 @@ GATES
   absence, and separately records execution_limit_ms and its origin, timeout
   or budget-times-ten. A receipt's recorded budget is provenance; current
   judgement uses the budget in force when the receipt is read. Timed evidence
-  needs no recorded budget judgement to count. Verify warns when the median of
+  without work references needs no recorded budget judgement to count. Verify warns when the median of
   up to 20 matching command-time observations in this change exceeds 80% of
   its budget; legacy total durations are excluded.
 
@@ -5719,7 +5693,30 @@ GATES
   time, effective budget and sources, excess, host,
   start load averages and online cores, CPU where recorded, and excluded wait
   and preparation. Missing observations stay missing. Load above the core count
-  may indicate possible host contention; it never changes the judgement.
+  may indicate possible host contention; start load alone grants no excuse.
+
+  A clock overrun is excused only when user-space retired instructions are at
+  most 3% above its reference and other processes used at least 25% of host CPU
+  capacity during the run. The reference is the earlier unexcused direct pass
+  of the same gate and declaration identity on the same known hostname with
+  the largest instruction count whose clock time fits the budget in force.
+  Hostnames identify hosts, not replica IDs. Unknown hosts cannot qualify.
+  The receipt carries that execution witness and its count. Lowering a budget
+  retires an excuse if its recorded reference stops fitting; readers neither
+  replace the reference nor consult live host load. Excused runs never become
+  references, budget-raise evidence or base-pass seeds, including after a raise.
+
+  Linux counts the whole command tree with perf_event_open inheritance,
+  excluding kernel and hypervisor instructions, before exec and reads after
+  every descendant exits. /proc/stat busy CPU excludes idle and I/O wait;
+  capacity is elapsed time times online logical CPUs. Other work is busy CPU
+  minus the tree's own user and system CPU. Missing, incomplete or multiplexed
+  counters and unavailable host readings grant no excuse. There is no flat
+  allowance. Known limit: added waiting first run on a busy host can be excused;
+  it shows on the next quiet run of a later change. `arc gates` counts excused
+  runs per gate and names the last; `gates measure` prints instructions and
+  other processes' share. A witness or excuse adopts store format 12 before
+  local publication or import; readers through format 11 refuse the ledger.
 
   A ledger adopts store format 9 before gate verification or reuse under any
   budget declaration, including a total with missing individual budgets,
@@ -5731,8 +5728,9 @@ GATES
   Every path that accepts gate evidence judges it against the budget in force:
   verify, status, integrate, accept, land, candidate selection and promotion,
   and publication.
-  A passing verify line says `Pass (over budget, ran ... of ...)` when over
-  budget; its recorded outcome remains a pass.
+  A passing verify line names either its busy-host reference, work and other
+  processes' share, or `Pass (over budget, ran ... of ...)` for a refusal;
+  its recorded outcome remains a pass.
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
@@ -5831,6 +5829,11 @@ GATE COSTS
   Each measure reports its sample count. Missing fields are unmeasured:
   legacy duration_ms never substitutes for command, CPU, wait or preparation.
 
+  Budget shares use at most the latest 20 command-time observations for the
+  current command and declared timeout, in the newest observed environment.
+  Legacy duration_ms samples remain in the named historical distribution and
+  never enter budget shares. A median above 80% is labelled in the report.
+
   `arc workspace gates` rows include declared total, landing median and p90,
   and landings and paid gate time in 7/30 days. They sort by 30-day measured
   gate time descending (the known lower bound when incomplete), then project
@@ -5863,6 +5866,33 @@ GATE COSTS
   A detached checkout without a matching destination reports it unobserved.
   Every required integration gate needs a budget when enforcement keys exist
   in that table; a landing-only table requires no individual budgets.
+
+  `arc gates init [--runs N]` measures six serial rounds by default. A budget
+  is worst run_ms plus spread (max minus min), at least 105% of worst, rounded
+  up to two significant digits (minimum 1ms). Total is their sum, with no
+  batch discount. Every other byte of .arc/gates.toml is kept. Operator-only
+  gates are copied into the project. Existing budgets, failed or unmeasured
+  rounds, or declaration edits during measurement refuse without writing.
+  `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
+  the applicable budget, its history sources, host observations and output
+  artifact, cost kinds and slowest recorded checks, followed by the order of
+  work in `arc guide gate-rounds`.
+
+  `arc gates measure --concurrent` accepts a batch under `arc guide gates-together`.
+  `arc gates measure [--runs N] [--gate G]` runs declarations sequentially on
+  this tree, five times by default, honoring timeouts. Each round follows the
+  `exclusive` and `admission` contract in `arc guide gates`. It prints command
+  wall and tree CPU time, instructions and other processes' CPU share, with
+  admission wait separately, the wall min, max and spread, and physical and
+  logical host cores. Missing topology is unmeasured.
+  Wall far above CPU indicates waiting inside the command; a wide spread
+  indicates load sensitivity. A round not admitted prints
+  `not measured (not-admitted)` and contributes no timing sample. Summaries
+  count measured and unmeasured rounds. It records no evidence and writes no
+  ledger or output artifacts; the gate commands may write their own build
+  outputs. A failed, timed-out or unmeasured round makes the command exit 1.
+  Unknown gates and zero runs are refused. Every declared gate runs unless
+  `--gate` selects one.
 
   Five cost kinds:
   - waiting: paired wall/CPU medians have wall >= 100ms and wall >= twice CPU.
@@ -5971,8 +6001,9 @@ GATE ROUNDS
     the remaining suite; a failure there is fixed, or the test removed,
     before the release. A check that guards a landing is made to fit, not
     moved to publication.
-  - No retries. A failure fails; a flake is a defect. A check that fails
-    only under load is fixed or given less concurrency.
+  - No retries. A failure fails; a flake is a defect; busy-host acceptance
+    is defined in `arc guide gates`. A check that fails only under load
+    is fixed or given less concurrency.
   - Nothing passes with coverage owed. A check that did not run is reported
     as not run, and a named check that was skipped or missing fails its gate.
   - A check gets a private home, temporary directory and state. It never
@@ -6140,7 +6171,7 @@ GATE RAISES
 
   The newest direct execution of that gate at the exact head must pass, be
   observed clean and stable on that head's tree, match the destination check
-  and current environment, exceed the destination budget and fit the proposed
+  and current environment, be unexcused, exceed the destination budget and fit the proposed
   one. Reuse, rewritten execution coordinates, attestation, bypass and measurement
   output cannot establish this need. Later evidence remains subject to ordinary
   newest-evidence judgement; a raise never masks a failure.
@@ -6242,7 +6273,7 @@ BASE PASSES
   context, execution/run IDs and digests, coordinates, command, timeout,
   environment identity, binding and timing. Output tails and artifacts stay in
   the original execution ledger.
-  Reused, bypassed, attested, untimed, over-budget and dirty-waived evidence
+  Reused, bypassed, attested, untimed, excused, over-budget and dirty-waived evidence
   cannot establish an entry. An empty baseline establishes no gate pass.
 
   Each gate's first observation may use the newest retained eligible local
@@ -6631,6 +6662,7 @@ SCHEMAS
     store format 9                   .git/arc/config.json and the change ledger
     store format 10                  base-pass baselines and reuse evidence
     store format 11                  measured batches and their authorization
+    store format 12                  busy-host work references and excuses
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization

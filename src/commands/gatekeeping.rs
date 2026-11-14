@@ -101,6 +101,7 @@ pub struct VerifyArgs {
 }
 
 struct VerificationInput {
+    work_declaration: Option<String>,
     timings: Option<String>,
     declaration: Option<String>,
     budget: Option<crate::gate_budget::BudgetJudgement>,
@@ -130,6 +131,7 @@ struct VerificationInput {
 }
 
 struct CompletedVerification {
+    display_budget: Option<Box<crate::gate_budget::BudgetJudgement>>,
     declaration: Option<String>,
     run_id: Option<String>,
     probe: Option<ProbeEvidenceRef>,
@@ -524,6 +526,7 @@ fn verify_with_landing(
             &store,
             &change_id,
             VerificationInput {
+                work_declaration: None,
                 timings: None,
                 declaration: None,
                 budget: None,
@@ -688,7 +691,7 @@ fn verify_with_landing(
             + together::run_required(run_ctx, &store, &change_id, to_run, |name, gate| {
                 VerificationInput {
                     timings: gate.timings.clone(),
-                    budget: Some(gate.budget_judgement(None)),
+                    budget: Some(gate.budget_judgement(&Default::default())),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
@@ -696,6 +699,7 @@ fn verify_with_landing(
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
+                    work_declaration: Some(gates::declaration_identity(gate)),
                     declaration: gates::coverage_identity(gate),
                     attested_result: None,
                     tested_revision: None,
@@ -804,6 +808,7 @@ fn verify_with_landing(
         &store,
         &change_id,
         VerificationInput {
+            work_declaration: profiled_gate.as_ref().map(gates::declaration_identity),
             timings,
             declaration,
             budget,
@@ -872,7 +877,7 @@ fn reuse_named_gate(
                 let source_execution = crate::base_pass::execution(&witness);
                 let timing = &source_execution.timing;
                 let hostname = &source_execution.hostname;
-                let judgement = gate.budget_judgement(timing.run_ms);
+                let judgement = gate.budget_judgement(timing);
                 if let Some(reason) = judgement.reason(timing, hostname) {
                     println!("gate {name}: {reason}; rerun explicitly with --rerun");
                 }
@@ -941,7 +946,7 @@ fn reuse_named_gate(
             .iter()
             .find(|e| e.event_id == source)
             .context("selected reuse source is missing")?;
-        let judgement = gate.budget_judgement(source_evidence.timing.run_ms);
+        let judgement = gate.budget_judgement(&source_evidence.timing);
         let run_id = start_verification_run(
             run_ctx,
             store,
@@ -974,7 +979,7 @@ fn reuse_named_gate(
         }
         return Ok(Some(if judgement.accepted() { 0 } else { 1 }));
     };
-    let judgement = gate.budget_judgement(evidence.timing.run_ms);
+    let judgement = gate.budget_judgement(&evidence.timing);
     let label = if judgement.accepted() {
         label
     } else {
@@ -1265,7 +1270,7 @@ fn verify_against(
         passed += together::run_required(scratch_ctx, store, change_id, to_run, |name, gate| {
             VerificationInput {
                 timings: gate.timings.clone(),
-                budget: Some(gate.budget_judgement(None)),
+                budget: Some(gate.budget_judgement(&Default::default())),
                 exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: std::mem::take(&mut preparation_ms),
                 run_id: Some(run_id.clone()),
@@ -1273,6 +1278,7 @@ fn verify_against(
                 gate: Some(name.clone()),
                 command: gate.command.clone(),
                 timeout_seconds: gate.timeout,
+                work_declaration: Some(gates::declaration_identity(gate)),
                 declaration: gates::coverage_identity(gate),
                 attested_result: None,
                 tested_revision: Some(synthesized.clone()),
@@ -1396,7 +1402,7 @@ pub(crate) fn verify_landing_head(
         together::run_required(&checkout_ctx, store, run.change_id, to_run, |name, gate| {
             VerificationInput {
                 timings: gate.timings.clone(),
-                budget: Some(gate.budget_judgement(None)),
+                budget: Some(gate.budget_judgement(&Default::default())),
                 exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: 0,
                 run_id: Some(run_id.clone()),
@@ -1404,6 +1410,7 @@ pub(crate) fn verify_landing_head(
                 gate: Some(name.clone()),
                 command: gate.command.clone(),
                 timeout_seconds: gate.timeout,
+                work_declaration: Some(gates::declaration_identity(gate)),
                 declaration: gates::coverage_identity(gate),
                 attested_result: None,
                 tested_revision: Some(run.commit.to_string()),
@@ -1743,7 +1750,7 @@ fn partition<'a>(
             environment,
             event,
         ) {
-            let judgement = gate.budget_judgement(evidence.timing.run_ms);
+            let judgement = gate.budget_judgement(&evidence.timing);
             println!(
                 "gate {name}: skipped ({}; declared by {})",
                 if judgement.accepted() {
@@ -1783,7 +1790,7 @@ fn partition<'a>(
             );
             if let Some(evidence) = st.verifications.iter().find(|e| e.event_id == source) {
                 if let Some(reason) = gate
-                    .budget_judgement(evidence.timing.run_ms)
+                    .budget_judgement(&evidence.timing)
                     .reason(&evidence.timing, &evidence.hostname)
                 {
                     println!("gate {name}: {reason}; rerun explicitly with --rerun");
@@ -1819,10 +1826,7 @@ fn partition<'a>(
             let source_execution = crate::base_pass::execution(&witness);
             let timing = &source_execution.timing;
             let hostname = &source_execution.hostname;
-            if let Some(reason) = gate
-                .budget_judgement(timing.run_ms)
-                .reason(timing, hostname)
-            {
+            if let Some(reason) = gate.budget_judgement(timing).reason(timing, hostname) {
                 println!("gate {name}: {reason}; rerun explicitly with --rerun");
                 partition.budget_refused += 1;
             }
@@ -2246,7 +2250,7 @@ fn verify_recorded(
                 &change_id,
                 VerificationInput {
                     timings: gate.timings.clone(),
-                    budget: Some(gate.budget_judgement(None)),
+                    budget: Some(gate.budget_judgement(&Default::default())),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: 0,
                     run_id: Some(run_id.clone()),
@@ -2254,6 +2258,7 @@ fn verify_recorded(
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
+                    work_declaration: Some(gates::declaration_identity(gate)),
                     declaration: gates::coverage_identity(gate),
                     attested_result: None,
                     tested_revision: None,
@@ -2654,7 +2659,7 @@ fn verify_all_parallel(
         .enumerate()
         .map(|(index, (name, gate))| VerificationInput {
             timings: gate.timings.clone(),
-            budget: Some(gate.budget_judgement(None)),
+            budget: Some(gate.budget_judgement(&Default::default())),
             exclusive: crate::exclusive::Request::for_gate(gate),
             preparation_ms: if index == 0 { preparation_ms } else { 0 },
             run_id: Some(run_id.to_owned()),
@@ -2662,6 +2667,7 @@ fn verify_all_parallel(
             gate: Some(name.clone()),
             command: gate.command.clone(),
             timeout_seconds: gate.timeout,
+            work_declaration: Some(gates::declaration_identity(gate)),
             declaration: gates::coverage_identity(gate),
             attested_result: None,
             tested_revision: None,
@@ -2735,7 +2741,9 @@ fn verify_all_parallel(
     eprintln!(
         "warning: parallel gates share a mutable worktree; their provenance is unknown and passing evidence is not green"
     );
+    let mut work_references = crate::gate_work::References::default();
     for item in &mut completed {
+        attach_work_reference(&mut work_references, store, item)?;
         item.tested_tree = Some(before.clone());
         // Boundary snapshots can miss a gate that changes and restores a file
         // while another gate is still running. Leave cleanliness unknown so
@@ -2748,15 +2756,15 @@ fn verify_all_parallel(
     if current.gates.has_budgets() {
         store.adopt_budgets()?;
     }
-    let ran_passed = completed
-        .iter()
-        .filter(|item| {
+    let ran_passed: usize = completed
+        .iter_mut()
+        .map(|item| {
             let judged = item
                 .gate
                 .as_ref()
                 .and_then(|name| current.gates.gates.get(name))
                 .map(|g| {
-                    let mut judgement = g.budget_judgement(item.timing.run_ms);
+                    let mut judgement = g.budget_judgement(&item.timing);
                     let _ = crate::gate_raise::fill_advice(
                         &ctx.cwd,
                         &current_state,
@@ -2765,16 +2773,19 @@ fn verify_all_parallel(
                     );
                     judgement
                 });
-            let budget = judged.as_ref().or(item.timing.budget_at_run.as_ref());
+            item.display_budget = judged
+                .map(Box::new)
+                .or_else(|| item.timing.budget_at_run.clone());
+            let budget = item.display_budget.as_deref();
             if let Some(reason) = budget.and_then(|b| b.reason(&item.timing, &item.hostname)) {
                 println!(
                     "gate {}: {reason}",
                     item.gate.as_deref().unwrap_or("command")
                 );
             }
-            item.result == VerifyResult::Pass && budget.is_none_or(|b| b.accepted())
+            usize::from(item.result == VerifyResult::Pass && budget.is_none_or(|b| b.accepted()))
         })
-        .count();
+        .sum();
     append_verifications(ctx, store, change_id, completed)?;
     let passed = ran_passed + skipped_green;
     println!("gates: {passed}/{total} pass");
@@ -2990,6 +3001,32 @@ git worktree remove --force {quoted_path}",
     Ok(path)
 }
 
+fn attach_work_reference(
+    references: &mut crate::gate_work::References,
+    store: &Store,
+    item: &mut CompletedVerification,
+) -> Result<()> {
+    if item.attested {
+        return Ok(());
+    }
+    if let Some(identity) = item.timing.work_identity.as_deref().cloned() {
+        references.attach(
+            store,
+            identity,
+            item.timing.budget_at_run.as_ref().and_then(|b| b.budget_ms),
+            &mut item.timing,
+        )?;
+        if let Some(budget) = &item.timing.budget_at_run {
+            item.timing.budget_at_run = Some(Box::new(crate::gate_budget::judge(
+                budget.budget_ms,
+                &budget.sources,
+                &item.timing,
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn record_verification(
     ctx: &Ctx,
     store: &Store,
@@ -3037,6 +3074,7 @@ fn record_verification_at(
         &store.repository_id,
         change_id,
     )?;
+    attach_work_reference(&mut Default::default(), store, &mut completed)?;
     if !completed.attested {
         let post = gitio::head(command_cwd)?;
         if post != revision {
@@ -3074,13 +3112,14 @@ fn record_verification_at(
                 store.adopt_budgets()?;
             }
             if let Some(gate) = current.gates.gates.get(name) {
-                let mut judgement = gate.budget_judgement(completed.timing.run_ms);
+                let mut judgement = gate.budget_judgement(&completed.timing);
                 let _ =
                     crate::gate_raise::fill_advice(&ctx.cwd, &current_state, name, &mut judgement);
-                budget = Some(judgement);
+                budget = Some(Box::new(judgement));
             }
         }
     }
+    completed.display_budget = budget.clone();
     let accepted = budget.as_ref().is_none_or(|b| b.accepted());
     if let Some(reason) = budget.and_then(|b| b.reason(&completed.timing, &completed.hostname)) {
         println!(
@@ -3107,6 +3146,7 @@ fn execute_verification(
     change_id: &str,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
+        work_declaration,
         timings,
         declaration,
         budget,
@@ -3192,10 +3232,20 @@ fn execute_verification(
         timing.execution_limit_ms = execution_limit_ms;
         timing.execution_limit_origin = origin;
     }
+    if timing.instructions.is_some() {
+        if let (Some(gate), Some(declaration)) = (&gate, work_declaration) {
+            timing.work_identity = Some(Box::new(crate::gate_work::Identity {
+                gate: gate.clone(),
+                declaration,
+                hostname: hostname.clone(),
+            }));
+        }
+    }
     timing.budget_at_run = budget
         .filter(|b| b.budget_ms.is_some())
-        .map(|b| crate::gate_budget::judge(b.budget_ms, &b.sources, timing.run_ms));
+        .map(|b| Box::new(crate::gate_budget::judge(b.budget_ms, &b.sources, &timing)));
     Ok(CompletedVerification {
+        display_budget: None,
         declaration,
         run_id,
         probe,
@@ -3280,7 +3330,11 @@ fn record_verifications(
         let result = item.result;
         let revision = item.revision.clone();
         let attested = item.attested;
-        let budget_marker = match item.timing.budget_at_run.as_ref() {
+        let budget_marker = match item
+            .display_budget
+            .as_deref()
+            .or(item.timing.budget_at_run.as_deref())
+        {
             Some(budget)
                 if result == VerifyResult::Pass
                     && budget.verdict == crate::gate_budget::BudgetVerdict::OverBudget =>
@@ -3290,6 +3344,11 @@ fn record_verifications(
                     crate::gate_budget::duration(budget.run_ms.expect("over-budget run")),
                     crate::gate_budget::duration(budget.budget_ms.expect("declared budget"))
                 )
+            }
+            Some(budget) if result == VerifyResult::Pass && budget.excuse.is_some() => {
+                crate::gate_budget::excuse_line(budget)
+                    .map(|line| format!(" ({line})"))
+                    .unwrap_or_default()
             }
             _ => String::new(),
         };
@@ -3703,7 +3762,11 @@ fn run_gate_in_shell(
     #[cfg(debug_assertions)]
     if let Ok(raw) = std::env::var("ARC_TEST_COMMAND_RUN_MS") {
         timing.run_ms = Some(raw.parse().context("invalid test command run_ms")?);
+        timing.instructions = None;
+        timing.host_busy_ms = None;
+        timing.host_capacity_ms = None;
     }
+    crate::gate_work::test_observations(&mut timing)?;
     Ok(GateRun {
         admission_expired: false,
         status,
@@ -6756,7 +6819,7 @@ fn declared_check(
                 profiled_gate: declared.coverage.base_passes.then(|| declared.clone()),
                 declaration: gates::coverage_identity(declared),
                 adopt_budget_format: gates.has_budgets(),
-                budget: Some(declared.budget_judgement(None)),
+                budget: Some(declared.budget_judgement(&Default::default())),
                 command: declared.command.clone(),
                 timeout: declared.timeout,
                 environment: declared.environment.clone(),

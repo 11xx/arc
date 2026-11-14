@@ -945,7 +945,14 @@ fn typed_repository_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<
     raw.into_iter()
         .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
             Ok(event) if matches!(event.payload, Payload::Unknown) => None,
-            other => Some(other.context("malformed repository event")),
+            other => Some(
+                other
+                    .context("malformed repository event")
+                    .and_then(|event| {
+                        crate::gate_work::validate_event(&event)?;
+                        Ok(event)
+                    }),
+            ),
         })
         .collect()
 }
@@ -956,7 +963,14 @@ fn typed_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<Event>> {
     raw.into_iter()
         .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
             Ok(event) if matches!(event.payload, Payload::Unknown) => None,
-            other => Some(other.context("malformed event file in change ledger")),
+            other => Some(
+                other
+                    .context("malformed event file in change ledger")
+                    .and_then(|event| {
+                        crate::gate_work::validate_event(&event)?;
+                        Ok(event)
+                    }),
+            ),
         })
         .collect()
 }
@@ -1162,6 +1176,7 @@ impl Store {
     pub const REPOSITORY_SCOPE: &'static str = "repository";
 
     fn append_repository_event_locked(&self, event: &Event) -> Result<()> {
+        crate::gate_work::validate_event(event)?;
         self.ensure_repository_event_allowed(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
@@ -2062,6 +2077,7 @@ impl Store {
     }
 
     fn write_event(&self, event: &Event) -> Result<()> {
+        crate::gate_work::validate_event(event)?;
         #[cfg(test)]
         if let Some((issued, release)) = LOCAL_PUBLICATION_PAUSE.take() {
             issued.send(()).unwrap();
@@ -2211,6 +2227,9 @@ impl Store {
     }
 
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
+        if crate::gate_work::payload_uses_work(payload) {
+            self.stamp_format(Some(12))?;
+        }
         if crate::gate_concurrency::payload_uses_concurrency(payload) {
             self.adopt_concurrency()?;
         }
@@ -2314,6 +2333,9 @@ impl Store {
     /// share their classification with typed records.
     #[cfg(test)]
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
+        if value.is_some_and(has_work_semantics) {
+            self.stamp_format(Some(12))?;
+        }
         if value.is_some_and(has_concurrent_semantics) {
             self.adopt_concurrency()?;
         }
@@ -3462,6 +3484,14 @@ impl Store {
         {
             self.stamp_format_locked(11)?;
         }
+        if batch
+            .events
+            .iter()
+            .chain(&batch.repository_events)
+            .any(has_work_semantics)
+        {
+            self.stamp_format_locked(12)?;
+        }
         let dir = self.root.join("imports");
         create_private_dir_all(&dir).map_err(|error| crate::model::OperationFailure {
             published: false,
@@ -3597,6 +3627,18 @@ fn authorization_has_no_verdict(
 /// as open, then closing it a second way. Refusing is the only honest answer,
 /// and it has to hold on every path that opens a store, not just the one that
 /// creates it.
+fn has_work_semantics(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            (key == "work_reference" && !value.is_null())
+                || (key == "verdict" && value == "excused")
+                || has_work_semantics(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(has_work_semantics),
+        _ => false,
+    }
+}
+
 fn has_concurrent_semantics(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {

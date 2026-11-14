@@ -323,6 +323,12 @@ impl Ledger {
 
     /// Check one event against the ledger and apply it.
     pub fn record(&mut self, event: &Event) -> Result<(), Refusal> {
+        if !event.event_id.is_empty() {
+            crate::gate_work::validate_event(event).map_err(|error| Refusal::Malformed {
+                event_id: event.event_id.clone(),
+                detail: error.to_string(),
+            })?;
+        }
         let declarant = event
             .on_behalf_of
             .clone()

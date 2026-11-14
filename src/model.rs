@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 pub const SCHEMA_VERSION: u32 = 7;
 
 /// The newest ledger format this build understands.
-pub const STORE_FORMAT: u32 = 11;
+pub const STORE_FORMAT: u32 = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {

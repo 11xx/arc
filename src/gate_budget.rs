@@ -126,8 +126,11 @@ impl Gate {
         self.budget_sources.dedup();
     }
 
-    pub fn budget_judgement(&self, run_ms: Option<u64>) -> BudgetJudgement {
-        let mut judgement = judge(self.budget, &self.budget_sources, run_ms);
+    pub fn budget_judgement(
+        &self,
+        timing: &crate::verification_timing::VerificationTiming,
+    ) -> BudgetJudgement {
+        let mut judgement = judge(self.budget, &self.budget_sources, timing);
         judgement.raise_allowance_ms = self.raise_allowance_ms;
         judgement.raise_budget_max_ms = self.raise_budget_max_ms;
         judgement
@@ -243,11 +246,14 @@ pub enum BudgetVerdict {
     Undeclared,
     WithinBudget,
     OverBudget,
+    Excused,
     Unmeasured,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetJudgement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excuse: Option<Box<crate::gate_work::Excuse>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raise_allowance_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,15 +268,23 @@ pub struct BudgetJudgement {
 pub fn judge(
     budget_ms: Option<u64>,
     provenance: &[BudgetSource],
-    run_ms: Option<u64>,
+    timing: &crate::verification_timing::VerificationTiming,
 ) -> BudgetJudgement {
+    let run_ms = timing.run_ms;
+    let excuse = budget_ms.and_then(|b| crate::gate_work::excuse(timing, b));
     let verdict = match (budget_ms, run_ms) {
         (None, _) => BudgetVerdict::Undeclared,
         (Some(_), None) => BudgetVerdict::Unmeasured,
+        (Some(b), Some(r)) if r > b && excuse.is_some() => BudgetVerdict::Excused,
         (Some(b), Some(r)) if r > b => BudgetVerdict::OverBudget,
         _ => BudgetVerdict::WithinBudget,
     };
     BudgetJudgement {
+        excuse: if verdict == BudgetVerdict::Excused {
+            excuse.map(Box::new)
+        } else {
+            None
+        },
         raise_allowance_ms: None,
         raise_budget_max_ms: None,
         verdict,
@@ -285,7 +299,7 @@ impl BudgetJudgement {
     pub fn accepted(&self) -> bool {
         matches!(
             self.verdict,
-            BudgetVerdict::Undeclared | BudgetVerdict::WithinBudget
+            BudgetVerdict::Undeclared | BudgetVerdict::WithinBudget | BudgetVerdict::Excused
         )
     }
 
@@ -326,6 +340,12 @@ impl BudgetJudgement {
         }
         Some(reason)
     }
+}
+
+pub fn excuse_line(judgement: &BudgetJudgement) -> Option<String> {
+    let work = judgement.excuse.as_ref()?;
+    Some(format!("accepted over budget: work {} instructions against reference {} ({} instructions); other processes {:.2}% of host CPU capacity",
+        work.instructions, work.reference_event_id, work.reference_instructions, work.other_cpu_basis_points as f64 / 100.0))
 }
 
 pub fn sources(values: &[BudgetSource]) -> String {
@@ -417,13 +437,19 @@ mod tests {
     /// and load only changes diagnostics. Rejects tolerance and load-dependent acceptance.
     #[test]
     fn boundary_and_load_do_not_change_the_judgement() {
-        assert!(judge(Some(10000), &[], Some(10000)).accepted());
-        assert!(!judge(Some(10000), &[], Some(10001)).accepted());
+        fn observed(ms: u64) -> crate::verification_timing::VerificationTiming {
+            crate::verification_timing::VerificationTiming {
+                run_ms: Some(ms),
+                ..Default::default()
+            }
+        }
+        assert!(judge(Some(10000), &[], &observed(10000)).accepted());
+        assert!(!judge(Some(10000), &[], &observed(10001)).accepted());
         assert_eq!(
-            judge(Some(10000), &[], None).verdict,
+            judge(Some(10000), &[], &Default::default()).verdict,
             BudgetVerdict::Unmeasured
         );
-        let b = judge(Some(10000), &[], Some(11000));
+        let b = judge(Some(10000), &[], &observed(11000));
         let low = crate::verification_timing::VerificationTiming {
             load_average: Some([0., 0., 0.]),
             core_count: Some(2),

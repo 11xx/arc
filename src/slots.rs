@@ -830,7 +830,14 @@ pub fn holder_main() -> ! {
     if control.is_some() {
         command.process_group(0);
     }
+    let host_sample = crate::gate_work::HostSample::start();
+    let pending_counter = crate::instruction_counter::prepare(&mut command);
     let spawned = command.spawn();
+    let counter = if spawned.is_ok() {
+        pending_counter.and_then(|pending| pending.receive())
+    } else {
+        None
+    };
     send(&observation);
     // The launcher reads the command's output to its end; only the command
     // and its descendants may hold those pipes open.
@@ -913,6 +920,10 @@ pub fn holder_main() -> ! {
     if complete {
         observation.timing.cpu_user_ms = Some(user / 1000);
         observation.timing.cpu_system_ms = Some(system / 1000);
+        observation.timing.instructions = counter.and_then(|counter| counter.finish());
+        if let Some(sample) = host_sample {
+            sample.finish(&mut observation.timing);
+        }
     }
     observation.stopped = control.is_some();
     send(&observation);

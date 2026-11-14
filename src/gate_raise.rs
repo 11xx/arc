@@ -565,7 +565,8 @@ pub fn propose(
                 .timing
                 .run_ms
                 .context("budget raise needs observed run_ms")?;
-            if entry.result != VerifyResult::Pass
+            if crate::gate_work::was_excused(&entry.timing)
+                || entry.result != VerifyResult::Pass
                 || entry.attested
                 || st.direct_executions.get(&entry.event_id) != Some(&Some(0))
                 || (gate.environment.is_some() && entry.environment.is_none())
@@ -848,8 +849,8 @@ pub fn advise(
             .iter()
             .rev()
             .find(|e| e.gate.as_ref() == Some(name))
-            .and_then(|e| e.timing.run_ms);
-        let mut judgement = gate.budget_judgement(run);
+            .map(|e| &e.timing);
+        let mut judgement = gate.budget_judgement(run.unwrap_or(&Default::default()));
         if !judgement.accepted() && judgement.run_ms.is_some() {
             if let Some((increment, maximum)) = advice(cwd, st, name, target_revision, head)? {
                 judgement.raise_allowance_ms = Some(increment);

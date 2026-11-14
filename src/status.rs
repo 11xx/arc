@@ -1803,7 +1803,8 @@ fn build_report(
             Some(tree) => state.gate_falsification_at_tree(name, tree, &resolve_tree),
             None => state.gate_falsification_at(name, &e.revision),
         });
-        let budget = gate.budget_judgement(evidence.and_then(|e| e.timing.run_ms));
+        let budget =
+            gate.budget_judgement(evidence.map(|e| &e.timing).unwrap_or(&Default::default()));
         let budget_ok = budget.accepted();
         gate_statuses.push(GateStatus {
             batch_acceptance_missing: evidence.is_some_and(|entry| {

@@ -228,6 +228,14 @@ impl Baseline {
         }
         for (name, entry) in &self.gates {
             let execution = &entry.execution;
+            crate::gate_work::validate_timing(
+                &execution.event_id,
+                execution.created_at,
+                execution.gate.as_deref(),
+                execution.declaration.as_deref(),
+                Some(&execution.hostname),
+                &execution.timing,
+            )?;
             let run = &entry.run;
             let coverage: gates::Coverage =
                 serde_json::from_value(entry.declaration["coverage"].clone())?;
@@ -286,9 +294,14 @@ impl Baseline {
                             )
                     })
                 || execution.worktree_dirty != Some(false)
+                || crate::gate_work::was_excused(&execution.timing)
                 || execution.timing.run_ms.is_none()
-                || !crate::gate_budget::judge(entry.budget_ms, &[], execution.timing.run_ms)
-                    .accepted()
+                || matches!(
+                    crate::gate_budget::judge(entry.budget_ms, &[], &execution.timing).verdict,
+                    crate::gate_budget::BudgetVerdict::Excused
+                        | crate::gate_budget::BudgetVerdict::OverBudget
+                        | crate::gate_budget::BudgetVerdict::Unmeasured
+                )
                 || !valid_digest(&execution.digest)
                 || !valid_digest(&run.digest)
             {
@@ -533,9 +546,7 @@ pub fn select(
         gate,
         entry.execution.timing.concurrent_batch.as_ref(),
     ) || entry.identity != gates::declaration_identity(gate)
-        || !gate
-            .budget_judgement(entry.execution.timing.run_ms)
-            .accepted()
+        || !gate.budget_judgement(&entry.execution.timing).accepted()
     {
         return None;
     }
@@ -643,9 +654,11 @@ pub fn record(
         else {
             continue;
         };
-        if declaration.as_deref() != Some(gates::declaration_identity(gate).as_str())
+        if crate::gate_work::was_excused(timing)
+            || declaration.as_deref() != Some(gates::declaration_identity(gate).as_str())
             || !crate::gate_concurrency::accepted_here(gate, timing.concurrent_batch.as_ref())
-            || !gate.budget_judgement(timing.run_ms).accepted()
+            || !gate.budget_judgement(timing).accepted()
+            || gate.budget_judgement(timing).verdict == crate::gate_budget::BudgetVerdict::Excused
         {
             continue;
         }

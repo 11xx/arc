@@ -95,6 +95,9 @@ paths = [
   # defect accepts a run that should have been refused, or answers a gate
   # from an execution that does not cover the change.
   "src/gate_budget.rs",
+  # Work witnesses and inherited hardware counters can excuse a clock overrun.
+  "src/gate_work.rs",
+  "src/instruction_counter.rs",
   "src/gate_raise.rs",
   "src/commands/gate_raise.rs",
   "src/base_pass.rs",

@@ -123,6 +123,7 @@ pub fn publication(
     let mut failed = false;
     let mut budget_refused = false;
     println!("publication target: {target} at {revision}");
+    let mut work_references = crate::gate_work::References::default();
     for (name, gate) in required {
         let environment = match gate.environment.as_deref() {
             Some(command) => {
@@ -176,9 +177,21 @@ pub fn publication(
                     .map(|request| (request, "publication", name.as_str())),
             )?;
             timing = run.timing;
+            work_references.attach(
+                &store,
+                crate::gate_work::Identity {
+                    gate: name.clone(),
+                    declaration: gates::declaration_identity(gate),
+                    hostname: super::local_hostname(),
+                },
+                gate.budget,
+                &mut timing,
+            )?;
             timing.execution_limit_ms = limit;
             timing.execution_limit_origin = origin;
-            timing.budget_at_run = gate.budget.map(|_| gate.budget_judgement(timing.run_ms));
+            timing.budget_at_run = gate
+                .budget
+                .map(|_| Box::new(gate.budget_judgement(&timing)));
             output_artifact = run.output_artifact;
             if let Some(tail) = run.output_tail {
                 if !tail.is_empty() {
@@ -202,7 +215,7 @@ pub fn publication(
                 observed => observed,
             }
         };
-        let judgement = gate.budget_judgement(timing.run_ms);
+        let judgement = gate.budget_judgement(&timing);
         if let Some(reason) = judgement.reason(&timing, hostname.as_deref().unwrap_or("unrecorded"))
         {
             eprintln!("publication gate {name}: {reason}");

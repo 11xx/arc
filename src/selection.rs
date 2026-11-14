@@ -440,7 +440,7 @@ pub fn evidence_shortfall(
         return Some(EvidenceShortfall::Failed);
     }
     let judgement =
-        crate::gate_budget::judge(gate.budget, &gate.budget_sources, evaluation.timing.run_ms);
+        crate::gate_budget::judge(gate.budget, &gate.budget_sources, &evaluation.timing);
     judgement
         .reason(&evaluation.timing, &evaluation.hostname)
         .map(|detail| EvidenceShortfall::Budget {
