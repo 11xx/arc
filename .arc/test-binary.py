@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Run exact invariant witnesses or an explicitly requested area suite.
 
-Cargo artifact receipts bind harnesses and the spawned CLI to this checkout.
+Cargo artifact receipts bind harnesses and the spawned CLI to this checkout,
+and the selection handed to the harnesses carries a receipt naming that build.
 The checked-in list is the complete integration selection.
 """
 
 import argparse
+import collections
 import concurrent.futures
 import csv
 import json
@@ -17,6 +19,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 PROFILE = "dev"
+Artifact = collections.namedtuple("Artifact", "path debug_assertions")
 
 
 def refuse_inside_git_operation(environ):
@@ -43,7 +46,8 @@ def cargo_artifacts(command):
             key = "unit"
         if key in found:
             raise ValueError(f"ambiguous Cargo artifact: {key}")
-        found[key] = str(Path(receipt["executable"]).resolve())
+        found[key] = Artifact(str(Path(receipt["executable"]).resolve()),
+                              receipt["profile"]["debug_assertions"])
     if build.returncode != 0:
         raise ValueError(f"cargo exited {build.returncode}; the build failed")
     return found
@@ -57,8 +61,20 @@ def artifacts(profile=PROFILE):
     return found
 
 
-def inventory(binary):
-    output = subprocess.check_output([binary, "--list", "--format=terse"], text=True)
+def selection(executable, cargo_arc):
+    """The environment selecting `executable` for the fixtures of the harnesses
+    built beside `cargo_arc`. The receipt names that build by the identity of
+    Cargo's own arc executable, which the harness compares with its own, so a
+    selection exported into a later build is refused there."""
+    built = os.stat(cargo_arc.path)
+    identity = f"{built.st_dev}:{built.st_ino}:{built.st_mtime_ns}:{built.st_size}"
+    assertions = "true" if executable.debug_assertions else "false"
+    return {"ARC_TEST_BIN": executable.path,
+            "ARC_TEST_BIN_RECEIPT": f"build={identity} debug-assertions={assertions}"}
+
+
+def inventory(binary, env):
+    output = subprocess.check_output([binary, "--list", "--format=terse"], env=env, text=True)
     return {line.removesuffix(": test") for line in output.splitlines() if line.endswith(": test")}
 
 
@@ -92,12 +108,12 @@ def run_one(binary, name, env):
 
 
 def run_invariants(rows, binaries, env):
-    inventories = {target: inventory(binaries[target]) for target in {"unit", "cli"}}
+    inventories = {target: inventory(binaries[target].path, env) for target in {"unit", "cli"}}
     validate(rows, inventories)
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
     workers = int(env.get("RUST_TEST_THREADS", min(64, cpus * 4)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(lambda row: run_one(binaries[row["target"]], row["test"], env), rows))
+        results = list(pool.map(lambda row: run_one(binaries[row["target"]].path, row["test"], env), rows))
     timings = ["arc-check-timings/1"]
     for index, (row, (name, ms, passed, output)) in enumerate(zip(rows, results), 1):
         label = row["invariant"] + ":" + row["target"] + ":" + name
@@ -126,19 +142,20 @@ def main():
     os.chdir(ROOT)
     binaries = artifacts()
     env = os.environ.copy()
-    env["ARC_TEST_BIN"] = binaries["arc"]
+    env.update(selection(binaries["arc"], binaries["arc"]))
     if args.mode == "invariants":
         with (ROOT / ".arc/invariants.tsv").open() as file:
             return run_invariants(witnesses(file), binaries, env)
     if args.mode == "release":
         release = cargo_artifacts(["cargo", "build", "--locked", "--release", "--bin", "arc",
                                    "--message-format=json"])
-        env["ARC_TEST_BIN"] = release["arc"]
+        env.update(selection(release["arc"], binaries["arc"]))
         args.target, args.module = "cli", "release"
-    names = sorted(name for name in inventory(binaries[args.target]) if name.rpartition("::")[0] == args.module)
+    harness = binaries[args.target].path
+    names = sorted(name for name in inventory(harness, env) if name.rpartition("::")[0] == args.module)
     if not names:
         raise ValueError(f"no tests in exact module {args.module}")
-    return subprocess.call([binaries[args.target], "--exact", *names], env=env)
+    return subprocess.call([harness, "--exact", *names], env=env)
 
 
 if __name__ == "__main__":

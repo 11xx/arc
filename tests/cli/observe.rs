@@ -1,7 +1,7 @@
 use super::common::*;
 
 fn recovery_wait_bound() -> Duration {
-    Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 45 })
+    Duration::from_secs(if selected_debug_assertions() { 5 } else { 45 })
 }
 
 /// Claim: an idle ledger watch reads history once, then sleeps until its
@@ -136,7 +136,7 @@ fn watch_feed_recovers_missing_or_unreadable_notices() {
                 "--until",
                 "brief-recorded",
                 "--timeout",
-                if stimulus == "fallback" && !cfg!(debug_assertions) {
+                if stimulus == "fallback" && !selected_debug_assertions() {
                     "40"
                 } else {
                     "10"
@@ -207,7 +207,7 @@ fn watch_feed_recovers_missing_or_unreadable_notices() {
             "reached: brief-recorded",
             "{stimulus}"
         );
-        let bound = if stimulus == "fallback" && !cfg!(debug_assertions) {
+        let bound = if stimulus == "fallback" && !selected_debug_assertions() {
             35
         } else {
             3

@@ -47,10 +47,24 @@ class RunnerClaims(unittest.TestCase):
     def test_artifact_path_comes_from_cargo_receipt(self):
         """Claim: the release check uses Cargo's executable; rejects a guessed stale path."""
         receipt = {"reason": "compiler-artifact", "target": {"name": "arc"},
-                   "profile": {"test": False}, "executable": "/selected/release/arc"}
+                   "profile": {"test": False, "debug_assertions": False},
+                   "executable": "/selected/release/arc"}
         build = subprocess.CompletedProcess([], 0, json.dumps(receipt))
         with patch.object(runner.subprocess, "run", return_value=build):
-            self.assertEqual(runner.cargo_artifacts(["cargo"])["arc"], "/selected/release/arc")
+            self.assertEqual(runner.cargo_artifacts(["cargo"])["arc"],
+                             runner.Artifact("/selected/release/arc", False))
+
+    def test_selection_names_the_build_and_the_selected_profile(self):
+        """Claim: a selection's receipt names the build by Cargo's own executable and states the
+        selected executable's debug assertions; rejects a receipt a later build would still accept
+        or one that reports the harness's profile for a release executable."""
+        cargo_arc = runner.Artifact(__file__, True)
+        built = runner.os.stat(__file__)
+        selected = runner.selection(runner.Artifact("/selected/release/arc", False), cargo_arc)
+        self.assertEqual(selected, {
+            "ARC_TEST_BIN": "/selected/release/arc",
+            "ARC_TEST_BIN_RECEIPT": f"build={built.st_dev}:{built.st_ino}:{built.st_mtime_ns}:"
+                                    f"{built.st_size} debug-assertions=false"})
 
     def test_failed_build_shows_compiler_messages_and_refuses(self):
         """Claim: a build failure prints rustc's message and refuses; rejects a silent or green failed build."""

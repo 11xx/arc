@@ -10,14 +10,83 @@ pub(crate) use std::thread;
 pub(crate) use std::time::{Duration, Instant};
 pub(crate) use tempfile::TempDir;
 
-/// The executable every fixture launches, selected by the test runner or Cargo.
+/// The executable every fixture launches: Cargo's own, or the one the runner
+/// selected for this build.
 pub(crate) fn arc_binary() -> &'static str {
-    static BINARY: OnceLock<String> = OnceLock::new();
-    BINARY.get_or_init(|| {
-        std::env::var_os("ARC_TEST_BIN")
-            .map(|value| value.into_string().expect("ARC_TEST_BIN is UTF-8"))
-            .unwrap_or_else(|| env!("CARGO_BIN_EXE_arc").to_owned())
+    &selection().path
+}
+
+/// Whether the executable under test carries debug assertions, which decide
+/// its debug-only clocks and test hooks. A runner selection can name an
+/// executable of another profile than this harness's.
+pub(crate) fn selected_debug_assertions() -> bool {
+    selection().debug_assertions
+}
+
+pub(crate) struct Selection {
+    path: String,
+    debug_assertions: bool,
+}
+
+/// The receipt the runner hands over with `ARC_TEST_BIN`: the build it chose
+/// the executable for, named by the identity of Cargo's own `arc` there, and
+/// the chosen executable's debug assertions. A later build replaces Cargo's
+/// executable, so a selection exported into it no longer matches.
+pub(crate) fn selection_receipt(debug_assertions: bool) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let built = fs::metadata(env!("CARGO_BIN_EXE_arc")).expect("Cargo's arc executable exists");
+    format!(
+        "build={}:{}:{}:{} debug-assertions={debug_assertions}",
+        built.dev(),
+        built.ino(),
+        built.mtime() as i128 * 1_000_000_000 + built.mtime_nsec() as i128,
+        built.size()
+    )
+}
+
+fn selection() -> &'static Selection {
+    static SELECTION: OnceLock<Selection> = OnceLock::new();
+    SELECTION.get_or_init(|| read_selection().expect("the selection was checked at entry"))
+}
+
+fn read_selection() -> Result<Selection, String> {
+    let Some(path) = std::env::var_os("ARC_TEST_BIN") else {
+        return Ok(Selection {
+            path: env!("CARGO_BIN_EXE_arc").to_owned(),
+            debug_assertions: cfg!(debug_assertions),
+        });
+    };
+    let path = path
+        .into_string()
+        .map_err(|_| "ARC_TEST_BIN is not UTF-8".to_owned())?;
+    let receipt = std::env::var("ARC_TEST_BIN_RECEIPT").unwrap_or_default();
+    let debug_assertions = [true, false]
+        .into_iter()
+        .find(|assertions| receipt == selection_receipt(*assertions))
+        .ok_or_else(|| {
+            format!(
+                "ARC_TEST_BIN selects {path}, but the runner did not select it for this build \
+                 of arc. Unset ARC_TEST_BIN to test Cargo's executable, or run \
+                 `python3 .arc/test-binary.py invariants`, `area` or `release`, which select one."
+            )
+        })?;
+    Ok(Selection {
+        path,
+        debug_assertions,
     })
+}
+
+/// libtest owns `main`, so the check runs from `.init_array`, before any test:
+/// a refused selection stops the harness instead of failing each test.
+#[used]
+#[link_section = ".init_array"]
+static CHECK_SELECTION: extern "C" fn() = check_selection;
+
+extern "C" fn check_selection() {
+    if let Err(refusal) = read_selection() {
+        eprintln!("{refusal}");
+        std::process::exit(2);
+    }
 }
 
 pub(crate) struct Repo {

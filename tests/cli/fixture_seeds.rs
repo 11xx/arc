@@ -92,6 +92,7 @@ fn fixture_commands_use_the_selected_executable() {
         ])
         .env(CHILD, "1")
         .env("ARC_TEST_BIN", canary)
+        .env("ARC_TEST_BIN_RECEIPT", selection_receipt(true))
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -101,6 +102,61 @@ fn fixture_commands_use_the_selected_executable() {
         "selected executable was bypassed or the child ran no test: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Claim: only the runner selects the executable fixtures launch. An
+/// `ARC_TEST_BIN` with no receipt, or with the runner's receipt for another
+/// build of arc, stops the harness before any test, naming the variable and
+/// the runner, and the selected executable never runs. Rejects a plain
+/// `cargo test` that silently exercises an exported, stale executable.
+#[test]
+fn a_selection_the_runner_did_not_make_for_this_build_is_refused() {
+    const CHILD: &str = "ARC_TEST_STALE_SELECTION";
+    if std::env::var_os(CHILD).is_some() {
+        let repo = Repo::new();
+        repo.arc(&repo.root).arg("--version").assert().success();
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let launched = repo.home.join("stale-launched");
+    let stale = repo.home.join("stale-arc");
+    fs::write(
+        &stale,
+        format!("#!/bin/sh\ntouch '{}'\n", launched.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&stale, fs::Permissions::from_mode(0o700)).unwrap();
+    let current = selection_receipt(true);
+    let (identity, assertions) = current.split_once(' ').unwrap();
+    let earlier_build = format!("{identity}0 {assertions}");
+    for receipt in [None, Some(earlier_build.as_str())] {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "fixture_seeds::a_selection_the_runner_did_not_make_for_this_build_is_refused",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ARC_TEST_BIN", &stale)
+            .env_remove("ARC_TEST_BIN_RECEIPT");
+        if let Some(receipt) = receipt {
+            child.env("ARC_TEST_BIN_RECEIPT", receipt);
+        }
+        let output = child.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !launched.exists(),
+            "receipt {receipt:?}: the unproven selection ran"
+        );
+        assert!(
+            !output.status.success()
+                && stderr.contains("ARC_TEST_BIN selects")
+                && stderr.contains("python3 .arc/test-binary.py"),
+            "receipt {receipt:?}: the harness did not refuse by name: {output:?}"
+        );
+    }
 }
 
 /// Claim: fixtures start with empty hook and exclude locations and commits

@@ -4,7 +4,11 @@ Integration runs the exact witnesses in `.arc/invariants.tsv`. Each row names it
 invariant and caller-visible claim. The runner validates every full name against
 libtest's inventory before dispatching it with `--exact`; missing, ignored and
 unexecuted witnesses fail. It selects the spawned executable from Cargo's artifact
-receipts. Development artifacts share one profile: the crate is unoptimized, so
+receipts and hands it to the harness as `ARC_TEST_BIN` with `ARC_TEST_BIN_RECEIPT`,
+which names the build the selection was made for and whether the selected
+executable carries debug assertions. Only the runner selects: a harness given
+`ARC_TEST_BIN` without a receipt for its own build refuses to start, so a plain
+`cargo test` never runs an exported, stale executable. Development artifacts share one profile: the crate is unoptimized, so
 an incremental rebuild after a source edit stays short, and dependencies are
 optimized. Debug symbols are disabled; debug assertions and integer overflow
 checks stay enabled. Preparation declared in `.arc/worktrees.toml` builds the
@@ -54,7 +58,8 @@ disable automatic maintenance and retain explicit collection and pruning. Child
 waits wake on process exit and kill and reap after a 120-second hang bound.
 `RUST_TEST_THREADS` sets invariant concurrency; its default is four workers per
 available logical CPU, capped at 64. Silent-write recovery probes use a short
-debug-only clock; a separate area check pins the thirty-second production default.
+debug-only clock, and their bounds follow the debug assertions of the executable
+under test; a separate area check pins the thirty-second production default.
 
 Gate coverage is declared in `.arc/gates.toml`; `arc gates paths` lists every
 tracked path and its gates. People-only Markdown and the license are inert.
