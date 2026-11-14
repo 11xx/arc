@@ -639,6 +639,7 @@ pub(super) fn snapshot_holding(
     let events = store.load_events(change_id)?;
     let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &st.target_branch);
     promote_change_spool(ctx, &st);
     let links_supplied = request.links_supplied();
     let SnapshotRequest {

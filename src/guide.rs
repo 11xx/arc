@@ -5905,7 +5905,9 @@ GATE CONFINEMENT
   it fires, including rebase's checkout/rewrite hooks and commit's pre-commit,
   message and post-commit hooks, pass through the project-command constructor.
   Hook forwarding controls live outside writable build/cache roots and remain
-  until Git exits. Git-configured filters, merge drivers and fsmonitor programs
+  until Git exits. Dispatch carries lazy committed destination authority for
+  native hooks; target mutations pin their destination before moving refs.
+  Git-configured filters, merge drivers and fsmonitor programs
   are configuration programs, not Git hooks, and are outside this forwarding.
   Operator-supplied `watch --exec` and `events --exec` handlers are not project
   commands and retain operator authority, subject to inherited restrictions.

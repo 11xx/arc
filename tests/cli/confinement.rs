@@ -503,6 +503,42 @@ fn git_commit_hooks_cannot_escape_through_squash() {
     assert_eq!(repo.head(&repo.root), head);
 }
 
+/// Claim I12: native reference hooks use committed destination authority for
+/// snapshot retention writes. Rejects missing authority that refuses a hook
+/// before applying its destination confinement.
+#[test]
+fn reference_hooks_receive_destination_authority_for_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("reference-hook-decoy");
+    fs::write(&decoy, "retained").unwrap();
+    repo.redeclare_gates(&declaration("true"));
+    let id = open(&repo);
+    repo.commit(&repo.root, "code", "changed", "test: snapshot content");
+    let hook = repo.root.join(".git/hooks/reference-transaction");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["snapshot", &id])
+        .output()
+        .unwrap();
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "reference hook escaped: {diagnostic}"
+    );
+    assert!(diagnostic.contains("ran confined"), "{diagnostic}");
+    assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
+}
+
 /// Claim I5: measurements for open or closed changes use destination roots
 /// even when the working table widens them. Rejects measurement/init treating a working declaration as authority.
 #[test]

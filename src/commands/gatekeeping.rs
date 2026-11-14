@@ -4845,6 +4845,7 @@ fn integrate_one(
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(status::check_exit_code(&report));
     };
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &target_head);
     let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
     ensure_destination_actor(ctx, &policy)?;
     selection.validate(&policy)?;
@@ -6419,6 +6420,8 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }
+    let _confinement =
+        crate::confinement::Scope::at(&ctx.cwd, into.as_deref().unwrap_or(&st.target_branch));
     super::land::refuse_pending(&st)?;
     if assert_integrated.is_some() {
         super::land::refuse_alone(&st, &store.readable_states()?)?;

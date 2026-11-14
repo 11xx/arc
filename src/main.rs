@@ -6749,6 +6749,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
+    let _confinement = confinement::Scope::checkout_destination(&ctx.cwd);
 
     // Neighbouring commands take the change as a flag, so `--change` works
     // wherever the positional is optional rather than being guessed at against

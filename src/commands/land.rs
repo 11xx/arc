@@ -1808,6 +1808,7 @@ fn compose(
     plan: &mut Plan,
     intent: &mut landing::Intent,
 ) -> Result<std::result::Result<(), Refusal>> {
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &plan.target_before);
     let mut tip = plan.target_before.clone();
     let mut composed = Vec::new();
     for member in &plan.members {
@@ -2001,6 +2002,7 @@ fn commit(
     started_at: chrono::DateTime<chrono::Utc>,
     composed_evidence: Option<BTreeMap<String, String>>,
 ) -> Result<i32> {
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &pinned.target_before);
     let attempt = intent.attempt.clone();
     let _authority = crate::replica::lock(store)?;
     if let Some(refusal) = crate::replica::integration_refusal(store)? {
@@ -2663,6 +2665,7 @@ fn finish_attempt(ctx: &Ctx, attempt: &str) -> Result<i32> {
     ctx.ensure_declared_actor(&store)?;
     let _authority = crate::replica::lock(&store)?;
     let (target, before, after, members) = attempt_facts(&store, attempt)?;
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &before);
     let mut locks = attempt_locks(&store, &target, &members)?;
     let landings = Landings::from_events(store.repository_events()?.iter());
     if let Some(completion) = landings.completion(attempt) {

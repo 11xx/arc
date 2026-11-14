@@ -43,6 +43,9 @@ pub fn combine(destination: &mut Option<Declaration>, layer: Option<Declaration>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Authority {
     Resolved(Option<Declaration>),
+    CheckoutDestination {
+        checkout: PathBuf,
+    },
     Destination {
         repository: PathBuf,
         revision: String,
@@ -57,6 +60,11 @@ pub struct Scope(Option<Authority>);
 impl Scope {
     pub fn new(declaration: &Option<Declaration>) -> Self {
         Self::captured(Authority::Resolved(declaration.clone()))
+    }
+    pub(crate) fn checkout_destination(checkout: &Path) -> Self {
+        Self::captured(Authority::CheckoutDestination {
+            checkout: checkout.to_path_buf(),
+        })
     }
     pub(crate) fn at(repository: &Path, revision: &str) -> Self {
         Self::captured(Authority::Destination {
@@ -122,6 +130,7 @@ pub(crate) fn unconfined() -> bool {
 pub(crate) fn declaration(site: &str, checkout: &Path) -> Result<Option<Declaration>> {
     match current().with_context(|| format!("project command at {site} has no destination confinement scope for {}; refusing to read the checkout's declaration", checkout.display()))? {
         Authority::Resolved(declaration) => Ok(declaration),
+        Authority::CheckoutDestination { checkout } => for_checkout(&checkout),
         Authority::Destination { repository, revision } => at(&repository, &revision),
     }
 }

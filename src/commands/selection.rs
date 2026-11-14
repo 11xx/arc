@@ -644,6 +644,7 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
     let events = store.load_events(&change_id)?;
     let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &st.target_branch);
     patchset_admitted(&st).map_err(|error| anyhow::anyhow!("destination-closed: {error:#}"))?;
     let reference = candidate::promotion_ref(&selection.candidate_id, selection_id);
     let head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;

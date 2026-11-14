@@ -148,3 +148,4 @@ I12	unit	confinement::tests::broad_roots_and_tmpdir_do_not_erase_the_boundary	Ho
 I5	cli	confinement::landing_preparation_cannot_drop_destination_confinement	Composed landing preparation cannot drop destination confinement.	Integration cannot weaken the target's required evidence.
 I12	cli	confinement::invalidation_cannot_write_outside_destination_roots	Slot invalidation cannot write outside destination roots.	A command cannot cross its established identity, role or confinement boundary.
 I12	cli	confinement::git_commit_hooks_cannot_escape_through_squash	A tracked commit hook cannot escape during squash.	A command cannot cross its established identity, role or confinement boundary.
+I12	cli	confinement::reference_hooks_receive_destination_authority_for_snapshot	Native reference hooks receive committed destination authority for snapshot retention.	A command cannot cross its established identity, role or confinement boundary.
