@@ -569,3 +569,46 @@ fn an_unowned_detached_checkout_requires_a_destination() {
         "{diagnostic}"
     );
 }
+
+/// Claim: a confined gate's receipt carries the instructions its command
+/// retired, as an unconfined gate's does on the same host, so the busy-host
+/// rule judges confined projects by their work. Rejects confinement installed
+/// where the command holder's instruction counter cannot attach.
+#[test]
+fn a_confined_measured_gate_still_records_instructions() {
+    if !supported() {
+        return;
+    }
+    let mut recorded = Vec::new();
+    for confine in ["", "[confine]\nwrites=['target']\n"] {
+        let (repo, _scratch) = fixture();
+        repo.redeclare_gates(&format!("{confine}[gates.guard]\ncommand='true'\n"));
+        let change = open(&repo);
+        repo.commit(&repo.root, "feature", "one", "test: measured content");
+        stdout(repo.arc(&repo.root).args(["snapshot", &change]));
+        stdout(repo.arc(&repo.root).args(["verify", &change, "--all"]));
+        let state = json_stdout(repo.arc(&repo.root).args(["show", &change, "--json"]));
+        recorded.push(
+            state["verifications"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .clone(),
+        );
+    }
+    let [unconfined, confined] = &recorded[..] else {
+        unreachable!()
+    };
+    if unconfined["instructions"].is_null() {
+        eprintln!("SKIP instruction counting: this host records none for an unconfined gate");
+        return;
+    }
+    assert_eq!(confined["confinement"]["confined"], true, "{confined}");
+    assert!(
+        confined["instructions"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "confined gate recorded no instructions: {confined}"
+    );
+}
