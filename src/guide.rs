@@ -5906,10 +5906,12 @@ GATE COSTS
   Every required integration gate needs a budget when enforcement keys exist
   in that table; a landing-only table requires no individual budgets. That
   includes a gate the destination declares and a change's head removes,
-  since the change still owes it, so one change cannot both replace gates
-  and declare a total. Land the replacement first with no total declared,
-  then declare budgets and the total in a following change, once the
-  destination holds only the gates it keeps; the refusal names this route.
+  since the change still owes it. A removed gate that has a budget on the
+  destination keeps it; one that has none cannot be given one, so a change
+  cannot both remove it and declare a total. Land the replacement first
+  with no total declared, then declare budgets and the total in a following
+  change, once the destination holds only the gates it keeps; the refusal
+  names this route.
 
   `arc gates init [--runs N] [--publication]` measures six serial rounds of
   every gate that runs at integration, in any profile, by default. A
