@@ -111,3 +111,27 @@ common Git directory. They permit fixture commit addresses and suppress only the
 seeded local Tester identity in health reports. Release executables enforce the
 ordinary identity rules. Git environment guard tests remove the flag to exercise
 product refusals.
+
+Git question costs are measured over a fixture lifecycle with one `true` gate,
+a snapshot, approval and in-place checkout. Writer measurements on a project
+with retained history use `arc sandbox clone`. `ARC_TRACE=1` supplies launches
+by Git subcommand and elapsed milliseconds. The command ceilings below bound
+launches on the small fixture; wall targets describe an unloaded development build on the retained
+Arc history and are measured separately from acceptance tests.
+
+| Command | Git launch ceiling | Wall target (s) |
+| --- | ---: | ---: |
+| begin | 24 | 10 |
+| status | 16 | 3 |
+| check | 20 | 3 |
+| snapshot | 18 | 12 |
+| verify | 110 | 5 |
+| review | 90 | 4 |
+| integrate | 250 | 10 |
+| rebase | 95 | 5 |
+| journal write | 3 | 0.5 |
+| catchup | 60 | 15 |
+
+Retained-history launch targets are 650 for `begin` and `review`, and 700 for
+`integrate`; the other commands use the same ceilings. Distinct immutable
+revisions still need individual file queries until object reads are batched.
