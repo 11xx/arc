@@ -73,7 +73,8 @@ pub(crate) enum LockMode {
 
 /// Wait up to `timeout` for `file`, the lock at `path`, announcing a wait
 /// that outlasts `LOCK_NOTICE_AFTER` and refusing past the budget with the
-/// lock's name and a request to retry.
+/// lock's name and a request to retry. Acquiring a contended lock discards
+/// held Git answers because the previous holder may have moved refs or files.
 pub(crate) fn wait_for_lock(
     file: &File,
     path: &Path,
@@ -89,7 +90,6 @@ pub(crate) fn wait_for_lock(
     // Only the debug-build test pause moves the start.
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut started = Instant::now();
-    #[cfg(debug_assertions)]
     let mut contended = false;
     let mut announced = false;
     loop {
@@ -98,14 +98,22 @@ pub(crate) fn wait_for_lock(
             LockMode::Shared => file.try_lock_shared(),
         };
         match attempt {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if contended {
+                    gitio::forget_answers();
+                }
+                return Ok(());
+            }
             Err(std::fs::TryLockError::WouldBlock) => {
+                let first = !std::mem::replace(&mut contended, true);
                 #[cfg(test)]
                 LOCK_CONTENTION.with_borrow(|report| report.as_ref().map(|report| report()));
                 // A test pauses here, once the lock is known to be held,
                 // and the pause does not count against the timeout.
+                #[cfg(not(debug_assertions))]
+                let _ = first;
                 #[cfg(debug_assertions)]
-                if !std::mem::replace(&mut contended, true) {
+                if first {
                     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                     crate::import_authorization::test_rendezvous(&format!("{stem}-contended"))?;
                     started = Instant::now();

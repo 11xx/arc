@@ -6851,6 +6851,14 @@ TRACING
   phases on concurrent threads are summed, so they can total more than
   elapsed_ms; time outside every phase is not attributed.
 
+  `children.git_by_site` counts Git launches by source file and line, without
+  runtime paths or argument values. Git answers are held per canonical checkout
+  and resolved administrative directory. Repository locations and immutable
+  object reads survive Git writes; branch, HEAD and ref reads expire on writes.
+  Project commands discard every held Git answer before and after execution.
+  Acquiring a contended lock discards answers the previous holder could alter.
+  Authorization revalidation rereads the destination ref.
+
   `coverage` names what the counters see. `ledger: store` counts ledger
   files read through the store's readers, not a file a diagnostic opens on
   its own; `children: arc` counts processes arc starts, not those a library

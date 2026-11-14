@@ -2719,6 +2719,9 @@ fn fast_forward_into_divergence_names_selected_destination() {
         )));
 }
 
+/// Invariant I8. Claim: integration judges the target ref after waiting for its
+/// lock. Rejects an earlier cached ref allowing debt or a merge attempt before
+/// reporting the divergence introduced by the previous lock holder.
 #[test]
 fn fast_forward_debt_checks_divergence_after_waiting_for_target_lock() {
     let repo = repo_with_gates();
@@ -4169,6 +4172,9 @@ fn no_ff_hook_failures_preserve_work_and_report_recovery() {
     }
 }
 
+/// Invariant I8. Claim: final authorization reads the destination's current
+/// actor policy. Rejects an earlier cached ref hiding a concurrent advance to
+/// a destination that requires a declared actor.
 #[test]
 fn final_destination_actor_policy_refuses_concurrent_advance() {
     use std::os::unix::fs::PermissionsExt;

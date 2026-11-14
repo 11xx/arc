@@ -75,6 +75,8 @@ paths = [
   "src/commands/slots.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
+  # Freshness boundaries prevent a cached pre-write answer from authorizing a merge.
+  "src/gitio/answers.rs",
   # Subprocess isolation prevents inherited Git state from reaching another repository.
   "src/child_command.rs",
   # Publication rejects constructors that bypass subprocess isolation.
@@ -301,6 +303,8 @@ acknowledged_safe = [
   # exit. It decides nothing, and a child it counts still runs as the caller
   # built it.
   "src/perf.rs",
+  # Launch-count acceptance probes execute only isolated fixture lifecycles.
+  "tests/cli/git_questions.rs",
   # Read-only projections and rendering. They report state; they never decide
   # it, and a defect shows up as a wrong screen rather than a wrong merge.
   "src/commands/diff.rs",

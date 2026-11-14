@@ -73,6 +73,7 @@ mod gate_tiers;
 mod gate_together;
 mod gate_work;
 mod git_environment;
+mod git_questions;
 mod guide_bounds;
 mod guide_topics;
 #[path = "../../src/harness_entry.rs"]

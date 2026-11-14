@@ -62,6 +62,7 @@ struct Trace {
     cache: BTreeMap<&'static str, (u64, u64)>,
     phases: BTreeMap<&'static str, Timed>,
     children: BTreeMap<String, Timed>,
+    git_sites: BTreeMap<String, u64>,
 }
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -242,13 +243,16 @@ fn child_kind(command: &std::process::Command) -> String {
 }
 
 /// Run a child to completion through `run`, counting it and its time.
+#[track_caller]
 pub(crate) fn child<T>(
     command: &mut std::process::Command,
     run: impl FnOnce(&mut std::process::Command) -> T,
 ) -> T {
+    let _answers = crate::gitio::answers::command_scope(command);
     if !enabled() {
         return run(command);
     }
+    git_site(command, std::panic::Location::caller());
     let kind = child_kind(command);
     let phase = phase("children");
     let started = Instant::now();
@@ -265,28 +269,46 @@ pub(crate) fn child<T>(
 
 /// Count a child arc starts and does not wait for where it starts it; the
 /// wait, if any, is the caller's.
+#[track_caller]
 pub(crate) fn spawned(command: &std::process::Command) {
     if !enabled() {
         return;
     }
+    git_site(command, std::panic::Location::caller());
     let kind = child_kind(command);
     with(|trace| trace.children.entry(kind).or_default().calls += 1);
+}
+
+/// Source coordinates identify launch sites without recording runtime paths or arguments.
+fn git_site(command: &std::process::Command, caller: &std::panic::Location<'_>) {
+    if std::path::Path::new(command.get_program())
+        .file_name()
+        .is_some_and(|s| s == "git")
+    {
+        let site = format!("{}:{}", caller.file(), caller.line());
+        with(|trace| *trace.git_sites.entry(site).or_default() += 1);
+    }
 }
 
 /// Run a command to completion, counted as a child.
 pub(crate) trait Counted {
     /// The command's output, bounded by the thread's deadline scope; see
     /// `gitio::bounded_output`.
+    #[track_caller]
     fn counted_output(&mut self) -> std::io::Result<std::process::Output>;
+    #[track_caller]
     fn counted_spawn(&mut self) -> std::io::Result<std::process::Child>;
 }
 
 impl Counted for std::process::Command {
+    #[track_caller]
     fn counted_output(&mut self) -> std::io::Result<std::process::Output> {
         child(self, crate::gitio::bounded_output)
     }
 
+    #[track_caller]
     fn counted_spawn(&mut self) -> std::io::Result<std::process::Child> {
+        let _answers = crate::gitio::answers::command_scope(self);
         spawned(self);
         self.spawn()
     }
@@ -348,6 +370,7 @@ fn record(outcome: Outcome, exit_code: Option<i32>) -> serde_json::Value {
         "children": {
             "runs": trace.children.values().map(|timed| timed.calls).sum::<u64>(),
             "by_kind": children,
+            "git_by_site": trace.git_sites,
         },
         "coverage": {
             "ledger": "store",

@@ -208,3 +208,33 @@ fn a_trace_counts_ledger_work_and_names_no_path_or_argument() {
         .sum();
     assert_eq!(record["children"]["runs"], runs, "{record}");
 }
+
+/// Claim: tracing attributes every Git launch to a source coordinate without
+/// runtime paths or argument values. Rejects unattributed or duplicated launches
+/// and disclosure of a fixture directory in a call-site label.
+#[test]
+fn git_launches_have_source_attribution() {
+    let repo = Repo::new();
+    let (_, record) = traced(&repo, &["catchup", "--json"]);
+    let sites = record["children"]["git_by_site"].as_object().unwrap();
+    let launches: u64 = record["children"]["by_kind"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(kind, _)| kind.as_str() == "git" || kind.starts_with("git "))
+        .map(|(_, value)| value["runs"].as_u64().unwrap())
+        .sum();
+    assert!(launches > 0);
+    assert_eq!(
+        sites.values().map(|v| v.as_u64().unwrap()).sum::<u64>(),
+        launches
+    );
+    for site in sites.keys() {
+        let (file, line) = site.rsplit_once(':').unwrap();
+        assert!(
+            file.starts_with("src/") && line.parse::<u32>().is_ok(),
+            "{site}"
+        );
+        assert!(!site.contains(repo.root.to_str().unwrap()), "{site}");
+    }
+}

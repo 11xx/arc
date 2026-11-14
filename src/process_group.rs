@@ -88,6 +88,7 @@ pub(crate) fn write_input(input: &mut impl std::io::Write, bytes: &[u8]) -> std:
 /// until its own descendants end. Its report counts as the leader's exit,
 /// and its status as the group's.
 pub(crate) struct OwnedGroup {
+    _answers: crate::gitio::answers::WriteScope,
     child: Child,
     status: Option<ExitStatus>,
     report: Option<std::fs::File>,
@@ -100,6 +101,7 @@ pub(crate) struct OwnedGroup {
 impl OwnedGroup {
     /// Spawn `command`, which must lead its own process group.
     pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        let _answers = crate::gitio::answers::WriteScope::project();
         Ok(Self::adopt(command.counted_spawn()?))
     }
 
@@ -107,6 +109,7 @@ impl OwnedGroup {
     /// yet waited for.
     pub(crate) fn adopt(child: Child) -> Self {
         Self {
+            _answers: crate::gitio::answers::WriteScope::project(),
             child,
             status: None,
             report: None,

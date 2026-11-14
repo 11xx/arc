@@ -1107,6 +1107,7 @@ fn selector_output(
     input: &str,
     timeout: Option<u64>,
 ) -> Result<Option<Vec<u8>>> {
+    let _answers = crate::gitio::answers::WriteScope::project();
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(
             timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS),

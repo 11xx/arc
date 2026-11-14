@@ -11,6 +11,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub(crate) mod answers;
 pub mod listing;
 
 thread_local! {
@@ -149,6 +150,7 @@ pub fn invocation_directory(cwd: &Path) -> Result<PathBuf> {
     )
 }
 
+#[track_caller]
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = git_command();
     command.args(args).current_dir(cwd);
@@ -183,8 +185,10 @@ pub fn git_inherit(cwd: &Path, args: &[String]) -> Result<()> {
 }
 
 /// A Git run's working directory and arguments.
-type GitRun = (PathBuf, Vec<String>);
+type GitRun = (answers::Repository, Vec<String>);
 
+/// Canonical checkout and resolved repository scope each command answer.
+/// Git writes and project commands discard these mutable observations.
 static SHARED_OUTPUTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<GitRun, String>>,
 > = std::sync::OnceLock::new();
@@ -192,12 +196,16 @@ static SHARED_OUTPUTS: std::sync::OnceLock<
 /// `git`, run once per working directory and arguments while the process
 /// shares its reads, for a read whose answer only a ref move or a checkout
 /// change could alter. A failure is not held.
+#[track_caller]
 fn shared_git(cwd: &Path, args: &[&str]) -> Result<String> {
-    if !crate::store::shares_reads() {
+    if !crate::store::shares_reads() || !answers::reads_are_stable() {
         return git(cwd, args);
     }
+    let Some(repository) = answers::repository(cwd) else {
+        return git(cwd, args);
+    };
     let key = (
-        cwd.to_path_buf(),
+        repository,
         args.iter().map(|arg| (*arg).to_string()).collect(),
     );
     let outputs = SHARED_OUTPUTS.get_or_init(Default::default);
@@ -216,6 +224,7 @@ fn shared_git(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(output)
 }
 
+#[track_caller]
 fn command_output(command: &mut Command) -> Result<Output> {
     Ok(command.counted_output()?)
 }
@@ -298,34 +307,23 @@ fn join_before_deadline<T>(
         .with_context(|| format!("git probe timed out waiting for {name}"))
 }
 
-/// The common Git directory shared by every worktree of one repository. A
-/// process that shares its ledger reads asks Git once per directory.
+/// The common Git directory, retained through Git writes and refreshed after
+/// project commands. Canonical checkout and administrative paths scope the answer.
 pub fn common_dir(cwd: &Path) -> Result<PathBuf> {
-    static RESOLVED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<PathBuf, PathBuf>>,
-    > = std::sync::OnceLock::new();
-    let shared = crate::store::shares_reads();
-    let resolved = RESOLVED.get_or_init(Default::default);
-    if shared {
-        if let Some(dir) = resolved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(cwd)
-        {
-            return Ok(dir.clone());
-        }
-    }
-    let raw = git(cwd, &["rev-parse", "--git-common-dir"])?;
-    let p = PathBuf::from(raw);
-    let abs = if p.is_absolute() { p } else { cwd.join(p) };
-    let dir = std::fs::canonicalize(&abs).unwrap_or(abs);
-    if shared {
-        resolved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(cwd.to_path_buf(), dir.clone());
-    }
-    Ok(dir)
+    let absolute = answers::text(cwd, &["common_dir"], true, || {
+        let raw = PathBuf::from(git(cwd, &["rev-parse", "--git-common-dir"])?);
+        let path = if raw.is_absolute() {
+            raw
+        } else {
+            cwd.join(raw)
+        };
+        Ok(path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned())
+    })?;
+    Ok(PathBuf::from(absolute))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -335,8 +333,13 @@ struct WorktreeOwner {
 }
 
 pub fn worktree_admin_dir(checkout: &Path) -> Result<PathBuf> {
-    std::fs::canonicalize(git(checkout, &["rev-parse", "--absolute-git-dir"])?)
-        .context("cannot resolve worktree administrative directory")
+    std::fs::canonicalize(answers::text(
+        checkout,
+        &["worktree_admin_dir"],
+        true,
+        || git(checkout, &["rev-parse", "--absolute-git-dir"]),
+    )?)
+    .context("cannot resolve worktree administrative directory")
 }
 
 /// The registered checkout must resolve to the directory allocated at creation.
@@ -407,9 +410,11 @@ pub fn worktree_owner_matches(checkout: &Path, change_id: &str, token: Option<&s
 }
 
 pub fn toplevel(cwd: &Path) -> Result<PathBuf> {
-    Ok(PathBuf::from(shared_git(
+    Ok(PathBuf::from(answers::text(
         cwd,
-        &["rev-parse", "--show-toplevel"],
+        &["toplevel"],
+        true,
+        || git(cwd, &["rev-parse", "--show-toplevel"]),
     )?))
 }
 
@@ -426,10 +431,12 @@ pub fn git_path(cwd: &Path, name: &str) -> Result<PathBuf> {
 }
 
 pub fn rev_parse(cwd: &Path, rev: &str) -> Result<String> {
-    git(
-        cwd,
-        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
-    )
+    answers::text(cwd, &["rev_parse", rev], is_object_id(rev), || {
+        git(
+            cwd,
+            &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+        )
+    })
 }
 
 pub fn head(cwd: &Path) -> Result<String> {
@@ -454,23 +461,25 @@ pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
 /// Resolve HEAD when the repository has one. An unborn repository is a
 /// normal probe condition, while other Git failures remain errors.
 pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
-    let out = git_command()
-        .args(["rev-parse", "--verify", "-q", "HEAD"])
-        .current_dir(cwd)
-        .counted_output()
-        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
-    if out.status.success() {
-        return Ok(Some(
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        ));
-    }
-    if out.status.code() == Some(1) {
-        return Ok(None);
-    }
-    bail!(
-        "git rev-parse --verify -q HEAD failed: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
+    answers::optional_text(cwd, &["head_if_present"], false, || {
+        let out = git_command()
+            .args(["rev-parse", "--verify", "-q", "HEAD"])
+            .current_dir(cwd)
+            .counted_output()
+            .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+        if out.status.success() {
+            return Ok(Some(
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            ));
+        }
+        if out.status.code() == Some(1) {
+            return Ok(None);
+        }
+        bail!(
+            "git rev-parse --verify -q HEAD failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    })
 }
 
 pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
@@ -484,19 +493,34 @@ pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
     rev_parse(cwd, &name)
 }
 
+/// The destination ref at an authorization boundary. This bypasses held ref
+/// answers because another process can move a destination after a prior read.
+pub fn fresh_branch_head(cwd: &Path, branch: &str) -> Result<String> {
+    git(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ],
+    )
+}
+
 pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
-    let out = git_command()
-        .args(["symbolic-ref", "-q", "HEAD"])
-        .current_dir(cwd)
-        .counted_output()?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .strip_prefix("refs/heads/")
-            .map(str::to_string))
-    } else {
-        Ok(None)
-    }
+    answers::optional_text(cwd, &["current_branch"], false, || {
+        let out = git_command()
+            .args(["symbolic-ref", "-q", "HEAD"])
+            .current_dir(cwd)
+            .counted_output()?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .strip_prefix("refs/heads/")
+                .map(str::to_string))
+        } else {
+            Ok(None)
+        }
+    })
 }
 
 /// Repository-relative paths a change touched between two revisions.
@@ -1084,6 +1108,7 @@ pub fn commit_tree_as(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let _answers = answers::command_scope(&command);
     let mut child = command
         .counted_spawn()
         .context("cannot run git commit-tree")?;
@@ -1295,6 +1320,7 @@ fn hash_object(cwd: &Path, kind: &str, object: &[u8]) -> Result<String> {
 
 /// Git with `input` on its standard input, answering with its standard
 /// output. The editor pins every other Git call here gets apply to these too.
+#[track_caller]
 fn git_piped(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
     let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     let mut command = git_command();
@@ -1425,6 +1451,7 @@ fn piped_output(
 }
 
 /// The same, for a caller that has already built the command.
+#[track_caller]
 fn piped_output_with(
     mut command: Command,
     program: &str,
@@ -1436,6 +1463,7 @@ fn piped_output_with(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let _answers = answers::command_scope(&command);
     let deadline = COMMAND_DEADLINE.get();
     if deadline.is_some() {
         command.process_group(0);
@@ -1482,43 +1510,77 @@ fn piped_output_with(
 /// A tracked file's text as committed at `rev`, or `None` when that revision
 /// holds no such path.
 pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
-    let object = format!("{rev}:{path}");
-    match shared_object(cwd, &object) {
-        Some(Object::Missing) => return Ok(None),
-        Some(Object::Found { kind, bytes, .. }) if kind == "blob" => {
-            return String::from_utf8(bytes)
-                .map(Some)
-                .with_context(|| format!("{object} is not UTF-8"));
+    if let Some(answer) = shared_object(cwd, &format!("{rev}:{path}")) {
+        match answer {
+            Object::Missing => return Ok(None),
+            Object::Found { kind, bytes, .. } if kind == "blob" => {
+                return String::from_utf8(bytes)
+                    .map(Some)
+                    .with_context(|| format!("{rev}:{path} is not UTF-8"));
+            }
+            _ => {}
         }
-        _ => {}
     }
-    let out = git_command()
-        .args(["rev-parse", "--verify", "-q", &object])
-        .current_dir(cwd)
-        .counted_output()
-        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
-    if out.status.code() == Some(1) {
-        return Ok(None);
-    }
-    if !out.status.success() {
-        bail!(
-            "git rev-parse --verify -q {object} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let bytes = git_bytes(cwd, &["cat-file", "blob", &blob])?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .with_context(|| format!("{object} is not UTF-8"))
+    let resolved = if is_object_id(rev) {
+        rev.to_owned()
+    } else {
+        let Some(id) = ref_value(cwd, rev)? else {
+            return Ok(None);
+        };
+        id
+    };
+    let rev = resolved.as_str();
+    answers::optional_text(cwd, &["file_at", rev, path], true, || {
+        let object = format!("{rev}:{path}");
+        match shared_object(cwd, &object) {
+            Some(Object::Missing) => return Ok(None),
+            Some(Object::Found { kind, bytes, .. }) if kind == "blob" => {
+                return String::from_utf8(bytes)
+                    .map(Some)
+                    .with_context(|| format!("{object} is not UTF-8"));
+            }
+            _ => {}
+        }
+        let out = git_command()
+            .args(["rev-parse", "--verify", "-q", &object])
+            .current_dir(cwd)
+            .counted_output()
+            .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+        if out.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !out.status.success() {
+            bail!(
+                "git rev-parse --verify -q {object} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let bytes = blob_bytes(cwd, &blob)?;
+        String::from_utf8(bytes)
+            .map(Some)
+            .with_context(|| format!("{object} is not UTF-8"))
+    })
 }
 
 /// A blob's bytes, exactly as the object store holds them.
 pub fn blob_bytes(cwd: &Path, blob: &str) -> Result<Vec<u8>> {
-    git_bytes(cwd, &["cat-file", "blob", blob])
+    let resolved = if is_object_id(blob) {
+        blob.to_owned()
+    } else {
+        ref_value(cwd, blob)?.unwrap_or_else(|| blob.to_owned())
+    };
+    Ok(answers::optional_bytes(
+        cwd,
+        &["blob_bytes", &resolved],
+        is_object_id(&resolved),
+        || git_bytes(cwd, &["cat-file", "blob", &resolved]).map(Some),
+    )?
+    .expect("blob reads return bytes"))
 }
 
 /// Git's raw output, for the callers that read objects rather than text.
+#[track_caller]
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let mut command = git_command();
     command.args(args).current_dir(cwd);
@@ -1632,12 +1694,21 @@ pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
 /// The tree a commit points at, for comparing what was committed with what was
 /// actually there.
 pub fn commit_tree(cwd: &Path, rev: &str) -> Result<String> {
-    if let Some(Object::Found { id, kind, .. }) = shared_object(cwd, &format!("{rev}^{{tree}}")) {
-        if kind == "tree" {
-            return Ok(id);
+    let resolved = if is_object_id(rev) {
+        rev.to_owned()
+    } else {
+        ref_value(cwd, rev)?.unwrap_or_else(|| rev.to_owned())
+    };
+    let rev = resolved.as_str();
+    answers::text(cwd, &["commit_tree", rev], is_object_id(rev), || {
+        if let Some(Object::Found { id, kind, .. }) = shared_object(cwd, &format!("{rev}^{{tree}}"))
+        {
+            if kind == "tree" {
+                return Ok(id);
+            }
         }
-    }
-    git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
+        git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
+    })
 }
 
 /// The tree a checkout would have to reproduce to match this worktree:
@@ -2216,17 +2287,19 @@ pub fn update_refs(cwd: &Path, updates: &[RefUpdate]) -> Result<()> {
 /// What a ref holds, or nothing where the repository has no such ref. An
 /// annotated tag answers with its tag object, which is what its ref holds.
 pub fn ref_value(cwd: &Path, name: &str) -> Result<Option<String>> {
-    let mut command = git_command();
-    command
-        .args(["rev-parse", "--verify", "--quiet", name])
-        .current_dir(cwd);
-    let out = command_output(&mut command)
-        .with_context(|| format!("failed to read {name} in {}", cwd.display()))?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok((!value.is_empty()).then_some(value))
+    answers::optional_text(cwd, &["ref_value", name], is_object_id(name), || {
+        let mut command = git_command();
+        command
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .current_dir(cwd);
+        let out = command_output(&mut command)
+            .with_context(|| format!("failed to read {name} in {}", cwd.display()))?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok((!value.is_empty()).then_some(value))
+    })
 }
 
 pub fn delete_ref(cwd: &Path, name: &str) -> Result<()> {
@@ -3229,14 +3302,16 @@ impl Drop for BlobReader {
 /// the reader. An empty slot is a reader not yet spawned, or one that failed.
 type ObjectReaderSlot = std::sync::Arc<std::sync::Mutex<Option<ObjectReader>>>;
 static OBJECT_READERS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, ObjectReaderSlot>>,
+    std::sync::Mutex<std::collections::HashMap<answers::Repository, ObjectReaderSlot>>,
 > = std::sync::OnceLock::new();
 
-/// Every answer the readers gave, by checkout and name: a process that
-/// shares its reads holds the repository still, so a name answers the same
-/// each time it is asked.
+/// Object answers are keyed by canonical checkout, resolved repository and
+/// name. Git writes and project commands discard them, including symbolic
+/// names and missing objects that may become present.
 static OBJECT_ANSWERS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, std::collections::HashMap<String, Object>>>,
+    std::sync::Mutex<
+        std::collections::HashMap<answers::Repository, std::collections::HashMap<String, Object>>,
+    >,
 > = std::sync::OnceLock::new();
 
 /// While the process shares its reads, the object `name` names, read through
@@ -3248,15 +3323,17 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
     // Bounded reads use the runner that kills and reaps a timed-out process group.
     if COMMAND_DEADLINE.get().is_some()
         || !crate::store::shares_reads()
+        || !answers::reads_are_stable()
         || name.contains(['\n', '\r'])
     {
         return None;
     }
+    let repository = answers::repository(cwd)?;
     let answers = OBJECT_ANSWERS.get_or_init(Default::default);
     if let Some(answer) = answers
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(cwd)
+        .get(&repository)
         .and_then(|held| held.get(name))
     {
         return Some(answer.clone());
@@ -3266,9 +3343,9 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match readers.get(cwd) {
+        match readers.get(&repository) {
             Some(slot) => std::sync::Arc::clone(slot),
-            None => std::sync::Arc::clone(readers.entry(cwd.to_path_buf()).or_default()),
+            None => std::sync::Arc::clone(readers.entry(repository.clone()).or_default()),
         }
     };
     let answer = {
@@ -3287,7 +3364,7 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
     answers
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(cwd.to_path_buf())
+        .entry(repository.clone())
         .or_default()
         .insert(name.to_string(), answer.clone());
     Some(answer)
@@ -3303,7 +3380,7 @@ pub fn changed_paths_of(
     cwd: &Path,
     ranges: &[(String, String)],
 ) -> std::collections::HashMap<(String, String), Vec<String>> {
-    if !crate::store::shares_reads() {
+    if !crate::store::shares_reads() || !answers::reads_are_stable() {
         return read_changed_paths_of(cwd, ranges);
     }
     let held = RANGE_PATHS.get_or_init(Default::default);
@@ -3344,8 +3421,9 @@ fn is_object_id(name: &str) -> bool {
 }
 
 /// What `changed_paths_of` answered for each checkout and range of two full
-/// object IDs while the process shares its reads. Commits do not change, so
-/// such an answer holds for as long as the process does.
+/// object IDs while the process shares its reads. Git writes preserve these
+/// answers; project commands and explicit refreshes discard them and their
+/// object streams because replacement refs can alter a full revision's view.
 static RANGE_PATHS: std::sync::OnceLock<std::sync::Mutex<RangePaths>> = std::sync::OnceLock::new();
 
 /// The paths each range touches, by the directory it was read in.
@@ -3356,6 +3434,22 @@ type RangePaths = std::collections::HashMap<(PathBuf, (String, String)), Vec<Str
 /// worktree cleanliness. For a reader that stays up while the repositories
 /// move.
 pub(crate) fn forget_answers() {
+    answers::forget();
+    forget_shared_answers();
+    forget_object_history();
+}
+
+fn forget_object_history() {
+    if let Some(paths) = RANGE_PATHS.get() {
+        paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+    close_object_readers();
+}
+
+fn forget_shared_answers() {
     listing::forget();
     if let Some(answers) = OBJECT_ANSWERS.get() {
         answers

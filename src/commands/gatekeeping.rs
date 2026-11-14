@@ -5977,7 +5977,7 @@ fn integration_facts(
     };
     // Read under the target lock, so the merge is checked against the same
     // tree the authorization covers.
-    let target_revision = gitio::branch_head(&ctx.cwd, target);
+    let target_revision = gitio::fresh_branch_head(&ctx.cwd, target);
     let mut selected = st.clone();
     selected.target_branch = target.to_string();
     let declarations = target_revision
