@@ -3,7 +3,6 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::net::UnixDatagram;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
@@ -21,93 +20,73 @@ mod linux {
         config1: u64,
     }
 
-    /// The socket transfers ownership of the child's counter without an exec race.
-    pub struct Pending {
-        socket: UnixDatagram,
-    }
+    /// The child waits before exec while a holder thread installs its counter.
+    pub struct Pending(std::thread::JoinHandle<Option<Counter>>);
     pub struct Counter(OwnedFd);
 
     pub fn prepare(command: &mut Command) -> Option<Pending> {
-        let (parent, child) = UnixDatagram::pair().ok()?;
+        use std::io::{Read, Write};
+        let (mut parent, child) = std::os::unix::net::UnixStream::pair().ok()?;
+        let worker = std::thread::spawn(move || {
+            let mut pid = [0_u8; 4];
+            parent.read_exact(&mut pid).ok()?;
+            let attr = Attr {
+                kind: 0,
+                size: std::mem::size_of::<Attr>() as u32,
+                config: 1,
+                period: 0,
+                sample_type: 0,
+                read_format: 3,
+                flags: 1 | (1 << 1) | (1 << 5) | (1 << 6) | (1 << 12),
+                wakeup: 0,
+                bp_type: 0,
+                config1: 0,
+            };
+            // SAFETY: attr describes the stopped-before-exec child. Only the
+            // holder owns this descriptor; prctl in the gate cannot disable it.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_perf_event_open,
+                    &attr,
+                    i32::from_ne_bytes(pid),
+                    -1,
+                    -1,
+                    8,
+                ) as i32
+            };
+            let counter = (fd >= 0).then(|| Counter(unsafe { OwnedFd::from_raw_fd(fd) }));
+            parent.write_all(&[0]).ok()?;
+            counter
+        });
         // SAFETY: the child uses stack storage and async-signal-safe syscalls only.
         unsafe {
             command.pre_exec(move || {
-                let attr = Attr {
-                    kind: 0,
-                    size: std::mem::size_of::<Attr>() as u32,
-                    config: 1,
-                    period: 0,
-                    sample_type: 0,
-                    read_format: 3,
-                    flags: 1 | (1 << 1) | (1 << 5) | (1 << 6) | (1 << 12),
-                    wakeup: 0,
-                    bp_type: 0,
-                    config1: 0,
-                };
-                let fd = libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, 8) as i32;
-                let mut byte = [0_u8];
-                let mut iov = libc::iovec {
-                    iov_base: byte.as_mut_ptr().cast(),
-                    iov_len: 1,
-                };
-                let mut control = [0_usize; 4];
-                let mut message: libc::msghdr = std::mem::zeroed();
-                message.msg_iov = &mut iov;
-                message.msg_iovlen = 1;
-                if fd >= 0 {
-                    message.msg_control = control.as_mut_ptr().cast();
-                    message.msg_controllen =
-                        libc::CMSG_SPACE(std::mem::size_of::<i32>() as u32) as usize;
-                    let header = libc::CMSG_FIRSTHDR(&message);
-                    (*header).cmsg_level = libc::SOL_SOCKET;
-                    (*header).cmsg_type = libc::SCM_RIGHTS;
-                    (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as u32) as usize;
-                    std::ptr::write(libc::CMSG_DATA(header).cast::<i32>(), fd);
+                let pid = libc::getpid().to_ne_bytes();
+                if libc::write(child.as_raw_fd(), pid.as_ptr().cast(), pid.len())
+                    != pid.len() as isize
+                {
+                    return Err(std::io::Error::last_os_error());
                 }
-                let _ = libc::sendmsg(child.as_raw_fd(), &message, libc::MSG_NOSIGNAL);
-                if fd >= 0 {
-                    libc::close(fd);
+                let mut byte = 0_u8;
+                loop {
+                    match libc::read(child.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) {
+                        1 => return Ok(()),
+                        -1 if std::io::Error::last_os_error().kind()
+                            == std::io::ErrorKind::Interrupted =>
+                        {
+                            continue
+                        }
+                        _ => return Err(std::io::Error::other("counter holder disconnected")),
+                    }
                 }
-                Ok(())
             });
         }
-        Some(Pending { socket: parent })
+        Some(Pending(worker))
     }
 
     impl Pending {
         pub fn receive(self) -> Option<Counter> {
-            let mut byte = [0_u8];
-            let mut iov = libc::iovec {
-                iov_base: byte.as_mut_ptr().cast(),
-                iov_len: 1,
-            };
-            let mut control = [0_usize; 4];
-            // SAFETY: recvmsg initializes the supplied message buffers; a received
-            // SCM_RIGHTS descriptor is owned by this process.
-            unsafe {
-                let mut message: libc::msghdr = std::mem::zeroed();
-                message.msg_iov = &mut iov;
-                message.msg_iovlen = 1;
-                message.msg_control = control.as_mut_ptr().cast();
-                message.msg_controllen = std::mem::size_of_val(&control);
-                if libc::recvmsg(
-                    self.socket.as_raw_fd(),
-                    &mut message,
-                    libc::MSG_CMSG_CLOEXEC,
-                ) != 1
-                {
-                    return None;
-                }
-                let header = libc::CMSG_FIRSTHDR(&message);
-                if header.is_null()
-                    || (*header).cmsg_level != libc::SOL_SOCKET
-                    || (*header).cmsg_type != libc::SCM_RIGHTS
-                {
-                    return None;
-                }
-                let fd = std::ptr::read(libc::CMSG_DATA(header).cast::<i32>());
-                Some(Counter(OwnedFd::from_raw_fd(fd)))
-            }
+            self.0.join().ok().flatten()
         }
     }
 
@@ -173,6 +152,30 @@ mod tests {
         assert!(
             tree > shell * 10,
             "descendant instructions missing: shell {shell}, tree {tree}"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ownership_tests {
+    /// A gate cannot disable a holder-owned inherited counter with prctl.
+    /// Rejects a near-zero count after the gate disables its own perf events.
+    #[test]
+    fn the_gate_cannot_disable_the_holders_counter() {
+        fn count(disable: bool) -> Option<u64> {
+            let mut command = std::process::Command::new("python3");
+            command.args(["-c", &format!("import ctypes, subprocess, sys; ctypes.CDLL(None).prctl(31,0,0,0,0) if {disable} else None; subprocess.run([sys.executable, '-c', 'sum(range(2000000))'], check=True)", disable=if disable {"True"} else {"False"})]);
+            let pending = super::prepare(&mut command)?;
+            let mut child = command.spawn().unwrap();
+            let counter = pending.receive();
+            assert!(child.wait().unwrap().success());
+            counter?.finish()
+        }
+        let Some(normal) = count(false) else { return };
+        let disabled = count(true).expect("counter remains available");
+        assert!(
+            disabled > normal / 2,
+            "gate disabled counter: normal {normal}, disabled {disabled}"
         );
     }
 }
