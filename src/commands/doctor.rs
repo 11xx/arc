@@ -231,8 +231,19 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         }),
     }
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
-    inspect_debt(ctx, &states, &mut advice)?;
-    inspect_clearance(&states, &mut advice);
+    // Debt standing is judged as every other view reads it: the store's
+    // states follow recorded rewrites and carry the review context, where the
+    // states above keep recorded revisions for the dangling-object checks.
+    match store.readable_states() {
+        Ok(ledger) => {
+            inspect_debt(ctx, &ledger, &mut advice)?;
+            inspect_clearance(&ledger, &mut advice);
+        }
+        Err(error) => advice.push(Finding {
+            code: "debt-unjudged",
+            detail: format!("outstanding debt cannot be counted: {error:#}"),
+        }),
+    }
     inspect_hold_releases(&readable, &mut advice);
     let replica = match crate::replica::status(&store) {
         Ok(status) => Some(status),

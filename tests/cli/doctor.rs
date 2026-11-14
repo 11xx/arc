@@ -1084,3 +1084,56 @@ fn doctor_reads_import_batches_a_fixed_number_of_times_however_many_changes() {
         "import batch reads grew from {few} to {many} with four more changes"
     );
 }
+
+/// Claim: `arc doctor` counts outstanding debt as every other view reads it,
+/// so its `debt-outstanding` total agrees with `arc query --debt` and the
+/// `debt-summary` that `arc check` prints. Rejects a doctor that judges debt
+/// at revisions a recorded history rewrite has replaced, which keeps a debt
+/// owed after an audit of the rewritten range discharged it.
+#[test]
+fn doctor_counts_debt_as_the_ledger_reads_it_after_a_history_rewrite() {
+    let repo = Repo::new();
+    let base = repo.head(&repo.root);
+    change_with_patchset(&repo, "rewritten");
+    repo.arc(&repo.root)
+        .args(["integrate", "rewritten", "--debt", "no reviewer reachable"])
+        .assert()
+        .success();
+    let out = stdout(repo.arc(&repo.root).args([
+        "rewrite",
+        "trailers",
+        "--include-shared",
+        "--no-sign",
+        "--append",
+        "Assisted-by: a:b#c (lead)",
+        "--from",
+        &base,
+    ]));
+    assert!(out.contains("rewritten on master"), "{out}");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Auditor")
+        .args([
+            "audit",
+            "rewritten",
+            "--verdict",
+            "approved",
+            "--extent",
+            "whole",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "rewritten", "--json"]));
+    assert_eq!(status["debt"]["standing"], "discharged", "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--debt"]))
+        .trim()
+        .is_empty());
+    let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let owed: Vec<_> = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "debt-outstanding")
+        .collect();
+    assert!(owed.is_empty(), "{owed:?}");
+}
