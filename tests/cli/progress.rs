@@ -73,13 +73,20 @@ fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
 /// it follows the change through commits, a snapshot, green gates, a review
 /// that asked for changes (counted as a round), a fresh snapshot, approval
 /// and integration, with its landing time and revision, while no progress
-/// write happens after the link. Rejects a stage that is written rather than
-/// derived, or that stops following the change at any step.
+/// write happens after the link. A change whose target's declarations cannot
+/// be read stays `snapshotted`, since its requirements are unknown. Rejects
+/// a stage that is written rather than derived, that stops following the
+/// change at any step, or that reads unknown requirements as green.
 #[test]
 fn a_linked_items_stage_follows_its_change_without_a_progress_write() {
     let repo = Repo::new();
     repo.redeclare_gates("[gates.unit]\ncommand = \"true\"\n");
-    let file = start(&repo, &repo.root, "ship", &["Wire the reader"]);
+    let file = start(
+        &repo,
+        &repo.root,
+        "ship",
+        &["Wire the reader", "Behind a lost target"],
+    );
     let begun = stdout(
         repo.arc(&repo.root)
             .args(["begin", "reader", "--item", "ship:i1"]),
@@ -133,13 +140,36 @@ fn a_linked_items_stage_follows_its_change_without_a_progress_write() {
     let report = report(&repo, &repo.root, &[]);
     let counts = &series(&report, &file)["counts"];
     assert_eq!(counts["complete"], 1);
-    assert_eq!(counts["percent"], 100);
+    assert_eq!(counts["percent"], 50);
     assert_eq!(series(&report, &file)["last_landing"]["item"], "i1");
 
     assert_eq!(
         item_events(&dir),
         writes,
         "the stage moved through a progress write rather than the ledger"
+    );
+
+    git(&repo.root, &["branch", "side", "master"]);
+    stdout(repo.arc(&repo.root).args([
+        "begin",
+        "lost-target",
+        "--target",
+        "side",
+        "--item",
+        "ship:i2",
+    ]));
+    let worktree = repo.home.join(".worktrees").join("repo-lost-target");
+    git(&worktree, &["rm", "-q", ".arc/gates.toml"]);
+    git(
+        &worktree,
+        &["commit", "-q", "-m", "chore: drop declarations"],
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", "lost-target"]));
+    git(&repo.root, &["branch", "-D", "side"]);
+    assert_eq!(
+        stage(&repo, &file, "i2")["stage"],
+        "snapshotted",
+        "requirements the target cannot be read for were read as green"
     );
 }
 
@@ -501,10 +531,11 @@ fn begin_change_in(repo: &Repo, cwd: &Path, slug: &str) -> String {
 }
 
 /// Claim: retiring a series by its conclusion records it consumed as
-/// superseded with the conclusion named as its successor, removes it from
-/// the default listing, keeps it readable by name, and refuses further
-/// edits. Rejects a retired series still listed, one unreadable by name, and
-/// a retirement that does not name the conclusion.
+/// superseded with the conclusion named as what resolved it, which the
+/// journal's library shows as its successor; removes it from the default
+/// listing, keeps it readable by name, and refuses further edits. Rejects a
+/// retired series still listed, one unreadable by name, and a retirement
+/// whose successor the journal's own readers do not show.
 #[test]
 fn retiring_a_series_by_its_conclusion_leaves_the_listing_and_records_the_successor() {
     let repo = Repo::new();
@@ -544,6 +575,21 @@ fn retiring_a_series_by_its_conclusion_leaves_the_listing_and_records_the_succes
         .assert()
         .failure()
         .stderr(predicates::str::contains("retired"));
+
+    let library =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--library", "--json"]),
+        );
+    let row = library["projects"][0]["library"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["file"] == file)
+        .unwrap()
+        .clone();
+    assert_eq!(row["status"], "superseded", "{row}");
+    assert_eq!(row["superseded_by"], conclusion.as_str(), "{row}");
 }
 
 /// Claim: `arc progress --json` carries the `arc-progress/1` shape the guide
@@ -658,4 +704,291 @@ fn progress_json_has_the_arc_progress_1_shape() {
             ("in_flight", "array"),
         ],
     );
+}
+
+/// The `arc-perf/1` record `ARC_TRACE` writes for one `arc progress`.
+fn traced_progress(repo: &Repo) -> serde_json::Value {
+    let output = repo
+        .arc(&repo.root)
+        .env("ARC_TRACE", "1")
+        .arg("progress")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr
+        .lines()
+        .find(|line| line.contains("\"arc-perf/1\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .unwrap_or_else(|| panic!("no trace record: {stderr}"))
+}
+
+/// What one report read: change ledgers opened and decoded, changes
+/// reduced, and Git processes started.
+fn reads(record: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "change_files_opened": record["ledger"]["change"]["opened"],
+        "change_events_decoded": record["ledger"]["change"]["decoded"],
+        "changes_reduced": record["counts"]["changes_reduced"],
+        "git": record["children"]["runs"],
+    })
+}
+
+/// Claim: a report reads the ledger only for its linked items: a second
+/// change that no item links, however many events it holds, changes neither
+/// the ledger files the report opens and decodes, the changes it reduces,
+/// nor the Git processes it starts. Rejects a report whose cost follows the
+/// size of the ledger rather than its own items.
+#[test]
+fn a_report_reads_only_the_changes_its_items_link() {
+    let repo = Repo::new();
+    start(&repo, &repo.root, "bounded", &["Linked", "Free"]);
+    let linked = begin_change(&repo, "linked", None);
+    progress(&repo, &repo.root, &["link", "bounded", "i1", &linked]);
+    let before = reads(&traced_progress(&repo));
+
+    let unrelated = begin_change(&repo, "unrelated", None);
+    for index in 0..12 {
+        stdout(repo.arc(&repo.root).args([
+            "keep",
+            &unrelated,
+            "--kind",
+            "constraint",
+            "--body",
+            &format!("fact {index}"),
+        ]));
+    }
+    let after = reads(&traced_progress(&repo));
+    assert_eq!(
+        before, after,
+        "an unlinked change changed what the report read"
+    );
+}
+
+/// Claim: `retire --by` and `start --follows` take only a bare artifact
+/// filename of this journal that is a regular file: a relative path climbing
+/// out, an absolute path, and a filename-shaped symbolic link to a file
+/// outside the journal are each refused and record nothing. Rejects a name
+/// that leads the journal to read a file outside its directories.
+#[test]
+fn artifact_names_on_the_command_line_never_leave_the_journal() {
+    let repo = Repo::new();
+    start(&repo, &repo.root, "contained", &["Only"]);
+    let dir = journal_dir(&repo, &repo.root);
+    let outside = repo.home.join("20261114T000000Z-outside-conclusion.md");
+    fs::write(&outside, "# Outside\n").unwrap();
+    let plan = repo.home.join("20261114T000000Z-outside-plan.md");
+    fs::write(&plan, "# Outside plan\n").unwrap();
+    let link = "20261114T000001Z-linked-conclusion.md";
+    std::os::unix::fs::symlink(&outside, dir.join(link)).unwrap();
+    let relative = pathdiff(&dir, &outside);
+    let events = journal_event_log(&dir).len();
+    for name in [relative.as_str(), outside.to_str().unwrap(), link] {
+        repo.arc(&repo.root)
+            .args(["progress", "retire", "contained", "--by", name])
+            .assert()
+            .failure();
+    }
+    let relative_plan = pathdiff(&dir, &plan);
+    for name in [relative_plan.as_str(), plan.to_str().unwrap()] {
+        repo.arc(&repo.root)
+            .args([
+                "progress",
+                "start",
+                "other",
+                "--title",
+                "Other",
+                "--follows",
+                name,
+            ])
+            .assert()
+            .failure();
+    }
+    assert_eq!(
+        journal_event_log(&dir).len(),
+        events,
+        "a refused name recorded something"
+    );
+    assert_eq!(
+        report(&repo, &repo.root, &[])["series"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// `to` spelled relative to `from`, climbing with `..` to their common root.
+fn pathdiff(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); from.len() - common];
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|part| part.as_os_str().to_string_lossy().to_string()),
+    );
+    parts.join("/")
+}
+
+/// Claim: `begin --item` checks the item before anything is written: a
+/// series or item that does not exist is refused in a repository with no
+/// ledger, and leaves no ledger, branch or change behind. Rejects a preflight
+/// that creates the ledger before refusing.
+#[test]
+fn begin_with_an_unknown_item_leaves_nothing_behind() {
+    let repo = Repo::new();
+    start(&repo, &repo.root, "fresh", &["Only"]);
+    let ledger = repo.root.join(".git/arc");
+    assert!(!ledger.exists(), "the fixture starts without a ledger");
+    for spec in ["nosuch:i1", "fresh:i9"] {
+        repo.arc(&repo.root)
+            .args(["begin", "never", "--item", spec])
+            .assert()
+            .failure();
+        assert!(!ledger.exists(), "{spec} left a ledger behind");
+    }
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/never"])
+        .trim()
+        .is_empty());
+}
+
+/// Claim: `reopen` undoes `drop` for an item that keeps its link, and the
+/// reopened item reads its stage from the change again and counts in flight.
+/// Rejects a reopen limited to unlinked items, or one that leaves a linked
+/// item reading as open.
+#[test]
+fn reopening_a_dropped_linked_item_returns_it_to_its_derived_stage() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "back", &["Linked"]);
+    let change = begin_change(&repo, "back-work", None);
+    progress(&repo, &repo.root, &["link", "back", "i1", &change]);
+    progress(
+        &repo,
+        &repo.root,
+        &["drop", "back", "i1", "--reason", "parked"],
+    );
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "dropped");
+    progress(
+        &repo,
+        &repo.root,
+        &["reopen", "back", "i1", "--note", "resumed"],
+    );
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "opened");
+    assert_eq!(row["change"], change.as_str());
+    let report = report(&repo, &repo.root, &[]);
+    assert_eq!(series(&report, &file)["counts"]["in_flight"], 1);
+}
+
+/// Claim: a link is written only while the item's link is still the one the
+/// command read, so a link another writer made between that read and the
+/// write is refused and kept, never silently replaced. Rejects a link decided
+/// on a stale reading.
+#[cfg(debug_assertions)]
+#[test]
+fn a_link_made_meanwhile_is_not_replaced() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "race", &["Contested"]);
+    let first = begin_change(&repo, "first", None);
+    let second = begin_change(&repo, "second", None);
+    let dir = journal_dir(&repo, &repo.root);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(".locks/transition.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let mut child = spawn_arc_paused_on_lock(
+        &repo,
+        &repo.root,
+        &["progress", "link", "race", "i1", &second],
+        "transition",
+        &[],
+    );
+    let competing = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "topic": "race",
+        "event": "item-linked",
+        "file": file,
+        "item": "i1",
+        "change": first,
+    });
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("events.jsonl"))
+        .unwrap();
+    use std::io::Write;
+    writeln!(log, "{competing}").unwrap();
+    drop(held);
+    release_lock_wait(&mut child);
+    let status = wait_for_exit(&mut child);
+    let stderr = child_stderr(&mut child);
+    assert!(
+        !status.success(),
+        "the stale link replaced the newer one: {stderr}"
+    );
+    assert!(stderr.contains("since this command read it"), "{stderr}");
+    assert_eq!(stage(&repo, &file, "i1")["change"], first.as_str());
+}
+
+/// Claim: a series' title as corrected through the journal is the title the
+/// report shows, retired or not, as the journal's other views show it.
+/// Rejects a report that keeps the title as first written.
+#[test]
+fn a_corrected_series_title_is_the_one_reported() {
+    let repo = Repo::new();
+    let file = start(&repo, &repo.root, "titled", &["Only"]);
+    let (_, conclusion) = journal_artifact(&repo, "titled", "conclusion", "# Done\n");
+    progress(
+        &repo,
+        &repo.root,
+        &["retire", "titled", "--by", &conclusion],
+    );
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "correct",
+        &file,
+        "--target",
+        "artifact",
+        "--field",
+        "title",
+        "--value",
+        "Titled, corrected",
+    ]));
+    let report = report(&repo, &repo.root, &[&file]);
+    assert_eq!(series(&report, &file)["title"], "Titled, corrected");
+    assert!(progress(&repo, &repo.root, &[&file])
+        .starts_with(&format!("== Titled, corrected ({file})")));
+}
+
+/// Claim: `unrelate` removes a relation this journal records, appending one
+/// event, so the series no longer names or prints the related series.
+/// Rejects a relation that stays after it was removed.
+#[test]
+fn unrelate_removes_the_relation_here() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    let here = start(&repo, &repo.root, "here", &["Local"]);
+    let there = start(&repo, &other, "there", &["Remote"]);
+    progress(&repo, &repo.root, &["relate", "here", "other::there"]);
+    let dir = journal_dir(&repo, &repo.root);
+    let events = journal_event_log(&dir).len();
+    let removed = progress(&repo, &repo.root, &["unrelate", "here", "other::there"]);
+    assert!(removed.contains(&there), "{removed}");
+    assert_eq!(journal_event_log(&dir).len(), events + 1);
+    let report = report(&repo, &repo.root, &[]);
+    assert!(series(&report, &here)["related"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(report["related"].as_array().unwrap().is_empty());
+    repo.arc(&repo.root)
+        .args(["progress", "unrelate", "here", "other::there"])
+        .assert()
+        .failure();
 }
