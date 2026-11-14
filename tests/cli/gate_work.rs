@@ -934,11 +934,18 @@ fn an_execute_only_command_cannot_seed_a_dropped_counter_reference() {
 fn a_clock_that_covers_less_than_the_reference_cannot_excuse() {
     // The fixture's reference clock covers all 100 ms of its waited CPU.
     let (repo, _, wt) = fixture("clock-coverage");
-    for (clock, code) in [(95, 0), (94, 1)] {
-        let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+    let observe = |ms: u64, other: u64, clock: u64, code: i32| {
+        let mut facts: Value = serde_json::from_str(&readings(Some(1000), other)).unwrap();
         facts["tree_cpu_ms"] = json!(clock);
-        controlled_run(&repo, &wt, 1100, facts, code);
-    }
+        controlled_run(&repo, &wt, ms, facts, code);
+    };
+    observe(1100, 5000, 95, 0);
+    observe(1100, 5000, 94, 1);
+    // A newer reference whose own clock covers 90%: the bound moves with it,
+    // which a fixed 95% floor would not.
+    observe(900, 1000, 90, 0);
+    observe(1100, 5000, 86, 0);
+    observe(1100, 5000, 85, 1);
 }
 
 /// I2: a receipt judged under rule 1 names thresholds without a coverage
