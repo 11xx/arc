@@ -672,6 +672,10 @@ pub struct StatusReport {
     pub provisional_prerequisites: Vec<crate::model::ProvisionalPrerequisite>,
     pub provisional_staging_destination: Option<String>,
     pub replay_snapshot_required: bool,
+    /// Integration's refusal of a reserved-domain commit in the patchset that
+    /// would ship, word for word, naming the commit and how to re-author it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved_identity: Option<String>,
     pub recorded_verdict_tips: Vec<String>,
     pub eligible_verdict_tips: Vec<String>,
     pub verdict_assessments: Vec<VerdictAssessment>,
@@ -1270,6 +1274,9 @@ pub fn prefetch_listing<'a>(cwd: &Path, states: impl Iterator<Item = &'a ChangeS
             wanted
                 .ancestry
                 .push((target.clone(), patchset.head.clone()));
+            wanted
+                .identities
+                .push((target.clone(), patchset.base.clone(), patchset.head.clone()));
         }
         if let Some(worktree) = state
             .worktree
@@ -1327,6 +1334,20 @@ pub fn build_at_with_shape(
     };
     let needs_rebase = diverged || merge.as_ref().is_some_and(|merge| merge.conflicts);
     let merged_tree = merge.and_then(|merge| merge.tree);
+    // The predicate integration refuses on, so readiness never reads ready
+    // for a patchset integration would refuse. A read that fails leaves the
+    // refusal to integration, which reports the failure itself.
+    let reserved = match (state.is_closed(), state.latest_patchset()) {
+        (false, Some(patchset)) => crate::git_health::shipped_reserved(
+            cwd,
+            &patchset.base,
+            &patchset.head,
+            target_head.as_deref(),
+        )
+        .ok()
+        .flatten(),
+        _ => None,
+    };
     let worktree_dirty = if state.is_closed() {
         None
     } else {
@@ -1359,6 +1380,7 @@ pub fn build_at_with_shape(
         },
         current_head,
         needs_rebase,
+        reserved,
         merged_tree,
         worktree_dirty,
         danger,
@@ -1411,6 +1433,7 @@ pub fn build_as_of(
         false,
         None,
         None,
+        None,
         match repo {
             Some(repo) => DangerScope::resolve(state, policy, repo, current_head.as_deref()),
             None => DangerScope::undetermined(state),
@@ -1442,6 +1465,7 @@ fn build_report(
     probe_site: ProbeSite<'_>,
     current_head: Option<String>,
     needs_rebase: bool,
+    reserved: Option<crate::git_health::ReservedCommit>,
     merged_tree: Option<String>,
     worktree_dirty: Option<bool>,
     danger: DangerScope,
@@ -1971,6 +1995,7 @@ fn build_report(
         blocked_by_changes: dependency_status.blocked,
         landing_pending: state.pending_landing.is_some() && !state.is_closed(),
         lands_with: false,
+        reserved_identity: reserved.is_some(),
         needs_rebase,
         merged_tree_evaluated: evaluated_tree.is_some(),
         gates: gate_statuses
@@ -2052,6 +2077,8 @@ fn build_report(
             "repair_blockers:metadata".into()
         } else if dependency_status.blocked {
             "wait_for:blockers".into()
+        } else if let Some(reserved) = &reserved {
+            format!("reauthor:{}", reserved.commit)
         } else if needs_rebase {
             "rebase".into()
         } else if !head_matches || !approved_head_matches {
@@ -2135,6 +2162,7 @@ fn build_report(
     let higher_priority_work = state.is_closed()
         || current_head.is_none()
         || dependency_status.blocked
+        || reserved.is_some()
         || needs_rebase
         || !head_matches
         || !approved_head_matches
@@ -2191,6 +2219,7 @@ fn build_report(
         provisional_prerequisites: Vec::new(),
         provisional_staging_destination: None,
         replay_snapshot_required: false,
+        reserved_identity: reserved.map(|reserved| reserved.to_string()),
         integration_mode: crate::integration::Mode::Authoritative,
         integration_mode_refusal: None,
         provisional_integrations: crate::provisional::project_obligations_at(state, now),
@@ -2877,6 +2906,7 @@ mod tests {
             Blocker::BlockedByChanges,
             Blocker::LandingPending,
             Blocker::LandsWith,
+            Blocker::ReservedIdentity,
             Blocker::NeedsRebase,
             Blocker::BlockingFindings,
             Blocker::NoValidApproval,

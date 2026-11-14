@@ -1662,6 +1662,11 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     );
                 }
             }
+            Blocker::ReservedIdentity => {
+                if let Some(refusal) = &report.reserved_identity {
+                    let _ = writeln!(out, "  - {refusal}");
+                }
+            }
             Blocker::NeedsRebase => {
                 let _ = writeln!(
                     out,
@@ -1850,6 +1855,10 @@ pub fn next_step(report: &StatusReport) -> String {
             };
             format!("wait for {waiting} to integrate; arc blocker-status {change} reports them")
         }
+        ("reauthor", commit) => format!(
+            "commit {commit}: {}, then: arc snapshot {change}",
+            crate::git_health::REAUTHOR
+        ),
         ("rebase", _) => format!("arc rebase {change}"),
         ("snapshot", _) => format!("arc snapshot {change}"),
         ("resolve_findings", _) => {
@@ -2066,6 +2075,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
         Blocker::LandingPending => "a landing attempt is pending",
         Blocker::LandsWith => "must land together",
+        Blocker::ReservedIdentity => "commit with a reserved-domain address",
         Blocker::NeedsRebase => {
             "target branch requires rebase under the selected integration shape"
         }
@@ -3288,6 +3298,12 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+    );
+    condition(
+        &mut out,
+        Blocker::ReservedIdentity,
+        "commit identities name people",
+        report.reserved_identity.clone().unwrap_or_default(),
     );
     condition(
         &mut out,

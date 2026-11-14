@@ -508,8 +508,12 @@ fn plan(
                 format!("{} has no patchset; snapshot it first", member.change_id),
             );
         };
-        crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
-        crate::git_health::guard_patchset(&ctx.cwd, &target_before, &patchset.head)?;
+        crate::git_health::guard_shipped_patchset(
+            &ctx.cwd,
+            &patchset.base,
+            &patchset.head,
+            &target_before,
+        )?;
         if gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &member.branch))
             .ok()
             .as_deref()

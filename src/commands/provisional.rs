@@ -394,8 +394,12 @@ fn plan(
 ) -> Result<std::result::Result<integration::ProvisionalPlan, i32>> {
     gitio::forget_mutable_answers();
     if let Some(patchset) = state.latest_patchset() {
-        crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
-        crate::git_health::guard_patchset(&ctx.cwd, &state.target_branch, &patchset.head)?;
+        crate::git_health::guard_shipped_patchset(
+            &ctx.cwd,
+            &patchset.base,
+            &patchset.head,
+            &state.target_branch,
+        )?;
     }
     let (report, declarations, provisional) = report(ctx, store, state, selection)?;
     let authorization = basis(
@@ -882,8 +886,12 @@ fn integrate_provisionally_inner(
     let _authority = crate::replica::lock(&store)?;
     let (_, initial) = ctx.load_state(&store, &references[0])?;
     if let Some(patchset) = initial.latest_patchset() {
-        crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
-        crate::git_health::guard_patchset(&ctx.cwd, &initial.target_branch, &patchset.head)?;
+        crate::git_health::guard_shipped_patchset(
+            &ctx.cwd,
+            &patchset.base,
+            &patchset.head,
+            &initial.target_branch,
+        )?;
     }
     if let Some(saved) = store.provisional_intent(&initial.change_id)? {
         let Payload::ChangeProvisionallyIntegrated { staging_branch, .. } = &saved.event.payload

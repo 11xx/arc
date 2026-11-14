@@ -24,16 +24,25 @@ pub struct Wanted {
     pub ancestry: Vec<(String, String)>,
     /// Worktrees whose cleanliness is read.
     pub worktrees: Vec<PathBuf>,
+    /// `(target, base, head)`: the raw author and committer address of every
+    /// commit in `target..head`, and in `base..head` where the walk shows the
+    /// two ranges are the same commits.
+    pub identities: Vec<(String, String, String)>,
 }
 
 type Pair = (String, String);
+/// `(target, base, head)` as an identity request names them.
+type Triple = (String, String, String);
 type Messages = Vec<(String, Vec<u8>)>;
+/// `(commit, author email, committer email)` for each commit in a range.
+pub type Identities = Vec<(String, String, String)>;
 
 #[derive(Default)]
 struct Answers {
     merges: HashMap<Pair, MergeOutcome>,
     ancestors: HashMap<Pair, bool>,
     ranges: HashMap<Pair, Messages>,
+    identities: HashMap<Pair, Identities>,
     changed: HashMap<Pair, Vec<String>>,
 }
 
@@ -77,6 +86,12 @@ pub fn prefetch(cwd: &Path, wanted: &Wanted) {
         .iter()
         .chain(&wanted.ancestry)
         .flat_map(|(a, b)| [a.as_str(), b.as_str()])
+        .chain(
+            wanted
+                .identities
+                .iter()
+                .flat_map(|(t, b, h)| [t.as_str(), b.as_str(), h.as_str()]),
+        )
         .collect();
     let commits = resolve_commits(cwd, revisions.into_iter());
     let resolved = |(a, b): &Pair| Some((commits.get(a)?.clone(), commits.get(b)?.clone()));
@@ -91,9 +106,28 @@ pub fn prefetch(cwd: &Path, wanted: &Wanted) {
         .filter_map(|asked| Some((asked, resolved(asked)?)))
         .collect();
 
+    let identities: Vec<(&Triple, [String; 3])> = wanted
+        .identities
+        .iter()
+        .filter_map(|asked| {
+            let (target, base, head) = asked;
+            Some((
+                asked,
+                [
+                    commits.get(target)?.clone(),
+                    commits.get(base)?.clone(),
+                    commits.get(head)?.clone(),
+                ],
+            ))
+        })
+        .collect();
+
     let outcomes = merge_outcomes(cwd, merges.iter().map(|(_, ids)| ids));
     let mut heads_by_target: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (_, (target, head)) in merges.iter().chain(&ancestry) {
+        heads_by_target.entry(target).or_default().insert(head);
+    }
+    for (_, [target, _, head]) in &identities {
         heads_by_target.entry(target).or_default().insert(head);
     }
     let walks: HashMap<&str, Walk> = heads_by_target
@@ -107,19 +141,34 @@ pub fn prefetch(cwd: &Path, wanted: &Wanted) {
             Some((*asked, walks.get(target.as_str())?.range(head)?))
         })
         .collect();
+    // Each request's commits, keyed by the ranges they answer.
+    let identity_ranges: Vec<(Pair, Vec<&str>)> = identities
+        .iter()
+        .filter_map(|((target, base, head), [target_id, base_id, _])| {
+            let walk = walks.get(target_id.as_str())?;
+            let head_id = &commits[head];
+            let reached = walk.reached(head_id);
+            let mut answered = vec![(pair(target, head), reached.clone())];
+            if base_id == target_id || walk.boundary(&reached) == BTreeSet::from([base_id.as_str()])
+            {
+                answered.push((pair(base, head), reached));
+            }
+            Some(answered)
+        })
+        .flatten()
+        .collect();
     let listed: BTreeSet<&str> = ranges
         .iter()
         .flat_map(|(_, commits)| commits.iter().map(String::as_str))
+        .chain(
+            identity_ranges
+                .iter()
+                .flat_map(|(_, commits)| commits.iter().copied()),
+        )
         .collect();
     let listed: Vec<&str> = listed.into_iter().collect();
-    let messages: HashMap<&str, Vec<u8>> = read_commits(cwd, &listed)
-        .map(|read| {
-            listed
-                .iter()
-                .copied()
-                .zip(read.into_iter().map(|commit| commit.message))
-                .collect()
-        })
+    let read: HashMap<&str, super::RawCommit> = read_commits(cwd, &listed)
+        .map(|read| listed.iter().copied().zip(read).collect())
         .unwrap_or_default();
 
     with(cwd, |answers| {
@@ -138,10 +187,26 @@ pub fn prefetch(cwd: &Path, wanted: &Wanted) {
         for (asked, commits) in &ranges {
             let read: Option<Messages> = commits
                 .iter()
-                .map(|commit| Some((commit.clone(), messages.get(commit.as_str())?.clone())))
+                .map(|commit| Some((commit.clone(), read.get(commit.as_str())?.message.clone())))
                 .collect();
             if let Some(read) = read {
                 answers.ranges.insert((*asked).clone(), read);
+            }
+        }
+        for (asked, commits) in &identity_ranges {
+            let found: Option<Identities> = commits
+                .iter()
+                .map(|commit| {
+                    let raw = read.get(commit)?;
+                    Some((
+                        commit.to_string(),
+                        raw.author.email.clone(),
+                        raw.committer.email.clone(),
+                    ))
+                })
+                .collect();
+            if let Some(found) = found {
+                answers.identities.insert(asked.clone(), found);
             }
         }
     });
@@ -179,6 +244,13 @@ pub(super) fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Optio
 pub(super) fn range_messages(cwd: &Path, base: &str, head: &str) -> Option<Messages> {
     with(cwd, |answers| {
         answers.ranges.get(&pair(base, head)).cloned()
+    })
+}
+
+/// The raw author and committer address of each commit in `base..head`.
+pub(crate) fn range_identities(cwd: &Path, base: &str, head: &str) -> Option<Identities> {
+    with(cwd, |answers| {
+        answers.identities.get(&pair(base, head)).cloned()
     })
 }
 
@@ -312,6 +384,18 @@ impl Walk {
             }
         }
         reached
+    }
+
+    /// The commits outside this walk that `reached` names as parents: every
+    /// commit `head` reaches and the target does not is in `reached`, and
+    /// every other commit it reaches is reachable from one of these. When
+    /// they are exactly one commit, `<that commit>..<head>` is `reached`.
+    fn boundary<'a>(&'a self, reached: &[&'a str]) -> BTreeSet<&'a str> {
+        reached
+            .iter()
+            .flat_map(|commit| self.parents[*commit].iter().map(String::as_str))
+            .filter(|parent| !self.parents.contains_key(*parent))
+            .collect()
     }
 
     /// Whether the target is an ancestor of `head`, and whether `head` is an

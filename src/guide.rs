@@ -1286,11 +1286,15 @@ RUN A CHANGE
   `snapshot` and `integrate` refuse a patchset containing a commit whose raw
   author or committer address uses .invalid, .example, .test, .localhost,
   example.com, example.org or example.net, including subdomains. A snapshot
-  base override cannot hide introduced commits. Integration checks recorded
-  patchsets too, including provisional preparation and multi-change landings.
-  The refusal names the commit and explains how to re-author it with a real
-  identity before taking a fresh snapshot. A project's identity-health
-  exception does not permit reserved commit addresses.
+  base override cannot hide introduced commits. Integration, provisional
+  preparation and multi-change landings check the recorded patchset that
+  ships, the newest, over its `base..head` and the target's `..head`; earlier
+  patchsets are not read. The refusal names the commit and explains how to
+  re-author it with a real identity before taking a fresh snapshot; it is a
+  history refusal, exit 1. Readiness reads the same: `check` and `status`
+  list `reserved-identity` (check exits 21) with the refusal's own words, and
+  the next step names the re-authoring and `arc snapshot`. A project's
+  identity-health exception does not permit reserved commit addresses.
 
   `arc rebase` is what `check` names when the selected integration shape
   requires replay onto the target. Where Git can, arc performs the replay
@@ -5287,6 +5291,8 @@ EXIT CODES
       closed without integrating; the change lands only with `arc land`.
     `arc check` exits 20 while a pending landing attempt holds the change;
       `arc land --recover <attempt>` finishes it.
+    `arc check` exits 21 when the patchset that would ship holds a commit
+      with a reserved-domain address (`arc guide change-integration`).
     `arc check` exits 11 when the target conflicts or ff-only ancestry
       requires rebasing; it shadows 14 when both are present.
     `arc check` exits 12 when a declared acceptance probe is not
@@ -7143,7 +7149,7 @@ pub(crate) fn blocker_pointers(blockers: &[crate::blockers::Blocker]) -> String 
     for blocker in blockers {
         let topic = match blocker {
             Blocker::IntegrationMode => "replicas",
-            Blocker::NeedsRebase => "change-integration",
+            Blocker::NeedsRebase | Blocker::ReservedIdentity => "change-integration",
             Blocker::LandingPending | Blocker::LandsWith => "change-landing",
             Blocker::MergedTreeUnevaluated | Blocker::GatesNotGreen => "rules-evidence",
             Blocker::BlockingFindings => "repair",

@@ -2681,8 +2681,9 @@ enum Cmd {
     /// Guarded integration of one change, or of a dependency-ordered queue named
     /// by several changes or by --tag.
     ///
-    /// Refuses recorded patchsets with reserved-domain author or committer addresses;
-    /// see `arc guide change-integration` for the domains and re-authoring.
+    /// Refuses a shipped patchset holding a reserved-domain author or committer
+    /// address, which `arc check` reports as `reserved-identity`; see `arc guide
+    /// change-integration` for the domains, the range read and re-authoring.
     /// Readiness must have read the target revision and merge tree the decision
     /// observes; a disagreement refuses with exit 1 and writes nothing (`arc guide
     /// change-integration`).

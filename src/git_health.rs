@@ -147,11 +147,68 @@ pub fn problems(cwd: &Path) -> Vec<Finding> {
     })
 }
 
-/// Patchset commits must name people, including commits authored before a
-/// guard was installed. Mailmap presentation cannot replace raw identities.
-pub fn guard_patchset(cwd: &Path, base: &str, head: &str) -> Result<()> {
+/// A commit whose raw author or committer address uses a reserved domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservedCommit {
+    pub commit: String,
+    pub role: &'static str,
+    pub email: String,
+}
+
+/// How a reserved-domain commit is replaced, shared by the refusal and by
+/// readiness's next step so the two never name different remedies.
+pub const REAUTHOR: &str = "re-author it with a real identity (for HEAD: git -c user.name='<name>' -c user.email='<email>' commit --amend --reset-author --no-edit; for earlier commits use git rebase -i)";
+
+impl std::fmt::Display for ReservedCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "commit {} has reserved-domain {} address {:?}; {REAUTHOR}, then take a fresh arc snapshot",
+            self.commit, self.role, self.email
+        )
+    }
+}
+
+fn reserved_domain(email: &str) -> bool {
+    let domain = email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_default();
+    [
+        "invalid",
+        "example",
+        "test",
+        "localhost",
+        "example.com",
+        "example.org",
+        "example.net",
+    ]
+    .iter()
+    .any(|reserved| domain == *reserved || domain.ends_with(&format!(".{reserved}")))
+}
+
+/// The first of `commits`, each `(commit, author email, committer email)`,
+/// naming a reserved domain.
+pub(crate) fn first_reserved<'a>(
+    commits: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) -> Option<ReservedCommit> {
+    commits.into_iter().find_map(|(commit, author, committer)| {
+        [("author", author), ("committer", committer)]
+            .into_iter()
+            .find(|(_, email)| reserved_domain(email))
+            .map(|(role, email)| ReservedCommit {
+                commit: commit.to_string(),
+                role,
+                email: email.to_string(),
+            })
+    })
+}
+
+/// The first commit in `base..head` with a reserved-domain address, read from
+/// the raw objects: mailmap presentation cannot replace raw identities.
+pub fn reserved_identity(cwd: &Path, base: &str, head: &str) -> Result<Option<ReservedCommit>> {
     if fixture_identity(cwd) {
-        return Ok(());
+        return Ok(None);
     }
     type CommitRange = (std::path::PathBuf, String, String);
     static CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<CommitRange>>> =
@@ -165,52 +222,77 @@ pub fn guard_patchset(cwd: &Path, base: &str, head: &str) -> Result<()> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(key)
     }) {
-        return Ok(());
+        return Ok(None);
     }
-    let log = gitio::git(
-        cwd,
-        &[
-            "--no-replace-objects",
-            "log",
-            "--no-show-signature",
-            "--no-notes",
-            "-z",
-            "--format=%H%x00%ae%x00%ce",
-            head,
-            "--not",
-            base,
-        ],
-    )?;
-    let mut fields = log.split('\0');
-    while let Some(commit) = fields.next().filter(|commit| !commit.is_empty()) {
-        let author = fields.next().context("Git log omitted author email")?;
-        let committer = fields.next().context("Git log omitted committer email")?;
-        for (role, email) in [("author", author), ("committer", committer)] {
-            let domain = email
-                .rsplit_once('@')
-                .map(|(_, domain)| domain.trim_end_matches('.').to_ascii_lowercase())
-                .unwrap_or_default();
-            if [
-                "invalid",
-                "example",
-                "test",
-                "localhost",
-                "example.com",
-                "example.org",
-                "example.net",
-            ]
-            .iter()
-            .any(|reserved| domain == *reserved || domain.ends_with(&format!(".{reserved}")))
-            {
-                anyhow::bail!("commit {commit} has reserved-domain {role} address {email:?}; re-author it with a real identity (for HEAD: git -c user.name='<name>' -c user.email='<email>' commit --amend --reset-author --no-edit; for earlier commits use git rebase -i), then take a fresh arc snapshot");
+    let found = match gitio::listing::range_identities(cwd, base, head) {
+        Some(commits) => first_reserved(commits.iter().map(|(commit, author, committer)| {
+            (commit.as_str(), author.as_str(), committer.as_str())
+        })),
+        None => {
+            let log = gitio::git(
+                cwd,
+                &[
+                    "--no-replace-objects",
+                    "log",
+                    "--no-show-signature",
+                    "--no-notes",
+                    "-z",
+                    "--format=%H%x00%ae%x00%ce",
+                    head,
+                    "--not",
+                    base,
+                ],
+            )?;
+            let mut fields = log.split('\0');
+            let mut commits = Vec::new();
+            while let Some(commit) = fields.next().filter(|commit| !commit.is_empty()) {
+                let author = fields.next().context("Git log omitted author email")?;
+                let committer = fields.next().context("Git log omitted committer email")?;
+                commits.push((commit, author, committer));
             }
+            first_reserved(commits)
         }
-    }
-    if let Some(key) = key {
+    };
+    if let (None, Some(key)) = (&found, key) {
         checked
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key);
     }
-    Ok(())
+    Ok(found)
+}
+
+/// Patchset commits must name people, including commits authored before a
+/// guard was installed.
+pub fn guard_patchset(cwd: &Path, base: &str, head: &str) -> Result<()> {
+    match reserved_identity(cwd, base, head)? {
+        Some(reserved) => anyhow::bail!("{reserved}"),
+        None => Ok(()),
+    }
+}
+
+/// The reserved-domain commit a patchset would ship onto `target`: one in
+/// `base..head`, else in `target..head`. Integration refuses on it and
+/// readiness reports it, both through this one reading.
+pub fn shipped_reserved(
+    cwd: &Path,
+    base: &str,
+    head: &str,
+    target: Option<&str>,
+) -> Result<Option<ReservedCommit>> {
+    if let Some(reserved) = reserved_identity(cwd, base, head)? {
+        return Ok(Some(reserved));
+    }
+    match target.filter(|target| *target != base) {
+        Some(target) => reserved_identity(cwd, target, head),
+        None => Ok(None),
+    }
+}
+
+/// Refuse a patchset [`shipped_reserved`] finds a reserved-domain commit in.
+pub fn guard_shipped_patchset(cwd: &Path, base: &str, head: &str, target: &str) -> Result<()> {
+    match shipped_reserved(cwd, base, head, Some(target))? {
+        Some(reserved) => anyhow::bail!("{reserved}"),
+        None => Ok(()),
+    }
 }

@@ -106,3 +106,43 @@ fn catchup_git_children_grow_only_by_one_status_per_worktree() {
         );
     }
 }
+
+/// Claim: with the reserved-identity guard in force, `catchup`, in text and
+/// JSON, answers readiness's reading of every open change's shipped commit
+/// identities from its batched reads: as many Git launches for one open change
+/// as for four. Rejects a listing that runs the reserved-identity `git log`
+/// per open change, which the fixture identity exception hides from every
+/// other count here.
+#[test]
+fn catchup_reads_shipped_identities_without_a_git_command_per_change() {
+    for args in [&[][..], &["--json"][..]] {
+        let launches = |count: usize| {
+            let repo = open_changes(count);
+            let output = repo
+                .arc(&repo.root)
+                .env_remove("ARC_TEST_FIXTURE_IDENTITY")
+                .env("ARC_TRACE", "1")
+                .arg("catchup")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let record: serde_json::Value = stderr
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str(line).ok())
+                .unwrap();
+            let sites = record["children"]["git_by_site"].as_object().unwrap();
+            sites
+                .values()
+                .map(|runs| runs.as_u64().unwrap())
+                .sum::<u64>()
+        };
+        let (one, four) = (launches(1), launches(4));
+        assert_eq!(
+            one, four,
+            "catchup {args:?}: {one} Git launches for 1 open change, {four} for 4"
+        );
+    }
+}

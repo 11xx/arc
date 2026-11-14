@@ -393,6 +393,87 @@ fn integrate_refuses_a_previously_recorded_placeholder_patchset() {
         .stderr(predicates::str::contains("reserved-domain"));
 }
 
+/// Claim: readiness reports what integration refuses. A change whose recorded
+/// patchset holds a reserved-domain commit is not ready: `arc check` exits 21
+/// listing `reserved-identity`, and check and status carry integration's own
+/// refusal, naming the commit and how to re-author it, with a next step that
+/// names the same remedy and a fresh snapshot. Rejects readiness that reads
+/// ready, or names another remedy, for a patchset `integrate` refuses.
+#[test]
+fn readiness_names_a_recorded_reserved_identity_as_integration_refuses_it() {
+    let repo = Repo::new();
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "identity",
+        "--no-worktree",
+    ])));
+    repo.commit(&repo.root, "feature", "feature", "test: placeholder");
+    let bad = repo.head(&repo.root);
+    stdout(repo.arc(&repo.root).args(["snapshot", &change]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", &change, "--verdict", "approved"]),
+    );
+    stdout(repo.arc(&repo.root).args(["check", &change]));
+
+    let guarded = |args: &[&str]| {
+        let output = repo
+            .arc(&repo.root)
+            .env_remove("ARC_TEST_FIXTURE_IDENTITY")
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (code, refused) = guarded(&["integrate", &change, "--dry-run"]);
+    assert_eq!(code, Some(1), "{refused}");
+    let refusal = refused
+        .lines()
+        .find_map(|line| line.strip_prefix("error: "))
+        .unwrap()
+        .to_string();
+    assert!(
+        refusal.contains(&bad) && refusal.contains("re-author"),
+        "{refusal}"
+    );
+
+    let (code, check) = guarded(&["check", &change]);
+    assert_eq!(code, Some(21), "{check}");
+    assert!(check.contains(&refusal), "{check}");
+    let step = check
+        .lines()
+        .find_map(|line| line.strip_prefix("Next step: "))
+        .unwrap();
+    assert!(
+        step.contains(&bad)
+            && step.contains("re-author it with a real identity")
+            && step.contains(&format!("arc snapshot {change}"))
+            && step.ends_with(&format!("(reauthor:{bad})")),
+        "{step}"
+    );
+
+    let (_, json) = guarded(&["check", &change, "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["ready"], false, "{json}");
+    assert!(json["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| blocker["blocker"] == "reserved-identity" && blocker["exit_code"] == 21));
+
+    let (_, status) = guarded(&["status", &change, "--json"]);
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["reserved_identity"], refusal.as_str(), "{status}");
+    assert_eq!(status["next_action"], format!("reauthor:{bad}"), "{status}");
+    assert!(
+        status.to_string().contains("\"reserved-identity\""),
+        "{status}"
+    );
+}
+
 /// Claim: selector and renderer commands receive the same scrubbed environment
 /// as gates. Rejects a selector fallback hiding inherited selectors or a renderer
 /// that can write the decoy's configuration.

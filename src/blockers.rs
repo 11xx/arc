@@ -23,6 +23,7 @@ pub enum Blocker {
     Iterating,
     BlockedByChanges,
     LandsWith,
+    ReservedIdentity,
     NeedsRebase,
     MergedTreeUnevaluated,
     BlockingFindings,
@@ -33,7 +34,7 @@ pub enum Blocker {
 }
 
 /// Every blocker, highest precedence first.
-pub const PRIORITY: [Blocker; 16] = [
+pub const PRIORITY: [Blocker; 17] = [
     Blocker::IntegrationMode,
     Blocker::Closed,
     Blocker::BranchMissing,
@@ -43,6 +44,7 @@ pub const PRIORITY: [Blocker; 16] = [
     Blocker::Iterating,
     Blocker::BlockedByChanges,
     Blocker::LandsWith,
+    Blocker::ReservedIdentity,
     Blocker::NeedsRebase,
     Blocker::MergedTreeUnevaluated,
     Blocker::BlockingFindings,
@@ -62,6 +64,7 @@ impl Blocker {
             Blocker::BlockedByChanges => 7,
             Blocker::LandingPending => 20,
             Blocker::LandsWith => 19,
+            Blocker::ReservedIdentity => 21,
             Blocker::NeedsRebase => 11,
             Blocker::MergedTreeUnevaluated => 14,
             Blocker::BlockingFindings => 2,
@@ -83,6 +86,7 @@ impl Blocker {
             Blocker::BlockedByChanges => "blocked-by-changes",
             Blocker::LandingPending => "landing-pending",
             Blocker::LandsWith => "lands-with",
+            Blocker::ReservedIdentity => "reserved-identity",
             Blocker::NeedsRebase => "needs-rebase",
             Blocker::MergedTreeUnevaluated => "merged-tree-unevaluated",
             Blocker::BlockingFindings => "blocking-findings",
@@ -123,6 +127,9 @@ pub struct BlockerFacts {
     /// Its must-land-together component has another open member, or one that
     /// closed without integrating.
     pub lands_with: bool,
+    /// The patchset that would ship holds a commit whose raw author or
+    /// committer address uses a reserved domain, which integration refuses.
+    pub reserved_identity: bool,
     pub needs_rebase: bool,
     /// The gates answer for a merged tree rather than the head's own.
     pub merged_tree_evaluated: bool,
@@ -147,6 +154,7 @@ impl BlockerFacts {
             Blocker::BlockedByChanges => self.blocked_by_changes,
             Blocker::LandingPending => self.landing_pending,
             Blocker::LandsWith => self.lands_with,
+            Blocker::ReservedIdentity => self.reserved_identity,
             Blocker::NeedsRebase => self.needs_rebase,
             // Nothing has been run against the content that would ship. A
             // tree some gates have answered for and others have not is an
@@ -228,6 +236,7 @@ mod tests {
             blocked_by_changes: false,
             landing_pending: false,
             lands_with: false,
+            reserved_identity: false,
             needs_rebase: false,
             merged_tree_evaluated: false,
             gates: Vec::new(),
@@ -253,7 +262,7 @@ mod tests {
 
     #[test]
     fn each_fact_alone_raises_its_blocker() {
-        let cases: [(Raise, Blocker); 16] = [
+        let cases: [(Raise, Blocker); 17] = [
             (|f| f.mode_refused = true, Blocker::IntegrationMode),
             (|f| f.closed = true, Blocker::Closed),
             (|f| f.branch_missing = true, Blocker::BranchMissing),
@@ -263,6 +272,7 @@ mod tests {
             (|f| f.landing_pending = true, Blocker::LandingPending),
             (|f| f.blocked_by_changes = true, Blocker::BlockedByChanges),
             (|f| f.lands_with = true, Blocker::LandsWith),
+            (|f| f.reserved_identity = true, Blocker::ReservedIdentity),
             (|f| f.needs_rebase = true, Blocker::NeedsRebase),
             (
                 |f| {
@@ -317,6 +327,7 @@ mod tests {
             blocked_by_changes: true,
             landing_pending: true,
             lands_with: true,
+            reserved_identity: true,
             needs_rebase: true,
             merged_tree_evaluated: true,
             gates: vec![GateFact {
@@ -354,7 +365,7 @@ mod tests {
         seen.sort_by_key(|blocker| blocker.as_str());
         seen.dedup();
         assert_eq!(seen.len(), PRIORITY.len());
-        assert_eq!(PRIORITY.len(), 16);
+        assert_eq!(PRIORITY.len(), 17);
     }
 
     #[test]
