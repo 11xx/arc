@@ -6008,10 +6008,13 @@ GATE COSTS
   branch, or the current branch without a matching change, combined with the
   operator's landing declaration by minimum; change-head additions do not bind.
   A detached checkout without a matching destination reports it unobserved.
-  Every required integration gate needs a budget when enforcement keys exist
-  in that table; a landing-only table requires no individual budgets. That
-  includes a gate the destination declares and a change's head removes,
-  since the change still owes it. A removed gate that has a budget on the
+  A [budget] table enforces unless `landing` is its only key: one holding
+  `total`, `raise`, `raise_per` or `exclude`, or no key at all, in any layer
+  of the effective suite makes every required integration gate need a
+  budget, in every profile. Per-gate budgets without such a table require
+  none of the others. The gates needing one include a gate the destination
+  declares and a change's head removes, since the change still owes it. A
+  removed gate that has a budget on the
   destination keeps it; one that has none cannot be given one, so a change
   cannot both remove it and declare a total. Land the replacement first
   with no total declared, then declare budgets and the total in a following
