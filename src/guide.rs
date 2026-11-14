@@ -1,4 +1,4 @@
-//! Stateless capability map and semantically owned workflow topics.
+//! Capability map, compiled workflow contracts and scoped journal guide topics.
 //! Operation-specific contracts live in command help.
 
 pub const GUIDE: &str = r#"arc — persistent context and guarded workflow state over plain Git for agentic coding arcs.
@@ -17,6 +17,7 @@ Run `arc catchup` for live project state and `arc journal open` for work
 waiting for a session.
 Run `arc guide` for indexed topics, `arc guide <topic>` for depth, or
 `arc guide --search <text>` to find a topic or command-help route.
+`arc guide guide-topics` explains editable operator and project guide topics.
 
 SAY WHO YOU ARE (before the first write)
   eval "$(arc env)"                    Detect harness, session, model, and session link.
@@ -2111,7 +2112,9 @@ STANDING REFERENCES (what a project keeps coming back to)
     arc journal pin <file.md> [--reason TEXT]
                          Record a `pinned` event. The body must be in hot
                          storage. Pinning again with the recorded reason
-                         writes nothing; another reason replaces it.
+                         writes nothing; another reason replaces it. Add
+                         --guide TOPIC to expose it through `arc guide`;
+                         `arc guide guide-topics` defines that route.
     arc journal unpin <file.md>
                          Record `unpinned`; an actionable artifact returns to
                          the queues. An artifact that is not pinned refuses.
@@ -6586,6 +6589,9 @@ SCHEMAS
   `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
 
+  A `pinned` event may carry an optional `guide` topic name. This additive
+  input field keeps `journal-events/2`; pins without it remain valid.
+
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;
   an event lacking one is unsupported and cannot change ownership state.
@@ -6940,6 +6946,38 @@ fn read_only_commands() -> String {
     lines.join("\n")
 }
 
+const GUIDE_TOPICS: &str = r#"GUIDE TOPICS
+  Built-in topics describe arc's contract and ship with the executable.
+  Run-time topics hold the operator's or project's rules and method in the
+  journal. They are labelled text owned by that scope, not arc's contract.
+    arc journal pin <file.md> --guide <topic>
+    arc journal pin --global <file.md> --guide <topic>
+  The first selects the project journal; --global selects the operator
+  journal. Topic names are lowercase alphanumeric segments separated by
+  single hyphens. Built-in topic names, families and command routes are
+  reserved, including hyphen-joined command paths such as journal-pin.
+  A name can have one pinned artifact per scope. Project text takes
+  precedence over operator text with the same name; the index and search
+  label both. `arc guide` works outside a repository for operator topics;
+  project topics appear wherever the project journal resolves.
+
+  `arc guide <topic>` prints the current body exactly as `arc journal show`
+  does, including appended corrections and blocks. The index uses the title
+  as corrected and the age of the body's last file edit. `arc guide --search
+  TEXT` searches both scopes and built-in instructions; `arc guide --all`
+  prints them all. Run-time text above 16,384 UTF-8 bytes remains readable
+  with a size notice in the index and topic header.
+
+  Repeating a pin with the same reason and guide name writes nothing.
+  `arc journal pin` without --guide preserves its existing guide name;
+  supplying a different name renames the route. `arc journal unpin` removes
+  the pin and its guide route. To keep a plain standing reference, unpin
+  then pin without --guide. Use `arc journal correct` or `arc journal
+  evidence` to append corrections or blocks with history. A successor is
+  a separate artifact: unpin the predecessor and pin the successor under
+  the topic name.
+"#;
+
 const TOPIC_LIMIT: usize = 16_384;
 
 struct Section {
@@ -7047,6 +7085,12 @@ fn topics(text: &str) -> Vec<Topic<'_>> {
         })
         .collect();
     topics.push(Topic {
+        name: "guide-topics",
+        family: "overview",
+        title: "Built-in contracts and run-time guide topics",
+        text: GUIDE_TOPICS,
+    });
+    topics.push(Topic {
         name: "identity-options",
         family: "identity",
         title: "Global options",
@@ -7129,6 +7173,73 @@ fn instruction_commands(mut command: clap::Command, path: &str, out: &mut Vec<(S
     }
 }
 
+/// Reserve topic routes and hyphen-joined command paths, including aliases.
+pub(crate) fn reserved_topic(name: &str) -> bool {
+    static RESERVED: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    RESERVED
+        .get_or_init(|| {
+            let text = GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands());
+            let topics = topics(&text);
+            let mut names: std::collections::BTreeSet<String> = topics
+                .iter()
+                .flat_map(|topic| [topic.name.to_string(), topic.family.to_string()])
+                .collect();
+            fn commands(
+                command: &clap::Command,
+                prefix: &str,
+                names: &mut std::collections::BTreeSet<String>,
+            ) {
+                for child in command.get_subcommands() {
+                    for name in std::iter::once(child.get_name()).chain(child.get_all_aliases()) {
+                        let route = if prefix.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{prefix}-{name}")
+                        };
+                        names.insert(route.clone());
+                        commands(child, &route, names);
+                    }
+                }
+            }
+            let mut command = crate::cli_command();
+            command.build();
+            commands(&command, "", &mut names);
+            names
+        })
+        .contains(name)
+}
+
+fn runtime_notice(topic: &crate::journal::guide_topics::GuideTopic) -> String {
+    if topic.body.len() > TOPIC_LIMIT {
+        format!(
+            "; size notice: {} UTF-8 bytes exceeds the {TOPIC_LIMIT}-byte built-in topic ceiling",
+            topic.body.len()
+        )
+    } else {
+        String::new()
+    }
+}
+
+fn print_runtime(topic: &crate::journal::guide_topics::GuideTopic) {
+    let owner = if topic.scope == "project" {
+        "Project's"
+    } else {
+        "Operator's"
+    };
+    println!(
+        "{owner} text (not arc's contract): arc guide {}",
+        topic.name
+    );
+    println!("Artifact: {}", topic.file);
+    println!(
+        "Last edit: {}{}\n",
+        topic.age(chrono::Utc::now()),
+        runtime_notice(topic)
+    );
+    print!("{}", topic.body);
+}
+
 /// Every command repeats the shared options, so their rows are not search results.
 const SHARED_OPTION_POINTER: &str = "see `arc guide identity-options`";
 
@@ -7166,6 +7277,10 @@ pub fn show(
         for topic in &topics {
             print!("{}", topic.text);
         }
+        for topic in crate::journal::guide_topics::load(&std::env::current_dir()?) {
+            println!();
+            print_runtime(&topic);
+        }
         return Ok(());
     }
     let routes = topic_routes(&topics);
@@ -7188,6 +7303,16 @@ pub fn show(
                 found = true;
             }
         }
+        for topic in crate::journal::guide_topics::load(&std::env::current_dir()?) {
+            let text = format!("{}\n{}\n{}", topic.name, topic.title, topic.body);
+            if let Some(context) = context(&text, &needle) {
+                println!(
+                    "arc guide {} [{}; {}]: {context}",
+                    topic.name, topic.scope, topic.file
+                );
+                found = true;
+            }
+        }
         if !found {
             println!("No instruction matches; use `arc guide` for the index.");
         }
@@ -7203,6 +7328,13 @@ pub fn show(
                 "compiled topic exceeds its byte budget"
             );
             print!("{body}");
+            return Ok(());
+        }
+        if let Some(topic) = crate::journal::guide_topics::load(&std::env::current_dir()?)
+            .iter()
+            .find(|topic| topic.name == name)
+        {
+            print_runtime(topic);
             return Ok(());
         }
         anyhow::bail!("unknown guide topic {name:?}; use `arc guide` for the index");
@@ -7247,6 +7379,21 @@ pub fn show(
     instruction_commands(command, "arc", &mut routes);
     for (route, _) in routes {
         println!("  {route}");
+    }
+    let runtime = crate::journal::guide_topics::load(&std::env::current_dir()?);
+    if !runtime.is_empty() {
+        println!("\nRun-time topics (operator and project text, not arc's contract):");
+        let now = chrono::Utc::now();
+        for topic in runtime {
+            println!(
+                "  arc guide {} [{}]  {} (last edit: {}){}",
+                topic.name,
+                topic.scope,
+                topic.title,
+                topic.age(now),
+                runtime_notice(&topic)
+            );
+        }
     }
     Ok(())
 }

@@ -72,6 +72,7 @@ mod gate_tiers;
 mod gate_together;
 mod git_environment;
 mod guide_bounds;
+mod guide_topics;
 mod hooks;
 mod implementer_trailers;
 mod import_authorization;

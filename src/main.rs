@@ -300,7 +300,10 @@ enum Cmd {
     /// 16,384 bytes lists its exact child routes; --all prints the complete
     /// guide. --search performs literal, case-insensitive search over topics
     /// and command help, showing each matching route once with compact context.
-    /// Unknown topics refuse naming `arc guide`. Reads work outside a repository,
+    /// Run-time journal topics are labelled operator or project text; see
+    /// `arc guide guide-topics`. Project topics take precedence over operator
+    /// topics with the same name. Unknown topics refuse naming `arc guide`.
+    /// Reads work outside a repository,
     /// under every role and with broken configuration, recording nothing.
     Guide {
         /// Topic from `arc guide`, including a listed child route

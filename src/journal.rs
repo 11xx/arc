@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod guide_topics;
 mod page;
 mod pins;
 mod private_text;
@@ -955,17 +956,22 @@ pub enum JournalCmd {
     /// the queues read from it, is never stale in `filed`, is skipped by
     /// `archive --consumed`, and refuses `archive` and `relocate` until
     /// unpinned. The artifact must be in hot storage. Pinning again with the
-    /// recorded reason writes nothing; another reason replaces it
+    /// recorded reason and guide name writes nothing. `--guide` gives the
+    /// pin a run-time guide route; see `arc guide guide-topics`. Omitting
+    /// `--guide` preserves an existing guide name
     Pin {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
         /// One line saying why the artifact stays visible
         #[arg(long)]
         reason: Option<String>,
+        /// Kebab-case guide topic, distinct from built-in topics and command routes
+        #[arg(long, value_name = "TOPIC")]
+        guide: Option<String>,
     },
     /// Remove an artifact's pin and emit a typed `unpinned` event, returning
-    /// an actionable artifact to the queues. An artifact that is not pinned
-    /// refuses
+    /// an actionable artifact to the queues and removing its run-time guide
+    /// route, if any. An artifact that is not pinned refuses
     Unpin {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -2086,7 +2092,11 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             title,
         } => evidence(ctx, &filename, &body_file, title.as_deref()),
         JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
-        JournalCmd::Pin { filename, reason } => pins::pin(ctx, &filename, reason.as_deref()),
+        JournalCmd::Pin {
+            filename,
+            reason,
+            guide,
+        } => pins::pin(ctx, &filename, reason.as_deref(), guide.as_deref()),
         JournalCmd::Unpin { filename } => pins::unpin(ctx, &filename),
         JournalCmd::Pins { json } => pins::list(ctx, json),
         JournalCmd::Render {
@@ -9138,6 +9148,10 @@ pub(crate) struct JournalEvent {
     /// render names it so the caller updates the same copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    /// The run-time guide route held by a `pinned` event. A pin without one
+    /// remains a standing reference outside the guide index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guide: Option<String>,
     /// The facility a `capability` event marks the start of. A journal that
     /// has never written a kind of fact is silent about it rather than
     /// negative, so derived state needs the point at which that kind of fact
@@ -9518,6 +9532,7 @@ impl JournalEvent {
             title: None,
             outcome: None,
             note: None,
+            guide: None,
             decision: None,
             verified_revision: None,
             verified_scope: None,
@@ -9704,6 +9719,7 @@ impl JournalEvent {
             "verified" => self.file.is_some(),
             "pinned" => {
                 self.artifact_file()
+                    && self.guide.as_deref().is_none_or(valid_topic)
                     && self.note.as_deref().is_none_or(|reason| {
                         !reason.trim().is_empty() && !reason.contains(['\n', '\r'])
                     })

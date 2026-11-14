@@ -19,7 +19,7 @@ use std::path::Path;
 
 /// The pin each pinned artifact holds now: its latest `pinned` event with no
 /// `unpinned` after it.
-fn pins(events: &[JournalEvent]) -> BTreeMap<&str, &JournalEvent> {
+pub(super) fn pins(events: &[JournalEvent]) -> BTreeMap<&str, &JournalEvent> {
     let mut pins = BTreeMap::new();
     for event in events {
         let Some(file) = event.file.as_deref() else {
@@ -79,9 +79,17 @@ fn pin_reason(reason: Option<&str>) -> Result<Option<String>> {
 /// Pin an artifact in hot storage. Consumption does not matter: a finished
 /// plan is still a reference. Pinning again with the reason already recorded
 /// writes nothing; another reason records a new pin that replaces it.
-pub(super) fn pin(ctx: &Ctx, filename: &str, reason: Option<&str>) -> Result<i32> {
+pub(super) fn pin(
+    ctx: &Ctx,
+    filename: &str,
+    reason: Option<&str>,
+    guide: Option<&str>,
+) -> Result<i32> {
     let (topic, _) = check_artifact_name(ctx, filename)?;
     let reason = pin_reason(reason)?;
+    if let Some(name) = guide {
+        super::guide_topics::validate_name(name)?;
+    }
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
     let events = read_events(&dir)?;
@@ -92,8 +100,18 @@ pub(super) fn pin(ctx: &Ctx, filename: &str, reason: Option<&str>) -> Result<i32
         }
         return Err(missing_write_target(&dir, filename));
     }
-    if let Some(current) = pins(&events).get(filename) {
-        if current.note == reason {
+    let pins = pins(&events);
+    let guide = guide.or_else(|| pins.get(filename).and_then(|pin| pin.guide.as_deref()));
+    if let Some(name) = guide {
+        if let Some((other, _)) = pins
+            .iter()
+            .find(|(file, pin)| **file != filename && pin.guide.as_deref() == Some(name))
+        {
+            bail!("guide topic {name:?} is already pinned to {other}; unpin it first");
+        }
+    }
+    if let Some(current) = pins.get(filename) {
+        if current.note == reason && current.guide.as_deref() == guide {
             println!("already pinned: {filename}");
             return Ok(0);
         }
@@ -101,6 +119,7 @@ pub(super) fn pin(ctx: &Ctx, filename: &str, reason: Option<&str>) -> Result<i32
     let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "pinned");
     event.file = Some(filename.to_string());
     event.note = reason;
+    event.guide = guide.map(str::to_string);
     append_event(ctx, &dir, &event)?;
     println!("pinned: {filename}");
     Ok(0)
