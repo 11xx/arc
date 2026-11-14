@@ -785,6 +785,9 @@ mod tests {
         );
     }
 
+    /// Claim: an approval of a head the change has since left, or of an earlier
+    /// patchset, is not valid for the current head. Rejects an earlier approval
+    /// authorizing a rewritten or later head.
     #[test]
     fn an_approval_left_behind_by_the_head_is_stale() {
         let (patchset, danger) = (patchset(), dangerous());
@@ -849,6 +852,9 @@ mod tests {
         assert!(!outcome.waiver_satisfies_approval);
     }
 
+    /// Claim: a local changes-requested verdict on the current patchset refuses
+    /// it even when debt waives the patchset's approval. Rejects debt turning a
+    /// standing refusal into a waiver.
     #[test]
     fn a_local_refusal_of_this_patchset_is_not_waived() {
         let (patchset, danger) = (patchset(), dangerous());
@@ -953,6 +959,10 @@ mod tests {
         assert!(outcome.external_verdicts[0].gates_current_head);
     }
 
+    /// Claim: an external approval alone never approves a patchset touching a
+    /// dangerous path, even with self-approval allowed; beside a local approval
+    /// it stands, and an external refusal still refuses. Rejects an external
+    /// verdict clearing a dangerous change on its own.
     #[test]
     fn an_external_approval_never_counts_alone_on_a_dangerous_path() {
         let (patchset, danger) = (patchset(), dangerous());

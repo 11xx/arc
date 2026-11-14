@@ -265,6 +265,10 @@ fn sibling_evidence_answers_only_under_matching_coordinates() {
     assert_eq!(git_out(&worktree, &["status", "--porcelain"]), "");
 }
 
+/// Claim: candidate selection refuses, naming every ground at once, when the
+/// target moved, a gate was redeclared, the evaluated tree differs, an
+/// evaluation ran in another environment, or none exists, and records no
+/// selection. Rejects a selection authorized by a stale or foreign evaluation.
 #[test]
 fn stale_target_and_stale_evaluation_are_refused_by_name() {
     let f = fixture(Some("matching-coordinates"), &[], false);

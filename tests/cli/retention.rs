@@ -108,6 +108,10 @@ fn finding<'a>(report: &'a serde_json::Value, list: &str, code: &str) -> Option<
         .map(|finding| finding["detail"].as_str().unwrap())
 }
 
+/// Claim: rewriting a reviewed commit's trailers moves the change's pin to the
+/// successor and retains the reviewed commit under one recorded retention ref,
+/// so garbage collection keeps it. Rejects a rewrite after which the commit a
+/// verdict read can be collected.
 #[test]
 fn a_trailer_rewrite_keeps_the_reviewed_commit_reachable() {
     let repo = repo_with_gates();

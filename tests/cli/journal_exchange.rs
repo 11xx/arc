@@ -1604,6 +1604,11 @@ fn every_typed_append_and_reanswered_question_exchanges_in_both_directions() {
     assert!(import(&b, &merged, false).status.success());
 }
 
+/// Claim: an import whose event append fails leaves the artifact body and the
+/// event log byte-identical, and its retry converges both replicas on one body
+/// and one event set, after which importing again changes nothing. Rejects a
+/// body updated without its events, and events duplicated or diverging on
+/// retry.
 #[test]
 fn failed_event_append_preserves_bodies_and_retry_converges() {
     use std::os::unix::fs::PermissionsExt;

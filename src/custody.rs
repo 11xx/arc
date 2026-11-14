@@ -1224,6 +1224,11 @@ mod tests {
         );
     }
 
+    /// Claim: when the custody directory or its digest directory is a symlink,
+    /// every access refuses: availability reports corruption, and reads,
+    /// verification, audits and installs fail without writing at the link's
+    /// target. Rejects custody reading or writing through a link outside the
+    /// ledger's private root.
     #[test]
     fn a_symlinked_custody_directory_is_refused_for_every_access() {
         for link in ["custody", "custody/sha256"] {

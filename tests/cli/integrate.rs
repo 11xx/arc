@@ -363,6 +363,9 @@ fn unrelated_untracked_and_ignored_files_survive_integration() {
     );
 }
 
+/// Claim: integrate and its dry run refuse a merge that would write over an
+/// untracked file in the target checkout, naming the path, and leave the target
+/// and the file's bytes unchanged. Rejects a merge overwriting local work.
 #[test]
 fn merge_writing_an_untracked_target_path_is_refused_by_name() {
     let repo = repo_with_gates();
@@ -2858,6 +2861,10 @@ fn audit_fix_guarded_shape_revalidates_operator_snapshot() {
         .any(|event| event["event_type"] == "change-integrated"));
 }
 
+/// Claim: integrate reads the integration-shape policy again after waiting on
+/// the target lock: a policy moved to `no-ff` in the meantime, in either
+/// declaration form, refuses the integration, which moves no branch and records
+/// no event. Rejects merging under the shape read before the wait.
 #[test]
 #[cfg(debug_assertions)]
 fn audit_fix_shape_revalidates_after_waiting_for_target_lock() {
@@ -3132,6 +3139,10 @@ exec '{git}' "$@"
     assert_eq!(events(&repo, &id), recorded);
 }
 
+/// Claim: when a fast-forward lands but publishing its closure fails in an
+/// unknown state, integrate fails naming the target ref it moved and the
+/// publication state, and records no integration. Rejects reporting the
+/// published fast-forward as success or as nothing having happened.
 #[test]
 fn fast_forward_closure_publication_failure_reports_recovery() {
     closure_publication_failure("unknown");
@@ -4570,6 +4581,10 @@ fn discard_ignored_implies_cleanup() {
     assert_ignored_discard_removed(&repo, &wt, &out);
 }
 
+/// Claim: cleanup keeps a worktree whose recorded path has become a symlink,
+/// for either discard scope, and names why; the content at the link's target
+/// stays. Rejects cleanup following the link and deleting a checkout it does
+/// not own.
 #[test]
 fn cleanup_keeps_a_worktree_whose_recorded_path_is_a_symlink() {
     for scope in ["artifacts", "ignored"] {

@@ -57,6 +57,9 @@ fn implementer_role_refuses_lead_owned_commands_without_appending_events() {
     }
 }
 
+/// Claim: a reviewer-role session can review and resolve findings, but its
+/// integrate and close refuse with exit 9, naming the lead role they require,
+/// and append nothing. Rejects a reviewer closing or integrating a change.
 #[test]
 fn reviewer_role_can_review_and_resolve_but_cannot_close_or_integrate() {
     let repo = Repo::new();

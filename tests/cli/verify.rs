@@ -348,6 +348,10 @@ fn failing_gate_keeps_complete_private_diagnostics_beside_its_short_tail() {
     assert_eq!(artifact["observed_bytes"], bytes.len() as u64);
 }
 
+/// Claim: a gate that overruns its timeout fails promptly, is recorded as a
+/// timed-out failure, and has its whole process group killed. Rejects a
+/// background child of the gate holding the run open, and a timeout recorded as
+/// anything but a failure.
 #[test]
 fn gate_timeout_records_failure_and_kills_the_process_group() {
     let repo = Repo::new();
@@ -839,6 +843,11 @@ fn probe_records_expected_baseline_fail_and_final_pass_against_one_brief() {
     );
 }
 
+/// Claim: a declared acceptance probe blocks check with exit 12 until it has
+/// passed at the current head and failed at the base, for the current patchset
+/// and brief: a pass at the head alone, or a discrimination recorded before the
+/// head or the brief moved, does not count. Rejects a probe satisfied without
+/// discriminating evidence for what is integrated.
 #[test]
 fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
     let repo = Repo::new();

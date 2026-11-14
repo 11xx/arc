@@ -16196,6 +16196,9 @@ fn promotion_body_failure_never_publishes_a_prefix() {
     assert_eq!(journal_event_log(&global).len(), 1);
 }
 
+/// Claim: a journal event log ending in a torn event refuses readers and
+/// writers alike, naming it, and stays byte-identical. Rejects reading past the
+/// tear, and appending after it, which would bury it.
 #[test]
 fn journal_reader_and_writer_refuse_unprepared_torn_tail() {
     let repo = Repo::new();

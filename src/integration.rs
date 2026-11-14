@@ -973,6 +973,10 @@ mod tests {
         assert!(matches!(refusal(facts), Refusal::Diverged));
     }
 
+    /// Claim: a change its lifecycle does not let integrate is refused as not
+    /// ready even when a fast-forward-only target has also diverged. Rejects
+    /// reporting divergence, which a rebase could clear, in place of the
+    /// standing lifecycle refusal.
     #[test]
     fn lifecycle_refusal_precedes_fast_forward_divergence() {
         let facts = IntegrationFacts {
@@ -1023,6 +1027,10 @@ mod tests {
         assert!(matches!(refusal(facts), Refusal::NotReady));
     }
 
+    /// Claim: integration refuses, saying nothing was written, when its
+    /// confirming second reading finds the authorization basis moved or the
+    /// change no longer ready. Rejects integrating on the first reading's
+    /// basis.
     #[test]
     fn a_basis_the_second_reading_disagrees_with_refuses() {
         let mut moved_basis = basis();
@@ -1047,6 +1055,10 @@ mod tests {
         assert!(refused.to_string().contains("nothing was written"));
     }
 
+    /// Claim: a fact integration cannot observe, such as the target's checkout
+    /// or what authorizes the merged patchset, refuses with that fact's own
+    /// error. Rejects treating an unreadable fact as satisfied or reporting it
+    /// as a different refusal.
     #[test]
     fn an_unobservable_fact_refuses_with_its_own_error() {
         let facts = IntegrationFacts {

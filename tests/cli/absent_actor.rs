@@ -12,6 +12,11 @@ pub(crate) fn without_actor(repo: &Repo, cwd: &Path) -> AssertCommand {
     command
 }
 
+/// Claim: with no flag, variable, session or Git identity naming an actor, a
+/// ledger write, a journal write and a role write refuse, saying how to declare
+/// one, and leave no branch or event behind, while reads proceed. Rejects a
+/// write recorded under an actor arc made up, and a refusal that also blocks
+/// reads.
 #[test]
 fn a_ledger_write_with_no_establishable_actor_refuses_and_a_read_proceeds() {
     let repo = Repo::new();

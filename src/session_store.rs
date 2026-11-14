@@ -1256,6 +1256,10 @@ mod tests {
         );
     }
 
+    /// Claim: a child agent named by a recording renders on one line: line
+    /// breaks become spaces, an overlong field is cut with an ellipsis, and a
+    /// blank name reads as unnamed. Rejects recording text breaking out of its
+    /// line into what the terminal shows.
     #[test]
     fn a_child_named_by_the_recording_cannot_break_out_of_its_line() {
         let child = unfinished(

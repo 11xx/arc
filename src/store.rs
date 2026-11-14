@@ -3827,6 +3827,9 @@ mod tests {
         LocalEvent::draft(event)
     }
 
+    /// Claim: of two local writers in one millisecond, the second waits until
+    /// the first publishes its issued id and then issues a later one. Rejects
+    /// event ids published out of order.
     #[test]
     fn local_writers_issue_ids_in_publication_order_in_one_millisecond() {
         let dir = tempfile::tempdir().unwrap();
@@ -4023,6 +4026,10 @@ mod tests {
         }
     }
 
+    /// Claim: an event whose file was written but whose directory sync failed
+    /// reads as visible but unconfirmed until synced, and a different event
+    /// under its id reads as unknown. Rejects reporting it absent, which a
+    /// retry would publish twice, or durable before it is.
     #[test]
     fn an_event_whose_directory_sync_failed_is_visible_but_unconfirmed() {
         let dir = tempfile::tempdir().unwrap();
@@ -4590,6 +4597,10 @@ mod tests {
         assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
     }
 
+    /// Claim: stamping the store format waits on the one store-wide format
+    /// lock, and a lower stamp never replaces a higher one. Rejects stamps
+    /// racing each other and a downgrade that lets an older reader open the
+    /// store.
     #[test]
     fn format_stamp_waits_on_one_store_wide_lock_and_never_downgrades() {
         let dir = tempfile::tempdir().unwrap();
@@ -4667,6 +4678,9 @@ mod tests {
         assert_eq!(crate::import_authorization::scope_derivations(), before);
     }
 
+    /// Claim: one read reuses the repository events it loaded, while a fresh
+    /// read reports damage written since. Rejects a fresh read served from an
+    /// earlier load that hides the damage.
     #[test]
     fn one_read_reuses_repository_events_and_a_fresh_read_reports_damage() {
         let dir = tempfile::tempdir().unwrap();
@@ -4683,6 +4697,9 @@ mod tests {
         assert!(store.readable_states().is_err());
     }
 
+    /// Claim: a read after a write derives its authorization scope afresh.
+    /// Rejects a scope kept across a write that changed what it is derived
+    /// from.
     #[test]
     fn a_scope_is_derived_after_a_write_not_kept_across_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -4699,6 +4716,8 @@ mod tests {
         );
     }
 
+    /// Claim: appending an event ordered before its change's opening refuses
+    /// and writes nothing. Rejects history placed before the change existed.
     #[test]
     fn append_refuses_an_event_before_the_change_opening_without_writes() {
         let dir = tempfile::tempdir().unwrap();

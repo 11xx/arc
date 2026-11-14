@@ -172,6 +172,10 @@ fn status(worker: &Repo, change: &str) -> serde_json::Value {
     json_stdout(worker.arc(&worker.root).args(["status", change, "--json"]))
 }
 
+/// Claim: where integration is provisional, plain integrate refuses with exit
+/// 17 and `integrate --provisional` records a provisional integration that
+/// leaves the change open. Rejects a provisional integration recorded as the
+/// change's closure.
 #[test]
 fn explicit_provisional_integration_keeps_the_change_open() {
     let (_authority, worker) = worker();
@@ -2682,6 +2686,10 @@ fn current_guard_refuses_unapplied_retry(guard: &str, code: i32) {
 fn unapplied_retry_respects_blocking_findings() {
     current_guard_refuses_unapplied_retry("finding", 2);
 }
+/// Claim: a hold set after a provisional intent was saved refuses the intent's
+/// retry in check and integrate with the hold's exit code, leaving the saved
+/// intent, the branches and the provisional refs unchanged. Rejects a retry
+/// applying a recorded intent past a standing hold.
 #[test]
 fn unapplied_retry_respects_holds() {
     current_guard_refuses_unapplied_retry("hold", 4);

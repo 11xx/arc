@@ -125,6 +125,9 @@ fn a_behind_change_under_ff_only_lists_both_blockers_and_exits_on_the_rebase() {
     );
 }
 
+/// Claim: a change whose clean merge with a moved target has not been gated is
+/// not ready, and once the merged tree fails a gate integrate refuses with the
+/// target unchanged. Rejects shipping a merged tree no gate ran on.
 #[test]
 fn a_clean_merge_breaking_a_gate_is_refused_before_it_can_ship() {
     let repo = Repo::new();

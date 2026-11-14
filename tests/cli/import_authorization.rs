@@ -1,5 +1,9 @@
 use super::common::*;
 
+/// Claim: from an enrolled publisher, import and its dry run refuse a bundle
+/// given without the publisher or with a received digest that does not match,
+/// and write no config or change. Rejects admitting an enrolled channel's
+/// bundle on asserted or mismatched provenance.
 #[test]
 fn enrolled_import_requires_exact_received_provenance_without_writes() {
     let source = Repo::new();
@@ -149,6 +153,10 @@ fn status(receiver: &Repo, bundle: &serde_json::Value) -> serde_json::Value {
     ]))
 }
 
+/// Claim: a foreign operator verdict admitted only as review input is kept as
+/// the operator's assessment of the current head, but earns no review credit:
+/// no valid approval, no gating eligibility, no place in the review map, and
+/// check refuses naming its origin. Rejects review input acting as an approval.
 #[test]
 fn input_verdict_preserves_operator_claim_without_review_credit() {
     let (source, path, bundle) = exported_review();
@@ -1536,6 +1544,10 @@ fn release_import(child: &mut Child) {
     child.stdin.take().unwrap().write_all(b"+").unwrap();
 }
 
+/// Claim: an import paused on the format lock reads its authorization again
+/// after the wait, so a policy revoking the publisher's review authority
+/// meanwhile refuses it, leaving the config, imports and keep refs untouched.
+/// Rejects an import writing under the authority it read before waiting.
 #[test]
 #[cfg(debug_assertions)]
 fn policy_revocation_during_format_wait_refuses_without_writes() {

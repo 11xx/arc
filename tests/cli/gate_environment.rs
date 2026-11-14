@@ -154,6 +154,10 @@ fn an_inherited_pass_is_ready_without_the_other_environment_run() {
         .success();
 }
 
+/// Claim: a pass recorded in another environment does not satisfy a gate here:
+/// status, check and integrate refuse, and `verify --skip-green` runs the gate
+/// locally. Rejects integration on evidence from an environment the gate does
+/// not accept.
 #[test]
 fn another_environment_is_inapplicable_without_a_local_pass() {
     let repo = Repo::new();

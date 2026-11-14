@@ -11,6 +11,10 @@ fn commit_composed_gates(repo: &Repo) {
     git(&repo.root, &["commit", "-m", "test: add gates"]);
 }
 
+/// Claim: a change marked iterating is refused by check and integrate with exit
+/// 13, which name the way off, and the inbox lists it only as iterating;
+/// switched off, it is judged by its approval again. Rejects an iterating
+/// change integrating or being reported as ready or awaiting review.
 #[test]
 fn iterating_change() {
     let repo = Repo::new();

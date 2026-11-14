@@ -6493,6 +6493,10 @@ mod tests {
         )
     }
 
+    /// Claim: an integration event replays to a guarded closure with its
+    /// recorded shape, and one recorded before shapes existed derives merge, or
+    /// already-contained when it says so. Rejects old integration events
+    /// replaying to another shape or none.
     #[test]
     fn guarded_integration_shapes_reduce_and_legacy_events_derive_shape() {
         use crate::model::IntegrationShape::{AlreadyContained, FastForward, Merge};
@@ -6779,6 +6783,8 @@ mod tests {
         assert!(entry.supersedes.is_none());
     }
 
+    /// Claim: a schema-1 change-opened event carrying no blockers or tags
+    /// replays with both empty. Rejects an old opening that no longer reduces.
     #[test]
     fn old_opening_events_default_new_metadata() {
         let event: Event = serde_json::from_value(serde_json::json!({
@@ -6931,6 +6937,11 @@ mod tests {
         assert!(reduce(&events).unwrap().holds.is_empty());
     }
 
+    /// Claim: a recorded reuse of passing evidence from a dirty, moved tree
+    /// still replays to a complete run, by revision or by tree, while a reuse
+    /// whose tree, gate or result disagrees with its evidence fails replay.
+    /// Rejects history that no longer replays, and a reuse standing in for
+    /// evidence it does not match.
     #[test]
     fn legacy_reuse_of_non_green_passing_evidence_still_replays() {
         let change = "legacy-reuse";

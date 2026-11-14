@@ -126,6 +126,11 @@ fn a_planner_and_orchestrator_can_clear_work_implemented_for_another_model() {
     );
 }
 
+/// Claim: an audit by the model that produced a change never discharges its
+/// independent-review debt, even when the commits' Implemented-by trailers name
+/// another implementer: the debt stays owed and the trailers are shown beside
+/// it. Rejects trailers overriding the recorded producer when independence is
+/// judged.
 #[test]
 fn an_implementer_can_never_clear_its_own_work_even_when_trailers_disagree() {
     let repo = policy(false);

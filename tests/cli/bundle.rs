@@ -207,6 +207,9 @@ fn importing_a_waiver_only_integration_stamps_store_format_three() {
     assert_eq!(config["schema_version"], 7, "{config}");
 }
 
+/// Claim: import refuses a bundle stamped with a store format newer than this
+/// arc reads. Rejects a reader importing, in whole or in part, events whose
+/// semantics it does not understand.
 #[test]
 fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
     let repo = Repo::new();
@@ -647,6 +650,10 @@ fn import_conflict_writes_nothing() {
     assert_eq!(fs::read(event_path).unwrap(), tampered_bytes);
 }
 
+/// Claim: a bundle carrying a known event with a malformed payload, a malformed
+/// envelope, or a stage event with no session is refused before any event or
+/// ref is written. Rejects decoding a recognized event as an opaque future one,
+/// and a partial import.
 #[test]
 fn import_rejects_malformed_known_events_before_writing() {
     let source = Repo::new();

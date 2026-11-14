@@ -47,6 +47,11 @@ fn status(repo: &Repo, cwd: &Path, slug: &str) -> serde_json::Value {
     serde_json::from_str(&stdout(repo.arc(cwd).args(["status", slug, "--json"]))).unwrap()
 }
 
+/// Claim: a change that deletes a gate from its own declarations still owes it,
+/// because integration judges by the target's declarations: check and integrate
+/// refuse naming the gate and status reports the change not ready, whether
+/// typed in its worktree or the target's checkout. Rejects a change escaping a
+/// gate by deleting it.
 #[test]
 fn a_deleted_gate_is_still_owed_from_the_change_worktree_and_the_target() {
     let repo = repo_declaring(TARGET_GATES);
