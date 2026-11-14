@@ -834,7 +834,8 @@ impl Ctx {
         said
     }
 
-    /// Build a local fact; publication assigns its identity under the ledger lock.
+    /// Build a local fact; publication assigns its identity and invocation
+    /// under the ledger lock.
     fn event_at(
         &self,
         store: &Store,
@@ -874,6 +875,8 @@ impl Ctx {
             session_link: self.session_link.clone(),
             session_resolution,
             session_resolution_reason,
+            invocation_id: None,
+            invocation_elapsed_ms: None,
             created_at,
             payload,
         }))

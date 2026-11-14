@@ -6788,6 +6788,13 @@ SCHEMAS
   `arc guide debt-clearance`. These optional input fields leave older records
   valid under store format 7.
 
+  Each change or repository event carries optional `invocation_id` (`inv-`
+  and a lowercase ULID, one per arc process) and `invocation_elapsed_ms`
+  (how long that process had run when it issued the event's identity). They
+  stamp no store format: events with or without them are valid, an older
+  reader ignores both, and export and import keep them as recorded.
+  `arc guide gate-costs` reads them.
+
   The bypass fields in state, status, check and explain retain historical
   judgements, including check.bypassed; gate authorization uses eligible passes.
 

@@ -90,6 +90,16 @@ pub(crate) fn start() {
     }
 }
 
+/// Wall time since this process started its clock, in milliseconds.
+pub(crate) fn elapsed_ms() -> u64 {
+    STARTED
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }

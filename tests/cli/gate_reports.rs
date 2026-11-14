@@ -895,6 +895,59 @@ fn over_from_another_checkout_includes_change_only_checks() {
     );
 }
 
+fn change_events(repo: &Repo, id: &str) -> Vec<Value> {
+    let mut paths: Vec<_> = fs::read_dir(event_dir(repo, id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| serde_json::from_slice(&fs::read(path).unwrap()).unwrap())
+        .collect()
+}
+
+/// Claim: every event an arc command writes names that command's invocation,
+/// `inv-` and a lowercase ULID shared by all of its events, and how long it
+/// had been running when it wrote each one. Rejects an unstamped event, an id
+/// per event or shared across commands, and a running time longer than the
+/// command took or running backwards within it.
+#[test]
+fn each_event_names_its_command_invocation_and_running_time() {
+    let repo = declared("true");
+    let (id, wt, _) = change_with_patchset(&repo, "stamped");
+    let started = std::time::Instant::now();
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let wall_ms = started.elapsed().as_millis() as u64;
+    let events = change_events(&repo, &id);
+    for event in &events {
+        let invocation = event["invocation_id"].as_str().unwrap_or_default();
+        let ulid = invocation.strip_prefix("inv-").unwrap_or_default();
+        assert!(ulid.len() == 26 && ulid == ulid.to_lowercase(), "{event}");
+        assert!(event["invocation_elapsed_ms"].is_u64(), "{event}");
+    }
+    let of = |kind: &str| {
+        events
+            .iter()
+            .find(|event| event["event_type"] == kind)
+            .unwrap()
+    };
+    let (opened, run, recorded) = (
+        of("change-opened"),
+        of("verification-run-started"),
+        of("verification-recorded"),
+    );
+    assert_eq!(run["invocation_id"], recorded["invocation_id"]);
+    assert_ne!(opened["invocation_id"], recorded["invocation_id"]);
+    assert_ne!(
+        of("patchset-added")["invocation_id"],
+        recorded["invocation_id"]
+    );
+    let elapsed = |event: &Value| event["invocation_elapsed_ms"].as_u64().unwrap();
+    assert!(elapsed(run) <= elapsed(recorded), "{run} {recorded}");
+    assert!(elapsed(recorded) <= wall_ms, "{recorded} ran {wall_ms}ms");
+}
+
 fn close_at(repo: &Repo, id: &str, at: chrono::DateTime<chrono::Utc>) {
     copy_event(repo, id, "patchset-added", |v| {
         v["event_type"] = json!("change-closed");

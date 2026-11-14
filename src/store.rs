@@ -1265,7 +1265,7 @@ impl Store {
         if !intent.event.event_id.is_empty() {
             bail!("provisional intent already has an issued identity");
         }
-        intent.event.event_id = self.issue_event_id()?.to_string();
+        self.issue_identity(&mut intent.event)?;
         self.stamp_format_for(&intent.event.payload)?;
         let path = self.provisional_intent_path(&intent.event.change_id)?;
         create_private_dir_all(path.parent().context("intent has no parent")?)?;
@@ -1770,6 +1770,16 @@ impl Store {
         Ok(id)
     }
 
+    /// Give a local event its identity and the invocation that issued it,
+    /// for a caller holding the ledger lock. Every change or repository event
+    /// this process writes is stamped here, except a landing completion, whose
+    /// identity the landing reserved and which is stamped when it is built.
+    pub(crate) fn issue_identity(&self, event: &mut Event) -> Result<()> {
+        event.event_id = self.issue_event_id()?.to_string();
+        event.stamp_invocation();
+        Ok(())
+    }
+
     /// Issue and publish under the same ledger-wide lock. No caller work,
     /// hook, or subprocess runs between these two operations.
     pub(crate) fn append_local_event(&self, event: &mut LocalEvent) -> Result<()> {
@@ -1777,7 +1787,7 @@ impl Store {
         if !event.event_id.is_empty() {
             bail!("local event already has an issued identity");
         }
-        event.event_id = self.issue_event_id()?.to_string();
+        self.issue_identity(event)?;
         self.write_event(event)
     }
 
@@ -1786,7 +1796,7 @@ impl Store {
         if !event.event_id.is_empty() {
             bail!("local event already has an issued identity");
         }
-        event.event_id = self.issue_event_id()?.to_string();
+        self.issue_identity(event)?;
         self.append_repository_event_locked(event)
     }
 

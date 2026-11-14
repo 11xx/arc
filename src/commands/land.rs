@@ -2354,6 +2354,7 @@ fn commit(
         let mut completion = lander.clone();
         completion.event_id = completion_id;
         completion.created_at = chrono::Utc::now();
+        completion.stamp_invocation();
         completion.payload = Payload::LandingCompleted {
             attempt: attempt.clone(),
             target_branch: plan.target_branch.clone(),

@@ -56,6 +56,13 @@ fn next_event_id(floor: Option<ulid::Ulid>) -> Result<ulid::Ulid> {
     Ok(id)
 }
 
+/// The arc process writing events: one id for every event it writes, a
+/// lowercase ULID after `inv-`.
+pub fn invocation_id() -> &'static str {
+    static INVOCATION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INVOCATION.get_or_init(|| format!("inv-{}", ulid::Ulid::new().to_string().to_lowercase()))
+}
+
 pub fn new_finding_id() -> String {
     format!("f{}", ulid::Ulid::new().to_string().to_lowercase())
 }
@@ -177,6 +184,14 @@ mod tests {
         assert!(validate_slug("Bad").is_err());
         assert!(validate_slug("a--b").is_err());
         assert!(validate_slug("-a").is_err());
+    }
+
+    #[test]
+    fn the_invocation_id_is_one_prefixed_lowercase_ulid_per_process() {
+        assert_eq!(invocation_id(), invocation_id());
+        let suffix = invocation_id().strip_prefix("inv-").unwrap();
+        assert_eq!(suffix, suffix.to_lowercase());
+        assert!(suffix.to_uppercase().parse::<ulid::Ulid>().is_ok());
     }
 
     #[test]

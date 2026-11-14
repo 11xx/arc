@@ -334,12 +334,27 @@ pub struct Event {
     /// a failed lookup is never read as a recording the store lacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_resolution_reason: Option<String>,
+    /// The arc process that wrote the event (`inv-` and a lowercase ULID),
+    /// shared by every event that process wrote. Absent on events written
+    /// before arc recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    /// How long, in wall milliseconds, that process had been running when it
+    /// issued the event's identity. Present exactly beside `invocation_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_elapsed_ms: Option<u64>,
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,
 }
 
 impl Event {
+    /// Record this process and its running time on the event.
+    pub fn stamp_invocation(&mut self) {
+        self.invocation_id = Some(crate::ids::invocation_id().to_string());
+        self.invocation_elapsed_ms = Some(crate::perf::elapsed_ms());
+    }
+
     /// The model the session store observed where it contradicted the model
     /// this event records.
     pub fn observed_model(&self) -> Option<String> {
@@ -4795,6 +4810,40 @@ mod tests {
         assert!(residual(
             &|r| r.unavailable = Some("No such file: /home/user".into())
         ));
+    }
+
+    /// Claim: an event written before arc stamped invocations loads with no
+    /// invocation and writes back byte for byte without the keys, while a
+    /// stamped one keeps both. Rejects requiring the fields of old history, or
+    /// adding them on rewrite, which would make a republished event differ from
+    /// its ledger file.
+    #[test]
+    fn events_without_an_invocation_read_and_write_unchanged() {
+        let old = serde_json::json!({
+            "schema_version": 1,
+            "event_id": "01J00000000000000000000000",
+            "repository_id": "repo",
+            "change_id": "change",
+            "actor": "tester",
+            "created_at": "2026-08-26T00:00:00Z",
+            "event_type": "hold-set",
+            "reason": "wait"
+        });
+        let event: Event = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(event.invocation_id, None);
+        assert_eq!(event.invocation_elapsed_ms, None);
+        assert_eq!(serde_json::to_value(&event).unwrap(), old);
+
+        let mut stamped = event;
+        stamped.stamp_invocation();
+        let written = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(written["invocation_id"], crate::ids::invocation_id());
+        assert!(written["invocation_elapsed_ms"].is_u64(), "{written}");
+        let read: Event = serde_json::from_value(written).unwrap();
+        assert_eq!(
+            read.invocation_id.as_deref(),
+            Some(crate::ids::invocation_id())
+        );
     }
 
     #[test]
