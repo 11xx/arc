@@ -165,6 +165,8 @@ pub fn begin(
         _ => None,
     };
     let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
+    let confinement = crate::confinement::at(&ctx.cwd, &target_head)?;
+    let _confinement = crate::confinement::Scope::new(&confinement);
     // Read the promotion source before anything is created: a `--from-fork`
     // naming no fork refuses by name, and the record is the fork as it stood
     // at promotion rather than whatever it becomes while this runs.

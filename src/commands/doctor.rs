@@ -196,7 +196,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // Doctor diagnoses the invoking checkout, including uncommitted
     // declarations and tracked files. A change's target would hide local
     // mistakes until they reached that branch.
-    inspect_gate_conflicts(&ctx.cwd, &mut problems);
+    inspect_gate_conflicts(&ctx.cwd, &mut problems, &mut advice);
     for state in states.values().filter(|s| !s.is_closed()) {
         if let Ok(declarations) = ctx.declarations(state) {
             for detail in declarations.gates.budget_errors() {
@@ -1163,7 +1163,7 @@ fn inspect_preparation_guard(
     });
 }
 
-fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
+fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>, advice: &mut Vec<Finding>) {
     let Ok(toplevel) = crate::gitio::toplevel(cwd) else {
         return;
     };
@@ -1177,6 +1177,12 @@ fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
             return;
         }
     };
+    if !gates.gates.is_empty() && gates.confine.is_none() {
+        advice.push(Finding {
+            code: "gates-unconfined",
+            detail: "project commands have unrestricted writes; declare [confine] writes in .arc/gates.toml (arc guide gates)".into(),
+        });
+    }
     if let Ok(Some(detail)) = crate::gate_raise::ceiling_warning(cwd, &gates) {
         problems.push(Finding {
             code: "gate-budget-unbounded",

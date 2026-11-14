@@ -25,7 +25,9 @@ pub struct VerificationTiming {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_reference: Option<Box<crate::gate_work::Reference>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_timings: Option<crate::check_timings::Receipt>,
+    pub confinement: Option<Box<crate::confinement::Receipt>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_timings: Option<Box<crate::check_timings::Receipt>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

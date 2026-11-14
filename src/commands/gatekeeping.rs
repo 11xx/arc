@@ -102,6 +102,7 @@ pub struct VerifyArgs {
 
 struct VerificationInput {
     work_declaration: Option<String>,
+    confine: Option<crate::confinement::Declaration>,
     timings: Option<String>,
     declaration: Option<String>,
     budget: Option<crate::gate_budget::BudgetJudgement>,
@@ -369,6 +370,8 @@ fn verify_with_landing(
     if let Some((target, _)) = landing_gates {
         st.target_branch = target.to_string();
     }
+    let confinement = ctx.declarations(&st)?.gates.confine;
+    let _confinement = crate::confinement::Scope::new(&confinement);
     if after_integration {
         return verify_after_integration(
             ctx,
@@ -535,6 +538,7 @@ fn verify_with_landing(
             &change_id,
             VerificationInput {
                 work_declaration: None,
+                confine: confinement.clone(),
                 timings: None,
                 declaration: None,
                 budget: None,
@@ -698,6 +702,7 @@ fn verify_with_landing(
         let passed = reused.len() - budget_refused
             + together::run_required(run_ctx, &store, &change_id, to_run, |name, gate| {
                 VerificationInput {
+                    confine: gate.confine.clone(),
                     timings: gate.timings.clone(),
                     budget: Some(gate.budget_judgement(&Default::default())),
                     exclusive: crate::exclusive::Request::for_gate(gate),
@@ -817,6 +822,7 @@ fn verify_with_landing(
         &change_id,
         VerificationInput {
             work_declaration: profiled_gate.as_ref().map(gates::declaration_identity),
+            confine: confinement.clone(),
             timings,
             declaration,
             budget,
@@ -1064,7 +1070,18 @@ impl ScratchWorktree {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
-        gitio::git(repo, &["worktree", "add", "--detach", &display, revision])?;
+        gitio::git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "--detach",
+                &display,
+                revision,
+            ],
+        )?;
+        gitio::populate_checkout(path)?;
         Ok(())
     }
 }
@@ -1114,6 +1131,7 @@ fn verify_against(
     selected.target_branch = target.to_string();
     let st = &selected;
     let declarations = ctx.declarations(st)?.gates;
+    let _confinement = crate::confinement::Scope::new(&declarations.confine);
     let required = declarations.required_for_event(&st.profile, event);
     if required.is_empty() {
         bail!("no gates declared for profile {}", st.profile);
@@ -1277,6 +1295,7 @@ fn verify_against(
             .context("a gate is left to run but its checkout was not created")?;
         passed += together::run_required(scratch_ctx, store, change_id, to_run, |name, gate| {
             VerificationInput {
+                confine: gate.confine.clone(),
                 timings: gate.timings.clone(),
                 budget: Some(gate.budget_judgement(&Default::default())),
                 exclusive: crate::exclusive::Request::for_gate(gate),
@@ -1409,6 +1428,7 @@ pub(crate) fn verify_landing_head(
     let passed =
         together::run_required(&checkout_ctx, store, run.change_id, to_run, |name, gate| {
             VerificationInput {
+                confine: gate.confine.clone(),
                 timings: gate.timings.clone(),
                 budget: Some(gate.budget_judgement(&Default::default())),
                 exclusive: crate::exclusive::Request::for_gate(gate),
@@ -1747,6 +1767,7 @@ fn partition<'a>(
         )
         .is_ok_and(|text| text.is_empty());
     for (name, gate) in gates {
+        let _confinement = crate::confinement::Scope::new(&gate.confine);
         let environment = declared_environment(environments, gate);
         if let Some(evidence) = reusable_evidence_for_event(
             &ctx.cwd,
@@ -2257,6 +2278,7 @@ fn verify_recorded(
                 &store,
                 &change_id,
                 VerificationInput {
+                    confine: gate.confine.clone(),
                     timings: gate.timings.clone(),
                     budget: Some(gate.budget_judgement(&Default::default())),
                     exclusive: crate::exclusive::Request::for_gate(gate),
@@ -2666,6 +2688,7 @@ fn verify_all_parallel(
         .into_iter()
         .enumerate()
         .map(|(index, (name, gate))| VerificationInput {
+            confine: gate.confine.clone(),
             timings: gate.timings.clone(),
             budget: Some(gate.budget_judgement(&Default::default())),
             exclusive: crate::exclusive::Request::for_gate(gate),
@@ -2866,6 +2889,7 @@ pub(super) fn gate_environments<'a>(
 ) -> Result<DeclaredEnvironments> {
     let mut identities = DeclaredEnvironments::new();
     for (name, gate) in gates {
+        let _confinement = crate::confinement::Scope::new(&gate.confine);
         let Some(probe) = gate.environment.as_deref() else {
             continue;
         };
@@ -2933,11 +2957,13 @@ fn create_baseline_checkout(
             &[
                 "worktree",
                 "add",
+                "--no-checkout",
                 "--detach",
                 path.to_str().context("non-UTF8 worktree path")?,
                 base,
             ],
         )?;
+        gitio::populate_checkout(&path)?;
         Ok(())
     })();
     if let Err(error) = creation {
@@ -3167,6 +3193,7 @@ fn execute_verification(
 ) -> Result<CompletedVerification> {
     let VerificationInput {
         work_declaration,
+        confine,
         timings,
         declaration,
         budget,
@@ -3187,6 +3214,7 @@ fn execute_verification(
         against_target,
         landing,
     } = input;
+    let _confinement = crate::confinement::Scope::new(&confine);
     let attested = attested_result.is_some();
     let mut timing = crate::verification_timing::VerificationTiming::default();
     let (execution_limit_ms, origin) = match timeout_seconds {
@@ -3625,6 +3653,7 @@ pub(super) fn run_gate_budgeted(
 }
 
 pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result<GateRun> {
+    let _confinement = crate::confinement::Scope::new(&gate.confine);
     let request = crate::exclusive::Request::for_gate(gate);
     with_check_timings(gate.timings.as_deref(), cwd, || {
         run_gate_with_capture(
@@ -3659,7 +3688,7 @@ fn with_check_timings(
                     receipt.dropped
                 );
             }
-            run.timing.check_timings = Some(receipt);
+            run.timing.check_timings = Some(Box::new(receipt));
         }
     }
     Ok(run)

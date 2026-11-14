@@ -24,6 +24,7 @@ mod claims;
 mod codex_model_checkpoint;
 mod commit_lookup_gaps;
 mod common;
+mod confinement;
 mod context;
 mod contribution;
 mod correspondence;

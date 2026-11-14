@@ -152,16 +152,39 @@ pub fn invocation_directory(cwd: &Path) -> Result<PathBuf> {
 
 #[track_caller]
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let checkout_policy = if matches!(args.first(), Some(&"switch" | &"checkout")) {
+        crate::confinement::declaration(cwd)?
+    } else {
+        None
+    };
+    let previous = checkout_policy.as_ref().map(|_| head(cwd)).transpose()?;
     let mut command = git_command();
+    if checkout_policy.is_some() {
+        command.args(["-c", "core.hooksPath=/dev/null"]);
+    }
     command.args(args).current_dir(cwd);
+    let confinement = if args.first() == Some(&"hook") {
+        crate::confinement::apply(&mut command, cwd)?
+    } else {
+        None
+    };
     let out = command_output(&mut command)
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if !out.status.success() {
+        if let Some(receipt) = confinement {
+            if receipt.confined {
+                receipt.failed();
+            }
+        }
         bail!(
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         );
+    }
+    if let Some(previous) = previous {
+        let _scope = crate::confinement::Scope::new(&checkout_policy);
+        checkout_hook(cwd, &previous, &head(cwd)?)?;
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
@@ -1877,17 +1900,28 @@ pub fn populate_checkout(path: &Path) -> Result<()> {
         _ => bail!("unsupported Git object format {format:?}"),
     };
     let head = git(path, &["rev-parse", "HEAD"])?;
+    checkout_hook(path, &null_oid, &head)
+}
+
+fn checkout_hook(path: &Path, previous: &str, head: &str) -> Result<()> {
     let hook = git_path(path, "hooks")?.join("post-checkout");
     use std::os::unix::fs::PermissionsExt;
     if fs::metadata(&hook)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     {
-        let output = crate::child_command::command(&hook)
-            .args([&null_oid, &head, "1"])
+        let mut command = crate::child_command::command(&hook);
+        let confinement = crate::confinement::apply(&mut command, path)?;
+        let output = command
+            .args([previous, head, "1"])
             .current_dir(path)
             .counted_output()
             .context("cannot run post-checkout hook")?;
         if !output.status.success() {
+            if let Some(receipt) = confinement {
+                if receipt.confined {
+                    receipt.failed();
+                }
+            }
             bail!(
                 "post-checkout hook failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()

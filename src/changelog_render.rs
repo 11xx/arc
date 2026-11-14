@@ -2,7 +2,7 @@
 //! a project declares in `.arc/changelog.toml`, and the intake count commands
 //! the operator declares in arc's configuration.
 //!
-//! The program runs with the invoking user's authority the way a gate is. It
+//! Project programs run under their declared writable roots, as gates do. A program
 //! runs as argv, never through a shell, from the directory its caller names,
 //! as the leader of its own process group, with the environment arc was
 //! given. It reads the request document its caller gives it on stdin, or
@@ -92,8 +92,10 @@ pub fn run(
     let deadline = Instant::now()
         .checked_add(timeout)
         .with_context(|| format!("{role} timeout is too large"))?;
+    let mut command = crate::child_command::command(program);
+    let confinement = crate::confinement::apply(&mut command, cwd)?;
     let mut group = match OwnedGroup::spawn(
-        crate::child_command::command(program)
+        command
             .args(arguments)
             .current_dir(cwd)
             .stdin(if request.is_some() {
@@ -113,6 +115,7 @@ pub fn run(
             }))
         }
     };
+    group.set_confinement(confinement);
     let child = group.child();
     let stdout = child
         .stdout

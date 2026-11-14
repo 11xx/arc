@@ -1739,8 +1739,8 @@ pub enum Payload {
         raise: crate::gate_raise::Raise,
     },
     VerificationRecorded {
-        /// Identity of a declaration with path coverage. Absence answers only
-        /// declarations without coverage settings.
+        /// Identity of a scoped or confined declaration. Absence answers only
+        /// unconfined declarations without coverage or concurrency settings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         declaration: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]

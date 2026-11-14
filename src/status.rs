@@ -1678,6 +1678,7 @@ fn build_report(
     let mut probe_subject: Option<ProbeSubject> = None;
     let live = matches!(probe_site, ProbeSite::Live { .. });
     for (name, gate) in gates.required_for(&state.profile) {
+        let _confinement = crate::confinement::Scope::new(&gate.confine);
         let bound = |entry: &state::VerificationEntry| {
             current_head
                 .as_deref()
@@ -2594,7 +2595,7 @@ pub fn matches_declaration(
     gate: &crate::gates::Gate,
 ) -> bool {
     evidence.declaration.as_ref().map_or_else(
-        || !gate.coverage.enabled() && !gate.concurrent,
+        || gate.confine.is_none() && !gate.coverage.enabled() && !gate.concurrent,
         |identity| identity == &crate::gates::declaration_identity(gate),
     ) && crate::gate_concurrency::accepted_here(gate, evidence.timing.concurrent_batch.as_ref())
         && evidence.command == gate.command

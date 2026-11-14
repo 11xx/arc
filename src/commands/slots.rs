@@ -544,6 +544,8 @@ pub fn warm(ctx: &Ctx, target: Option<&str>, limit: u32) -> Result<()> {
             gitio::branch_head(&ctx.cwd, &branch)?
         }
     };
+    let confinement = crate::confinement::at(&ctx.cwd, &target)?;
+    let _confinement = crate::confinement::Scope::new(&confinement);
     deprioritize();
     let identity = slots::identity(&gitio::toplevel(&ctx.cwd)?, &declaration)?;
     let open_worktrees: Vec<(PathBuf, String)> = ctx

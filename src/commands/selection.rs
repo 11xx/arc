@@ -234,6 +234,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
     if declarations.gates.has_budgets() {
         store.adopt_budgets()?;
     }
+    let _confinement = crate::confinement::Scope::new(&declarations.gates.confine);
     let required = declarations.gates.required_for(&st.profile);
     let selected: Vec<_> = match only {
         Some(name) => {
@@ -267,6 +268,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
     let mut passed = 0;
     let mut work_references = crate::gate_work::References::default();
     for (name, gate) in selected {
+        let _confinement = crate::confinement::Scope::new(&gate.confine);
         eprintln!("running: {}", gate.command);
         let started = std::time::Instant::now();
         let (limit, origin) = gate.execution_limit()?;

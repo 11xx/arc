@@ -855,6 +855,8 @@ fn execute_acceptance(
     plan: &AcceptancePlan,
     result: &mut AcceptanceResult,
 ) -> Result<i32> {
+    let confinement = ctx.declarations(&plan.state)?.gates.confine;
+    let _confinement = crate::confinement::Scope::new(&confinement);
     result.delivered_head = Some(plan.delivered_head.clone());
     result.prepared_head = Some(plan.head.clone());
     result.worktree = Some(plan.checkout.clone());

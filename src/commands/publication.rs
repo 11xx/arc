@@ -36,6 +36,7 @@ pub fn publication(
     if gates.has_budgets() {
         store.adopt_budgets()?;
     }
+    let _confinement = crate::confinement::Scope::new(&gates.confine);
     let prior_events = store.load_repository_events()?;
     let audited_through = prior_events.iter().rev().find(|event| matches!(&event.payload,
         Payload::PublicationVerified { target: previous_target, profile: previous_profile, result: VerifyResult::Pass, budget_accepted, .. }
@@ -125,6 +126,7 @@ pub fn publication(
     println!("publication target: {target} at {revision}");
     let mut work_references = crate::gate_work::References::default();
     for (name, gate) in required {
+        let _confinement = crate::confinement::Scope::new(&gate.confine);
         let environment = match gate.environment.as_deref() {
             Some(command) => {
                 gates::environment_probe(&scratch.path, command, gate.timeout)?.identity

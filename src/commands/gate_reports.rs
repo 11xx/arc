@@ -11,6 +11,7 @@ type BudgetSample = (chrono::DateTime<chrono::Utc>, Option<String>, u64);
 
 #[derive(Serialize)]
 pub(super) struct GateReport {
+    confine: Option<crate::confinement::Declaration>,
     schema: &'static str,
     pub(super) landing: landing::Report,
     unclaimed_paths: usize,
@@ -179,6 +180,7 @@ fn collect_declarations(
         None
     };
     let budget_declared = declared.has_budgets();
+    let confine = declared.confine.clone();
     let budget_rules = declared.budget.clone();
     let budget_errors = declared.budget_errors();
     let integration_budget_sum_ms = crate::gate_concurrency::total(&declared.required_for(""));
@@ -447,6 +449,7 @@ fn collect_declarations(
         })
         .collect();
     Ok(GateReport {
+        confine,
         schema: GATES_SCHEMA,
         landing: landing_costs.summarize(cwd, repository, chrono::Utc::now())?,
         unclaimed_paths,
@@ -484,6 +487,13 @@ fn ms(value: Option<u64>) -> String {
 }
 
 pub(super) fn render(report: &GateReport) {
+    match &report.confine {
+        Some(confine) => println!(
+            "confinement: writes {:?}; required = {}",
+            confine.writes, confine.required
+        ),
+        None => println!("confinement: undeclared"),
+    }
     report.landing.render();
     match report.budget_rules.as_ref().and_then(|b| b.total) {
         Some(total) => println!(

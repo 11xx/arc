@@ -590,7 +590,8 @@ SANDBOX (rehearse something destructive)
   configuration still apply. A hook parent's GIT_DIR and GIT_WORK_TREE locate
   arc's checkout once; subsequent Git calls use explicit directories. This
   protects against inherited redirection, not commands that choose another
-  repository themselves.
+  repository themselves. `arc guide gate-confinement` defines kernel-enforced
+  writable roots for project commands.
 
   Git configuration health is reported as problems by `arc doctor`, in one
   line by `arc catchup`, and per registered project by `arc workspace report`.
@@ -1122,8 +1123,9 @@ RUN A CHANGE
                                      Record that the change needs no entry.
   arc changelog [--json | --write]   Render unreleased copy, or write the target.
 
-  A gate runs where its change lives. `verify`, `snapshot --verify`, `done`,
-  and `rebase --verify` execute the command in the change's recorded worktree
+  A gate runs where its change lives, under `arc guide gate-confinement`.
+  `verify`, `snapshot --verify`, `done`, and `rebase --verify` execute the
+  command in the change's recorded worktree
   and record the evidence at that worktree's head, whichever checkout of the
   repository the command was typed in; the run says which tree it used when
   that is not the one you are standing in. Which gates are required is read
@@ -1765,8 +1767,8 @@ RUN A CHANGE
   Empty list items retain their markers.
   A project whose file follows another convention selects `renderer =
   "command"` with a `renderer_command` argv. That command runs from the
-  repository root without a shell, with the authority of whoever runs `arc
-  changelog`, reads an `arc-changelog-render-request/1` document on stdin,
+  repository root without a shell, under `arc guide gate-confinement`,
+  reads an `arc-changelog-render-request/1` document on stdin,
   and answers on stdout: the rendering for a read, and for `--write` the
   complete replacement file, written atomically after it exits 0. It may
   answer without reading the whole request. Its process group is killed when
@@ -5602,8 +5604,8 @@ GATES
   `unclaimed_paths` counts tracked paths outside inert exclusions that no
   explicit gate pattern names; a gate with no paths does not name a path.
   Unreadable changes are named, readable history is retained, and a partial
-  report exits 16. JSON is `arc-gates/1`. Cost kinds and check timings are
-  defined in `arc guide gate-costs`.
+  report exits 16. JSON is `arc-gates/1`, including `confine`.
+  See `arc guide gate-costs` and `arc guide gate-confinement`.
 
   `arc gates paths [--json]` reports tracked paths, affected gates and why
   coverage is mandatory, using one `git ls-files` with no ledger reads or
@@ -5812,9 +5814,8 @@ GATES
 
   Paths and inert exclusions participate in evidence identity. The complete
   coverage map and dangerous patterns also participate because they determine
-  unnamed-path fallback. Declaring nonempty coverage settings requires a fresh
-  pass; legacy evidence without identity cannot answer a scoped declaration.
-  A declaration without coverage settings retains its default identity. Target
+  unnamed-path fallback. Coverage and confinement require fresh identity;
+  legacy evidence answers only unconfined, unscoped declarations. Target
   coverage stays in force until an edited declaration lands, as with selector
   changes. Project and operator inert lists combine; differing paths for the
   same gate conflict. Scoped run receipts retain identity, and delta receipts
@@ -5829,6 +5830,62 @@ GATES
   publication checks every required gate on a changed tree. Reuse receipts
   retain the passing source tree, target tree, selector and declarations;
   they grant no result to another event or environment.
+
+GATE CONFINEMENT
+  A project declares writable roots in .arc/gates.toml:
+
+    [confine]
+    writes = ["target", "~/.cargo"]
+    required = true                    default; false permits unavailable fallback
+
+  The table opts every project command into Linux Landlock write confinement:
+  gates, selectors, environment probes, preparation, slot identity and warm
+  commands, explicit checkout hooks, changelog renderers, and commands in
+  acceptance and publication scratch checkouts. Without the table commands
+  retain ordinary write authority; doctor advises `gates-unconfined` when gates
+  are declared without confinement. Reads and network access are unrestricted.
+  A project must list its package caches and other writable outputs.
+
+  Relative roots are inside the evaluated checkout. `~`, `$VAR` and `${VAR}`
+  expand using arc's environment; unset variables refuse execution. Roots
+  resolve symlinks before enforcement. An absent root is created as a directory
+  only inside the checkout or its arc-managed build storage. External roots
+  must already exist. A file root grants writes to that file only.
+
+  Commands can also write the build and cache storage arc manages for this
+  checkout, /tmp, TMPDIR, and the process devices /dev/null, /dev/zero,
+  /dev/random, /dev/urandom, /dev/tty and existing /dev/pts nodes. The source
+  checkout and its Git directories receive no implicit write permission.
+  Automatic roots still apply when a checkout lives beneath one of them.
+
+  The destination's committed declaration governs a change, including scratch
+  runs. Operator [confine] roots supplement it, and either layer may require
+  enforcement. A head can adopt confinement when its destination has none,
+  or require enforcement, but cannot add writable roots to an existing
+  destination declaration. Declaration differences name both sides. Changing
+  confinement changes execution identity: a pass under another declaration,
+  including an unconfined pass, cannot silently remain green.
+
+  Arc queries the kernel ABI and requires ABI 3 for truncation protection.
+  It handles supported filesystem write rights, including cross-directory
+  rename and, from ABI 5, device ioctls; it requests no unsupported right.
+  Unavailable Landlock or missing required rights refuse project execution.
+  Only `required = false` permits an unconfined fallback, labelled in diagnostics
+  and the receipt. Failure to install a prepared ruleset before exec refuses
+  execution. The child installs the restriction before exec, inherits it across
+  all descendants, and cannot lift it. Nested restrictions intersect.
+
+  Gate receipts include `confinement`: whether enforced, ABI, resolved writable
+  roots, and `identity`, a SHA-256 digest of those roots and ABI. An unavailable
+  fallback records its reason. A failed confined command prints its writable
+  roots once. Declaration identity binds the declared paths and required flag;
+  the receipt digest describes the resolved execution, including automatic roots.
+
+  Landlock protects filesystem content writes, creation, removal, rename and
+  truncation. It does not mediate every metadata operation, writes through
+  descriptors opened before confinement, or requests sent to an external
+  service. Arc retains its own authority to populate checkouts and record
+  evidence; the restriction applies to project commands and their descendants.
 
 GATE COSTS
   `arc gates` in text and JSON and `arc gates over` diagnose command costs
@@ -7109,7 +7166,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "questions", family: "questions", title: "Discussions, questions and decisions", start: "SETTLE A QUESTION (before it is work)" },
     Section { name: "change-commands", family: "change", title: "Change lifecycle commands", start: "RUN A CHANGE" },
     Section { name: "change-bundles", family: "change", title: "History export, objects and custody", start: "  Change history checksums hash compact JSON with recursively sorted object" },
-    Section { name: "change-gates", family: "change", title: "Gate execution and atomic review input", start: "  A gate runs where its change lives. `verify`, `snapshot --verify`, `done`," },
+    Section { name: "change-gates", family: "change", title: "Gate execution and atomic review input", start: "  A gate runs where its change lives, under `arc guide gate-confinement`." },
     Section { name: "probes", family: "probes", title: "Acceptance probes and brief bases", start: "  Each acceptance probe declared on the patchset's brief blocks readiness" },
     Section { name: "change-integration", family: "change", title: "Replay, integration shapes and shipped evidence", start: "  `snapshot` and `integrate` refuse a patchset containing a commit whose raw" },
     Section { name: "change-landing", family: "change", title: "Landings and must-land-together relations", start: "  Some changes must reach their target together or not at all. `arc metadata" },
@@ -7152,6 +7209,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
     Section { name: "files", family: "files", title: "Configuration, build storage and retention", start: "FILES" },
     Section { name: "gates", family: "gates", title: "Gate declarations and selection", start: "GATES" },
+    Section { name: "gate-confinement", family: "gates", title: "Kernel-enforced project writable roots", start: "GATE CONFINEMENT" },
     Section { name: "gate-costs", family: "gates", title: "Cost diagnosis, levers and check timings", start: "GATE COSTS" },
     Section { name: "gate-rounds", family: "gates", title: "Gate rules and the method of a round", start: "GATE ROUNDS" },
     Section { name: "gates-together", family: "gates-together", title: "Measured concurrent batches and host-local acceptance", start: "GATES TOGETHER" },

@@ -80,6 +80,9 @@ pub(crate) fn for_change_at(
         for (name, gate) in &mut required.gates {
             gate.head_removes = !own.gates.contains_key(name);
         }
+        if required.confine != own.confine {
+            notes.push(format!("confinement differs: {target} declares {:?}; {} declares {:?}; destination writable roots apply", required.confine, state.branch, own.confine));
+        }
         let divergences = required.owe_also(
             own,
             &format!("{target}'s .arc/gates.toml"),

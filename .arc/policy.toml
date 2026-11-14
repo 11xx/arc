@@ -79,6 +79,11 @@ paths = [
   "src/gitio/answers.rs",
   # Subprocess isolation prevents inherited Git state from reaching another repository.
   "src/child_command.rs",
+  # Enforces destination writable roots before project commands execute.
+  "src/confinement.rs",
+  # Confinement witnesses must reject commands that escape writable roots.
+  "src/confinement/tests.rs",
+  "tests/cli/confinement.rs",
   # Publication rejects constructors that bypass subprocess isolation.
   "clippy.toml",
   # Commit identity admission and configuration health reject contamination.

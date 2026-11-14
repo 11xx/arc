@@ -663,6 +663,7 @@ pub fn exclusive_in(cwd: &Path) -> Result<Option<UseLease>> {
 /// has exited; elsewhere it is plain `sh`.
 pub struct Shell {
     pub command: Command,
+    project: Option<PathBuf>,
     report: Option<(OwnedFd, OwnedFd)>,
     control: Option<(OwnedFd, OwnedFd)>,
     _lease: Option<UseLease>,
@@ -673,13 +674,16 @@ pub fn shell(cwd: &Path) -> Result<Shell> {
     let Some(checkout) = slot_checkout(cwd) else {
         return Ok(Shell {
             command: crate::child_command::command("sh"),
+            project: Some(cwd.to_path_buf()),
             report: None,
             control: None,
             _lease: None,
             _exclusive: None,
         });
     };
-    held_shell(Some(UseLease::shared(&checkout)?), None, false)
+    let mut shell = held_shell(Some(UseLease::shared(&checkout)?), None, false)?;
+    shell.project = Some(cwd.to_path_buf());
+    Ok(shell)
 }
 
 /// A command holder that accounts for the command's entire descendant tree.
@@ -696,7 +700,9 @@ pub fn measured_shell_with_lock(cwd: &Path, exclusive: Option<File>) -> Result<(
         }
         None => (None, 0),
     };
-    Ok((held_shell(lease, exclusive, true)?, wait_ms))
+    let mut shell = held_shell(lease, exclusive, true)?;
+    shell.project = Some(cwd.to_path_buf());
+    Ok((shell, wait_ms))
 }
 
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
@@ -761,6 +767,7 @@ fn held_shell(lease: Option<UseLease>, exclusive: Option<File>, measured: bool) 
     }
     Ok(Shell {
         command,
+        project: None,
         report: Some((read, write)),
         control,
         _lease: lease,
@@ -771,7 +778,16 @@ fn held_shell(lease: Option<UseLease>, exclusive: Option<File>, measured: bool) 
 impl Shell {
     /// Spawn the shell as the leader of its own process group.
     pub fn spawn(&mut self) -> std::io::Result<OwnedGroup> {
+        let receipt = self
+            .project
+            .as_deref()
+            .map(|checkout| crate::confinement::apply(&mut self.command, checkout))
+            .transpose()
+            .map_err(std::io::Error::other)?
+            .flatten();
         let mut group = OwnedGroup::spawn(&mut self.command)?;
+        group.set_confinement(receipt.clone());
+        group.observation.timing.confinement = receipt.map(Box::new);
         if let Some((read, write)) = self.report.take() {
             drop(write);
             group.report_through(read)?;
@@ -1066,6 +1082,7 @@ pub fn identity(checkout: &Path, declaration: &Declaration) -> Result<String> {
     };
     let mut shell = Shell {
         command: crate::child_command::command("sh"),
+        project: Some(checkout.to_path_buf()),
         report: None,
         control: None,
         _lease: None,

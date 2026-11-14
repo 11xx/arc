@@ -36,6 +36,7 @@ pub const BYPASS_RETIRED: &str = "--bypass is retired; make the gate fit its bud
 #[derive(Debug, Default, Deserialize)]
 #[serde(from = "GateDeclarations")]
 pub struct GatesFile {
+    pub confine: Option<crate::confinement::Declaration>,
     #[serde(skip)]
     pub concurrent_measurement: Option<crate::gate_concurrency::Acceptance>,
     #[serde(skip)]
@@ -62,6 +63,7 @@ pub struct GatesFile {
 
 #[derive(Deserialize)]
 struct GateDeclarations {
+    confine: Option<crate::confinement::Declaration>,
     #[serde(default)]
     selection: PathSelection,
     budget: Option<BudgetDeclaration>,
@@ -85,6 +87,7 @@ impl From<GateDeclarations> for GatesFile {
         });
         Self {
             selection: declared.selection,
+            confine: declared.confine,
             gates: declared.gates,
             budget,
             landing_budget_ms,
@@ -195,6 +198,8 @@ impl Coverage {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Gate {
+    #[serde(skip)]
+    pub confine: Option<crate::confinement::Declaration>,
     #[serde(default)]
     pub concurrent: bool,
     #[serde(skip)]
@@ -651,6 +656,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
             toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?;
         let source = source.to_string();
         layer.name_budget_sources(&origin);
+        crate::confinement::combine(&mut merged.confine, layer.confine.take());
         merged.landing_budget_ms = merged
             .landing_budget_ms
             .into_iter()
@@ -799,6 +805,9 @@ impl GatesFile {
         }
     }
     fn refresh_coverage(&mut self) {
+        for gate in self.gates.values_mut() {
+            gate.confine = self.confine.clone();
+        }
         let coverage: BTreeMap<_, _> = self
             .gates
             .iter()
@@ -851,6 +860,11 @@ impl GatesFile {
         target_label: &str,
         change_label: &str,
     ) -> Vec<GateDivergence> {
+        if let Some(current) = &mut self.confine {
+            current.required |= own.confine.as_ref().is_some_and(|c| c.required);
+        } else {
+            self.confine = own.confine.clone();
+        }
         if self.concurrent_measurement.is_none() {
             self.concurrent_measurement = own.concurrent_measurement;
         }
@@ -925,7 +939,7 @@ impl GatesFile {
 
 /// Identity of the gate declaration whose evidence can be reused.
 ///
-/// Default bindings and absent coverage settings add no identity fields.
+/// Absent confinement, default bindings and absent coverage add no identity fields.
 /// Scoped declarations bind the complete coverage map and dangerous patterns,
 /// since they determine the fallback for a path no gate names.
 pub fn declaration_identity(gate: &Gate) -> String {
@@ -938,6 +952,9 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
         "profiles": gate.profiles, "events": gate.events,
         "timeout": gate.timeout, "selector": gate.selector,
     });
+    if let Some(confine) = &gate.confine {
+        value["confine"] = serde_json::json!(confine);
+    }
     if gate.concurrent {
         value["concurrent"] = serde_json::json!(true);
     }
@@ -953,7 +970,7 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
 
 /// Retain structural identity for coverage and budget-raise execution proofs.
 pub fn coverage_identity(gate: &Gate) -> Option<String> {
-    (gate.concurrent || gate.coverage.enabled() || gate.budget.is_some())
+    (gate.confine.is_some() || gate.concurrent || gate.coverage.enabled() || gate.budget.is_some())
         .then(|| declaration_identity(gate))
 }
 
@@ -994,6 +1011,7 @@ pub fn select_delta(
     declared_gates: &[String],
     paths: &[String],
 ) -> Option<DeltaSelection> {
+    let _confinement = crate::confinement::Scope::new(&gate.confine);
     let selector = gate.selector.as_deref();
     let request = serde_json::json!({
         "schema": "arc-gate-delta/1", "source_tree": source_tree,
@@ -1117,7 +1135,9 @@ fn selector_output(
             timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS),
         ))
         .context("gate selector timeout is too large")?;
-    let child = crate::child_command::command("sh")
+    let mut command = crate::child_command::command("sh");
+    let confinement = crate::confinement::apply(&mut command, cwd)?;
+    let child = command
         .arg("-c")
         .arg(selector)
         .current_dir(cwd)
@@ -1176,9 +1196,21 @@ fn selector_output(
             break;
         }
         if Instant::now() >= deadline {
+            if let Some(receipt) = confinement {
+                if receipt.confined {
+                    receipt.failed();
+                }
+            }
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+    if status != Some(true) {
+        if let Some(receipt) = confinement {
+            if receipt.confined {
+                receipt.failed();
+            }
+        }
     }
     let output =
         join_before_deadline(reader, Some(deadline), "gate selector stdout")?.transpose()?;

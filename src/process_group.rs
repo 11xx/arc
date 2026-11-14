@@ -96,6 +96,7 @@ pub(crate) struct OwnedGroup {
     reported: Option<ExitStatus>,
     report_bytes: Vec<u8>,
     pub(crate) observation: crate::verification_timing::CommandReport,
+    confinement: Option<crate::confinement::Receipt>,
 }
 
 impl OwnedGroup {
@@ -117,6 +118,19 @@ impl OwnedGroup {
             reported: None,
             report_bytes: Vec::new(),
             observation: Default::default(),
+            confinement: None,
+        }
+    }
+
+    pub(crate) fn set_confinement(&mut self, receipt: Option<crate::confinement::Receipt>) {
+        self.confinement = receipt;
+    }
+
+    fn report_confinement(&mut self, status: ExitStatus) {
+        if let Some(receipt) = self.confinement.take() {
+            if !status.success() && receipt.confined {
+                receipt.failed();
+            }
         }
     }
 
@@ -160,7 +174,9 @@ impl OwnedGroup {
                     Err(error) => return Err(error),
                 }
                 while let Some(end) = self.report_bytes.iter().position(|byte| *byte == b'\n') {
+                    let confinement = self.observation.timing.confinement.take();
                     self.observation = serde_json::from_slice(&self.report_bytes[..end])?;
+                    self.observation.timing.confinement = confinement;
                     self.report_bytes.drain(..=end);
                     if let Some(raw) = self.observation.status {
                         self.reported = Some(ExitStatus::from_raw(raw));
@@ -245,6 +261,7 @@ impl OwnedGroup {
             })();
             let status = self.reported.unwrap_or(ExitStatus::from_raw(libc::SIGKILL));
             self.status = Some(status);
+            self.report_confinement(status);
             let pid = self.child.id() as i32;
             std::thread::spawn(move || {
                 // SAFETY: this unreaped child belongs to the holder guard.
@@ -260,6 +277,7 @@ impl OwnedGroup {
         let status = self.child.wait()?;
         let status = self.reported.unwrap_or(status);
         self.status = Some(status);
+        self.report_confinement(status);
         Ok(status)
     }
 }

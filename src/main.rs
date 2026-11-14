@@ -16,6 +16,7 @@ mod check_timings;
 mod child_command;
 mod commands;
 mod config;
+mod confinement;
 mod context;
 mod coordinate;
 mod correspondence;
@@ -994,7 +995,7 @@ enum Cmd {
     /// The projection is rendered by the renderer `.arc/changelog.toml`
     /// selects: the built-in `keep-a-changelog`, or `command`, whose
     /// `renderer_command` argv runs from the repository root without a shell,
-    /// with the authority of whoever runs arc changelog. It reads an
+    /// under the write confinement in `arc guide gate-confinement`. It reads an
     /// arc-changelog-render-request/1 document on stdin and answers on stdout;
     /// `renderer_timeout` bounds it (default 60s), and its process group is
     /// killed at the deadline. `--json` never runs it. The request's
