@@ -948,6 +948,47 @@ fn candidate_budget_refuses_execution_and_selection_without_moving_heads() {
     assert_eq!(config["schema_version"], 9);
 }
 
+/// Claim: `arc candidate verify` exits 0 only when every gate run passes and
+/// the budget judge accepts it; an over-budget pass is recorded as a pass, and
+/// its line names the overrun beside the nonzero exit. Rejects a
+/// success-looking `pass` line followed by exit 1, and a budget refusal of a
+/// run that fits.
+#[test]
+fn candidate_verify_names_a_budget_refusal_beside_its_exit() {
+    let f = fixture(Some("never"), &[], false);
+    let repo = &f.repo;
+    budget_declaration(repo, "10s");
+    let run = |run_ms: u64, code: i32| {
+        let output = repo
+            .arc(&repo.root)
+            .env("ARC_TEST_COMMAND_RUN_MS", run_ms.to_string())
+            .args(["candidate", "verify", "alice"])
+            .assert()
+            .code(code)
+            .get_output()
+            .clone();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let over = run(11300, 1);
+    assert!(
+        over.lines()
+            .any(|line| line.ends_with(": pass (over budget, ran 11.3s of 10s)")),
+        "success-looking line: {over}"
+    );
+    assert!(over.contains("gates: 0/1 pass"), "{over}");
+    assert_eq!(
+        repository_events(repo, "candidate-verified").pop().unwrap()["result"],
+        "pass"
+    );
+    let within = run(10000, 0);
+    assert!(
+        within
+            .lines()
+            .any(|line| line.starts_with("gate ") && line.ends_with(": pass")),
+        "{within}"
+    );
+}
+
 /// Claim: promotion rejudges the selected receipt under a reduced operator budget
 /// even when neither coordinate moved. Rejects treating a recorded selection as cost authority.
 #[test]

@@ -5106,8 +5106,10 @@ enum CandidateCmd {
     /// truncation or capture errors in the event. Exports carry metadata only.
     /// A gate command that exits 75 records `not-admitted`, as a change gate
     /// does: nothing ran, so it is no passing evaluation and is reported as
-    /// unrun rather than failed. Exits 0 when every gate run passes and 1
-    /// otherwise. Refused:
+    /// unrun rather than failed. Exits 0 when every gate run passes and the
+    /// budget judge of `arc guide gates` accepts its command time, and 1
+    /// otherwise: an over-budget or unmeasured pass is recorded as a pass, its
+    /// line names the refusal, and selection refuses it as an evaluation. Refused:
     /// `unknown-candidate`; `unknown-gate` for a --gate the change is not
     /// required to pass; `target-unreadable` when the target cannot be read
     Verify {

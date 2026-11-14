@@ -354,7 +354,16 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         ledger.record(&event)?;
         ctx.ensure_declared_actor(&store)?;
         store.append_local_repository_event(&mut event)?;
-        println!("gate {name}: {}", result.as_str());
+        let refusal = match (judgement.run_ms, judgement.budget_ms) {
+            _ if result != VerifyResult::Pass || accepted => String::new(),
+            (Some(run), Some(budget)) => format!(
+                " (over budget, ran {} of {})",
+                crate::gate_budget::duration(run),
+                crate::gate_budget::duration(budget)
+            ),
+            _ => " (unmeasured under its budget)".into(),
+        };
+        println!("gate {name}: {}{refusal}", result.as_str());
         println!("evaluation: {}", event.event_id);
         if result == VerifyResult::Pass && accepted {
             passed += 1;

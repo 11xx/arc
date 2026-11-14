@@ -4235,7 +4235,8 @@ CANDIDATES
   gate's command, timeout, and environment probe as consumed, the identity the
   probe yielded there, the result, and command timing. Required declarations
   include the candidate tree's additions and tightened budgets. Execution and
-  selection judge timing against the effective budgets in `arc guide gates`.
+  selection judge timing against the effective budgets in `arc guide gates`;
+  `arc candidate verify --help` states the exit status that follows.
 
   Selection is validation, never choice. The caller names the registration,
   the destination (the change whose brief it answers), the target head it
