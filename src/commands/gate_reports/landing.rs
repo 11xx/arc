@@ -1,4 +1,5 @@
-//! Command time paid by integrated changes, counted once at their closure.
+//! Command time paid by integrated changes, counted once at their closure,
+//! with the preparation the same receipts paid beside it.
 
 use super::*;
 use chrono::{DateTime, Duration, Utc};
@@ -12,6 +13,8 @@ pub(in crate::commands) struct ChangeCost {
     executions: usize,
     run_ms: Option<u64>,
     measured_ms: u64,
+    prepare_ms: Option<u64>,
+    measured_prepare_ms: u64,
 }
 
 #[derive(Default, Serialize)]
@@ -20,6 +23,9 @@ pub(in crate::commands) struct Period {
     pub(in crate::commands) measured_ms: u64,
     unmeasured: usize,
     paid_ms: Option<u64>,
+    measured_prepare_ms: u64,
+    prepare_unmeasured: usize,
+    prepare_paid_ms: Option<u64>,
 }
 
 impl Period {
@@ -32,8 +38,14 @@ impl Period {
             period.landings += 1;
             period.measured_ms = period.measured_ms.saturating_add(change.measured_ms);
             period.unmeasured += usize::from(change.run_ms.is_none());
+            period.measured_prepare_ms = period
+                .measured_prepare_ms
+                .saturating_add(change.measured_prepare_ms);
+            period.prepare_unmeasured += usize::from(change.prepare_ms.is_none());
         }
         period.paid_ms = (period.unmeasured == 0).then_some(period.measured_ms);
+        period.prepare_paid_ms =
+            (period.prepare_unmeasured == 0).then_some(period.measured_prepare_ms);
         period
     }
 }
@@ -48,6 +60,8 @@ pub(in crate::commands) struct Report {
     unmeasured: usize,
     zero_execution_share: Option<f64>,
     timing: Distribution,
+    prepare_unmeasured: usize,
+    preparation: Distribution,
     #[serde(skip_serializing_if = "Option::is_none")]
     median_exceeds_budget: Option<bool>,
     pub(in crate::commands) last_7_days: Period,
@@ -87,6 +101,8 @@ impl Costs {
             executions: 0,
             run_ms: Some(0),
             measured_ms: 0,
+            prepare_ms: Some(0),
+            measured_prepare_ms: 0,
         });
         for event in events {
             match &event.payload {
@@ -133,6 +149,13 @@ impl Costs {
                         .zip(timing.run_ms)
                         .and_then(|(a, b)| a.checked_add(b));
                     cost.measured_ms = cost.measured_ms.saturating_add(timing.run_ms.unwrap_or(0));
+                    cost.prepare_ms = cost
+                        .prepare_ms
+                        .zip(timing.prepare_ms)
+                        .and_then(|(a, b)| a.checked_add(b));
+                    cost.measured_prepare_ms = cost
+                        .measured_prepare_ms
+                        .saturating_add(timing.prepare_ms.unwrap_or(0));
                 }
                 _ => {}
             }
@@ -192,6 +215,13 @@ impl Costs {
             .collect::<Vec<_>>();
         let unmeasured = landings - samples.len();
         let timing = window_timing(&mut samples, unmeasured);
+        let mut preparation = self
+            .changes
+            .iter()
+            .filter_map(|c| c.prepare_ms)
+            .collect::<Vec<_>>();
+        let prepare_unmeasured = landings - preparation.len();
+        let preparation = window_timing(&mut preparation, prepare_unmeasured);
         Ok(Report {
             window: WINDOW,
             budget_ms,
@@ -207,6 +237,8 @@ impl Costs {
                 .zip(budget_ms)
                 .map(|(median, budget)| median > budget),
             timing,
+            prepare_unmeasured,
+            preparation,
             last_7_days,
             last_30_days,
             changes: self.changes,
@@ -214,7 +246,9 @@ impl Costs {
     }
 }
 
-fn window_timing(samples: &mut [u64], unmeasured: usize) -> Distribution {
+/// A percentile over `samples` and `unmeasured` landings, stated only when no
+/// value the unmeasured landings could hold would change it.
+pub(super) fn window_timing(samples: &mut [u64], unmeasured: usize) -> Distribution {
     let mut timing = Distribution::of(samples, 0);
     if unmeasured > 0 {
         let landings = samples.len() + unmeasured;
@@ -248,16 +282,25 @@ impl Report {
             self.window, self.landings, self.unmeasured, statistic(self.timing.median_ms), statistic(self.timing.p90_ms), ms(self.budget_ms),
             if self.median_exceeds_budget == Some(true) { " (median exceeds advisory)" } else { "" },
             self.zero_execution_share.map_or_else(|| "unmeasured".into(), |s| format!("{:.1}%", s*100.0)));
+        println!(
+            "  preparation: {} unmeasured; median {}, p90 {}; outside the landing budget, which judges gate time",
+            self.prepare_unmeasured,
+            statistic(self.preparation.median_ms),
+            statistic(self.preparation.p90_ms)
+        );
         if let Some(warning) = &self.budget_warning {
             println!("{warning}");
         }
         for (days, period) in [(7, &self.last_7_days), (30, &self.last_30_days)] {
             println!(
-                "  {days} days: {} landings; paid {}; measured {}; {} unmeasured landings",
+                "  {days} days: {} landings; paid {}; measured {}; {} unmeasured landings; preparation paid {}; measured {}; {} unmeasured",
                 period.landings,
                 ms(period.paid_ms),
                 ms(Some(period.measured_ms)),
-                period.unmeasured
+                period.unmeasured,
+                ms(period.prepare_paid_ms),
+                ms(Some(period.measured_prepare_ms)),
+                period.prepare_unmeasured
             );
         }
     }

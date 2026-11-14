@@ -92,6 +92,8 @@ struct History {
     ever_failed: bool,
     last_failed_first: Option<Failure>,
     timing: Distribution,
+    prepare_unmeasured: usize,
+    preparation: Distribution,
 }
 
 #[derive(Serialize)]
@@ -192,6 +194,7 @@ fn collect_declarations(
         .collect();
     let mut observations: BTreeMap<String, crate::gate_diagnostics::Observations> = BTreeMap::new();
     let mut budget_samples: BTreeMap<String, Vec<BudgetSample>> = BTreeMap::new();
+    let mut preparation_samples: BTreeMap<String, (Vec<u64>, usize)> = BTreeMap::new();
     let mut rows: BTreeMap<_, _> = declared
         .gates
         .into_iter()
@@ -386,6 +389,12 @@ fn collect_declarations(
                         if let Some(ms) = timing.run_ms.or(*duration_ms) {
                             samples.push(ms);
                             *legacy += usize::from(timing.run_ms.is_none());
+                            let (prepared, unmeasured) =
+                                preparation_samples.entry(row.name.clone()).or_default();
+                            match timing.prepare_ms {
+                                Some(ms) => prepared.push(ms),
+                                None => *unmeasured += 1,
+                            }
                         }
                     }
                     Payload::VerificationBaseReused { gate, .. } => {
@@ -411,6 +420,10 @@ fn collect_declarations(
         .into_values()
         .map(|(mut row, mut samples, legacy)| {
             row.history.timing = Distribution::of(&mut samples, legacy);
+            let (mut prepared, unmeasured) =
+                preparation_samples.remove(&row.name).unwrap_or_default();
+            row.history.prepare_unmeasured = unmeasured;
+            row.history.preparation = landing::window_timing(&mut prepared, unmeasured);
             (row.diagnosis, row.checks) = observations
                 .remove(&row.name)
                 .unwrap_or_default()
@@ -610,6 +623,12 @@ pub(super) fn render(report: &GateReport) {
                 .map_or_else(|| "none".into(), |ms| format!("{:.3}s", ms as f64 / 1000.0))
         );
         println!("  timing: {} samples; {} legacy duration_ms samples (includes preparation and waiting); attested: {}; not-admitted: {}", timing.samples, timing.legacy_duration_samples, h.attested, h.not_admitted);
+        println!(
+            "  preparation: {} unmeasured; median {}, p90 {}",
+            h.prepare_unmeasured,
+            ms(h.preparation.median_ms),
+            ms(h.preparation.p90_ms)
+        );
     }
 }
 

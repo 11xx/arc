@@ -5868,9 +5868,9 @@ GATE COSTS
   never enter budget shares. A median above 80% is labelled in the report.
 
   `arc workspace gates` rows include declared total, landing median and p90,
-  and landings and paid gate time in 7/30 days. They sort by 30-day measured
-  gate time descending (the known lower bound when incomplete), then project
-  name; unobserved projects follow readable ones.
+  and landings, paid gate time and paid preparation in 7/30 days. They sort
+  by 30-day measured gate time descending (the known lower bound when
+  incomplete), then project name; unobserved projects follow readable ones.
 
   Landing costs use the latest 100 readable integrated changes, including
   asserted and legacy closures and each completed stack member separately.
@@ -5888,6 +5888,11 @@ GATE COSTS
   landed within that period, charging its complete landing cost there.
   Paid totals are null if any such change is unmeasured; measured_ms retains
   the known lower bound. Unreadable changes remain collection failures.
+  Preparation paid is reported beside gate time for the same landings and
+  windows, and for each gate over its runs, from prepare_ms on the same
+  receipts by the same rules: a receipt without prepare_ms leaves its
+  landing's preparation unmeasured, and a percentile is stated only when
+  known. The landing budget judges gate time alone.
 
   Total bounds the worst-case integration suite and is enforced.
   Landing declares typical executed cost and is advisory, reported against
@@ -6069,7 +6074,10 @@ GATE ROUNDS
   3. Remove the waste, which costs no coverage: the levers of
      `arc guide gate-costs` in their order, up to cutting tests. Duplication
      answers to reuse, `paths` and base passes; queueing, to fewer and
-     shorter runs holding an `exclusive` lock.
+     shorter runs holding an `exclusive` lock. A build a gate needs is
+     declared as preparation, `[prepare]` in `.arc/worktrees.toml`
+     (`arc guide files`), so `arc gates` shows its time beside the gate's
+     rather than inside it.
   4. Rank the checks by what they guard, as above, and cut from the bottom
      until the bound holds, never by cost alone.
   5. Make what matters fit. Shorten the product's waits inside the test,

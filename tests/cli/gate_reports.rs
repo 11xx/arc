@@ -976,6 +976,67 @@ fn landing_budget_is_destination_owned_and_advisory() {
     assert_eq!(report["landing"]["budget_ms"], 10);
 }
 
+/// Claim: `arc gates` reports the preparation each landing paid beside its gate
+/// time, from prepare_ms on the same receipts, per landing, per gate and in the
+/// 7/30-day totals, and the advisory landing budget judges gate time alone.
+/// Rejects a report that hides preparation, a preparation percentile an
+/// unmeasured landing could change, and a landing budget judging preparation.
+#[test]
+fn landing_cost_reports_preparation_beside_gate_time() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[budget]\nlanding = '10ms'\n[gates.unit]\ncommand = 'true'\n");
+    let land = |slug: &str, prepare_ms: Option<u64>| {
+        let (id, wt, _) = change_with_patchset(&repo, slug);
+        repo.arc(&wt).args(["verify", "--all"]).assert().success();
+        rewrite_event(&repo, &id, "verification-recorded", |v| {
+            v["run_ms"] = json!(5);
+            match prepare_ms {
+                Some(ms) => v["prepare_ms"] = json!(ms),
+                None => {
+                    v.as_object_mut().unwrap().remove("prepare_ms");
+                }
+            }
+        });
+        close_at(&repo, &id, chrono::Utc::now());
+        wt
+    };
+    let wt = land("prepared", Some(300));
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let l = &report["landing"];
+    assert_eq!(l["timing"]["median_ms"], 5);
+    assert_eq!(l["preparation"]["median_ms"], 300);
+    assert_eq!(l["prepare_unmeasured"], 0);
+    assert_eq!(l["median_exceeds_budget"], false);
+    assert_eq!(l["last_7_days"]["prepare_paid_ms"], 300);
+    assert_eq!(l["changes"][0]["prepare_ms"], 300);
+    let unit = report["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["name"] == "unit")
+        .unwrap();
+    assert_eq!(unit["history"]["preparation"]["median_ms"], 300);
+    let text = stdout(repo.arc(&wt).arg("gates"));
+    assert!(
+        text.contains("preparation: 0 unmeasured; median 0.300s, p90 0.300s; outside the landing budget, which judges gate time"),
+        "{text}"
+    );
+    assert!(
+        text.contains("preparation paid 0.300s; measured 0.300s; 0 unmeasured"),
+        "{text}"
+    );
+
+    land("unprepared", None);
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let l = &report["landing"];
+    assert_eq!(l["timing"]["median_ms"], 5);
+    assert_eq!(l["prepare_unmeasured"], 1);
+    assert!(l["preparation"]["median_ms"].is_null(), "{l}");
+    assert!(l["last_30_days"]["prepare_paid_ms"].is_null(), "{l}");
+    assert_eq!(l["last_30_days"]["measured_prepare_ms"], 300);
+    assert_eq!(l["last_30_days"]["prepare_unmeasured"], 1);
+}
+
 /// Claim: reports use the latest 100 landings while 7/30-day totals include every
 /// landing in each period. Rejects an unbounded median, execution-date charging,
 /// oldest-first selection, missing zero landings or a zero median for no history.
