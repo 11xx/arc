@@ -2442,3 +2442,97 @@ fn without_descriptor_directories_workbench_acts_refuse_clearly() {
     assert!(path.join("result.txt").is_file());
     assert_eq!(listed(&repo, true)[0]["storage"], "hot");
 }
+
+/// Whether the fixture's filesystem takes an ACL on `path`.
+fn takes_acl(path: &Path) -> bool {
+    std::process::Command::new("setfacl")
+        .args(["-m", "u:nobody:r"])
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success())
+        && std::process::Command::new("setfacl")
+            .args(["-b"])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+fn getfacl(path: &Path) -> String {
+    let output = std::process::Command::new("getfacl")
+        .args(["-c", "-p"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Claim: a draft of an index is readable by its owner alone from the
+/// moment it is created until it takes the index's mode, whatever the
+/// umask: a rewrite interrupted with the draft just created or partly
+/// written leaves a draft no one else can read. Rejects a draft created
+/// under the umask and narrowed only after its content is in it.
+#[test]
+fn an_index_draft_is_private_until_it_takes_the_index_mode() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "private", "private notes");
+    fs::set_permissions(path.join("WORKBENCH.md"), fs::Permissions::from_mode(0o600)).unwrap();
+    for stage in ["created", "partial"] {
+        let (_, artifact) = journal_artifact(&repo, stage, "plan", "# Plan\n");
+        let interrupted = repo
+            .arc_under_umask(&repo.root, "022")
+            .env("ARC_TEST_WORKBENCH_INDEX_INTERRUPT", stage)
+            .args([
+                "journal",
+                "workbench",
+                "link",
+                "private",
+                "--artifact",
+                &artifact,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            interrupted.status.code(),
+            Some(9),
+            "{stage}: {interrupted:?}"
+        );
+        let left = drafts(&path);
+        assert_eq!(left.len(), 1, "{stage}: {left:?}");
+        let mode = fs::metadata(path.join(&left[0])).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{stage}: the draft was {mode:o}");
+    }
+}
+
+/// Claim: a rewritten index ends with exactly the access ACL the index had,
+/// none when it had none, even where the directory's default ACL would
+/// give a new file one. Rejects a replacement readable by a user the
+/// original was not. Runs where the fixture's filesystem takes an ACL.
+#[test]
+fn an_index_rewrite_never_takes_an_inherited_acl() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "plain", "plain notes");
+    let index = path.join("WORKBENCH.md");
+    if !takes_acl(&index) {
+        return;
+    }
+    let status = std::process::Command::new("setfacl")
+        .args(["-d", "-m", "u:nobody:r"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let before = getfacl(&index);
+    assert!(!before.contains("nobody"), "{before}");
+    let (_, artifact) = journal_artifact(&repo, "plain", "plan", "# Plan\n");
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "link",
+        "plain",
+        "--artifact",
+        &artifact,
+    ]));
+    assert!(fs::read_to_string(&index).unwrap().contains(&artifact));
+    assert_eq!(getfacl(&index), before);
+}

@@ -2253,9 +2253,10 @@ WORKBENCHES (working material in the journal)
   the second until the next journal write publishes it. A later act rewrites the index only while it
   is the one arc wrote, and leaves any other `WORKBENCH.md` as it is. The
   rewrite is written beside it, under a name beginning
-  `.WORKBENCH.md.arc-draft` that no other attempt uses, with its mode and
-  access ACL, and renamed over it, so a reader finds the old index or the
-  new one whole; other extended attributes of the index are not kept. A
+  `.WORKBENCH.md.arc-draft` that no other attempt uses, readable by its
+  owner alone until written, then given exactly the index's mode and access
+  ACL, none when it has none, and renamed over it, so a reader finds the old
+  index or the new one whole; other extended attributes are not kept. A
   later rewrite removes the drafts interrupted ones left, which are empty or
   begin with part of arc's marker, and leaves any other file of those names
   alone. Arc reads a file in a workbench only as a regular file, opened

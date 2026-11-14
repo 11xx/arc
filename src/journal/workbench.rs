@@ -1039,16 +1039,18 @@ fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) ->
     let text = render_index(workbench);
     let index = at.join(INDEX);
     let create = || -> Result<()> {
-        let mut file = opened.create_new(OsStr::new(INDEX)).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                anyhow!(
-                    "{} is there already, and arc writes no index over a file it did not write",
-                    index.display()
-                )
-            } else {
-                anyhow::Error::new(error).context(format!("cannot create {}", index.display()))
-            }
-        })?;
+        let mut file = opened
+            .create_new(OsStr::new(INDEX), 0o666)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    anyhow!(
+                        "{} is there already, and arc writes no index over a file it did not write",
+                        index.display()
+                    )
+                } else {
+                    anyhow::Error::new(error).context(format!("cannot create {}", index.display()))
+                }
+            })?;
         file.write_all(text.as_bytes())
             .with_context(|| format!("cannot write {}", index.display()))
     };
@@ -1114,17 +1116,17 @@ fn interrupt_at(stage: &str) {
 }
 
 /// Write `text` durably to a draft beside the index, under a name no other
-/// attempt uses, created so it replaces nothing, with the mode and access
-/// ACL of the index opened as `like`, so the rename that publishes it
-/// neither publishes an empty file nor widens who can read it. Returns the
-/// draft's name and path.
+/// attempt uses, created so it replaces nothing and readable by its owner
+/// alone until it is written, then given exactly the mode and access ACL of
+/// the index opened as `like`, so the rename that publishes it neither
+/// publishes an empty file nor widens who can read it. Returns the draft's
+/// name and path.
 fn write_draft(
     opened: &Dir,
     at: &Path,
     text: &str,
     like: &std::fs::File,
 ) -> Result<(std::ffi::OsString, PathBuf)> {
-    use std::os::unix::fs::PermissionsExt;
     let stamp = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1132,7 +1134,7 @@ fn write_draft(
     let name = std::ffi::OsString::from(format!("{DRAFT_PREFIX}-{}-{stamp}", std::process::id()));
     let path = at.join(&name);
     let mut file = opened
-        .create_new(&name)
+        .create_new(&name, 0o600)
         .with_context(|| format!("cannot create {}", path.display()))?;
     let written = (|| -> std::io::Result<()> {
         #[cfg(debug_assertions)]
@@ -1146,10 +1148,7 @@ fn write_draft(
             }
         }
         file.write_all(text.as_bytes())?;
-        file.set_permissions(std::fs::Permissions::from_mode(
-            like.metadata()?.permissions().mode() & 0o7777,
-        ))?;
-        fsat::copy_access_acl(like, &file)?;
+        fsat::match_access(like, &file)?;
         file.sync_all()
     })();
     if let Err(error) = written {
@@ -2058,18 +2057,25 @@ fn copy_entry(from: &Path, to: &Path, copy: &mut SandboxCopy) -> Result<()> {
 }
 
 /// Copy the opened regular file `from`, from its start, to a new file at
-/// `to`, with its mode.
+/// `to`: readable by its owner alone until the content is in it, then
+/// given exactly the source's mode and access ACL.
 pub(crate) fn copy_open(mut from: std::fs::File, to: &Path) -> std::io::Result<()> {
     use std::io::Seek;
-    use std::os::unix::fs::PermissionsExt;
-    let mode = from.metadata()?.permissions().mode() & 0o7777;
+    use std::os::unix::fs::OpenOptionsExt;
     from.rewind()?;
     let mut copy = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(to)?;
     std::io::copy(&mut from, &mut copy)?;
-    copy.set_permissions(std::fs::Permissions::from_mode(mode))
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ARC_TEST_WORKBENCH_COPY_INTERRUPT")
+        .is_some_and(|name| to.file_name() == Some(name.as_os_str()))
+    {
+        std::process::exit(9);
+    }
+    fsat::match_access(&from, &copy)
 }
 
 /// Report workbenches whose directories and records disagree: a recorded

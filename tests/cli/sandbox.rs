@@ -819,3 +819,91 @@ fn a_clone_refuses_a_workbench_directory_that_is_a_link() {
     assert!(stderr.contains("is a link to"), "{stderr}");
     assert!(!prefix.exists(), "the clone wrote {}", prefix.display());
 }
+
+fn getfacl(path: &Path) -> String {
+    let output = std::process::Command::new("getfacl")
+        .args(["-c", "-p"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn setfacl(args: &[&str], path: &Path) -> bool {
+    std::process::Command::new("setfacl")
+        .args(args)
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Claim: a file a clone copies ends with exactly the source's mode and
+/// access ACL, none when the source has none, even where the copy's
+/// directory has a default ACL; and until it has them it is readable by
+/// its owner alone, whatever the umask. Rejects a copy readable by a user
+/// the source is not, and private content written into a file the umask
+/// left open. The ACL half runs where the fixture's filesystem takes one.
+#[test]
+fn a_clone_copy_keeps_the_source_access_exactly() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let repo = Repo::new();
+    let name = source_with_a_workbench(&repo);
+    let journal = PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    let source = journal.join("workbench").join(&name);
+    let private = source.join("private.txt");
+    fs::write(&private, "secret\n").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let early = repo.home.join("early");
+    let interrupted = repo
+        .arc_under_umask(&repo.root, "022")
+        .env("ARC_TEST_WORKBENCH_COPY_INTERRUPT", "private.txt")
+        .args([
+            "sandbox",
+            "clone",
+            early.to_str().unwrap(),
+            "--workbench-content",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(interrupted.status.code(), Some(9), "{interrupted:?}");
+    let caught = early
+        .join(".local/ai/journals")
+        .join(config_path_slug(&early.join("repo")))
+        .join("workbench")
+        .join(&name)
+        .join("private.txt");
+    assert_eq!(fs::read_to_string(&caught).unwrap(), "secret\n");
+    let mode = fs::metadata(&caught).unwrap().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the copy was {mode:o} before its mode was set");
+
+    if !setfacl(&["-m", "u:nobody:r"], &private) {
+        return;
+    }
+    let shared = getfacl(&private);
+    let plain = source.join("raw/run.csv");
+    let unshared = getfacl(&plain);
+    assert!(setfacl(&["-d", "-m", "u:nobody:rw"], &repo.home));
+    let whole = repo.home.join("whole");
+    repo.arc(&repo.root)
+        .args([
+            "sandbox",
+            "clone",
+            whole.to_str().unwrap(),
+            "--workbench-content",
+        ])
+        .assert()
+        .success();
+    let copy = whole
+        .join(".local/ai/journals")
+        .join(config_path_slug(&whole.join("repo")))
+        .join("workbench")
+        .join(&name);
+    assert_eq!(getfacl(&copy.join("private.txt")), shared);
+    assert_eq!(getfacl(&copy.join("raw/run.csv")), unshared);
+    assert_eq!(
+        fs::metadata(copy.join("private.txt")).unwrap().mode(),
+        fs::metadata(&private).unwrap().mode()
+    );
+}

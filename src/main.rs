@@ -4405,7 +4405,9 @@ enum SandboxCmd {
     /// with arc's index, so its records and directories agree; its content,
     /// which arc never reads, stays in the source unless
     /// `--workbench-content` copies it, and the report says how much that is.
-    /// A copied workbench keeps every link as the link it is. A workbench in
+    /// A copied workbench keeps every link as the link it is. Every file a
+    /// clone copies is readable by its owner alone until its content is in
+    /// it, then takes exactly the source's mode and access ACL. A workbench in
     /// the copy without its content lists the size and staleness of what the
     /// copy holds. The cold archive is not copied. Versioned
     /// `arc-sandbox-clone/2`.

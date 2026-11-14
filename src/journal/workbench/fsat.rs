@@ -292,9 +292,11 @@ impl Dir {
         Ok(())
     }
 
-    /// Create the file `name`, refusing when anything is there already.
-    pub(super) fn create_new(&self, name: &OsStr) -> io::Result<File> {
-        let fd = self.open_at(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o666)?;
+    /// Create the file `name` with at most the permission bits `mode`,
+    /// refusing when anything is there already. Neither the umask nor the
+    /// directory's default ACL grants more than `mode`.
+    pub(super) fn create_new(&self, name: &OsStr, mode: libc::c_uint) -> io::Result<File> {
+        let fd = self.open_at(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)?;
         // SAFETY: `fd` was just opened and nothing else owns it.
         Ok(unsafe { File::from_raw_fd(fd) })
     }
@@ -321,43 +323,109 @@ pub(super) fn open_regular(path: &Path) -> io::Result<File> {
     regular(file)
 }
 
-/// Give `to` the access ACL `from` carries, when it carries one. Without
-/// it, the group bits of a file with an ACL hold the ACL's mask, so its
-/// mode alone grants the owning group what the mask allows.
-pub(super) fn copy_access_acl(from: &File, to: &File) -> io::Result<()> {
+/// Give `to` exactly the access of `from`: its permission bits, and its
+/// access ACL when it carries one, or none when it does not, whatever `to`
+/// inherited from its directory's default ACL. Without the ACL, the group
+/// bits of a file with one hold the ACL's mask, so its mode alone would
+/// grant the owning group what the mask allows.
+pub(super) fn match_access(from: &File, to: &File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match access_acl(from)? {
+        Some(acl) => set_access_acl(to, &acl)?,
+        None => remove_access_acl(to)?,
+    }
+    to.set_permissions(std::fs::Permissions::from_mode(
+        from.metadata()?.permissions().mode() & 0o7777,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+const ACCESS_ACL: &[u8] = b"system.posix_acl_access\0";
+
+/// Whether an error says a file carries no ACL, or its filesystem none.
+#[cfg(target_os = "linux")]
+fn no_acl(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENODATA) | Some(libc::ENOTSUP)
+    )
+}
+
+/// The access ACL `file` carries, in the kernel's form, or `None`.
+fn access_acl(file: &File) -> io::Result<Option<Vec<u8>>> {
     #[cfg(target_os = "linux")]
-    {
-        const NAME: &[u8] = b"system.posix_acl_access\0";
-        let mut buffer = vec![0u8; 4096];
-        // SAFETY: the descriptor is open, the name is NUL-terminated and
-        // the buffer's length is passed.
+    loop {
+        // SAFETY: the descriptor is open and the name NUL-terminated; a null
+        // buffer of length 0 asks for the size.
+        let size = unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                ACCESS_ACL.as_ptr().cast(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if size < 0 {
+            let error = io::Error::last_os_error();
+            return if no_acl(&error) { Ok(None) } else { Err(error) };
+        }
+        let mut buffer = vec![0u8; size as usize];
+        // SAFETY: as above, with the buffer's length passed.
         let length = unsafe {
             libc::fgetxattr(
-                from.as_raw_fd(),
-                NAME.as_ptr().cast(),
+                file.as_raw_fd(),
+                ACCESS_ACL.as_ptr().cast(),
                 buffer.as_mut_ptr().cast(),
                 buffer.len(),
             )
         };
-        if length < 0 {
-            let error = io::Error::last_os_error();
-            return match error.raw_os_error() {
-                Some(libc::ENODATA) | Some(libc::ENOTSUP) => Ok(()),
-                _ => Err(error),
-            };
+        if length >= 0 {
+            buffer.truncate(length as usize);
+            return Ok(Some(buffer));
         }
-        // SAFETY: as above; `length` bytes of the buffer were filled.
-        check(unsafe {
-            libc::fsetxattr(
-                to.as_raw_fd(),
-                NAME.as_ptr().cast(),
-                buffer.as_ptr().cast(),
-                length as usize,
-                0,
-            )
-        })?;
+        let error = io::Error::last_os_error();
+        // The ACL grew between the two calls: ask again.
+        if error.raw_os_error() != Some(libc::ERANGE) {
+            return if no_acl(&error) { Ok(None) } else { Err(error) };
+        }
     }
-    let _ = (from, to);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Ok(None)
+    }
+}
+
+fn set_access_acl(file: &File, acl: &[u8]) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: the descriptor is open, the name NUL-terminated, and the
+    // value's length passed.
+    check(unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            ACCESS_ACL.as_ptr().cast(),
+            acl.as_ptr().cast(),
+            acl.len(),
+            0,
+        )
+    })?;
+    let _ = (file, acl);
+    Ok(())
+}
+
+fn remove_access_acl(file: &File) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the descriptor is open and the name NUL-terminated.
+        let result = unsafe { libc::fremovexattr(file.as_raw_fd(), ACCESS_ACL.as_ptr().cast()) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if !no_acl(&error) {
+                return Err(error);
+            }
+        }
+    }
+    let _ = file;
     Ok(())
 }
 
