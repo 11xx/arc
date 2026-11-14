@@ -4357,8 +4357,10 @@ enum WorkspaceCmd {
     /// Each line is `arc-workspace-report/3` as `report --json` prints it,
     /// on one line. The watch follows the workspace feed (`arc guide
     /// workspace`): once the feed has been quiet for 250 ms, or 2 s after a
-    /// notice, it reads again only the projects the notices name, and emits
-    /// the report when anything but its observation times changed. Between
+    /// notice, it reads again only the projects the notices name, and with
+    /// `--progress` each project whose series hold an item linked into a
+    /// ledger they name, and emits the report when anything but its
+    /// observation times changed. Between
     /// notices it sleeps on one inotify watch and holds no Git process.
     ///
     /// Only arc's own writes reach the feed. A commit made outside arc, a
@@ -4404,8 +4406,9 @@ enum WorkspaceCmd {
         library: bool,
         /// Include each project's active progress series in JSON, each as
         /// `arc workspace progress --json` reports it with no relation's
-        /// `mutual` filled (arc guide progress); an
-        /// item edit or a write to a linked change emits a report
+        /// `mutual` filled (arc guide progress); an item edit or a write to a
+        /// linked change emits a report, and a write to a ledger also reads
+        /// again each project whose series hold an item linked into it
         #[arg(long)]
         progress: bool,
     },

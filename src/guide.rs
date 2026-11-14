@@ -281,7 +281,9 @@ FROM A WORKSPACE ROOT (outside a project)
   arc workspace watch [--previous FILE] [--library] [--progress]
                        The report as one JSON line, then again each time a
                        notice changes it: only the projects the feed names are
-                       read again. Requests on stdin compare with a previous
+                       read again, and with --progress each project whose
+                       series hold an item linked into a ledger it names.
+                       Requests on stdin compare with a previous
                        report or refresh every project; it ends when stdin
                        closes. --library retains each project's library beside
                        its row and reads it again only when that project is
@@ -6789,7 +6791,9 @@ PROGRESS
   The share complete is a count: integrated and done items over the items that
   stand, printed as counts first and one percentage after. No estimate of
   time, no weighting. The report also says how many items were declared at
-  the start and how many were added, dropped and split since.
+  the start and how many were added, dropped and split since. The waiting
+  count overlaps the others: an item that waits is also counted under its
+  stage.
 
   `arc progress` prints every series of this project that is not retired, in
   full, one block per series; `arc progress <series>` narrows to one and
@@ -6841,7 +6845,8 @@ PROGRESS
   directly under its header as `one-sided`. Each related series then prints
   after the local ones in compact form, in `--plain` under a `--` header
   line: its counts, last integration and in-flight items, read from that
-  project's journal events and ledger only. A related journal that cannot be read prints one line and
+  project's journal events and ledger, and the ledger of each project its
+  items link into. A related journal that cannot be read prints one line and
   fails nothing. Relations share no items and roll up no percentage.
 
   `arc progress retire <series> --by <conclusion>` records the series as
