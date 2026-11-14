@@ -145,7 +145,7 @@ impl View {
         let mut facts = vec![topic(&series.file)];
         if let Some(retired) = &series.retired {
             facts.push(match &retired.by {
-                Some(by) => format!("retired {}, superseded by {by}", self.age(&retired.at)),
+                Some(by) => format!("retired {} by {by}", self.age(&retired.at)),
                 None => format!("retired {}", self.age(&retired.at)),
             });
         }
@@ -374,17 +374,19 @@ impl View {
     }
 
     /// How long ago a recorded time was, to one unit; the time as recorded
-    /// when it does not parse.
+    /// when it does not parse or is yet to come.
     fn age(&self, at: &str) -> String {
         let Ok(then) = DateTime::parse_from_rfc3339(at) else {
             return at.to_string();
         };
-        let seconds = (self.now - then.with_timezone(&Utc)).num_seconds().max(0);
-        match seconds {
-            0..=59 => "just now".to_string(),
-            60..=3_599 => format!("{}m ago", seconds / 60),
-            3_600..=172_799 => format!("{}h ago", seconds / 3_600),
-            _ => format!("{}d ago", seconds / 86_400),
+        if then > self.now {
+            return at.to_string();
+        }
+        match (self.now - then.with_timezone(&Utc)).num_seconds() {
+            ..=59 => "just now".to_string(),
+            seconds @ 60..=3_599 => format!("{}m ago", seconds / 60),
+            seconds @ 3_600..=172_799 => format!("{}h ago", seconds / 3_600),
+            seconds => format!("{}d ago", seconds / 86_400),
         }
     }
 }
@@ -622,6 +624,38 @@ ship-it · 1 added since the start
             ]
         );
         assert!(text.contains("1 of 1 · 100%"), "{text}");
+    }
+
+    /// A retired series names the artifact recorded as resolving it, and a
+    /// time yet to come prints as recorded. Rejects a view that calls every
+    /// retirement a supersession, and an age that reads a future time as
+    /// just past.
+    #[test]
+    fn retirement_and_future_times_print_only_what_is_recorded() {
+        let mut retired = series(vec![row("i1", "Keep", "done")]);
+        retired.retired = Some(crate::journal::series::Retirement {
+            at: "2026-01-01T12:00:00Z".to_string(),
+            by: Some("20260101T000000Z-ship-it-decision.md".to_string()),
+        });
+        let text = drawn(look(false, None), &retired);
+        assert!(
+            text.contains("ship-it · retired 24h ago by 20260101T000000Z-ship-it-decision.md"),
+            "{text}"
+        );
+        assert!(!text.contains("superseded"), "{text}");
+
+        let mut ahead = row("i1", "Keep", "integrated");
+        ahead.integrated_at = Some("2031-05-06T07:08:09Z".to_string());
+        let text = drawn(look(false, None), &series(vec![ahead]));
+        assert!(text.contains("integrated  2031-05-06T07:08:09Z"), "{text}");
+        assert!(!text.contains("just now"), "{text}");
+
+        let view = View::new(
+            look(false, None),
+            "2026-01-02T11:59:59.500Z".parse().unwrap(),
+        );
+        assert_eq!(view.age("2026-01-02T12:00:00Z"), "2026-01-02T12:00:00Z");
+        assert_eq!(view.age("2026-01-02T11:59:59Z"), "just now");
     }
 
     /// A narrow terminal narrows the title column, so the stage and a short

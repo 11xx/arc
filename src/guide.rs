@@ -6770,14 +6770,14 @@ PROGRESS
   revision and age of the integration. The marks are `✓` complete, `○`
   open, a circle that fills from `opened` to `reviewed`, `×` dropped or
   closed, `÷` split and `?` unknown. The view names a series by its topic
-  and gives a time as an age; a title wider than its column continues on
-  the next line, and nothing is cut. It is painted only when standard output
-  is a terminal, `NO_COLOR` is unset and `TERM` is not `dumb`; its words are
-  the same unpainted. `--plain` prints
-  every recorded fact as line-oriented text that is never painted:
-  filenames, change ids, full times and revisions, each series under a `==`
-  header line. `--json` prints the versioned shape. A reader that acts on
-  the report takes `--plain` or `--json`.
+  and gives a past time as an age; the title of an item past `open`
+  continues on the next line when wider than the column before its stage,
+  and nothing is cut. It is painted only when standard output is a terminal,
+  `NO_COLOR` is unset or empty and `TERM` is not `dumb`; its words are the
+  same unpainted. `--plain` prints every recorded fact as line-oriented text
+  that is never painted, with filenames, change ids and full times, each
+  series under a `==` header line. `--json` prints the versioned shape. A
+  reader that acts on the report takes `--plain` or `--json`.
 
   A report
   reads one event log per journal it shows and reduces only the linked

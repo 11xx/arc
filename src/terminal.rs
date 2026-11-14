@@ -14,7 +14,8 @@ pub const CYAN: &str = "36";
 #[derive(Clone, Copy)]
 pub struct Look {
     /// Whether text is painted. A pipe, a file and a `dumb` terminal are
-    /// never painted, and neither is anything while `NO_COLOR` is set.
+    /// never painted, and neither is anything while `NO_COLOR` is set to
+    /// more than the empty string.
     pub color: bool,
     /// The terminal's columns; absent when standard output is not one, and
     /// text is then never wrapped.
