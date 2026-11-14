@@ -5780,14 +5780,18 @@ GATE ROUNDS
   `arc guide gates`, cost kinds, levers and check timings in
   `arc guide gate-costs`, and raises in `arc guide gate-raises`.
 
-  Arc holds these rules itself:
-  - A budget for each required integration gate and a total, judged as
-    `arc guide gates` defines. A budget rises only through a recorded raise.
-  - A gate runs once for a piece of content and not for paths that cannot
-    affect it: exact-tree reuse, selection by `paths`, and base passes where
-    the project adopts them (`arc guide base-passes`).
-  - A gate command that could not start exits 75 and is recorded as not
-    run, never as a pass (`arc guide change-gates`).
+  What arc does for a round, each defined in its topic:
+  - Budgets. A round declares a budget for each integration gate and a
+    `[budget] total`. `arc guide gates` defines what arc then requires and
+    how it judges a run; `arc guide gate-raises` defines raising one.
+  - Not running again. A gate should not run again for content it has
+    passed, nor for paths that cannot affect it. Exact-tree reuse and
+    selection by `paths` (`arc guide gates`) and adopted base passes
+    (`arc guide base-passes`) serve that aim; each names when the gate
+    runs anyway.
+  - Checks that never started. By convention a gate's own wrapper exits 75
+    when its checks never started, and arc records that as not run, never
+    as a pass; `arc guide change-gates` defines it and what outranks it.
 
   The rest is judgement, which no command holds:
   - The bound comes first. The operator names it in seconds before anything
@@ -5796,8 +5800,8 @@ GATE ROUNDS
     never a reason to move it. Nothing is skipped to fit.
   - A check earns its place by what it guards, not by being cheap. Rank the
     checks by what must never break, fund those first, and give what is left
-    to the rest. Cutting by cost alone removes the slowest checks, which are
-    the ones guarding the riskiest behaviour.
+    to the rest. Cutting by cost alone removes the slowest checks, whatever
+    they guard.
   - A witness states one claim, runs in a few seconds, and fails first on
     the unfixed code or a faulty variant, for the reason it names.
   - No inventories on the landing path: no whole suite, matrix, sweep or
@@ -5823,8 +5827,9 @@ GATE ROUNDS
   3. Make the bad state unrepresentable or remove the second source of
      truth. Only when neither is possible, add the smallest witness that
      fails first.
-  4. Record the escape with `arc journal incident <topic>`, naming that
-     layer, so the gate decision's revisit trigger fires on evidence.
+  4. Record the escape, naming that layer, with
+     `arc journal incident <topic> --body-file <path>`, so the gate
+     decision's revisit trigger fires on evidence.
   5. Delete the checks the repair supersedes.
 
   A round is one session. It ends with every gate inside the bound and the
@@ -5865,8 +5870,9 @@ GATE ROUNDS
      across changes. A README points at the declaration rather than
      repeating its numbers.
   11. Record the round in the project's journal with
-     `arc journal conclusion <topic>`: the bound, each gate before and after,
-     what was cut and what it guarded, the floors named, and what surprised.
+     `arc journal conclusion <topic> --body-file <path>`: the bound, each
+     gate before and after, what was cut and what it guarded, the floors
+     named, and what surprised.
      `arc workspace gates` is the view across projects, including those
      with no gates or no budget yet.
 
@@ -5877,7 +5883,8 @@ GATE ROUNDS
     impact planner or judge until receipts show the duplicate or the
     misclassification it would remove.
   - A fix that needs a second session is filed as its own work, with the
-    measurement that justifies it, by `arc journal todo <topic>`.
+    measurement that justifies it, by
+    `arc journal todo <topic> --body-file <path>`.
 
 GATES TOGETHER
   A gate declaring concurrent = true may share a batch with other consenting

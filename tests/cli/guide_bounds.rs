@@ -15,10 +15,12 @@ fn entry_instructions_fit_their_size_ceilings() {
 }
 
 /// Claim: a lane starting a gate round reaches its topic from the guide index,
-/// the topic names the command or declaration for each step arc performs, and
-/// the order of work has one home that the other gate topics point at.
+/// the topic names the command or declaration for each step arc performs, each
+/// journal write it prints records something as printed, and the order of work
+/// has one home that the other gate topics point at.
 /// Rejects an unindexed topic, a step left as handwork where a command does it,
-/// and the order of work restated in a second topic.
+/// a journal example without a body source, and the order of work restated in
+/// a second topic.
 #[test]
 fn gate_round_method_is_indexed_and_names_its_commands() {
     let repo = Repo::new();
@@ -40,10 +42,29 @@ fn gate_round_method_is_indexed_and_names_its_commands() {
         "`paths`",
         "`exclusive`",
         "`[selection]`",
-        "`arc journal conclusion <topic>`",
         "`arc workspace gates`",
     ] {
         assert!(topic.contains(named), "gate-rounds omits {named}");
+    }
+    let journal_writes: Vec<&str> = topic
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.starts_with("arc journal "))
+        .collect();
+    for kind in ["conclusion", "incident", "todo"] {
+        assert!(
+            journal_writes
+                .iter()
+                .any(|span| span.starts_with(&format!("arc journal {kind} "))),
+            "gate-rounds omits arc journal {kind}"
+        );
+    }
+    for span in journal_writes {
+        assert!(
+            span.contains("--body-file"),
+            "`{span}` records nothing as printed"
+        );
     }
     for referring in ["gates", "gate-costs"] {
         let text = stdout(repo.arc(&repo.home).args(["guide", referring]));
