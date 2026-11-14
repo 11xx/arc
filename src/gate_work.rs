@@ -792,11 +792,24 @@ impl HostSample {
         };
         let busy = u128::from(ticks) * 1000 / u128::from(self.ticks_per_second);
         let capacity = u128::from(ns) * u128::from(self.cores) / 1_000_000;
-        if busy <= capacity {
+        let tick = 1000 / u128::from(self.ticks_per_second);
+        // One tick per core for accounting that charges whole ticks, and six
+        // for the kernel's rounding of the six aggregate fields summed here.
+        let tolerance = (u128::from(self.cores) + 6) * tick;
+        if let Some(busy) = within_capacity(busy, capacity, tolerance) {
             timing.host_busy_ms = u64::try_from(busy).ok();
             timing.host_capacity_ms = u64::try_from(capacity).ok();
         }
     }
+}
+
+/// Busy time as a share of capacity can be read at most whole. Busy time is
+/// counted in ticks and capacity by the monotonic clock, so on a saturated
+/// host busy time can read above capacity by a small tolerance; that much
+/// reads as fully busy. More than that is a reading that does not describe
+/// this window, and is absent.
+fn within_capacity(busy: u128, capacity: u128, tolerance: u128) -> Option<u128> {
+    (busy <= capacity.saturating_add(tolerance)).then_some(busy.min(capacity))
 }
 
 /// Debug executables alone accept controlled observations, as fixture input.
@@ -984,5 +997,21 @@ pub fn conditions_before_spawn() -> Conditions {
 pub fn refuse_unattributed_batch(timing: &mut VerificationTiming) {
     if let Some(c) = &mut timing.work_conditions {
         c.concurrent_unattributed = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Claim: a saturated host's reading survives the tick tolerance of its
+    /// counters and reads as fully busy. Rejects discarding the reading, which
+    /// leaves the busiest hosts with no load evidence, and accepting busy time
+    /// beyond what the tolerance explains.
+    #[test]
+    fn a_saturated_reading_within_the_tick_tolerance_is_fully_busy() {
+        // 16 cores at 100 Hz: sixteen ticks and six more are 220 ms.
+        assert_eq!(super::within_capacity(2400, 2420, 220), Some(2400));
+        assert_eq!(super::within_capacity(2420, 2420, 220), Some(2420));
+        assert_eq!(super::within_capacity(2640, 2420, 220), Some(2420));
+        assert_eq!(super::within_capacity(2641, 2420, 220), None);
     }
 }
