@@ -255,7 +255,7 @@ impl LedgerRead<'_> {
         Ok(self.landings.get_or_init(|| gathered))
     }
 
-    fn repository_events(&self) -> Result<&[Event]> {
+    pub(crate) fn repository_events(&self) -> Result<&[Event]> {
         if let Some(held) = self.repository_events.get() {
             return Ok(held);
         }
@@ -3975,6 +3975,38 @@ mod tests {
         assert!(store
             .append_local_event(&mut ordering_draft("recovery"))
             .is_err());
+    }
+
+    /// Claim: a provisional event carries the invocation stamped when its
+    /// intent was saved: read back from the saved intent, it publishes,
+    /// confirms and republishes against its ledger file, which holds that same
+    /// stamp. Rejects restamping at publication, which would make the
+    /// published event differ from the attempted one.
+    #[test]
+    fn a_saved_intent_publishes_the_invocation_it_was_stamped_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut intent = crate::commands::provisional::Intent {
+            event: ordering_draft("stamped").into_event(),
+            old_staging: None,
+        };
+        store.write_provisional_intent(&mut intent).unwrap();
+        assert_eq!(
+            intent.event.invocation_id.as_deref(),
+            Some(crate::ids::invocation_id())
+        );
+        let saved = store.provisional_intent("stamped").unwrap().unwrap();
+        // Publication runs later in the process than the reservation.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.publish_provisional_event(&saved.event).unwrap();
+        store.publish_provisional_event(&saved.event).unwrap();
+        let path = store
+            .events_dir("stamped")
+            .join(format!("{}.json", saved.event.event_id));
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(published, serde_json::to_value(&intent.event).unwrap());
+        assert!(published["invocation_elapsed_ms"].is_u64(), "{published}");
     }
 
     #[test]

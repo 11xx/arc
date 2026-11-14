@@ -4813,26 +4813,29 @@ mod tests {
     }
 
     /// Claim: an event written before arc stamped invocations loads with no
-    /// invocation and writes back byte for byte without the keys, while a
-    /// stamped one keeps both. Rejects requiring the fields of old history, or
-    /// adding them on rewrite, which would make a republished event differ from
-    /// its ledger file.
+    /// invocation and serializes back to the same bytes its ledger file
+    /// holds, while a stamped one keeps both fields. Rejects requiring the
+    /// fields of old history, or writing them, even as null, on rewrite, which
+    /// would make a republished event differ from its ledger file.
     #[test]
     fn events_without_an_invocation_read_and_write_unchanged() {
-        let old = serde_json::json!({
-            "schema_version": 1,
-            "event_id": "01J00000000000000000000000",
-            "repository_id": "repo",
-            "change_id": "change",
-            "actor": "tester",
-            "created_at": "2026-08-26T00:00:00Z",
-            "event_type": "hold-set",
-            "reason": "wait"
-        });
-        let event: Event = serde_json::from_value(old.clone()).unwrap();
+        let old = br#"{
+  "schema_version": 1,
+  "event_id": "01J00000000000000000000000",
+  "repository_id": "repo",
+  "change_id": "change",
+  "actor": "tester",
+  "created_at": "2026-08-26T00:00:00Z",
+  "event_type": "hold-set",
+  "reason": "wait"
+}"#;
+        let event: Event = serde_json::from_slice(old).unwrap();
         assert_eq!(event.invocation_id, None);
         assert_eq!(event.invocation_elapsed_ms, None);
-        assert_eq!(serde_json::to_value(&event).unwrap(), old);
+        assert_eq!(
+            String::from_utf8(serde_json::to_vec_pretty(&event).unwrap()).unwrap(),
+            String::from_utf8(old.to_vec()).unwrap()
+        );
 
         let mut stamped = event;
         stamped.stamp_invocation();
