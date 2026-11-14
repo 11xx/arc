@@ -176,6 +176,8 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "workspace report",
     "journal catchup",
     "journal open",
+    "progress",
+    "workspace progress",
 ];
 
 /// The commands that record nothing, in every form and flag. An invocation of
