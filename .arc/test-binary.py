@@ -31,6 +31,14 @@ def refuse_inside_git_operation(environ):
                              "Run them outside any Git operation, with GIT_DIR and GIT_WORK_TREE unset.")
 
 
+def clear_git_environment(environ):
+    """Every inherited GIT_ variable leaves before Cargo starts: a build script
+    running Git, or a harness, would otherwise be steered by a trace target,
+    template or selector the caller's environment named."""
+    for name in [name for name in environ if name.startswith("GIT_")]:
+        del environ[name]
+
+
 def cargo_artifacts(command):
     build = subprocess.run(command, stdout=subprocess.PIPE, text=True)
     found = {}
@@ -156,6 +164,7 @@ def main():
     sub.add_parser("release")
     args = parser.parse_args()
     refuse_inside_git_operation(os.environ)
+    clear_git_environment(os.environ)
     os.chdir(ROOT)
     binaries = artifacts()
     env = harness_environment(os.environ, selection(binaries["arc"], binaries["arc"]))

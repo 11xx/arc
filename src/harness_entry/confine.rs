@@ -1,12 +1,14 @@
 //! Write confinement for a test harness and every process it starts, enforced
 //! by the kernel through Landlock.
 //!
-//! Writes, creations, removals, renames, links and truncations are allowed
-//! only beneath the roots given and on the device nodes a process opens for
-//! writing; reading and executing stay unrestricted. A Landlock domain is
-//! inherited by every child and can never be lifted, so whatever path a test,
-//! a helper or the program under test names, nothing outside the roots is
-//! written.
+//! Every file system access right the running kernel's Landlock offers is
+//! handled. Reading, listing and executing are granted everywhere; everything
+//! else, writing, truncating, creating, removing, renaming, linking, device
+//! ioctls and connecting to pathname sockets created outside the domain, only
+//! beneath the roots given. The device nodes a process opens for writing get
+//! exactly what it needs of them. A Landlock domain is inherited by every
+//! child and can never be lifted, so whatever path a test, a helper or the
+//! program under test names, nothing outside the roots is written.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -15,40 +17,54 @@ use std::path::Path;
 const CREATE_RULESET_VERSION: u32 = 1;
 const RULE_PATH_BENEATH: libc::c_int = 1;
 
-const WRITE_FILE: u64 = 1 << 1;
-const REMOVE_DIR: u64 = 1 << 4;
-const REMOVE_FILE: u64 = 1 << 5;
-const MAKE_CHAR: u64 = 1 << 6;
-const MAKE_DIR: u64 = 1 << 7;
-const MAKE_REG: u64 = 1 << 8;
-const MAKE_SOCK: u64 = 1 << 9;
-const MAKE_FIFO: u64 = 1 << 10;
-const MAKE_BLOCK: u64 = 1 << 11;
-const MAKE_SYM: u64 = 1 << 12;
+pub(crate) const EXECUTE: u64 = 1 << 0;
+pub(crate) const WRITE_FILE: u64 = 1 << 1;
+pub(crate) const READ_FILE: u64 = 1 << 2;
+pub(crate) const READ_DIR: u64 = 1 << 3;
+/// The rights of ABI 1, from executing through making symbolic links.
+const ABI_1: u64 = (1 << 13) - 1;
 /// Linking or renaming into another directory; ABI 2.
 const REFER: u64 = 1 << 13;
 /// Truncating by path or open; ABI 3.
-const TRUNCATE: u64 = 1 << 14;
+pub(crate) const TRUNCATE: u64 = 1 << 14;
+/// Device ioctls; ABI 5.
+pub(crate) const IOCTL_DEV: u64 = 1 << 15;
+/// Connecting to a pathname socket created outside the domain; ABI 9.
+const RESOLVE_UNIX: u64 = 1 << 16;
 
-/// Every right that changes the file system. Below ABI 3 a path could still
-/// be truncated, and below ABI 2 every cross-directory rename is refused, so
-/// those kernels do not confine.
-const WRITES: u64 = WRITE_FILE
-    | REMOVE_DIR
-    | REMOVE_FILE
-    | MAKE_CHAR
-    | MAKE_DIR
-    | MAKE_REG
-    | MAKE_SOCK
-    | MAKE_FIFO
-    | MAKE_BLOCK
-    | MAKE_SYM
-    | REFER
-    | TRUNCATE;
+/// Below ABI 3 a path could still be truncated, and below ABI 2 every
+/// cross-directory rename is refused, so those kernels do not confine.
 const MINIMUM_ABI: i64 = 3;
 
-/// The rights a device node may be granted: it is a file, not a directory.
-const DEVICE_WRITES: u64 = WRITE_FILE | TRUNCATE;
+/// What is granted everywhere: reading never writes.
+const READS: u64 = EXECUTE | READ_FILE | READ_DIR;
+
+/// The device nodes a process opens for writing, and what it needs of each:
+/// output to the null device, and output and terminal control to the
+/// terminal.
+const DEVICES: [(&str, u64); 3] = [
+    ("/dev/null", WRITE_FILE | TRUNCATE),
+    ("/dev/tty", WRITE_FILE | TRUNCATE | IOCTL_DEV),
+    ("/dev/pts", WRITE_FILE | TRUNCATE | IOCTL_DEV),
+];
+
+/// Every file system right the Landlock ABI `abi` offers.
+pub(crate) fn rights_of(abi: i64) -> u64 {
+    let mut rights = ABI_1;
+    if abi >= 2 {
+        rights |= REFER;
+    }
+    if abi >= 3 {
+        rights |= TRUNCATE;
+    }
+    if abi >= 5 {
+        rights |= IOCTL_DEV;
+    }
+    if abi >= 9 {
+        rights |= RESOLVE_UNIX;
+    }
+    rights
+}
 
 #[repr(C)]
 struct RulesetAttr {
@@ -62,9 +78,9 @@ struct PathBeneathAttr {
 }
 
 /// Confine this process, and every process it will start, to writing beneath
-/// `roots` and to the `devices` that exist. The error says why the kernel
-/// cannot, and leaves the process unconfined.
-pub(crate) fn confine(roots: &[&Path], devices: &[&Path]) -> Result<(), String> {
+/// `roots`. The error says why the kernel cannot, and leaves the process
+/// unconfined.
+pub(crate) fn confine(roots: &[&Path]) -> Result<(), String> {
     // SAFETY: a null attribute with size 0 and the version flag only queries
     // the ABI the kernel supports.
     let abi = unsafe {
@@ -86,8 +102,9 @@ pub(crate) fn confine(roots: &[&Path], devices: &[&Path]) -> Result<(), String> 
             "this kernel's Landlock ABI {abi} cannot refuse truncation (ABI {MINIMUM_ABI})"
         ));
     }
+    let handled = rights_of(abi);
     let attr = RulesetAttr {
-        handled_access_fs: WRITES,
+        handled_access_fs: handled,
     };
     // SAFETY: attr is a valid ruleset attribute of the size passed.
     let ruleset = unsafe {
@@ -106,12 +123,13 @@ pub(crate) fn confine(roots: &[&Path], devices: &[&Path]) -> Result<(), String> 
     }
     let ruleset = ruleset as libc::c_int;
     let result = (|| {
+        allow(ruleset, Path::new("/"), READS)?;
         for root in roots {
-            allow(ruleset, root, WRITES)?;
+            allow(ruleset, root, handled)?;
         }
-        for device in devices {
+        for (device, access) in DEVICES {
             // A node this host lacks needs no rule.
-            let _ = allow(ruleset, device, DEVICE_WRITES);
+            let _ = allow(ruleset, Path::new(device), access & handled);
         }
         // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes integer arguments only.
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {

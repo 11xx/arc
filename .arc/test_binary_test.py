@@ -90,6 +90,20 @@ class RunnerClaims(unittest.TestCase):
                 runner.cargo_artifacts(["cargo"])
         self.assertIn("error[E0425]: missing", shown.getvalue())
 
+    def test_inherited_git_variables_leave_before_cargo_starts(self):
+        """Claim: Cargo, its build scripts and the harnesses start with no inherited GIT_ variable;
+        rejects a build phase steered by a trace target, template or selector from the caller."""
+        seen = []
+        def run(command, **kwargs):
+            seen.append(sorted(name for name in runner.os.environ if name.startswith("GIT_")))
+            return subprocess.CompletedProcess(command, 101, "")
+        inherited = {"GIT_TRACE2_EVENT": "/elsewhere/trace", "GIT_TEMPLATE_DIR": "/elsewhere/template"}
+        with patch.object(runner.subprocess, "run", side_effect=run), \
+                patch.object(sys, "argv", ["runner", "invariants"]), patch.dict(runner.os.environ, inherited):
+            with self.assertRaisesRegex(ValueError, "the build failed"):
+                runner.main()
+        self.assertEqual(seen, [[]])
+
     def test_inherited_git_selection_refuses_before_building(self):
         """Claim: the runner started inside a Git operation refuses and names the variable;
         rejects a run whose fixtures would write the repository GIT_DIR or GIT_WORK_TREE names."""

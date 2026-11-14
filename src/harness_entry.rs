@@ -1,15 +1,26 @@
 //! What every test harness of this crate does before its first test, so that
-//! no test, helper or program under test can write a repository or file the
-//! suite did not create.
+//! no test, helper or program under test reaches, by accident, a repository or
+//! file the suite did not create.
 //!
 //! The kernel enforces it. The harness confines itself and every process it
 //! starts to writing beneath the build's target directory and the system
 //! temporary directory, so whatever path a command names, by discovery, by
 //! `-C`, by `--git-dir` or by a path it computed, the checkout's repository,
 //! the operator's Git configuration and other repositories are out of reach.
-//! A kernel without the Landlock rights this needs leaves the harness
-//! unconfined with a notice; the invariant runner asks for confinement and
-//! refuses to run without it.
+//! A writable root that is, or contains, the checkout, the home directory or
+//! the directory holding the checkout's shared Git directory, or that lies
+//! inside that Git directory, is refused rather than granted. Descriptors the
+//! harness inherited above standard error are closed and standard input is
+//! read-only, since a descriptor opened before confinement keeps its access.
+//! A kernel without the Landlock rights this needs, or a refused root, leaves
+//! the harness unconfined with a notice; the invariant runner asks for
+//! confinement and the harness then refuses to run.
+//!
+//! Two limits stand. A machine prepared in advance to defeat the guard, with
+//! a hard link or bind mount planted inside the build directory before the
+//! run, is outside it; and Landlock does not restrict metadata-only changes:
+//! mode, ownership, timestamps and extended attributes. `arc doctor` and
+//! `arc catchup` still report a contaminated repository configuration.
 //!
 //! The environment adds what confinement cannot say. `GIT_DIR` and
 //! `GIT_WORK_TREE` mean the suite was started from inside a Git operation, and
@@ -42,12 +53,13 @@ pub(crate) const CONFINEMENT: &str = "ARC_TEST_CONFINEMENT";
 
 /// libtest owns `main`, so the entry runs from `.init_array`: before `main`
 /// and before any test thread exists, which is also what makes changing the
-/// process environment and restricting the process sound.
+/// process environment, its descriptors and its restriction sound.
 #[used]
 #[link_section = ".init_array"]
 static ENTRY: extern "C" fn() = enter;
 
 extern "C" fn enter() {
+    close_inherited_descriptors();
     for name in REFUSED {
         if std::env::var_os(name).is_some() {
             refuse(&format!(
@@ -69,16 +81,27 @@ extern "C" fn enter() {
     for name in dropped {
         std::env::remove_var(name);
     }
+    let roots = writable_roots();
     std::env::set_var(
         "GIT_CEILING_DIRECTORIES",
         std::env::join_paths(discovery_ceilings()).expect("ceiling paths hold no separator"),
     );
-    std::env::set_var("GIT_CONFIG_GLOBAL", own_global_config());
+    // Global configuration lives under the temporary root only once that
+    // root is known not to grant anything protected; otherwise Git reads an
+    // empty file and cannot write one.
+    let global = match &roots {
+        Ok(_) => own_global_config(),
+        Err(_) => PathBuf::from("/dev/null"),
+    };
+    std::env::set_var("GIT_CONFIG_GLOBAL", global);
     std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
     std::env::set_var("GIT_TEMPLATE_DIR", "");
     std::env::set_var("GIT_EDITOR", "true");
     std::env::set_var("GIT_SEQUENCE_EDITOR", "true");
-    let confinement = confine_writes();
+    let confinement = roots.and_then(|roots| {
+        let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        confine::confine(&roots)
+    });
     CONFINED.get_or_init(|| confinement.is_ok());
     if let Err(reason) = confinement {
         if std::env::var_os(CONFINEMENT).is_some_and(|value| value == "required") {
@@ -87,6 +110,27 @@ extern "C" fn enter() {
             ));
         }
         eprintln!("notice: the tests run unconfined, guarded by their environment only: {reason}");
+    }
+}
+
+/// Close every descriptor above standard error and make standard input
+/// read-only: a descriptor opened before confinement keeps the access it was
+/// opened with, and the harness needs none of them. What Cargo passes, its
+/// jobserver among it, serves the build, not the tests.
+fn close_inherited_descriptors() {
+    // SAFETY: close_range takes integer bounds and closes only descriptors.
+    unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
+    // SAFETY: F_GETFL reads the status flags of descriptor 0.
+    let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
+    if flags >= 0 && flags & libc::O_ACCMODE != libc::O_RDONLY {
+        // SAFETY: the path is NUL-terminated and dup2 replaces descriptor 0.
+        unsafe {
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            if null >= 0 {
+                libc::dup2(null, 0);
+                libc::close(null);
+            }
+        }
     }
 }
 
@@ -125,21 +169,73 @@ pub(crate) fn target_directory() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Writes go beneath the build's target directory and the temporary directory,
-/// and to the device nodes a process opens for writing.
-fn confine_writes() -> Result<(), String> {
+/// The roots the harness may write beneath, the build's target directory and
+/// the temporary directory, each checked against what it must never grant.
+fn writable_roots() -> Result<Vec<PathBuf>, String> {
     let target = target_directory().ok_or("the build's target directory is not marked")?;
     let temporary = std::env::temp_dir()
         .canonicalize()
         .map_err(|error| format!("the temporary directory: {error}"))?;
-    confine::confine(
-        &[&target, &temporary],
-        &[
-            Path::new("/dev/null"),
-            Path::new("/dev/tty"),
-            Path::new("/dev/pts"),
-        ],
-    )
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    for root in [&target, &temporary] {
+        if let Some(refusal) = root_refusal(root, &checkout(), home.as_deref()) {
+            return Err(refusal);
+        }
+    }
+    Ok(vec![target, temporary])
+}
+
+/// Why `root` cannot be granted for writing: it is, or contains, the
+/// checkout, the home directory or the directory holding the checkout's
+/// shared Git directory, or it lies inside that Git directory. `None` when
+/// it grants none of them.
+pub(crate) fn root_refusal(root: &Path, checkout: &Path, home: Option<&Path>) -> Option<String> {
+    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = resolved(root);
+    let checkout = resolved(checkout);
+    let shared = shared_git_directory(&checkout).map(|dir| resolved(&dir));
+    let protected = [
+        Some(("the checkout", checkout.clone())),
+        home.map(|home| ("the home directory", resolved(home))),
+        shared.as_ref().and_then(|dir| dir.parent()).map(|holder| {
+            (
+                "the directory holding the shared Git directory",
+                holder.to_path_buf(),
+            )
+        }),
+    ];
+    for (what, path) in protected.into_iter().flatten() {
+        if path.starts_with(&root) {
+            return Some(format!(
+                "the writable root {} would grant {what}, {}",
+                root.display(),
+                path.display()
+            ));
+        }
+    }
+    if let Some(shared) = shared.filter(|shared| root.starts_with(shared)) {
+        return Some(format!(
+            "the writable root {} lies inside the shared Git directory {}",
+            root.display(),
+            shared.display()
+        ));
+    }
+    None
+}
+
+/// The Git directory every worktree of `checkout`'s repository shares, read
+/// from the checkout's `.git` without running Git.
+fn shared_git_directory(checkout: &Path) -> Option<PathBuf> {
+    let dot_git = checkout.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let own = checkout.join(pointer.strip_prefix("gitdir:")?.trim());
+    match std::fs::read_to_string(own.join("commondir")) {
+        Ok(common) => Some(own.join(common.trim())),
+        Err(_) => Some(own),
+    }
 }
 
 /// A global configuration file in a directory this process created, under a
@@ -352,26 +448,142 @@ mod tests {
         );
     }
 
-    /// Claim: this harness's writes are confined by the kernel: creating a
-    /// file in the checkout it was built from fails, though the checkout is
-    /// the working directory every test starts in. Rejects a unit test, or a
-    /// production helper a unit test calls, writing the checkout or its
-    /// repository by any path it names.
+    const CONFINED_CHILD: &str = "ARC_TEST_CHILD_UNIT_CONFINEMENT";
+
+    /// Claim: this harness's writes are confined by the kernel: a child
+    /// harness whose temporary directory is a scratch subdirectory cannot
+    /// create a file beside it, outside its roots. Rejects a unit test, or a
+    /// production helper a unit test calls, writing a file or repository it
+    /// did not create by any path it names.
     #[test]
-    fn this_harness_cannot_write_beneath_the_checkout() {
-        assert!(super::confined(), "this harness runs unconfined");
-        let probe = super::checkout().join(format!(".arc-confinement-{}", std::process::id()));
-        let created = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe);
-        if created.is_ok() {
-            let _ = std::fs::remove_file(&probe);
+    fn this_harness_confines_its_writes() {
+        if in_child_mode(CONFINED_CHILD) {
+            assert!(super::confined(), "this harness runs unconfined");
+            let outside = std::env::temp_dir().parent().unwrap().join("outside");
+            let created = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(outside);
+            assert_eq!(
+                created.map(|_| ()).map_err(|error| error.kind()),
+                Err(std::io::ErrorKind::PermissionDenied)
+            );
+            return;
+        }
+        let scratch = tempfile::TempDir::new().unwrap();
+        let temporary = scratch.path().join("child-tmp");
+        std::fs::create_dir(&temporary).unwrap();
+        let (switch, token) = child_switch(CONFINED_CHILD);
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "harness_entry::tests::this_harness_confines_its_writes",
+                "--nocapture",
+            ])
+            .env(switch, token)
+            .env("TMPDIR", &temporary)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            !scratch.path().join("outside").exists(),
+            "the child wrote outside its roots"
+        );
+    }
+
+    /// A decoy checkout as a linked worktree, `home/checkout`, whose shared Git
+    /// directory is `home/main/.git`, inside the home `home`.
+    fn decoy_worktree() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let home = scratch.path().join("home");
+        let main = home.join("main");
+        let own = main.join(".git/worktrees/checkout");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        let checkout = home.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
+        (scratch, home, main, checkout)
+    }
+
+    /// Claim: a writable root that is, or contains, the home directory is
+    /// refused, naming what it would grant, and a root beside the home is
+    /// accepted. Rejects `TMPDIR` or `CARGO_TARGET_DIR` naming the home, or
+    /// a directory above it, turning confinement into a grant of the home.
+    #[test]
+    fn a_root_granting_the_home_is_refused() {
+        let (_scratch, home, _main, checkout) = decoy_worktree();
+        let elsewhere = tempfile::TempDir::new().unwrap();
+        let outside_checkout = elsewhere.path().join("checkout");
+        std::fs::create_dir(&outside_checkout).unwrap();
+        for root in [home.clone(), home.parent().unwrap().to_path_buf()] {
+            let refusal = super::root_refusal(&root, &outside_checkout, Some(&home));
+            assert!(
+                refusal
+                    .as_deref()
+                    .is_some_and(|r| r.contains("the home directory")),
+                "{root:?}: {refusal:?}"
+            );
         }
         assert_eq!(
-            created.map(|_| ()).map_err(|error| error.kind()),
-            Err(std::io::ErrorKind::PermissionDenied),
-            "a write beneath the checkout"
+            super::root_refusal(&checkout.join("target"), &checkout, Some(&home)),
+            None
+        );
+    }
+
+    /// Claim: a writable root that is, or contains, the checkout is refused,
+    /// and a root beneath the checkout, as its target directory is, is
+    /// accepted. Rejects a root granting the checkout's tracked files.
+    #[test]
+    fn a_root_granting_the_checkout_is_refused() {
+        let (_scratch, _home, _main, checkout) = decoy_worktree();
+        for root in [checkout.clone(), checkout.parent().unwrap().to_path_buf()] {
+            let refusal = super::root_refusal(&root, &checkout, None);
+            assert!(
+                refusal
+                    .as_deref()
+                    .is_some_and(|r| r.contains("the checkout")),
+                "{root:?}: {refusal:?}"
+            );
+        }
+        assert_eq!(
+            super::root_refusal(&checkout.join("target"), &checkout, None),
+            None
+        );
+    }
+
+    /// Claim: a writable root that is, or contains, the directory holding the
+    /// checkout's shared Git directory is refused, even when the checkout is
+    /// a linked worktree elsewhere. Rejects a root granting the main checkout
+    /// whose `.git` every worktree shares.
+    #[test]
+    fn a_root_granting_the_shared_git_directory_is_refused() {
+        let (_scratch, _home, main, checkout) = decoy_worktree();
+        let refusal = super::root_refusal(&main, &checkout, None);
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("the directory holding the shared Git directory")),
+            "{refusal:?}"
+        );
+    }
+
+    /// Claim: a writable root inside the checkout's shared Git directory is
+    /// refused. Rejects a root granting the repository's configuration, refs
+    /// or objects from below.
+    #[test]
+    fn a_root_inside_the_shared_git_directory_is_refused() {
+        let (_scratch, _home, main, checkout) = decoy_worktree();
+        let refusal = super::root_refusal(&main.join(".git/worktrees"), &checkout, None);
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("lies inside the shared Git directory")),
+            "{refusal:?}"
         );
     }
 
@@ -385,6 +597,13 @@ mod tests {
             .find_map(|line| line.strip_prefix("child switch: "))
             .unwrap_or_else(|| panic!("the probe did not report: {stdout}"))
             .to_owned()
+    }
+
+    /// Reports whether this harness confines its writes; launched by the
+    /// witnesses that start a harness under a root it must not grant.
+    #[test]
+    fn confinement_probe() {
+        println!("confined: {}", super::confined());
     }
 
     /// Reports whether its child switch reached it; launched only by

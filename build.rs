@@ -2,8 +2,17 @@ use std::path::PathBuf;
 #[path = "src/child_command.rs"]
 mod child_command;
 
+/// Git reading this checkout's metadata, with a Git environment of its own:
+/// nothing the build inherited selects another repository, traces into a
+/// file or reaches a template.
 fn git(args: &[&str]) -> Option<String> {
-    let output = child_command::command("git")
+    let mut command = child_command::command("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)
         .output()
