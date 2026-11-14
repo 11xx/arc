@@ -596,7 +596,17 @@ fn copy_tree(source: &Path, destination: &Path, except: Option<&str>) -> Result<
         if kind.is_dir() {
             copy_tree(&from, &to, None)?;
         } else if kind.is_file() {
-            fs::copy(&from, &to)
+            // Opened without waiting, and copied only while what it opened
+            // is a regular file: a pipe put in its place is never read.
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&from)
+                .and_then(|file| match file.metadata()?.is_file() {
+                    true => journal::copy_open_file(file, &to),
+                    false => Ok(()),
+                })
                 .with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))?;
         }
     }

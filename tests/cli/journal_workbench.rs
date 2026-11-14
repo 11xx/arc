@@ -2091,20 +2091,35 @@ fn without_a_no_replace_rename_nothing_moves() {
     assert_eq!(listed(&repo, true)[0]["storage"], "hot");
 }
 
+/// The drafts a rewrite left beside the index at `path`: every entry whose
+/// name begins with the reserved draft name.
+fn drafts(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".WORKBENCH.md.arc-draft"))
+        .collect();
+    names.sort();
+    names
+}
+
+const MARKER: &str = "<!-- arc writes this index from the journal's records -->";
+
 /// Claim: a rewrite of a workbench's index never alters the file a reader
 /// already has open: that reader reads the old index whole while the path
-/// holds the new one. A rewrite interrupted before its draft takes the
-/// index's place leaves the old index whole, and the next act replaces the
-/// draft it left and publishes. A file at the draft's name that arc did not
-/// write is left as it is, and the index with it. Rejects an index
-/// truncated and rewritten in place, which an interruption leaves partial.
+/// holds the new one. A rewrite interrupted at any point before its draft
+/// takes the index's place, the draft just created, holding part of arc's
+/// marker, or written whole, leaves the old index whole, and the next act
+/// removes every draft arc abandoned and publishes. A file under the draft
+/// names that is not arc's is left as it is and stops nothing. Rejects an
+/// index truncated and rewritten in place, and an abandoned or foreign
+/// draft that keeps the index out of date.
 #[test]
 fn an_index_rewrite_leaves_the_old_index_whole_until_the_new_one_replaces_it() {
     use std::io::Read;
     let repo = Repo::new();
     let path = open_workbench(&repo, "lane-fanout", "lane indexes and reports");
     let index = path.join("WORKBENCH.md");
-    let draft = path.join(".WORKBENCH.md.arc-draft");
     let opened = fs::read_to_string(&index).unwrap();
     let mut reader = fs::File::open(&index).unwrap();
     let (_, first) = journal_artifact(&repo, "first", "plan", "# First\n");
@@ -2130,14 +2145,38 @@ fn an_index_rewrite_leaves_the_old_index_whole_until_the_new_one_replaces_it() {
         "{linked}"
     );
 
-    let (_, second) = journal_artifact(&repo, "second", "plan", "# Second\n");
-    let interrupted = link(&second)
-        .env("ARC_TEST_WORKBENCH_INDEX_INTERRUPT", "1")
-        .output()
-        .unwrap();
-    assert_eq!(interrupted.status.code(), Some(9), "{interrupted:?}");
-    assert_eq!(fs::read_to_string(&index).unwrap(), linked);
-    assert!(fs::read_to_string(&draft).unwrap().contains(&second));
+    // A draft a rewrite abandoned under the bare reserved name, holding
+    // half of the marker, and one a foreign hand left under the pattern.
+    fs::write(
+        path.join(".WORKBENCH.md.arc-draft"),
+        &MARKER[..MARKER.len() / 2],
+    )
+    .unwrap();
+    fs::write(path.join(".WORKBENCH.md.arc-draft-mine"), "my own notes\n").unwrap();
+    let mut linked_artifacts = vec![first.clone()];
+    for (topic, stage) in [
+        ("second", "created"),
+        ("third", "partial"),
+        ("fourth", "written"),
+    ] {
+        let (_, artifact) = journal_artifact(&repo, topic, "plan", "# Plan\n");
+        let interrupted = link(&artifact)
+            .env("ARC_TEST_WORKBENCH_INDEX_INTERRUPT", stage)
+            .output()
+            .unwrap();
+        assert_eq!(
+            interrupted.status.code(),
+            Some(9),
+            "{stage}: {interrupted:?}"
+        );
+        assert_eq!(fs::read_to_string(&index).unwrap(), linked, "{stage}");
+        // The draft this attempt abandoned, beside the foreign one: each
+        // attempt removed what earlier ones abandoned.
+        let left = drafts(&path);
+        assert_eq!(left.len(), 2, "{stage}: {left:?}");
+        assert!(left.contains(&".WORKBENCH.md.arc-draft-mine".to_string()));
+        linked_artifacts.push(artifact);
+    }
     stdout(repo.arc(&repo.root).args([
         "journal",
         "workbench",
@@ -2147,33 +2186,174 @@ fn an_index_rewrite_leaves_the_old_index_whole_until_the_new_one_replaces_it() {
         "done",
     ]));
     let closed = fs::read_to_string(&index).unwrap();
-    assert!(closed.contains(&format!("{first}, {second}")), "{closed}");
+    assert!(
+        closed.contains(&format!(
+            "Linked artifacts: {}",
+            linked_artifacts.join(", ")
+        )),
+        "{closed}"
+    );
     assert!(closed.contains("State: closed"), "{closed}");
-    assert!(!draft.exists(), "the interrupted draft stayed");
+    assert_eq!(drafts(&path), [".WORKBENCH.md.arc-draft-mine"]);
+    assert_eq!(
+        fs::read_to_string(path.join(".WORKBENCH.md.arc-draft-mine")).unwrap(),
+        "my own notes\n"
+    );
+}
 
-    let other = open_workbench(&repo, "probe-run", "probe output");
-    let foreign = other.join(".WORKBENCH.md.arc-draft");
-    fs::write(&foreign, "my own notes\n").unwrap();
-    let before = fs::read_to_string(other.join("WORKBENCH.md")).unwrap();
+fn mkfifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// Claim: a named pipe where arc reads a file inside a workbench, under a
+/// draft name or at `WORKBENCH.md`, never makes a rewrite, an adoption in
+/// place or a clone wait on it: each finishes, leaves the pipe as it is,
+/// and treats it as a file arc did not write. Rejects opening a pipe for
+/// reading by name, which blocks until a writer appears.
+#[test]
+fn a_named_pipe_in_a_workbench_never_blocks_arc() {
+    let repo = Repo::new();
+    let timeout = std::time::Duration::from_secs(20);
+    let path = open_workbench(&repo, "pipes", "pipe fixtures");
+    mkfifo(&path.join(".WORKBENCH.md.arc-draft-pipe"));
+    let (_, artifact) = journal_artifact(&repo, "piped", "plan", "# Plan\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "workbench",
+            "link",
+            "pipes",
+            "--artifact",
+            &artifact,
+        ])
+        .timeout(timeout)
+        .assert()
+        .success();
+    let index = fs::read_to_string(path.join("WORKBENCH.md")).unwrap();
+    assert!(index.contains(&artifact), "{index}");
+
+    fs::remove_file(path.join("WORKBENCH.md")).unwrap();
+    mkfifo(&path.join("WORKBENCH.md"));
+    let output = repo
+        .arc(&repo.root)
+        .args(["journal", "workbench", "close", "pipes", "--note", "done"])
+        .timeout(timeout)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(stderr.contains("is not a file arc wrote"), "{stderr}");
+
+    let dir = journal_dir(&repo);
+    let unrecorded = dir.join("workbench/stray-20261009");
+    fs::create_dir_all(&unrecorded).unwrap();
+    mkfifo(&unrecorded.join("WORKBENCH.md"));
     let output = repo
         .arc(&repo.root)
         .args([
             "journal",
             "workbench",
+            "adopt",
+            unrecorded.to_str().unwrap(),
+            "--purpose",
+            "stray",
+        ])
+        .timeout(timeout)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(stderr.contains("is not an index arc wrote"), "{stderr}");
+    fs::remove_dir_all(&unrecorded).unwrap();
+
+    let prefix = repo.home.join("boxed");
+    let report = json_stdout(
+        repo.arc(&repo.root)
+            .args(["sandbox", "clone", prefix.to_str().unwrap(), "--json"])
+            .timeout(timeout),
+    );
+    let copied = PathBuf::from(report["journal"].as_str().unwrap())
+        .join("workbench")
+        .join(path.file_name().unwrap());
+    assert!(copied.is_dir());
+    assert!(fs::symlink_metadata(copied.join("WORKBENCH.md")).is_err());
+    let whole = repo.home.join("whole");
+    repo.arc(&repo.root)
+        .args([
+            "sandbox",
+            "clone",
+            whole.to_str().unwrap(),
+            "--workbench-content",
+        ])
+        .timeout(timeout)
+        .assert()
+        .success();
+    assert!(path.join("WORKBENCH.md").exists());
+}
+
+/// Claim: a rewrite keeps the index's permission bits and its access ACL:
+/// an index its owner made private stays private after arc rewrites it, and
+/// one shared with a named user stays shared with exactly that user. Rejects
+/// a rewrite that replaces a `0600` index with a draft made under the
+/// umask, widening it, or that drops an ACL, which leaves the ACL's mask as
+/// the owning group's permission. The ACL half runs where the fixture's
+/// filesystem takes one.
+#[test]
+fn an_index_rewrite_keeps_its_mode() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "private", "private notes");
+    let index = path.join("WORKBENCH.md");
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
+    let (_, artifact) = journal_artifact(&repo, "secret", "plan", "# Plan\n");
+    repo.arc_under_umask(&repo.root, "022")
+        .args([
+            "journal",
+            "workbench",
             "link",
-            "probe-run",
+            "private",
             "--artifact",
-            &first,
+            &artifact,
         ])
         .assert()
         .success();
-    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
-    assert!(stderr.contains("is not a draft arc wrote"), "{stderr}");
-    assert_eq!(fs::read_to_string(&foreign).unwrap(), "my own notes\n");
+    let rewritten = fs::read_to_string(&index).unwrap();
+    assert!(rewritten.contains(&artifact), "{rewritten}");
+    assert_eq!(fs::metadata(&index).unwrap().mode() & 0o7777, 0o600);
+
+    let acl = |args: &[&str]| {
+        std::process::Command::new(args[0])
+            .args(&args[1..])
+            .output()
+    };
+    let index_path = index.to_str().unwrap();
+    let shared = acl(&["setfacl", "-m", "u:nobody:r", index_path]);
+    if !shared.is_ok_and(|output| output.status.success()) {
+        return;
+    }
+    let before = acl(&["getfacl", "-c", index_path]).unwrap().stdout;
+    let mode = fs::metadata(&index).unwrap().mode();
+    let (_, other) = journal_artifact(&repo, "shared", "plan", "# Plan\n");
+    repo.arc_under_umask(&repo.root, "022")
+        .args([
+            "journal",
+            "workbench",
+            "link",
+            "private",
+            "--artifact",
+            &other,
+        ])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(&index).unwrap().contains(&other));
+    let after = acl(&["getfacl", "-c", index_path]).unwrap().stdout;
     assert_eq!(
-        fs::read_to_string(other.join("WORKBENCH.md")).unwrap(),
-        before
+        String::from_utf8_lossy(&after),
+        String::from_utf8_lossy(&before)
     );
+    assert!(String::from_utf8_lossy(&after).contains("user:nobody:r--"));
+    assert_eq!(fs::metadata(&index).unwrap().mode(), mode);
 }
 
 /// Claim: where `/dev/fd` or `/proc/self/fd` is missing, adopting, closing

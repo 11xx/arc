@@ -48,9 +48,10 @@ const INDEX: &str = "WORKBENCH.md";
 /// arc's to rewrite.
 const INDEX_MARKER: &str = "<!-- arc writes this index from the journal's records -->";
 
-/// Where a rewrite of an index is written before it takes the index's
-/// place, so no reader of `WORKBENCH.md` sees one half written.
-const INDEX_DRAFT: &str = ".WORKBENCH.md.arc-draft";
+/// What every name a rewrite of an index is drafted under begins with. A
+/// draft is written beside the index and renamed over it, so no reader of
+/// `WORKBENCH.md` sees one half written.
+const DRAFT_PREFIX: &str = ".WORKBENCH.md.arc-draft";
 
 /// Days with no recorded act and no changed file after which an open
 /// workbench is stale: the threshold `journal filed` applies to open items.
@@ -1054,7 +1055,7 @@ fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) ->
     if fresh {
         return create();
     }
-    let checked = match opened.open_file(OsStr::new(INDEX), false) {
+    let checked = match opened.open_file(OsStr::new(INDEX)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return create(),
         Err(_) => bail!(
@@ -1068,16 +1069,15 @@ fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) ->
             index.display()
         );
     }
+    let (draft, draft_path) = {
+        let like = &checked;
+        remove_abandoned_drafts(opened);
+        write_draft(opened, at, &text, like)?
+    };
     let checked = checked
         .metadata()
         .with_context(|| format!("cannot read {}", index.display()))?;
-    let draft = at.join(INDEX_DRAFT);
-    write_draft(opened, &draft, &text)?;
     let published = (|| -> Result<()> {
-        #[cfg(debug_assertions)]
-        if std::env::var_os("ARC_TEST_WORKBENCH_INDEX_INTERRUPT").is_some() {
-            std::process::exit(9);
-        }
         use std::os::unix::fs::MetadataExt;
         let current = opened.entry(OsStr::new(INDEX))?;
         if !current
@@ -1089,47 +1089,115 @@ fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) ->
             );
         }
         opened
-            .rename_over(OsStr::new(INDEX_DRAFT), OsStr::new(INDEX))
-            .with_context(|| format!("cannot replace {}", index.display()))
+            .rename_over(&draft, OsStr::new(INDEX))
+            .with_context(|| {
+                format!(
+                    "cannot replace {} with {}",
+                    index.display(),
+                    draft_path.display()
+                )
+            })
     })();
     if published.is_err() {
-        let _ = opened.remove_file(OsStr::new(INDEX_DRAFT));
+        let _ = opened.remove_file(&draft);
     }
     published
 }
 
-/// Write `text` to the draft beside an index, durably, so the rename that
-/// publishes it never publishes an empty file. A draft an interrupted
-/// rewrite left, which carries arc's marker, is replaced; any other file
-/// of that name is left as it is and stops the rewrite.
-fn write_draft(opened: &Dir, draft: &Path, text: &str) -> Result<()> {
-    let name = OsStr::new(INDEX_DRAFT);
-    let mut file = match opened.create_new(name) {
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let left = opened
-                .open_file(name, false)
-                .is_ok_and(|file| carries_marker(&file));
-            if !left {
-                bail!(
-                    "{} is not a draft arc wrote, and arc writes its index there first; arc leaves it as it is",
-                    draft.display()
-                );
+/// Where a debug build stops a rewrite, so a test can interrupt it: once
+/// its draft is `created`, holds a `partial` marker, or is `written`.
+#[cfg(debug_assertions)]
+fn interrupt_at(stage: &str) {
+    if std::env::var("ARC_TEST_WORKBENCH_INDEX_INTERRUPT").as_deref() == Ok(stage) {
+        std::process::exit(9);
+    }
+}
+
+/// Write `text` durably to a draft beside the index, under a name no other
+/// attempt uses, created so it replaces nothing, with the mode and access
+/// ACL of the index opened as `like`, so the rename that publishes it
+/// neither publishes an empty file nor widens who can read it. Returns the
+/// draft's name and path.
+fn write_draft(
+    opened: &Dir,
+    at: &Path,
+    text: &str,
+    like: &std::fs::File,
+) -> Result<(std::ffi::OsString, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+    let stamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = std::ffi::OsString::from(format!("{DRAFT_PREFIX}-{}-{stamp}", std::process::id()));
+    let path = at.join(&name);
+    let mut file = opened
+        .create_new(&name)
+        .with_context(|| format!("cannot create {}", path.display()))?;
+    let written = (|| -> std::io::Result<()> {
+        #[cfg(debug_assertions)]
+        {
+            interrupt_at("created");
+            let half = &INDEX_MARKER.as_bytes()[..INDEX_MARKER.len() / 2];
+            if std::env::var("ARC_TEST_WORKBENCH_INDEX_INTERRUPT").as_deref() == Ok("partial") {
+                file.write_all(half)?;
+                file.sync_all()?;
+                interrupt_at("partial");
             }
-            opened
-                .remove_file(name)
-                .and_then(|()| opened.create_new(name))
         }
-        created => created,
-    }
-    .with_context(|| format!("cannot create {}", draft.display()))?;
-    let written = file
-        .write_all(text.as_bytes())
-        .and_then(|()| file.sync_all());
+        file.write_all(text.as_bytes())?;
+        file.set_permissions(std::fs::Permissions::from_mode(
+            like.metadata()?.permissions().mode() & 0o7777,
+        ))?;
+        fsat::copy_access_acl(like, &file)?;
+        file.sync_all()
+    })();
     if let Err(error) = written {
-        let _ = opened.remove_file(name);
-        return Err(error).with_context(|| format!("cannot write {}", draft.display()));
+        let _ = opened.remove_file(&name);
+        return Err(error).with_context(|| format!("cannot write {}", path.display()));
     }
-    Ok(())
+    #[cfg(debug_assertions)]
+    interrupt_at("written");
+    Ok((name, path))
+}
+
+/// Remove the drafts earlier rewrites abandoned beside the index: regular
+/// files under the draft names that are empty or begin with a prefix of
+/// arc's marker line, which is all an interrupted draft can hold. Rewrites
+/// are serialized by the journal's lock, so none is another's live draft.
+/// Anything else under those names is left as it is and stops nothing.
+fn remove_abandoned_drafts(opened: &Dir) {
+    let Ok(names) = opened.names() else {
+        return;
+    };
+    let marker = format!("{INDEX_MARKER}\n");
+    for name in names.flatten() {
+        if !name.as_encoded_bytes().starts_with(DRAFT_PREFIX.as_bytes()) {
+            continue;
+        }
+        let Ok(file) = opened.open_file(&name) else {
+            continue;
+        };
+        let mut head = Vec::new();
+        if (&file)
+            .take(marker.len() as u64)
+            .read_to_end(&mut head)
+            .is_err()
+            || !marker.as_bytes().starts_with(&head)
+        {
+            continue;
+        }
+        let Ok(stat) = file.metadata() else {
+            continue;
+        };
+        use std::os::unix::fs::MetadataExt;
+        let same = opened.entry(&name).is_ok_and(|entry| {
+            entry.is_some_and(|entry| entry.dev == stat.dev() && entry.ino == stat.ino())
+        });
+        if same {
+            let _ = opened.remove_file(&name);
+        }
+    }
 }
 
 /// Whether `file` begins with arc's marker line.
@@ -1144,7 +1212,7 @@ fn carries_marker(file: &std::fs::File) -> bool {
 /// Whether the index at the top of `opened` is one arc wrote.
 fn is_arc_index(opened: &Dir) -> bool {
     opened
-        .open_file(OsStr::new(INDEX), false)
+        .open_file(OsStr::new(INDEX))
         .is_ok_and(|file| carries_marker(&file))
 }
 
@@ -1935,8 +2003,12 @@ pub(crate) fn copy_for_sandbox(
         std::fs::create_dir(&target)
             .with_context(|| format!("cannot create {}", target.display()))?;
         let opened = Dir::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
-        if is_arc_index(&opened) {
-            std::fs::copy(path.join(INDEX), target.join(INDEX))
+        if let Some(index) = opened
+            .open_file(OsStr::new(INDEX))
+            .ok()
+            .filter(carries_marker)
+        {
+            copy_open(index, &target.join(INDEX))
                 .with_context(|| format!("cannot copy {}", path.join(INDEX).display()))?;
         }
         if !content {
@@ -1949,7 +2021,7 @@ pub(crate) fn copy_for_sandbox(
             std::fs::read_dir(&path).with_context(|| format!("cannot read {}", path.display()))?
         {
             let inner = inner.with_context(|| format!("cannot read {}", path.display()))?;
-            if inner.file_name() == INDEX && target.join(INDEX).exists() {
+            if inner.file_name() == INDEX && std::fs::symlink_metadata(target.join(INDEX)).is_ok() {
                 continue;
             }
             copy_entry(&inner.path(), &target.join(inner.file_name()), &mut copy)?;
@@ -1978,11 +2050,26 @@ fn copy_entry(from: &Path, to: &Path, copy: &mut SandboxCopy) -> Result<()> {
     } else if kind.is_symlink() {
         std::fs::read_link(from).and_then(|target| std::os::unix::fs::symlink(target, to))
     } else if kind.is_file() {
-        std::fs::copy(from, to).map(|_| ())
+        fsat::open_regular(from).and_then(|file| copy_open(file, to))
     } else {
         Ok(())
     };
     copied.with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))
+}
+
+/// Copy the opened regular file `from`, from its start, to a new file at
+/// `to`, with its mode.
+pub(crate) fn copy_open(mut from: std::fs::File, to: &Path) -> std::io::Result<()> {
+    use std::io::Seek;
+    use std::os::unix::fs::PermissionsExt;
+    let mode = from.metadata()?.permissions().mode() & 0o7777;
+    from.rewind()?;
+    let mut copy = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    std::io::copy(&mut from, &mut copy)?;
+    copy.set_permissions(std::fs::Permissions::from_mode(mode))
 }
 
 /// Report workbenches whose directories and records disagree: a recorded

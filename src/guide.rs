@@ -2252,8 +2252,14 @@ WORKBENCHES (working material in the journal)
   the call, which no rename here can prevent. A record prepared but not yet published is
   the second until the next journal write publishes it. A later act rewrites the index only while it
   is the one arc wrote, and leaves any other `WORKBENCH.md` as it is. The
-  rewrite is written beside it as `.WORKBENCH.md.arc-draft` and renamed over
-  it, so a reader finds the old index or the new one whole.
+  rewrite is written beside it, under a name beginning
+  `.WORKBENCH.md.arc-draft` that no other attempt uses, with its mode and
+  access ACL, and renamed over it, so a reader finds the old index or the
+  new one whole; other extended attributes of the index are not kept. A
+  later rewrite removes the drafts interrupted ones left, which are empty or
+  begin with part of arc's marker, and leaves any other file of those names
+  alone. Arc reads a file in a workbench only as a regular file, opened
+  without waiting, so a pipe or a device there never holds it.
   Adopting, closing, archiving and unarchiving refuse before reading or
   moving anything where `/dev/fd` or `/proc/self/fd` is missing, through
   which arc reads and names the directories it opens; a listing then gives

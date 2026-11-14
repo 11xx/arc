@@ -299,20 +299,77 @@ impl Dir {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    /// Open the existing file `name` to read and write; a link refuses.
-    pub(super) fn open_file(&self, name: &OsStr, write: bool) -> io::Result<File> {
-        let flags = if write { libc::O_RDWR } else { libc::O_RDONLY };
-        let fd = self.open_at(name, flags, 0)?;
+    /// Open the existing regular file `name` to read. A link, a pipe, a
+    /// device or anything else that is not a regular file refuses, and the
+    /// open never waits on one: it neither follows a link nor blocks, and
+    /// the file's kind is read from the descriptor it opened.
+    pub(super) fn open_file(&self, name: &OsStr) -> io::Result<File> {
+        let fd = self.open_at(name, libc::O_RDONLY | libc::O_NONBLOCK, 0)?;
         // SAFETY: `fd` was just opened and nothing else owns it.
-        let file = unsafe { File::from_raw_fd(fd) };
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a regular file",
-            ));
-        }
-        Ok(file)
+        regular(unsafe { File::from_raw_fd(fd) })
     }
+}
+
+/// Open the regular file at `path` to read, as [`Dir::open_file`] does:
+/// without following a link in its last component or waiting on a pipe.
+pub(super) fn open_regular(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    regular(file)
+}
+
+/// Give `to` the access ACL `from` carries, when it carries one. Without
+/// it, the group bits of a file with an ACL hold the ACL's mask, so its
+/// mode alone grants the owning group what the mask allows.
+pub(super) fn copy_access_acl(from: &File, to: &File) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        const NAME: &[u8] = b"system.posix_acl_access\0";
+        let mut buffer = vec![0u8; 4096];
+        // SAFETY: the descriptor is open, the name is NUL-terminated and
+        // the buffer's length is passed.
+        let length = unsafe {
+            libc::fgetxattr(
+                from.as_raw_fd(),
+                NAME.as_ptr().cast(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if length < 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENODATA) | Some(libc::ENOTSUP) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        // SAFETY: as above; `length` bytes of the buffer were filled.
+        check(unsafe {
+            libc::fsetxattr(
+                to.as_raw_fd(),
+                NAME.as_ptr().cast(),
+                buffer.as_ptr().cast(),
+                length as usize,
+                0,
+            )
+        })?;
+    }
+    let _ = (from, to);
+    Ok(())
+}
+
+/// `file`, when the descriptor is a regular file.
+fn regular(file: File) -> io::Result<File> {
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 /// Rename `from` in `from_dir` to `to` in `to_dir`, refusing to replace

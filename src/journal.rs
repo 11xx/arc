@@ -40,7 +40,7 @@ mod pins;
 mod private_text;
 mod workbench;
 pub(crate) use workbench::{
-    copy_for_sandbox as copy_workbenches_for_sandbox,
+    copy_for_sandbox as copy_workbenches_for_sandbox, copy_open as copy_open_file,
     refuse_unreal_holding as refuse_unreal_workbench_holding, SandboxCopy as WorkbenchSandboxCopy,
     WorkbenchRow, HOLDING_DIR as WORKBENCH_DIR,
 };
