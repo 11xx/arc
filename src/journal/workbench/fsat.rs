@@ -247,22 +247,27 @@ pub(super) fn rename_new(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr)
     #[cfg(target_os = "linux")]
     {
         let (from_c, to_c) = (c_name(from)?, c_name(to)?);
-        // SAFETY: both descriptors are open and both names are
-        // NUL-terminated and outlive the call.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                from_dir.fd.as_raw_fd(),
-                from_c.as_ptr(),
-                to_dir.fd.as_raw_fd(),
-                to_c.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
+        let error = if no_replace_unsupported() {
+            // What a filesystem without the flag answers.
+            io::Error::from_raw_os_error(libc::EINVAL)
+        } else {
+            // SAFETY: both descriptors are open and both names are
+            // NUL-terminated and outlive the call.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    from_dir.fd.as_raw_fd(),
+                    from_c.as_ptr(),
+                    to_dir.fd.as_raw_fd(),
+                    to_c.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if result == 0 {
+                return Ok(());
+            }
+            io::Error::last_os_error()
         };
-        if result == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
         if !matches!(
             error.raw_os_error(),
             Some(libc::EINVAL) | Some(libc::ENOSYS)
@@ -275,4 +280,15 @@ pub(super) fn rename_new(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr)
         io::ErrorKind::Unsupported,
         "this kernel or filesystem has no rename that refuses to replace, so arc moves nothing here",
     ))
+}
+
+/// Whether a debug build is told to answer every no-replace rename as a
+/// filesystem without one does, so a test reaches the refusal.
+#[cfg(target_os = "linux")]
+fn no_replace_unsupported() -> bool {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ARC_TEST_WORKBENCH_NO_RENAME_NOREPLACE").is_some() {
+        return true;
+    }
+    false
 }

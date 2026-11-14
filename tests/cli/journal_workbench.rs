@@ -2023,3 +2023,70 @@ fn the_workspace_views_surface_a_stale_workbench_and_an_unknown_one() {
         "{report}"
     );
 }
+
+/// Claim: where no rename that refuses to replace exists, adopting a
+/// directory or a file and archiving a workbench each refuse, naming the
+/// missing rename, and leave the material where it was, every byte kept,
+/// with no workbench directory made and nothing recorded. Rejects a move
+/// that falls back to a rename able to replace what stands at the
+/// destination, and a refused file adoption that leaves its empty
+/// directory behind.
+#[test]
+fn without_a_no_replace_rename_nothing_moves() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let unsupported = |args: &[&str]| {
+        let output = repo
+            .arc(&repo.root)
+            .env("ARC_TEST_WORKBENCH_NO_RENAME_NOREPLACE", "1")
+            .args(args)
+            .assert()
+            .failure();
+        String::from_utf8_lossy(&output.get_output().stderr).to_string()
+    };
+    let missing = "no rename that refuses to replace, so arc moves nothing here";
+
+    let source = dir.join("loose/sweep-20261009");
+    loose_entry(&source);
+    let notebook = repo.home.join("notes.org");
+    fs::write(&notebook, "* notes\n").unwrap();
+    let before = (digests(&source), fs::read(&notebook).unwrap());
+    for path in [&source, &notebook] {
+        let stderr = unsupported(&[
+            "journal",
+            "workbench",
+            "adopt",
+            path.to_str().unwrap(),
+            "--purpose",
+            "old material",
+        ]);
+        assert!(stderr.contains(missing), "{stderr}");
+        assert!(stderr.contains("nothing moved"), "{stderr}");
+    }
+    assert_eq!(before, (digests(&source), fs::read(&notebook).unwrap()));
+    let holding: Vec<_> = fs::read_dir(dir.join("workbench"))
+        .map(|entries| entries.map(|entry| entry.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(holding.is_empty(), "{holding:?}");
+    assert!(workbench_events(&dir).is_empty());
+
+    let path = open_workbench(&repo, "finished", "finished work");
+    fs::write(path.join("result.txt"), "done\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "workbench", "close", &name, "--note", "kept"]),
+    );
+    let stderr = unsupported(&["journal", "archive", &name]);
+    assert!(stderr.contains(missing), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(path.join("result.txt")).unwrap(),
+        "done\n"
+    );
+    assert!(!PathBuf::from(format!("{}-archive", dir.display()))
+        .join("workbench")
+        .join(&name)
+        .exists());
+    assert_eq!(listed(&repo, true)[0]["storage"], "hot");
+}
