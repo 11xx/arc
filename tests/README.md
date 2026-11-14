@@ -51,31 +51,38 @@ It guards against a test run reaching, by accident, what it did not create: an
 inherited environment, a forgotten helper, a wrong path, or a test or the `arc`
 under test naming the real repository. The kernel confines each harness, and
 every process it starts, to writing beneath the build's target directory and the
-system temporary directory, through Landlock, with every file system right the
-running kernel offers handled and device ioctls granted only on the terminal. A
-root that is, or contains, the checkout, the home directory or the directory
-holding the checkout's shared Git directory, or that lies inside that Git
-directory, is refused rather than granted. Descriptors inherited above standard
-error are closed and standard input is made read-only, since a descriptor opened
-before confinement keeps its access. A kernel without the Landlock rights this
-needs, or a refused root, leaves a plain `cargo test` unconfined with a notice;
-the runner sets `ARC_TEST_CONFINEMENT=required`, and the harness then refuses to
-run. A machine prepared in advance to defeat the guard, with a hard link or bind
-mount planted inside the build directory, is outside it, and Landlock does not
-restrict metadata-only changes such as mode, ownership, timestamps and extended
-attributes; `arc doctor` and `arc catchup` still report a contaminated repository
-configuration.
+system temporary directory, `/tmp`, through Landlock, with every file system
+right the running kernel offers handled and device ioctls granted only on the
+terminal. The environment never chooses a writable root: an inherited `TMPDIR`
+naming anything but `/tmp` is replaced, for the harness and every process it
+starts, by a directory the harness creates under `/tmp` and removes when it
+exits. `/tmp` rather than the build directory keeps Unix socket paths beneath
+it within their 108 bytes. A target directory that is, or contains, the
+checkout, the home directory or the directory holding the checkout's shared Git
+directory, that lies inside that Git directory, in the checkout other than
+within its `target`, or in the home's configuration, is refused rather than
+granted. Descriptors inherited above standard error are closed, one by one from
+`/proc/self/fd` where `close_range` is refused, and standard input is made
+read-only, since a descriptor opened before confinement keeps its access. A
+kernel without the Landlock rights this needs, a refused root, or a descriptor
+the harness cannot close or replace leaves a plain `cargo test` unconfined with
+a notice naming why; the runner sets `ARC_TEST_CONFINEMENT=required`, and the
+harness then refuses to run. A machine prepared in advance to defeat the guard,
+with a hard link or bind mount planted inside the build directory, is outside
+it, and Landlock does not restrict metadata-only changes such as mode,
+ownership, timestamps and extended attributes; `arc doctor` and `arc catchup`
+still report a contaminated repository configuration.
 
 Started with `GIT_DIR` or `GIT_WORK_TREE` set, as Git sets them for hooks and
 `rebase --exec` steps, the harness and the runner refuse to start and name the
 variable. The runner removes every other inherited `GIT_` variable before it
-starts Cargo, and `build.rs` runs Git with a Git environment of its own. Every other inherited `GIT_` variable is removed, and the harness sets
-the few it needs: Git discovery never climbs into the checkout or the system
-temporary directory from below, so Git in a directory a test forgot to
-initialize finds no repository and a test that means this checkout names it;
-`git init` copies no template; global configuration is a file in a directory the
-harness process created, removed when it exits; system configuration is not
-read. A helper's own settings for its command still apply. A child-mode switch,
+starts Cargo, and `build.rs` runs Git with a Git environment of its own. Every
+other inherited `GIT_` variable is removed, and the harness sets the few it
+needs: Git discovery never climbs into the checkout or `/tmp` from below, so
+Git in a directory a test forgot to initialize finds no repository and a test
+that means this checkout names it; `git init` copies no template; global
+configuration is a file in a directory the harness process created, removed when
+it exits; system configuration is not read. A helper's own settings for its command still apply. A child-mode switch,
 a variable named `ARC_TEST_CHILD_*`, reaches a harness only from the harness
 that started it, carrying that parent's token; the runner passes none.
 

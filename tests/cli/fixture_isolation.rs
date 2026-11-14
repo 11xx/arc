@@ -89,9 +89,9 @@ fn git_files(repo: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     found
 }
 
-/// This harness run once more for the test `name`, in child mode, under `envs`.
-fn harness_child(name: &str, envs: &[(&str, PathBuf)]) -> std::process::Output {
-    let mut child = Command::new(std::env::current_exe().unwrap());
+/// The harness `exe` run for the test `name`, in child mode, under `envs`.
+fn harness_child_of(exe: &Path, name: &str, envs: &[(&str, PathBuf)]) -> std::process::Output {
+    let mut child = Command::new(exe);
     child
         .args(["--exact", name, "--nocapture"])
         .env(CHILD, child_token());
@@ -99,6 +99,11 @@ fn harness_child(name: &str, envs: &[(&str, PathBuf)]) -> std::process::Output {
         child.env(variable, value);
     }
     child.output().unwrap()
+}
+
+/// This harness run once more for the test `name`, in child mode, under `envs`.
+fn harness_child(name: &str, envs: &[(&str, PathBuf)]) -> std::process::Output {
+    harness_child_of(&std::env::current_exe().unwrap(), name, envs)
 }
 
 /// A child harness started with `variable` naming a decoy repository must
@@ -239,9 +244,10 @@ fn git_beneath_the_checkout_finds_no_repository() {
 }
 
 /// Claim: Git run in a plain directory under the temporary directory finds
-/// no repository, even when the temporary directory lies inside one: the
-/// child harness's temporary directory is inside a decoy repository, and
-/// discovery stops at it. Rejects a fixture directory a test forgot to
+/// no repository, even when the inherited `TMPDIR` lies inside one: the child
+/// harness inherits a `TMPDIR` inside a decoy repository, works in a
+/// temporary directory of its own under the system one, and discovery never
+/// climbs into the system one. Rejects a fixture directory a test forgot to
 /// initialize adopting whatever repository encloses the temporary directory.
 #[test]
 fn git_in_a_plain_temporary_directory_finds_no_enclosing_repository() {
@@ -298,16 +304,15 @@ fn git_config_global_from_a_bare_command_never_reaches_the_users_file() {
             .collect::<Vec<_>>()
     };
     let real_before = real_files(&real);
-    let (scratch, temporary) = confined_scratch();
+    let (scratch, harness) = stand_in_target();
     let home = scratch.path().join("home");
     fs::create_dir_all(home.join(".config/git")).unwrap();
     fs::write(home.join(".gitconfig"), "[user]\n\tname = Operator\n").unwrap();
     let stand_in = Some(home.clone());
     let stand_in_before = real_files(&stand_in);
-    let output = Command::new(std::env::current_exe().unwrap())
+    let output = Command::new(&harness)
         .args(["--exact", NAME, "--nocapture"])
         .env(CHILD, child_token())
-        .env("TMPDIR", &temporary)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env_remove("GIT_CONFIG_GLOBAL")
@@ -330,9 +335,9 @@ fn git_config_global_from_a_bare_command_never_reaches_the_users_file() {
     );
 }
 
-/// Where a confined child harness's decoys live: everything under the
-/// scratch directory except the child's own temporary directory, which is
-/// all of the scratch the child may write.
+/// Where a confined child harness's decoys live: the scratch directory that
+/// holds its stand-in target directory, all of it outside the child's roots
+/// except that target.
 const DECOYS: &str = "ARC_TEST_DECOYS";
 
 /// The decoy directory a confined child was given.
@@ -340,31 +345,49 @@ fn decoys() -> PathBuf {
     PathBuf::from(std::env::var_os(DECOYS).expect("a confined child names its decoys"))
 }
 
-/// A scratch directory whose `child-tmp` is the temporary directory of a
-/// confined child harness; anything else in it is outside the child's roots.
-fn confined_scratch() -> (TempDir, PathBuf) {
-    let scratch = TempDir::new().unwrap();
-    let temporary = scratch.path().join("child-tmp");
-    fs::create_dir(&temporary).unwrap();
-    (scratch, temporary)
+/// A scratch directory under the build's own temporary directory holding a
+/// stand-in target directory, `target`, marked as Cargo's cache, with this
+/// harness linked into it. A child started from the link writes only beneath
+/// that stand-in and the system temporary directory, so everything else in
+/// the scratch is outside its roots.
+fn stand_in_target() -> (TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix("stand-in-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let target = scratch.path().join("target");
+    fs::create_dir_all(target.join("deps")).unwrap();
+    fs::write(
+        target.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    let harness = target.join("deps/harness");
+    fs::hard_link(std::env::current_exe().unwrap(), &harness).unwrap();
+    (scratch, harness)
 }
 
-/// The test `name` run in a child harness whose temporary directory is
-/// `scratch`'s `child-tmp`, with `scratch` named as its decoys, under `envs`.
-/// The child must pass: its test asserts the refusal it observes.
-fn assert_confined_child_passes(name: &str, scratch: &Path, envs: &[(&str, PathBuf)]) {
-    let mut all = vec![
-        ("TMPDIR", scratch.join("child-tmp")),
-        (DECOYS, scratch.to_path_buf()),
-    ];
-    all.extend(envs.iter().cloned());
-    let output = harness_child(name, &all);
+/// A started child harness must pass: its test asserts what it observes.
+fn assert_child_passed(output: &std::process::Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The test `name` run in a child harness started from `harness`, linked in
+/// `scratch`'s stand-in target, with `scratch` named as its decoys, under
+/// `envs`. The child must pass: its test asserts the refusal it observes.
+fn assert_confined_child_passes(
+    name: &str,
+    (scratch, harness): &(TempDir, PathBuf),
+    envs: &[(&str, PathBuf)],
+) {
+    let mut all = vec![(DECOYS, scratch.path().to_path_buf())];
+    all.extend(envs.iter().cloned());
+    assert_child_passed(&harness_child_of(harness, name, &all));
 }
 
 /// `git <args> config arc.confinement.probe 1` from a confined child, aimed at
@@ -385,11 +408,11 @@ fn assert_decoy_config_unwritable(name: &str, aim: fn(&Path) -> Vec<String>) {
         );
         return;
     }
-    let (scratch, _) = confined_scratch();
-    let decoy = scratch.path().join("decoy");
-    git(scratch.path(), &["init", "-q", "--template=", "decoy"]);
+    let stand_in = stand_in_target();
+    let decoy = stand_in.0.path().join("decoy");
+    git(stand_in.0.path(), &["init", "-q", "--template=", "decoy"]);
     let before = git_files(&decoy);
-    assert_confined_child_passes(name, scratch.path(), &[]);
+    assert_confined_child_passes(name, &stand_in, &[]);
     assert!(git_files(&decoy) == before, "the decoy repository changed");
 }
 
@@ -420,6 +443,15 @@ fn git_aimed_by_git_dir_outside_the_roots_cannot_write_its_config() {
     );
 }
 
+/// Whether creating `path` was refused by the kernel.
+fn creation_refused(path: &Path) -> bool {
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    matches!(created, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 /// Claim: a test cannot create a file beneath its home directory: the kernel
 /// refuses it. Proven with a decoy home outside a confined child's roots.
 /// Rejects a test, helper or `arc` under test writing the operator's
@@ -429,28 +461,60 @@ fn a_write_beneath_the_home_fails() {
     if in_child_mode(CHILD) {
         assert!(confined(), "this harness runs unconfined");
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-        let created = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(home.join("probe"));
-        assert_eq!(
-            created.map(|_| ()).map_err(|error| error.kind()),
-            Err(std::io::ErrorKind::PermissionDenied)
-        );
+        assert!(creation_refused(&home.join("probe")), "a file was created");
         return;
     }
-    let (scratch, _) = confined_scratch();
-    let home = scratch.path().join("home");
+    let stand_in = stand_in_target();
+    let home = stand_in.0.path().join("home");
     fs::create_dir(&home).unwrap();
     assert_confined_child_passes(
         "fixture_isolation::a_write_beneath_the_home_fails",
-        scratch.path(),
+        &stand_in,
         &[("HOME", home.clone())],
     );
     assert_eq!(
         fs::read_dir(&home).unwrap().count(),
         0,
         "the decoy home changed"
+    );
+}
+
+/// Claim: an inherited `TMPDIR` is never a writable root, wherever it points:
+/// the harness works in a temporary directory of its own under the system
+/// one, and a file cannot be created in the inherited directory. Proven with
+/// `TMPDIR` naming a decoy home's `.config/git`, which neither is nor holds
+/// the home. Rejects a root the environment chooses granting the operator's
+/// configuration, or the checkout's sources, from inside.
+#[test]
+fn an_inherited_temporary_directory_is_never_a_writable_root() {
+    if in_child_mode(CHILD) {
+        assert!(confined(), "this harness runs unconfined");
+        let inherited = decoys().join("home/.config/git");
+        let own = std::env::temp_dir();
+        assert_eq!(
+            own.parent(),
+            Some(Path::new(crate::harness_entry::SYSTEM_TEMPORARY)),
+            "the harness kept the inherited temporary directory"
+        );
+        assert!(
+            creation_refused(&inherited.join("config")),
+            "a file was created in the inherited temporary directory"
+        );
+        return;
+    }
+    let stand_in = stand_in_target();
+    let home = stand_in.0.path().join("home");
+    let inherited = home.join(".config/git");
+    fs::create_dir_all(&inherited).unwrap();
+    assert_confined_child_passes(
+        "fixture_isolation::an_inherited_temporary_directory_is_never_a_writable_root",
+        &stand_in,
+        &[("HOME", home), ("TMPDIR", inherited.clone())],
+    );
+    assert_eq!(
+        fs::read_dir(&inherited).unwrap().count(),
+        0,
+        "the inherited temporary directory changed"
     );
 }
 
@@ -478,11 +542,11 @@ fn writing_an_existing_file_outside_the_roots_fails() {
         );
         return;
     }
-    let (scratch, _) = confined_scratch();
-    let (file, bytes) = outside_file(scratch.path());
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
     assert_confined_child_passes(
         "fixture_isolation::writing_an_existing_file_outside_the_roots_fails",
-        scratch.path(),
+        &stand_in,
         &[],
     );
     assert_eq!(fs::read(file).unwrap(), bytes);
@@ -511,11 +575,11 @@ fn truncating_an_existing_file_outside_the_roots_fails() {
         );
         return;
     }
-    let (scratch, _) = confined_scratch();
-    let (file, bytes) = outside_file(scratch.path());
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
     assert_confined_child_passes(
         "fixture_isolation::truncating_an_existing_file_outside_the_roots_fails",
-        scratch.path(),
+        &stand_in,
         &[],
     );
     assert_eq!(fs::read(file).unwrap(), bytes);
@@ -549,12 +613,137 @@ fn a_device_ioctl_outside_the_granted_nodes_is_refused() {
         );
         return;
     }
-    let (scratch, _) = confined_scratch();
     assert_confined_child_passes(
         "fixture_isolation::a_device_ioctl_outside_the_granted_nodes_is_refused",
-        scratch.path(),
+        &stand_in_target(),
         &[],
     );
+}
+
+/// A system call a child is denied: its number, an argument that must hold
+/// a value for the denial to apply, and the error it fails with.
+type Denial = (libc::c_long, Option<(usize, u32)>, libc::c_int);
+
+/// A seccomp program failing each call `denials` names, and allowing the
+/// rest. Arguments are compared by their low 32 bits.
+fn seccomp_program(denials: &[Denial]) -> Vec<libc::sock_filter> {
+    let statement = |code: u32, k: u32| libc::sock_filter {
+        code: code as u16,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let jump_unless = |k: u32, skip: u8| libc::sock_filter {
+        code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        jt: 0,
+        jf: skip,
+        k,
+    };
+    let load = |offset: u32| statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, offset);
+    let mut program = Vec::new();
+    for &(call, argument, errno) in denials {
+        program.push(load(0));
+        let deny = statement(
+            libc::BPF_RET | libc::BPF_K,
+            libc::SECCOMP_RET_ERRNO | errno as u32,
+        );
+        match argument {
+            None => program.extend([jump_unless(call as u32, 1), deny]),
+            Some((index, value)) => program.extend([
+                jump_unless(call as u32, 3),
+                load(16 + 8 * index as u32),
+                jump_unless(value, 1),
+                deny,
+            ]),
+        }
+    }
+    program.push(statement(
+        libc::BPF_RET | libc::BPF_K,
+        libc::SECCOMP_RET_ALLOW,
+    ));
+    program
+}
+
+/// Install, between fork and exec of `command`, a seccomp filter denying
+/// `denials`, as a container or sandbox policy might.
+fn deny_calls(command: &mut Command, denials: &[Denial]) {
+    use std::os::unix::process::CommandExt;
+    let program = seccomp_program(denials);
+    // SAFETY: between fork and exec only prctl runs, which is
+    // async-signal-safe, on a program built before the fork.
+    unsafe {
+        command.pre_exec(move || {
+            let filter = libc::sock_fprog {
+                len: program.len() as u16,
+                filter: program.as_ptr() as *mut libc::sock_filter,
+            };
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &filter as *const libc::sock_fprog,
+                ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// `close_range` refused as a kernel without it refuses it.
+const NO_CLOSE_RANGE: Denial = (libc::SYS_close_range, None, libc::ENOSYS);
+
+/// Make `command` start with descriptor 3 open on `file` for writing.
+fn inherit_writable_descriptor(command: &mut Command, file: &Path) -> fs::File {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let writable = fs::OpenOptions::new().write(true).open(file).unwrap();
+    let fd = writable.as_raw_fd();
+    // SAFETY: between fork and exec only dup2 runs, which is async-signal-safe;
+    // it leaves descriptor 3 open on the file without close-on-exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    writable
+}
+
+/// The child's side of the descriptor witnesses: confined, with no
+/// descriptor open on the decoy file.
+fn assert_no_descriptor_on_the_decoy() {
+    assert!(confined(), "this harness runs unconfined");
+    let decoy = decoys().join("existing").canonicalize().unwrap();
+    for entry in fs::read_dir("/proc/self/fd").unwrap() {
+        let target = fs::read_link(entry.unwrap().path());
+        assert!(
+            target.ok().as_deref() != Some(decoy.as_path()),
+            "a descriptor on the decoy survived the entry"
+        );
+    }
+}
+
+/// The test `name` run confined in a stand-in target with descriptor 3
+/// inherited open for writing on a decoy file, and `denials` in force. The
+/// child must pass, and the file's bytes stay.
+fn assert_inherited_descriptor_closed(name: &str, denials: &[Denial]) {
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
+    let mut child = Command::new(&stand_in.1);
+    child
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD, child_token())
+        .env(DECOYS, stand_in.0.path());
+    let writable = inherit_writable_descriptor(&mut child, &file);
+    deny_calls(&mut child, denials);
+    let output = child.output().unwrap();
+    drop(writable);
+    assert_child_passed(&output);
+    assert_eq!(fs::read(file).unwrap(), bytes);
 }
 
 /// Claim: a writable descriptor the harness inherited above standard error
@@ -565,50 +754,73 @@ fn a_device_ioctl_outside_the_granted_nodes_is_refused() {
 #[test]
 fn an_inherited_writable_descriptor_is_closed_at_entry() {
     if in_child_mode(CHILD) {
-        let decoy = decoys().join("existing").canonicalize().unwrap();
-        for entry in fs::read_dir("/proc/self/fd").unwrap() {
-            let target = fs::read_link(entry.unwrap().path());
-            assert!(
-                target.ok().as_deref() != Some(decoy.as_path()),
-                "a descriptor on the decoy survived the entry"
-            );
-        }
-        return;
+        return assert_no_descriptor_on_the_decoy();
     }
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-    let (scratch, temporary) = confined_scratch();
-    let (file, bytes) = outside_file(scratch.path());
-    let writable = fs::OpenOptions::new().write(true).open(&file).unwrap();
-    let fd = writable.as_raw_fd();
-    let mut child = Command::new(std::env::current_exe().unwrap());
-    child
-        .args([
-            "--exact",
-            "fixture_isolation::an_inherited_writable_descriptor_is_closed_at_entry",
-            "--nocapture",
-        ])
-        .env(CHILD, child_token())
-        .env("TMPDIR", temporary)
-        .env(DECOYS, scratch.path());
-    // SAFETY: between fork and exec only dup2 runs, which is async-signal-safe;
-    // it leaves descriptor 3 open on the decoy without close-on-exec.
-    unsafe {
-        child.pre_exec(move || {
-            if libc::dup2(fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let output = child.output().unwrap();
-    drop(writable);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
-        "{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_inherited_descriptor_closed(
+        "fixture_isolation::an_inherited_writable_descriptor_is_closed_at_entry",
+        &[],
     );
+}
+
+/// Claim: where `close_range` is refused, an inherited writable descriptor
+/// is still closed before any test runs, one by one from those
+/// `/proc/self/fd` lists, and the harness runs confined. Rejects a harness
+/// that, on a kernel or under a policy without `close_range`, keeps the
+/// descriptor open while reporting itself confined.
+#[test]
+fn an_inherited_descriptor_is_closed_where_close_range_is_refused() {
+    if in_child_mode(CHILD) {
+        return assert_no_descriptor_on_the_decoy();
+    }
+    assert_inherited_descriptor_closed(
+        "fixture_isolation::an_inherited_descriptor_is_closed_where_close_range_is_refused",
+        &[NO_CLOSE_RANGE],
+    );
+}
+
+/// A harness started by `start`, which cannot finish its entry for the
+/// reason `reason`, must refuse naming it when confinement is required, and
+/// run unconfined with the notice naming it when not.
+fn assert_unconfined_for(reason: &str, start: impl Fn() -> Command) {
+    let (reported, output) = probe_confinement(start().env("ARC_TEST_CONFINEMENT", "required"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        reported.is_none() && output.status.code() == Some(2) && stderr.contains(reason),
+        "a required confinement ran without refusing for {reason}: {output:?}"
+    );
+    let (reported, output) = probe_confinement(start().env_remove("ARC_TEST_CONFINEMENT"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        reported == Some(false)
+            && stderr.contains("notice: the tests run unconfined")
+            && stderr.contains(reason),
+        "a harness reported itself confined despite {reason}: {output:?}"
+    );
+}
+
+/// Claim: an inherited descriptor that can be neither range-closed nor
+/// closed is a failure to confine: with confinement required the harness
+/// refuses, naming the descriptor; otherwise it runs unconfined with the
+/// notice naming it, and the decoy file's bytes stay. Rejects a harness that
+/// ignores a refused close and reports itself confined with a writable
+/// descriptor outside its roots still open.
+#[test]
+fn a_descriptor_that_cannot_be_closed_leaves_the_harness_unconfined() {
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
+    let held = std::cell::RefCell::new(Vec::new());
+    assert_unconfined_for("inherited descriptor 3 stays open", || {
+        let mut command = Command::new(&stand_in.1);
+        command.args(["--exact", PROBE, "--nocapture"]);
+        held.borrow_mut()
+            .push(inherit_writable_descriptor(&mut command, &file));
+        deny_calls(
+            &mut command,
+            &[NO_CLOSE_RANGE, (libc::SYS_close, Some((0, 3)), libc::EPERM)],
+        );
+        command
+    });
+    drop(held);
     assert_eq!(fs::read(file).unwrap(), bytes);
 }
 
@@ -619,6 +831,7 @@ fn an_inherited_writable_descriptor_is_closed_at_entry() {
 #[test]
 fn a_writable_standard_input_is_reopened_read_only() {
     if in_child_mode(CHILD) {
+        assert!(confined(), "this harness runs unconfined");
         // SAFETY: F_GETFL reads the status flags of descriptor 0.
         let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
         assert_eq!(
@@ -630,31 +843,55 @@ fn a_writable_standard_input_is_reopened_read_only() {
         assert_ne!(fs::read_link("/proc/self/fd/0").ok(), Some(decoy));
         return;
     }
-    let (scratch, temporary) = confined_scratch();
-    let (file, bytes) = outside_file(scratch.path());
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
     let stdin = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&file)
         .unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
+    let output = Command::new(&stand_in.1)
         .args([
             "--exact",
             "fixture_isolation::a_writable_standard_input_is_reopened_read_only",
             "--nocapture",
         ])
         .env(CHILD, child_token())
-        .env("TMPDIR", temporary)
-        .env(DECOYS, scratch.path())
+        .env(DECOYS, stand_in.0.path())
         .stdin(stdin)
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
-        "{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_child_passed(&output);
+    assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+/// Claim: a writable standard input that cannot be replaced is a failure to
+/// confine: with confinement required the harness refuses, naming it;
+/// otherwise it runs unconfined with the notice naming it, and the decoy
+/// file's bytes stay. Rejects a harness that ignores a refused `dup2` and
+/// reports itself confined with standard input writable outside its roots.
+#[test]
+fn a_standard_input_that_cannot_be_replaced_leaves_the_harness_unconfined() {
+    let stand_in = stand_in_target();
+    let (file, bytes) = outside_file(stand_in.0.path());
+    assert_unconfined_for("standard input stays writable", || {
+        let stdin = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file)
+            .unwrap();
+        let mut command = Command::new(&stand_in.1);
+        command.args(["--exact", PROBE, "--nocapture"]).stdin(stdin);
+        deny_calls(
+            &mut command,
+            &[
+                #[cfg(target_arch = "x86_64")]
+                (libc::SYS_dup2, Some((1, 0)), libc::EPERM),
+                (libc::SYS_dup3, Some((1, 0)), libc::EPERM),
+            ],
+        );
+        command
+    });
     assert_eq!(fs::read(file).unwrap(), bytes);
 }
 
@@ -670,77 +907,23 @@ fn probe_confinement(command: &mut Command) -> (Option<bool>, std::process::Outp
     (reported, output)
 }
 
-/// A harness started by `start` with a home its roots would grant must refuse
-/// when confinement is required, and run unconfined with the notice when not.
-fn assert_home_root_refused(start: impl Fn() -> Command) {
-    let (reported, output) = probe_confinement(start().env("ARC_TEST_CONFINEMENT", "required"));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        reported.is_none()
-            && output.status.code() == Some(2)
-            && stderr.contains("would grant the home directory"),
-        "a required confinement granted the home: {output:?}"
-    );
-    let (reported, output) = probe_confinement(start().env_remove("ARC_TEST_CONFINEMENT"));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        reported == Some(false) && stderr.contains("notice: the tests run unconfined"),
-        "a confinement granted the home: {output:?}"
-    );
-}
-
 const PROBE: &str = "harness_entry::tests::confinement_probe";
-
-/// Claim: a temporary directory that is the home directory is never granted
-/// for writing: with confinement required the harness refuses, naming what
-/// the root would grant; otherwise it runs unconfined with the notice. Proven
-/// with a decoy home. Rejects `TMPDIR=$HOME` turning confinement into a grant
-/// of the whole home.
-#[test]
-fn a_temporary_directory_that_is_the_home_is_never_granted() {
-    let (scratch, _) = confined_scratch();
-    let home = scratch.path().join("home");
-    fs::create_dir(&home).unwrap();
-    assert_home_root_refused(|| {
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args(["--exact", PROBE, "--nocapture"])
-            .env("HOME", &home)
-            .env("TMPDIR", &home);
-        command
-    });
-    assert_eq!(
-        fs::read_dir(&home).unwrap().count(),
-        0,
-        "the decoy home changed"
-    );
-}
 
 /// Claim: a build directory that is the home directory is never granted for
 /// writing: a harness whose target directory is its home refuses when
 /// confinement is required and otherwise runs unconfined with the notice.
-/// Proven with this harness linked into a decoy home marked as Cargo's cache.
-/// Rejects `CARGO_TARGET_DIR=$HOME` turning confinement into a grant of the
-/// whole home.
+/// Proven with this harness linked into a stand-in target that is also the
+/// home. Rejects `CARGO_TARGET_DIR=$HOME` turning confinement into a grant of
+/// the whole home.
 #[test]
 fn a_target_directory_that_is_the_home_is_never_granted() {
-    let home = tempfile::Builder::new()
-        .prefix("home-as-target-")
-        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
-        .unwrap();
-    fs::write(
-        home.path().join("CACHEDIR.TAG"),
-        "Signature: 8a477f597d28d172789f06886806bc55\n",
-    )
-    .unwrap();
-    fs::create_dir(home.path().join("deps")).unwrap();
-    let linked = home.path().join("deps/harness");
-    fs::hard_link(std::env::current_exe().unwrap(), &linked).unwrap();
-    assert_home_root_refused(|| {
-        let mut command = Command::new(&linked);
+    let (_scratch, harness) = stand_in_target();
+    let home = harness.parent().unwrap().parent().unwrap().to_path_buf();
+    assert_unconfined_for("would grant the home directory", || {
+        let mut command = Command::new(&harness);
         command
             .args(["--exact", PROBE, "--nocapture"])
-            .env("HOME", home.path());
+            .env("HOME", &home);
         command
     });
 }

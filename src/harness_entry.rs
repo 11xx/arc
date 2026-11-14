@@ -4,16 +4,21 @@
 //!
 //! The kernel enforces it. The harness confines itself and every process it
 //! starts to writing beneath the build's target directory and the system
-//! temporary directory, so whatever path a command names, by discovery, by
-//! `-C`, by `--git-dir` or by a path it computed, the checkout's repository,
-//! the operator's Git configuration and other repositories are out of reach.
-//! A writable root that is, or contains, the checkout, the home directory or
-//! the directory holding the checkout's shared Git directory, or that lies
-//! inside that Git directory, is refused rather than granted. Descriptors the
-//! harness inherited above standard error are closed and standard input is
+//! temporary directory, `/tmp`, so whatever path a command names, by
+//! discovery, by `-C`, by `--git-dir` or by a path it computed, the
+//! checkout's repository, the operator's Git configuration and other
+//! repositories are out of reach. The environment never chooses a writable
+//! root: an inherited `TMPDIR` naming anything but `/tmp` is replaced by a
+//! directory the harness creates there. A target directory that is, or
+//! contains, the checkout, the home directory or the directory holding the
+//! checkout's shared Git directory, that lies inside that Git directory, in
+//! the checkout other than within its `target`, or in the home's
+//! configuration, is refused rather than granted. Descriptors the harness
+//! inherited above standard error are closed and standard input is
 //! read-only, since a descriptor opened before confinement keeps its access.
-//! A kernel without the Landlock rights this needs, or a refused root, leaves
-//! the harness unconfined with a notice; the invariant runner asks for
+//! A kernel without the Landlock rights this needs, a refused root, or a
+//! descriptor the harness cannot close or replace leaves the harness
+//! unconfined with a notice naming why; the invariant runner asks for
 //! confinement and the harness then refuses to run.
 //!
 //! Two limits stand. A machine prepared in advance to defeat the guard, with
@@ -26,10 +31,9 @@
 //! `GIT_WORK_TREE` mean the suite was started from inside a Git operation, and
 //! the harness refuses to run. Every other inherited `GIT_` variable is
 //! removed, whatever it selects or traces, and the harness sets the few it
-//! needs: discovery never climbs into this checkout or the temporary
-//! directory from below, `git init` copies no template, the global
-//! configuration is a file this process created and the system file is not
-//! read. A helper's own settings for its command still apply. Child-mode
+//! needs: discovery never climbs into this checkout or `/tmp` from below,
+//! `git init` copies no template, the global configuration is a file this
+//! process created and the system file is not read. A helper's own settings for its command still apply. Child-mode
 //! switches reach a child only from its parent harness.
 //!
 //! The unit harness and the CLI harness both compile this file.
@@ -59,7 +63,7 @@ pub(crate) const CONFINEMENT: &str = "ARC_TEST_CONFINEMENT";
 static ENTRY: extern "C" fn() = enter;
 
 extern "C" fn enter() {
-    close_inherited_descriptors();
+    let descriptors = close_inherited_descriptors();
     for name in REFUSED {
         if std::env::var_os(name).is_some() {
             refuse(&format!(
@@ -81,18 +85,18 @@ extern "C" fn enter() {
     for name in dropped {
         std::env::remove_var(name);
     }
-    let roots = writable_roots();
+    let temporary = own_temporary_directory();
     std::env::set_var(
         "GIT_CEILING_DIRECTORIES",
         std::env::join_paths(discovery_ceilings()).expect("ceiling paths hold no separator"),
     );
-    // Global configuration lives under the temporary root only once that
-    // root is known not to grant anything protected; otherwise Git reads an
-    // empty file and cannot write one.
-    let global = match &roots {
+    // Without a temporary directory of its own, Git reads an empty global
+    // configuration and cannot write one.
+    let global = match &temporary {
         Ok(_) => own_global_config(),
         Err(_) => PathBuf::from("/dev/null"),
     };
+    let roots = descriptors.and(temporary).and_then(writable_roots);
     std::env::set_var("GIT_CONFIG_GLOBAL", global);
     std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
     std::env::set_var("GIT_TEMPLATE_DIR", "");
@@ -116,22 +120,50 @@ extern "C" fn enter() {
 /// Close every descriptor above standard error and make standard input
 /// read-only: a descriptor opened before confinement keeps the access it was
 /// opened with, and the harness needs none of them. What Cargo passes, its
-/// jobserver among it, serves the build, not the tests.
-fn close_inherited_descriptors() {
+/// jobserver among it, serves the build, not the tests. Where `close_range`
+/// is refused, each descriptor `/proc/self/fd` lists is closed instead. One
+/// left open, or a standard input still writable, is a failure to confine.
+fn close_inherited_descriptors() -> Result<(), String> {
     // SAFETY: close_range takes integer bounds and closes only descriptors.
-    unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
-    // SAFETY: F_GETFL reads the status flags of descriptor 0.
-    let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
-    if flags >= 0 && flags & libc::O_ACCMODE != libc::O_RDONLY {
-        // SAFETY: the path is NUL-terminated and dup2 replaces descriptor 0.
-        unsafe {
-            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-            if null >= 0 {
-                libc::dup2(null, 0);
-                libc::close(null);
+    if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {
+        let refused = std::io::Error::last_os_error();
+        let listed: Vec<libc::c_int> = std::fs::read_dir("/proc/self/fd")
+            .map_err(|error| format!("close_range: {refused}; /proc/self/fd: {error}"))?
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .filter(|fd| *fd > 2)
+            .collect();
+        for fd in listed {
+            // SAFETY: closing a descriptor number; the listing's own, already
+            // closed, fails with EBADF.
+            let closed = unsafe { libc::close(fd) } == 0;
+            let error = std::io::Error::last_os_error();
+            // SAFETY: F_GETFD only asks whether the descriptor is open.
+            if !closed && unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
+                return Err(format!(
+                    "inherited descriptor {fd} stays open: close_range: {refused}; close: {error}"
+                ));
             }
         }
     }
+    // SAFETY: F_GETFL reads the status flags of descriptor 0.
+    let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY {
+        return Ok(());
+    }
+    // SAFETY: the path is NUL-terminated; dup2 replaces descriptor 0 with a
+    // read-only /dev/null, and the extra descriptor is closed after.
+    unsafe {
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        let replaced = null >= 0 && libc::dup2(null, 0) == 0;
+        let error = std::io::Error::last_os_error();
+        if null >= 0 {
+            libc::close(null);
+        }
+        if !replaced {
+            return Err(format!("standard input stays writable: {error}"));
+        }
+    }
+    Ok(())
 }
 
 static CONFINED: OnceLock<bool> = OnceLock::new();
@@ -149,7 +181,7 @@ fn refuse(message: &str) -> ! {
 /// The directories Git discovery must not climb into from below, resolved,
 /// since Git compares them with the resolved working directory.
 pub(crate) fn discovery_ceilings() -> Vec<PathBuf> {
-    [checkout(), std::env::temp_dir()]
+    [checkout(), PathBuf::from(SYSTEM_TEMPORARY)]
         .into_iter()
         .filter_map(|path| path.canonicalize().ok())
         .collect()
@@ -169,20 +201,100 @@ pub(crate) fn target_directory() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The roots the harness may write beneath, the build's target directory and
-/// the temporary directory, each checked against what it must never grant.
-fn writable_roots() -> Result<Vec<PathBuf>, String> {
-    let target = target_directory().ok_or("the build's target directory is not marked")?;
-    let temporary = std::env::temp_dir()
-        .canonicalize()
-        .map_err(|error| format!("the temporary directory: {error}"))?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    for root in [&target, &temporary] {
-        if let Some(refusal) = root_refusal(root, &checkout(), home.as_deref()) {
-            return Err(refusal);
+/// The system temporary directory, the one writable root the environment
+/// does not choose.
+pub(crate) const SYSTEM_TEMPORARY: &str = "/tmp";
+
+/// The system temporary directory, resolved. An inherited `TMPDIR` naming
+/// anything else is never a root: the harness sets `TMPDIR` to a directory it
+/// creates there, removed when it exits, so every test and child uses that.
+/// It lives under the system temporary directory rather than the build
+/// directory because Unix socket paths a test binds beneath it must stay
+/// within their 108 bytes.
+fn own_temporary_directory() -> Result<PathBuf, String> {
+    static OWN: OnceLock<PathBuf> = OnceLock::new();
+    extern "C" fn remove_own() {
+        if let Some(own) = OWN.get() {
+            let _ = std::fs::remove_dir_all(own);
         }
     }
+    let system = Path::new(SYSTEM_TEMPORARY)
+        .canonicalize()
+        .map_err(|error| format!("{SYSTEM_TEMPORARY}: {error}"))?;
+    let inherited = std::env::temp_dir().canonicalize().ok();
+    if inherited.as_deref() != Some(system.as_path()) {
+        let own = tempfile::Builder::new()
+            .prefix("arc-test-tmp-")
+            .tempdir_in(&system)
+            .map_err(|error| format!("a temporary directory under {SYSTEM_TEMPORARY}: {error}"))?
+            .keep();
+        std::env::set_var("TMPDIR", &own);
+        if OWN.set(own).is_ok() {
+            // SAFETY: remove_own is an extern "C" function taking no arguments.
+            unsafe { libc::atexit(remove_own) };
+        }
+    }
+    Ok(system)
+}
+
+/// The roots the harness may write beneath: the build's target directory,
+/// checked against what it must never grant, and the system temporary
+/// directory.
+fn writable_roots(temporary: PathBuf) -> Result<Vec<PathBuf>, String> {
+    let target = target_directory().ok_or("the build's target directory is not marked")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let configuration = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    if let Some(refusal) = target_refusal(
+        &target,
+        &checkout(),
+        home.as_deref(),
+        configuration.as_deref(),
+    ) {
+        return Err(refusal);
+    }
+    if let Some(refusal) = root_refusal(&temporary, &checkout(), home.as_deref()) {
+        return Err(refusal);
+    }
     Ok(vec![target, temporary])
+}
+
+/// Why the build's target directory `target` cannot be granted: what
+/// `root_refusal` says, or it lies inside the checkout other than within
+/// Cargo's own build directory, or inside the home's configuration.
+pub(crate) fn target_refusal(
+    target: &Path,
+    checkout: &Path,
+    home: Option<&Path>,
+    configuration: Option<&Path>,
+) -> Option<String> {
+    if let Some(refusal) = root_refusal(target, checkout, home) {
+        return Some(refusal);
+    }
+    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let target = resolved(target);
+    let checkout = resolved(checkout);
+    if target.starts_with(&checkout) && !target.starts_with(checkout.join("target")) {
+        return Some(format!(
+            "the target directory {} lies inside the checkout's source tree",
+            target.display()
+        ));
+    }
+    let configurations = [
+        home.map(|home| resolved(home).join(".config")),
+        configuration.map(resolved),
+    ];
+    if let Some(configuration) = configurations
+        .into_iter()
+        .flatten()
+        .find(|configuration| target.starts_with(configuration))
+    {
+        return Some(format!(
+            "the target directory {} lies inside the home's configuration, {}",
+            target.display(),
+            configuration.display()
+        ));
+    }
+    None
 }
 
 /// Why `root` cannot be granted for writing: it is, or contains, the
@@ -286,8 +398,13 @@ pub(crate) fn in_child_mode(name: &str) -> bool {
 fn parent_token() -> Option<String> {
     // SAFETY: getppid has no preconditions and cannot fail.
     let parent = unsafe { libc::getppid() };
-    let same = std::fs::read_link(format!("/proc/{parent}/exe")).ok()?
-        == std::fs::read_link("/proc/self/exe").ok()?;
+    let identity = |exe: String| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(exe)
+            .ok()
+            .map(|file| (file.dev(), file.ino()))
+    };
+    let same = identity(format!("/proc/{parent}/exe"))? == identity("/proc/self/exe".into())?;
     same.then(|| token_of(parent)).flatten()
 }
 
@@ -451,15 +568,16 @@ mod tests {
     const CONFINED_CHILD: &str = "ARC_TEST_CHILD_UNIT_CONFINEMENT";
 
     /// Claim: this harness's writes are confined by the kernel: a child
-    /// harness whose temporary directory is a scratch subdirectory cannot
-    /// create a file beside it, outside its roots. Rejects a unit test, or a
+    /// harness linked into a stand-in target directory cannot create a file
+    /// beside that directory, outside its roots. Rejects a unit test, or a
     /// production helper a unit test calls, writing a file or repository it
     /// did not create by any path it names.
     #[test]
     fn this_harness_confines_its_writes() {
         if in_child_mode(CONFINED_CHILD) {
             assert!(super::confined(), "this harness runs unconfined");
-            let outside = std::env::temp_dir().parent().unwrap().join("outside");
+            let target = super::target_directory().unwrap();
+            let outside = target.parent().unwrap().join("outside");
             let created = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -470,18 +588,29 @@ mod tests {
             );
             return;
         }
-        let scratch = tempfile::TempDir::new().unwrap();
-        let temporary = scratch.path().join("child-tmp");
-        std::fs::create_dir(&temporary).unwrap();
+        let scratch_parent = super::target_directory().unwrap().join("tmp");
+        std::fs::create_dir_all(&scratch_parent).unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("stand-in-")
+            .tempdir_in(scratch_parent)
+            .unwrap();
+        let target = scratch.path().join("target");
+        std::fs::create_dir_all(target.join("deps")).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        let harness = target.join("deps/harness");
+        std::fs::hard_link(std::env::current_exe().unwrap(), &harness).unwrap();
         let (switch, token) = child_switch(CONFINED_CHILD);
-        let output = Command::new(std::env::current_exe().unwrap())
+        let output = Command::new(&harness)
             .args([
                 "--exact",
                 "harness_entry::tests::this_harness_confines_its_writes",
                 "--nocapture",
             ])
             .env(switch, token)
-            .env("TMPDIR", &temporary)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -512,7 +641,7 @@ mod tests {
 
     /// Claim: a writable root that is, or contains, the home directory is
     /// refused, naming what it would grant, and a root beside the home is
-    /// accepted. Rejects `TMPDIR` or `CARGO_TARGET_DIR` naming the home, or
+    /// accepted. Rejects `CARGO_TARGET_DIR` naming the home, or
     /// a directory above it, turning confinement into a grant of the home.
     #[test]
     fn a_root_granting_the_home_is_refused() {
@@ -584,6 +713,61 @@ mod tests {
                 .as_deref()
                 .is_some_and(|r| r.contains("lies inside the shared Git directory")),
             "{refusal:?}"
+        );
+    }
+
+    /// Claim: a target directory inside the checkout other than within its
+    /// `target` build directory is refused, naming the source tree, and one
+    /// within `target` is accepted. Rejects `CARGO_TARGET_DIR=<checkout>/src`
+    /// granting the checkout's sources, which contain no protected path.
+    #[test]
+    fn a_target_inside_the_source_tree_is_refused() {
+        let (_scratch, home, _main, checkout) = decoy_worktree();
+        let refusal =
+            super::target_refusal(&checkout.join("src/build"), &checkout, Some(&home), None);
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("inside the checkout's source tree")),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            super::target_refusal(
+                &checkout.join("target/nested"),
+                &checkout,
+                Some(&home),
+                None
+            ),
+            None
+        );
+    }
+
+    /// Claim: a target directory inside the home's configuration, under
+    /// `.config` or `XDG_CONFIG_HOME`, is refused, naming it. Rejects
+    /// `CARGO_TARGET_DIR=$HOME/.config/git` granting the operator's Git
+    /// configuration, which contains no protected path.
+    #[test]
+    fn a_target_inside_the_home_configuration_is_refused() {
+        let (scratch, home, _main, checkout) = decoy_worktree();
+        let configuration = scratch.path().join("configuration");
+        for target in [home.join(".config/git"), configuration.join("cargo")] {
+            let refusal =
+                super::target_refusal(&target, &checkout, Some(&home), Some(&configuration));
+            assert!(
+                refusal
+                    .as_deref()
+                    .is_some_and(|r| r.contains("inside the home's configuration")),
+                "{target:?}: {refusal:?}"
+            );
+        }
+        assert_eq!(
+            super::target_refusal(
+                &home.join("build"),
+                &checkout,
+                Some(&home),
+                Some(&configuration)
+            ),
+            None
         );
     }
 
