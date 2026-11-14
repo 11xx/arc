@@ -37,15 +37,18 @@ passing at the head. A replacement proves the same boundary before removing its
 predecessor. Test existence and historical catches are not selection criteria.
 
 Area suites run on demand with `python3 .arc/test-binary.py area cli <module>`
-(or `area unit <module>`), using the exact module path. They belong to no gate.
+(or `area unit <module>`), using the exact module path. They belong to no
+integration gate; publication runs them with the rest of the tree.
 The invariant gate is the only integration gate. It compiles the crate to run
 its witnesses, so it is also the build check, and its 20 s budget covers that
 compile after a source edit. A check joins it only as a witness of something
 that must never pass; a budget overrun is answered by the order of work in
 `arc guide gate-rounds`, with a larger budget last.
-Publication adds clippy, formatting and five release-artifact checks against
-the release-profile executable. Run `cargo clippy --all-targets -- -D warnings`
-and `cargo fmt` while working: nothing checks them before publication.
+Publication adds clippy, formatting, five release-artifact checks against
+the release-profile executable, and the whole remaining suite with
+`cargo test --locked`. A failure there is fixed, or the test removed, before
+the release. Run `cargo clippy --all-targets -- -D warnings` and `cargo fmt`
+while working: nothing checks them before publication.
 Runner details and commands are in `tests/README.md`.
 
 ## Releasing

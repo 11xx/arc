@@ -1,6 +1,7 @@
 # Integration runs the named invariant witnesses and nothing else: the list is
 # .arc/invariants.tsv, and the gate compiles the crate to run them, so it is
-# also the build check. Lint and the release-artifact checks run at publication.
+# also the build check. Lint, the release-artifact checks and the whole
+# remaining suite run at publication, which is rare and off the landing path.
 [budget]
 total = "20s"
 
@@ -24,5 +25,10 @@ events = ["publication"]
 
 [gates.release]
 command = "python3 .arc/test-binary.py release"
+paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
+events = ["publication"]
+
+[gates.suite]
+command = "cargo test --locked"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["publication"]

@@ -23,7 +23,8 @@ python3 .arc/test-binary.py area cli gate_raises
 ```
 
 Use `area unit store::tests` for a unit module and `area cli ''` for root tests. The module argument names its
-direct tests, not modules sharing a substring. Area suites belong to no gate.
+direct tests, not modules sharing a substring. Area suites belong to no
+integration gate.
 The runner's own acceptance checks are `python3 .arc/test_binary_test.py`.
 `cargo test --locked` runs the whole remaining Rust tree with the development executable.
 
@@ -33,9 +34,10 @@ or a faulty variant; then demonstrate success. Add its full name and claim to
 the list. Replacements must establish the same boundary before a witness leaves
 it. A test's existence, cost or historical failure count does not make it required.
 
-Publication runs the invariant gate, clippy, formatting and the five exact tests in module `release`
-against the release-profile executable built from the checkout. Run that artifact
-check with `python3 .arc/test-binary.py release`. Area inventories do not participate.
+Publication runs the invariant gate, clippy, formatting, the five exact tests in module `release`
+against the release-profile executable built from the checkout, and `cargo test --locked`.
+Run that artifact check with `python3 .arc/test-binary.py release`. A publication failure in
+the remaining tree is fixed, or the test removed, before the release.
 
 CLI fixtures copy independent Git files with empty hooks and exclude locations,
 disable automatic maintenance and retain explicit collection and pruning. Child
