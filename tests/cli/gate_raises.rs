@@ -1404,166 +1404,180 @@ fn raise_scope_net_excluded_deletion() {
     scope_net_growth("excluded");
 }
 
+/// Declaration diffs a change can make against the target's budgets.
+const REMOVAL_MODES: [&str; 9] = [
+    "remove-gate",
+    "remove-budget",
+    "remove-total",
+    "remove-table",
+    "rename-unbudgeted",
+    "publication-unbudgeted",
+    "remove-all",
+    "lower-gate",
+    "lower-total",
+];
+
+/// Whether a change may make the declaration diff `mode` without a raise.
+fn removal_allowed(mode: &str) -> bool {
+    !matches!(
+        mode,
+        "remove-budget"
+            | "remove-total"
+            | "remove-table"
+            | "rename-unbudgeted"
+            | "publication-unbudgeted"
+    )
+}
+
+/// Every mode that `route` must accept, or every mode it must refuse.
 fn removal_rules(route: &str, accepted: bool) {
+    let mismatches = REMOVAL_MODES
+        .into_iter()
+        .filter(|mode| removal_allowed(mode) == accepted)
+        .flat_map(|mode| removal_mismatches(route, mode))
+        .collect::<Vec<_>>();
+    assert!(mismatches.is_empty(), "{route}: {mismatches:#?}");
+}
+
+/// What `route` did with a change making the declaration diff `mode`, where
+/// it differs from the rule, on a fixture of its own.
+fn removal_mismatches(route: &str, mode: &str) -> Vec<String> {
     let mut mismatches = Vec::new();
-    for mode in [
-        "remove-gate",
-        "remove-budget",
-        "remove-total",
-        "remove-table",
-        "rename-unbudgeted",
-        "publication-unbudgeted",
-        "remove-all",
-        "lower-gate",
-        "lower-total",
-    ] {
-        let allowed = !matches!(
-            mode,
-            "remove-budget"
-                | "remove-total"
-                | "remove-table"
-                | "rename-unbudgeted"
-                | "publication-unbudgeted"
+    let allowed = removal_allowed(mode);
+    let repo = Repo::new();
+    let base = declaration(10000, 20000);
+    repo.redeclare_gates(&base);
+    let (id, wt, _) = change_with_patchset(&repo, mode);
+    let own = match mode {
+        "remove-gate" => base.split("[gates.unit]").next().unwrap().to_string(),
+        "remove-budget" => base.replace("budget='10000ms'\n", ""),
+        "remove-total" => base.replace("total='20000ms'\n", ""),
+        "remove-table" => base.replace("[budget]\ntotal='20000ms'\n", ""),
+        "rename-unbudgeted" => "[gates.renamed]\ncommand='true'\n".into(),
+        "publication-unbudgeted" => {
+            "[gates.release]\ncommand='true'\nevents=['publication']\n".into()
+        }
+        "remove-all" => "[selection]\ninert=['.arc/']\n".into(),
+        "lower-gate" => declaration(9000, 20000),
+        _ => declaration(10000, 15000),
+    };
+    repo.commit(&wt, ".arc/gates.toml", &own, "test: declaration decision");
+    snapshot(&repo, &wt);
+    approve(&repo, &wt);
+    verify(&repo, &wt, 8000, 0);
+    let expected = if mode == "remove-budget" {
+        "removes its budget; restore the budget or remove the gate"
+    } else {
+        "cannot remove [budget] total while gates remain"
+    };
+    let status = json_stdout(repo.arc(&wt).args(["status", &id]));
+    let errors = status["budget_errors"].as_array().unwrap();
+    if allowed {
+        if !errors.is_empty() {
+            mismatches.push(format!("{mode} status blocked: {errors:?}"));
+        }
+        assert_eq!(
+            status["gates"][0]["budget"]["budget_ms"],
+            if mode == "lower-gate" { 9000 } else { 10000 }
         );
-        if allowed != accepted {
-            continue;
-        }
-        let repo = Repo::new();
-        let base = declaration(10000, 20000);
-        repo.redeclare_gates(&base);
-        let (id, wt, _) = change_with_patchset(&repo, mode);
-        let own = match mode {
-            "remove-gate" => base.split("[gates.unit]").next().unwrap().to_string(),
-            "remove-budget" => base.replace("budget='10000ms'\n", ""),
-            "remove-total" => base.replace("total='20000ms'\n", ""),
-            "remove-table" => base.replace("[budget]\ntotal='20000ms'\n", ""),
-            "rename-unbudgeted" => "[gates.renamed]\ncommand='true'\n".into(),
-            "publication-unbudgeted" => {
-                "[gates.release]\ncommand='true'\nevents=['publication']\n".into()
-            }
-            "remove-all" => "[selection]\ninert=['.arc/']\n".into(),
-            "lower-gate" => declaration(9000, 20000),
-            _ => declaration(10000, 15000),
-        };
-        repo.commit(&wt, ".arc/gates.toml", &own, "test: declaration decision");
-        snapshot(&repo, &wt);
-        approve(&repo, &wt);
-        verify(&repo, &wt, 8000, 0);
-        let expected = if mode == "remove-budget" {
-            "removes its budget; restore the budget or remove the gate"
-        } else {
-            "cannot remove [budget] total while gates remain"
-        };
-        let status = json_stdout(repo.arc(&wt).args(["status", &id]));
-        let errors = status["budget_errors"].as_array().unwrap();
-        if allowed {
-            if !errors.is_empty() {
-                mismatches.push(format!("{mode} status blocked: {errors:?}"));
-            }
-            assert_eq!(
-                status["gates"][0]["budget"]["budget_ms"],
-                if mode == "lower-gate" { 9000 } else { 10000 }
-            );
-            assert!(status["budget_raises"].as_array().unwrap().is_empty());
-        } else {
-            let text = errors
-                .iter()
-                .map(Value::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
-            if !text.contains(expected) || text.contains("arc gates raise") {
-                mismatches.push(format!("{mode} diagnostic: {text}"));
-            }
-        }
-        let mut observe = |label: &str, command: &mut AssertCommand| {
-            let output = command.output().unwrap();
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            if output.status.success() != allowed || (!allowed && !text.contains(expected)) {
-                mismatches.push(format!("{mode} {label}: {}: {text}", output.status));
-            }
-        };
-        let before = repo.head(&repo.root);
-        match route {
-            "integrate" => {
-                observe("check", repo.arc(&wt).args(["check", &id]));
-                observe("integrate", repo.arc(&repo.root).args(["integrate", &id]));
-                if allowed && repo.head(&repo.root) != before {
-                    let committed = git_out(&repo.root, &["show", "HEAD:.arc/gates.toml"]);
-                    assert_eq!(committed.trim(), own.trim());
-                }
-            }
-            "land" => {
-                let (other, _, _) = change_with_patchset(&repo, "other-removal-member");
-                observe(
-                    "land",
-                    repo.arc(&repo.root)
-                        .env("ARC_TEST_COMMAND_RUN_MS", "8000")
-                        .args(["land", &id, &other, "--debt", "combined review owed"]),
-                );
-            }
-            "candidate" => {
-                register(&repo, &id, &wt, "removal-candidate");
-                observe(
-                    "candidate verify",
-                    repo.arc(&wt).env("ARC_TEST_COMMAND_RUN_MS", "8000").args([
-                        "candidate",
-                        "verify",
-                        "removal-candidate",
-                    ]),
-                );
-                let evaluation = fs::read_dir(repo.root.join(".git/arc/repository/events"))
-                    .unwrap()
-                    .map(|e| {
-                        serde_json::from_slice::<Value>(&fs::read(e.unwrap().path()).unwrap())
-                            .unwrap()
-                    })
-                    .find(|e| e["event_type"] == "candidate-verified")
-                    .map(|e| e["event_id"].as_str().unwrap().to_string());
-                let mut selection = repo.arc(&wt);
-                selection.args([
-                    "candidate",
-                    "select",
-                    "--chosen",
-                    "removal-candidate",
-                    "--into",
-                    &id,
-                    "--target",
-                    &before,
-                    "--rationale",
-                    "review the candidate",
-                ]);
-                if let Some(evaluation) = evaluation {
-                    selection.args(["--evaluation", &evaluation]);
-                }
-                observe("candidate select and promote", &mut selection);
-            }
-            _ => {
-                let branch = git_out(&wt, &["branch", "--show-current"]);
-                for cached in [false, true] {
-                    let mut command = repo.arc(&wt);
-                    command.env("ARC_TEST_COMMAND_RUN_MS", "8000").args([
-                        "publication",
-                        "--target",
-                        &branch,
-                        "--change",
-                        &id,
-                    ]);
-                    if cached {
-                        command.arg("--skip-green");
-                    }
-                    observe("publication", &mut command);
-                }
-            }
-        }
-        if !allowed || matches!(route, "candidate" | "publication") {
-            assert_eq!(repo.head(&repo.root), before);
+        assert!(status["budget_raises"].as_array().unwrap().is_empty());
+    } else {
+        let text = errors
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !text.contains(expected) || text.contains("arc gates raise") {
+            mismatches.push(format!("{mode} diagnostic: {text}"));
         }
     }
-    assert!(mismatches.is_empty(), "{route}: {mismatches:#?}");
+    let mut observe = |label: &str, command: &mut AssertCommand| {
+        let output = command.output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() != allowed || (!allowed && !text.contains(expected)) {
+            mismatches.push(format!("{mode} {label}: {}: {text}", output.status));
+        }
+    };
+    let before = repo.head(&repo.root);
+    match route {
+        "integrate" => {
+            observe("check", repo.arc(&wt).args(["check", &id]));
+            observe("integrate", repo.arc(&repo.root).args(["integrate", &id]));
+            if allowed && repo.head(&repo.root) != before {
+                let committed = git_out(&repo.root, &["show", "HEAD:.arc/gates.toml"]);
+                assert_eq!(committed.trim(), own.trim());
+            }
+        }
+        "land" => {
+            let (other, _, _) = change_with_patchset(&repo, "other-removal-member");
+            observe(
+                "land",
+                repo.arc(&repo.root)
+                    .env("ARC_TEST_COMMAND_RUN_MS", "8000")
+                    .args(["land", &id, &other, "--debt", "combined review owed"]),
+            );
+        }
+        "candidate" => {
+            register(&repo, &id, &wt, "removal-candidate");
+            observe(
+                "candidate verify",
+                repo.arc(&wt).env("ARC_TEST_COMMAND_RUN_MS", "8000").args([
+                    "candidate",
+                    "verify",
+                    "removal-candidate",
+                ]),
+            );
+            let evaluation = fs::read_dir(repo.root.join(".git/arc/repository/events"))
+                .unwrap()
+                .map(|e| {
+                    serde_json::from_slice::<Value>(&fs::read(e.unwrap().path()).unwrap()).unwrap()
+                })
+                .find(|e| e["event_type"] == "candidate-verified")
+                .map(|e| e["event_id"].as_str().unwrap().to_string());
+            let mut selection = repo.arc(&wt);
+            selection.args([
+                "candidate",
+                "select",
+                "--chosen",
+                "removal-candidate",
+                "--into",
+                &id,
+                "--target",
+                &before,
+                "--rationale",
+                "review the candidate",
+            ]);
+            if let Some(evaluation) = evaluation {
+                selection.args(["--evaluation", &evaluation]);
+            }
+            observe("candidate select and promote", &mut selection);
+        }
+        _ => {
+            let branch = git_out(&wt, &["branch", "--show-current"]);
+            for cached in [false, true] {
+                let mut command = repo.arc(&wt);
+                command.env("ARC_TEST_COMMAND_RUN_MS", "8000").args([
+                    "publication",
+                    "--target",
+                    &branch,
+                    "--change",
+                    &id,
+                ]);
+                if cached {
+                    command.arg("--skip-green");
+                }
+                observe("publication", &mut command);
+            }
+        }
+    }
+    if !allowed || matches!(route, "candidate" | "publication") {
+        assert_eq!(repo.head(&repo.root), before);
+    }
+    mismatches
 }
 
 /// Claim: removing gates, removing all gates with the table, and lowering
@@ -1574,11 +1588,51 @@ fn raise_removal_accepts_check_and_integrate() {
     removal_rules("integrate", true);
 }
 
-/// Claim: a kept gate cannot lose its budget and a retained or renamed suite cannot
-/// lose its total. Rejects accepting either removal or directing it to raise.
+/// Check and integrate on a change making the refused declaration diff `mode`.
+fn removal_refused_by_check_and_integrate(mode: &str) {
+    assert!(!removal_allowed(mode));
+    let mismatches = removal_mismatches("integrate", mode);
+    assert!(mismatches.is_empty(), "{mode}: {mismatches:#?}");
+}
+
+/// Claim: a gate the change keeps cannot lose its budget: check and integrate
+/// refuse, naming the gate and the remedy, and the target does not move.
+/// Rejects accepting the removal or directing it to a raise.
 #[test]
-fn raise_removal_refuses_check_and_integrate() {
-    removal_rules("integrate", false);
+fn raise_removal_of_a_kept_gate_budget_refuses_check_and_integrate() {
+    removal_refused_by_check_and_integrate("remove-budget");
+}
+
+/// Claim: a change keeping its gates and the `[budget]` table cannot drop the
+/// table's total: check and integrate refuse naming the remedy, and the target
+/// does not move. Rejects accepting the removal or directing it to a raise.
+#[test]
+fn raise_removal_of_the_total_refuses_check_and_integrate() {
+    removal_refused_by_check_and_integrate("remove-total");
+}
+
+/// Claim: a change keeping its gates cannot drop the whole `[budget]` table and
+/// its total with it: check and integrate refuse, and the target does not move.
+/// Rejects accepting the removal or directing it to a raise.
+#[test]
+fn raise_removal_of_the_budget_table_refuses_check_and_integrate() {
+    removal_refused_by_check_and_integrate("remove-table");
+}
+
+/// Claim: replacing the target's gates with a renamed, unbudgeted one cannot
+/// drop the total: check and integrate refuse, and the target does not move.
+/// Rejects a rename escaping the suite's total.
+#[test]
+fn raise_removal_by_renaming_the_suite_refuses_check_and_integrate() {
+    removal_refused_by_check_and_integrate("rename-unbudgeted");
+}
+
+/// Claim: a suite left with only a publication gate still has gates and cannot
+/// drop the total: check and integrate refuse, and the target does not move.
+/// Rejects a publication-only gate counting as no gates remaining.
+#[test]
+fn raise_removal_leaving_a_publication_gate_refuses_check_and_integrate() {
+    removal_refused_by_check_and_integrate("publication-unbudgeted");
 }
 
 /// Claim: landing permits gate removal and lower bounds under target obligations.

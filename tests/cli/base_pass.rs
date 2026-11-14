@@ -420,51 +420,65 @@ fn budget_reduction_executes_without_an_older_faster_fallback() {
     assert_eq!(executed(&state(&repo, &wt)), 1);
 }
 
-/// Claim: isolated replay rejects fabricated paths and ancestry even when the
-/// frozen path classification itself would permit reuse. Rejects trusting a
-/// path list, digest or ancestry boolean without checking retained Git objects.
+/// Claim: replay rejects a base pass whose recorded path list differs from
+/// the retained Git diff, even when the frozen path classification itself
+/// would permit reuse. Rejects trusting a recorded path list or digest
+/// without checking retained Git objects.
 #[test]
-fn replay_refuses_fabricated_diff_and_ancestry() {
-    for ancestry in [false, true] {
-        let repo = seed(GATES);
-        let (id, wt) = begin(&repo, "fabricated", "notes.md");
-        repo.arc(&wt).args(["verify", "--all"]).assert().success();
-        let orphan = if ancestry {
-            let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
-            Some(git_out(
-                &wt,
-                &["commit-tree", &tree, "-m", "test: unrelated root"],
-            ))
-        } else {
-            None
-        };
-        for file in event_files(&repo, &id) {
-            let mut event: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-            if event["event_type"] == "verification-run-started" {
-                if let Some(orphan) = &orphan {
-                    event["revision"] = orphan.clone().into();
-                    fs::write(&file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
-                }
-            }
-            if event["event_type"] != "verification-base-reused" {
-                continue;
-            }
+fn replay_refuses_a_fabricated_diff() {
+    replay_refuses_fabricated(false);
+}
+
+/// Claim: replay rejects a base pass whose recorded revision does not descend
+/// from the baseline by first parent. Rejects trusting a recorded revision or
+/// ancestry claim without checking retained Git objects.
+#[test]
+fn replay_refuses_fabricated_ancestry() {
+    replay_refuses_fabricated(true);
+}
+
+/// A change's base pass with its path list emptied, or with its revision
+/// moved to an unrelated root of the same tree when `ancestry`, must fail
+/// replay.
+fn replay_refuses_fabricated(ancestry: bool) {
+    let repo = seed(GATES);
+    let (id, wt) = begin(&repo, "fabricated", "notes.md");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let orphan = if ancestry {
+        let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+        Some(git_out(
+            &wt,
+            &["commit-tree", &tree, "-m", "test: unrelated root"],
+        ))
+    } else {
+        None
+    };
+    for file in event_files(&repo, &id) {
+        let mut event: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        if event["event_type"] == "verification-run-started" {
             if let Some(orphan) = &orphan {
                 event["revision"] = orphan.clone().into();
-                event["witness"]["revision"] = orphan.clone().into();
-            } else {
-                event["witness"]["changed_paths"] = serde_json::json!([]);
+                fs::write(&file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
             }
-            fs::write(file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
         }
-        repo.arc(&wt)
-            .args(["show", "--json"])
-            .assert()
-            .failure()
-            .stderr(predicates::str::contains(
-                "Git diff or first-parent ancestry mismatch",
-            ));
+        if event["event_type"] != "verification-base-reused" {
+            continue;
+        }
+        if let Some(orphan) = &orphan {
+            event["revision"] = orphan.clone().into();
+            event["witness"]["revision"] = orphan.clone().into();
+        } else {
+            event["witness"]["changed_paths"] = serde_json::json!([]);
+        }
+        fs::write(file, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
     }
+    repo.arc(&wt)
+        .args(["show", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Git diff or first-parent ancestry mismatch",
+        ));
 }
 
 /// Claim: a reuse resolves authenticated compact facts without the producing
@@ -1138,28 +1152,40 @@ fn missing_execution_objects_cause_full_execution() {
     assert_eq!(executed(&state(&repo, &wt)), 2);
 }
 
-/// Claim: a later local failure or not-admitted attempt cannot be rescued by
-/// a baseline. Rejects fallback to another change's earlier successful execution.
+/// A change whose own run of every gate exited `exit`, verified again: its
+/// later pass must come from executing the gates, never from a baseline.
+fn local_refusal_executes_again(exit: &str) {
+    let repo = seed(&GATES.replace("command='true'", "command='exit \"${ARC_GATE_RESULT:-0}\"'"));
+    let (_, wt) = begin(&repo, &format!("refusal-{exit}"), "notes.md");
+    repo.arc(&wt)
+        .env("ARC_GATE_RESULT", exit)
+        .args(["verify", "--all", "--rerun"])
+        .assert()
+        .code(1);
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let s = state(&repo, &wt);
+    assert_eq!(
+        bases(&s),
+        0,
+        "{exit}: a local refusal forbids baseline fallback"
+    );
+    assert_eq!(executed(&s), 4);
+}
+
+/// Claim: a change whose own gate run failed executes the gates again; a
+/// baseline cannot answer them. Rejects fallback from a local failure to
+/// another change's earlier successful execution.
 #[test]
-fn local_refusals_cannot_be_rescued_by_a_baseline() {
-    for exit in ["1", "75"] {
-        let repo =
-            seed(&GATES.replace("command='true'", "command='exit \"${ARC_GATE_RESULT:-0}\"'"));
-        let (_, wt) = begin(&repo, &format!("refusal-{exit}"), "notes.md");
-        repo.arc(&wt)
-            .env("ARC_GATE_RESULT", exit)
-            .args(["verify", "--all", "--rerun"])
-            .assert()
-            .code(1);
-        repo.arc(&wt).args(["verify", "--all"]).assert().success();
-        let s = state(&repo, &wt);
-        assert_eq!(
-            bases(&s),
-            0,
-            "{exit}: a local refusal forbids baseline fallback"
-        );
-        assert_eq!(executed(&s), 4);
-    }
+fn a_local_failure_cannot_be_rescued_by_a_baseline() {
+    local_refusal_executes_again("1");
+}
+
+/// Claim: a change whose own gate run was not admitted executes the gates
+/// again; a baseline cannot answer them. Rejects fallback from a not-admitted
+/// attempt to another change's earlier successful execution.
+#[test]
+fn a_local_not_admitted_run_cannot_be_rescued_by_a_baseline() {
+    local_refusal_executes_again("75");
 }
 
 /// Claim: provisional integration can consume already canonical evidence but
