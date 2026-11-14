@@ -54,6 +54,7 @@ mod external;
 mod falsification_transport;
 mod final_wave_cost;
 mod findings;
+mod fixture_isolation;
 mod fixture_seeds;
 mod forge;
 mod forge_custody;
@@ -73,6 +74,8 @@ mod gate_together;
 mod git_environment;
 mod guide_bounds;
 mod guide_topics;
+#[path = "../../src/harness_entry.rs"]
+mod harness_entry;
 mod hooks;
 mod implementer_trailers;
 mod import_authorization;

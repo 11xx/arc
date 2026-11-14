@@ -62,6 +62,16 @@ class RunnerClaims(unittest.TestCase):
                 runner.cargo_artifacts(["cargo"])
         self.assertIn("error[E0425]: missing", shown.getvalue())
 
+    def test_inherited_git_selection_refuses_before_building(self):
+        """Claim: the runner started inside a Git operation refuses and names the variable;
+        rejects a run whose fixtures would write the repository GIT_DIR or GIT_WORK_TREE names."""
+        for name in ["GIT_DIR", "GIT_WORK_TREE"]:
+            with patch.object(runner.subprocess, "run") as run, patch.object(sys, "argv", ["runner", "invariants"]), \
+                    patch.dict(runner.os.environ, {name: "/elsewhere"}):
+                with self.assertRaisesRegex(ValueError, f"^{name} is set"):
+                    runner.main()
+            run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

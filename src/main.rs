@@ -37,6 +37,8 @@ mod gates;
 mod git_health;
 mod gitio;
 mod guide;
+#[cfg(test)]
+mod harness_entry;
 mod ids;
 mod import_authorization;
 mod inbox;

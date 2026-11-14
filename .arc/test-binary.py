@@ -19,6 +19,15 @@ ROOT = Path(__file__).resolve().parent.parent
 PROFILE = "dev"
 
 
+def refuse_inside_git_operation(environ):
+    """Git exports these to commands it runs, and a fixture Git started under
+    one writes the repository it names."""
+    for name in ("GIT_DIR", "GIT_WORK_TREE"):
+        if name in environ:
+            raise ValueError(f"{name} is set: the tests would reach the repository it names. "
+                             "Run them outside any Git operation, with GIT_DIR and GIT_WORK_TREE unset.")
+
+
 def cargo_artifacts(command):
     build = subprocess.run(command, stdout=subprocess.PIPE, text=True)
     found = {}
@@ -113,6 +122,7 @@ def main():
     area.add_argument("module", help="exact module path, for example gate_raises or store::tests")
     sub.add_parser("release")
     args = parser.parse_args()
+    refuse_inside_git_operation(os.environ)
     os.chdir(ROOT)
     binaries = artifacts()
     env = os.environ.copy()

@@ -41,6 +41,14 @@ against the release-profile executable built from the checkout, and `cargo test 
 Run that artifact check with `python3 .arc/test-binary.py release`. A publication failure in
 the remaining tree is fixed, or the test removed, before the release.
 
+Both harnesses enter through `src/harness_entry.rs` before their first test.
+Started with `GIT_DIR` or `GIT_WORK_TREE` set, as Git sets them for hooks and
+`rebase --exec` steps, the harness and the runner refuse to start and name the
+variable. Every other variable through which Git selects a repository, index,
+object directory, common directory, namespace or configuration is removed from
+the harness's environment, so no fixture command, a helper's or one a test builds, can
+reach a repository the fixture did not create.
+
 CLI fixtures copy independent Git files with empty hooks and exclude locations,
 disable automatic maintenance and retain explicit collection and pruning. Child
 waits wake on process exit and kill and reap after a 120-second hang bound.
