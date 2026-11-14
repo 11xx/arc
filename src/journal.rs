@@ -14780,7 +14780,7 @@ pub(crate) struct LibraryEntry {
 pub(crate) fn library_artifacts(hot: &Path) -> Result<Vec<LibraryEntry>> {
     let events = read_events(hot)?;
     let indexed = FileIndex::new(&events);
-    let facts = reconciliation_facts_from(&events);
+    let facts = reconciliation_facts_from(hot, &events);
     let cold = archive_dir(hot);
     let mut locations = BTreeMap::new();
     for (dir, storage) in [(cold.as_path(), "archived"), (hot, "hot")] {
@@ -14870,10 +14870,10 @@ pub(crate) struct ReconciliationFacts {
 }
 
 pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
-    Ok(reconciliation_facts_from(&read_events(dir)?))
+    Ok(reconciliation_facts_from(dir, &read_events(dir)?))
 }
 
-fn reconciliation_facts_from(events: &[JournalEvent]) -> ReconciliationFacts {
+fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> ReconciliationFacts {
     let mut facts = ReconciliationFacts::default();
     for event in events {
         if !event.known() {
@@ -14893,14 +14893,16 @@ fn reconciliation_facts_from(events: &[JournalEvent]) -> ReconciliationFacts {
                         .consumed
                         .entry(file.to_string())
                         .or_insert_with(|| outcome.to_string());
-                    // A superseded consumption that names the artifact of
-                    // this journal that resolved it records that artifact as
-                    // its successor, as a transition records the artifact it
-                    // wrote.
-                    let successor = event
-                        .decision
-                        .as_deref()
-                        .filter(|_| outcome == "superseded" && event.decision_project.is_none());
+                    // A superseded consumption that names an artifact this
+                    // journal holds as what resolved it records that artifact
+                    // as its successor, as a transition records the artifact
+                    // it wrote. A name the journal does not hold, or one that
+                    // is not a bare artifact name, records none.
+                    let successor = event.decision.as_deref().filter(|decision| {
+                        outcome == "superseded"
+                            && event.decision_project.is_none()
+                            && series::held_artifact(dir, decision).is_some()
+                    });
                     if let Some(successor) = successor {
                         facts
                             .successors

@@ -767,9 +767,12 @@ fn a_report_reads_only_the_changes_its_items_link() {
 
 /// Claim: `retire --by` and `start --follows` take only a bare artifact
 /// filename of this journal that is a regular file: a relative path climbing
-/// out, an absolute path, and a filename-shaped symbolic link to a file
-/// outside the journal are each refused and record nothing. Rejects a name
-/// that leads the journal to read a file outside its directories.
+/// out, an absolute path, a filename-shaped symbolic link to a file outside
+/// the journal, and a qualified `<directory>::<file>` reference through a
+/// symbolically linked directory are each refused and record nothing; the
+/// qualified one is refused by its spelling, before anything under the named
+/// directory is read. Rejects a name that leads the journal to read a file
+/// outside its directories, a decoy binding among them.
 #[test]
 fn artifact_names_on_the_command_line_never_leave_the_journal() {
     let repo = Repo::new();
@@ -788,6 +791,48 @@ fn artifact_names_on_the_command_line_never_leave_the_journal() {
             .args(["progress", "retire", "contained", "--by", name])
             .assert()
             .failure();
+    }
+    let decoy = repo.home.join("decoy");
+    fs::create_dir_all(&decoy).unwrap();
+    fs::write(
+        decoy.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-11-14T00:00:00Z\",\"event\":\"bound\",\"anchor\":\"DECOY-MARKER\"}\n",
+    )
+    .unwrap();
+    fs::write(decoy.join("20261114T000000Z-x-conclusion.md"), "# X\n").unwrap();
+    fs::write(decoy.join("20261114T000000Z-x-plan.md"), "# X\n").unwrap();
+    let through = repo.home.join("through");
+    std::os::unix::fs::symlink(&decoy, &through).unwrap();
+    let qualified = |file: &str| format!("{}::{file}", through.display());
+    for args in [
+        vec![
+            "retire".to_string(),
+            "contained".to_string(),
+            "--by".to_string(),
+            qualified("20261114T000000Z-x-conclusion.md"),
+        ],
+        vec![
+            "start".to_string(),
+            "decoyed".to_string(),
+            "--title".to_string(),
+            "Decoyed".to_string(),
+            "--follows".to_string(),
+            qualified("20261114T000000Z-x-plan.md"),
+        ],
+    ] {
+        let output = repo
+            .arc(&repo.root)
+            .arg("progress")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("DECOY-MARKER"),
+            "a qualified name was resolved outside the journal: {stderr}"
+        );
+        assert!(stderr.contains("bare"), "{stderr}");
     }
     let relative_plan = pathdiff(&dir, &plan);
     for name in [relative_plan.as_str(), plan.to_str().unwrap()] {
@@ -991,4 +1036,66 @@ fn unrelate_removes_the_relation_here() {
         .args(["progress", "unrelate", "here", "other::there"])
         .assert()
         .failure();
+}
+
+/// Claim: a superseded consumption records a successor only when its
+/// decision names an artifact this journal holds by a bare name: one naming
+/// a missing file, or spelled as another directory's reference, records
+/// none. Rejects a successor taken from whatever the event names.
+#[test]
+fn a_successor_is_only_an_artifact_the_journal_holds() {
+    let repo = Repo::new();
+    let held = start(&repo, &repo.root, "held", &["Only"]);
+    let missing = start(&repo, &repo.root, "missing", &["Only"]);
+    let qualified = start(&repo, &repo.root, "qualified", &["Only"]);
+    let (_, conclusion) = journal_artifact(&repo, "held", "conclusion", "# Held\n");
+    progress(&repo, &repo.root, &["retire", "held", "--by", &conclusion]);
+
+    let dir = journal_dir(&repo, &repo.root);
+    let retired = journal_event_log(&dir)
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "consumed")
+        .unwrap();
+    let mut lines = String::new();
+    for (file, decision) in [
+        (
+            &missing,
+            "20261114T000000Z-absent-conclusion.md".to_string(),
+        ),
+        (&qualified, format!("/x::{conclusion}")),
+    ] {
+        let mut event = retired.clone();
+        event["file"] = serde_json::json!(file);
+        event["decision"] = serde_json::json!(decision);
+        lines.push_str(&format!("{event}\n"));
+    }
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("events.jsonl"))
+        .unwrap();
+    std::io::Write::write_all(&mut log, lines.as_bytes()).unwrap();
+
+    let library =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--library", "--json"]),
+        );
+    let row = |file: &str| {
+        library["projects"][0]["library"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == file)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&held)["superseded_by"], conclusion.as_str());
+    for file in [&missing, &qualified] {
+        let row = row(file);
+        assert!(
+            row["superseded_by"].is_null(),
+            "a successor was taken from a name the journal does not hold: {row}"
+        );
+    }
 }

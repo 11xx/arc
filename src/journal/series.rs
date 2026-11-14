@@ -608,20 +608,43 @@ fn one_line(what: &str, value: &str) -> Result<String> {
     Ok(value.trim().to_string())
 }
 
+/// The kind of `name` when it is a bare artifact filename, judged from its
+/// characters alone: no path separator, no `<journal-dir>::<file>`
+/// qualifier, no leading dot, and the `<timestamp>-<topic>-<kind>.md` shape.
+/// Nothing is read to decide it, so a name that is refused is never looked
+/// up anywhere first.
+pub(crate) fn bare_artifact_kind(name: &str) -> Option<String> {
+    if name.contains(['/', '\\', '\0'])
+        || name.contains(super::REFERENCE_SEPARATOR)
+        || name.starts_with('.')
+    {
+        return None;
+    }
+    parse_artifact_name(name).map(|(_, _, kind)| kind)
+}
+
+/// Whether `name` is a bare artifact filename whose body is a regular file in
+/// the journal at `dir` or its cold archive. A symbolic link is not one.
+pub(crate) fn held_artifact(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    bare_artifact_kind(name)?;
+    [dir.join(name), archive_dir(dir).join(name)]
+        .into_iter()
+        .find(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()))
+}
+
 /// An artifact a write names on the command line, as a path inside this
-/// journal. Only a bare artifact filename of `kind` is accepted: a path, a
-/// `<journal-dir>::<file>` reference, or another kind is refused by the
-/// journal's own name check, and the name must be a regular file in the hot
-/// journal or its cold archive. A symbolic link is refused rather than
-/// followed, so a name never leads out of the journal's directories.
-fn named_artifact(
-    ctx: &Ctx,
-    dir: &Path,
-    name: &str,
-    kind: &str,
-    flag: &str,
-) -> Result<std::path::PathBuf> {
-    let (_, found) = super::check_artifact_name(ctx, name)?;
+/// journal. Only a bare artifact filename of `kind` is accepted, decided from
+/// the name's characters before anything is read; the name must then be a
+/// regular file in the hot journal or its cold archive. A symbolic link is
+/// refused rather than followed, so a name never leads out of the journal's
+/// directories.
+fn named_artifact(dir: &Path, name: &str, kind: &str, flag: &str) -> Result<std::path::PathBuf> {
+    let Some(found) = bare_artifact_kind(name) else {
+        bail!(
+            "{flag} takes a bare {kind} artifact filename of this journal \
+             (<timestamp>-<topic>-{kind}.md), not a path or another journal's reference"
+        );
+    };
     if found != kind {
         bail!("{flag} takes a {kind} artifact's filename; {name} is a {found}");
     }
@@ -683,7 +706,7 @@ pub(crate) fn start(
         .collect::<Result<Vec<_>>>()?;
     let dir = resolve_dir(&ctx.cwd)?;
     if let Some(plan) = follows {
-        named_artifact(ctx, &dir, plan, "plan", "--follows")?;
+        named_artifact(&dir, plan, "plan", "--follows")?;
     }
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -908,7 +931,7 @@ pub(crate) fn unrelate(ctx: &Ctx, name: &str, related: RelatedSeries) -> Result<
 /// Retire a series as superseded by its conclusion.
 pub(crate) fn retire(ctx: &Ctx, name: &str, conclusion: &str) -> Result<String> {
     let open = open_for_write(ctx, name)?;
-    let path = named_artifact(ctx, &open.dir, conclusion, "conclusion", "--by")?;
+    let path = named_artifact(&open.dir, conclusion, "conclusion", "--by")?;
     let digest = super::body_digest(&path)?;
     let mut event = open.event(ctx, "consumed", None);
     event.outcome = Some("superseded".to_string());
