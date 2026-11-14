@@ -165,7 +165,8 @@ fn doctor(repo: &Repo) -> serde_json::Value {
 
 /// Invariant I12. Claim: doctor, catchup and the workspace report expose leaked local identity,
 /// bare checkout state and disabled global signing. Rejects a clean health report
-/// for a contaminated registered project, including included config values.
+/// for a contaminated registered project, including included config values
+/// and a bare setting inherited when no local key exists.
 #[test]
 fn configuration_health_reaches_all_three_views() {
     let repo = Repo::new();
@@ -203,6 +204,23 @@ fn configuration_health_reaches_all_three_views() {
             "{problems:?}"
         );
     }
+    git(&repo.root, &["config", "--unset", "core.bare"]);
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(repo.home.join(".gitconfig"))
+        .unwrap()
+        .write_all(b"[core]\n bare = true\n")
+        .unwrap();
+    let inherited = doctor(&repo);
+    assert!(
+        inherited["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "bare-with-worktree"),
+        "inherited bare setting must be reported: {inherited}"
+    );
     let catchup = stdout(
         repo.arc(&repo.root)
             .env_remove("ARC_TEST_FIXTURE_IDENTITY")

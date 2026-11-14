@@ -103,14 +103,17 @@ pub fn inspect(cwd: &Path) -> Result<Vec<Finding>> {
             .is_some_and(|parent| parent.join(".git").is_dir()))
         || std::fs::read_dir(common.join("worktrees"))
             .is_ok_and(|mut entries| entries.next().is_some());
-    if has_checkout
-        && ["local", "worktree"].iter().any(|scope| {
-            values
-                .get(&(*scope, "core.bare"))
-                .and_then(|value| boolean(value))
-                == Some(true)
-        })
-    {
+    let shared_bare = values
+        .get(&("local", "core.bare"))
+        .or_else(|| values.get(&("global", "core.bare")))
+        .or_else(|| values.get(&("system", "core.bare")))
+        .and_then(|value| boolean(value))
+        == Some(true);
+    let checkout_bare = values
+        .get(&("worktree", "core.bare"))
+        .and_then(|value| boolean(value))
+        == Some(true);
+    if has_checkout && (shared_bare || checkout_bare) {
         findings.push(Finding {
             code: "bare-with-worktree",
             detail: "core.bare = true in a repository with a checkout or linked worktrees; restore core.bare = false".into(),

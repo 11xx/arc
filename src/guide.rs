@@ -595,7 +595,8 @@ SANDBOX (rehearse something destructive)
   line by `arc catchup`, and per registered project by `arc workspace report`.
   Local user.name and user.email require [git] allow_local_identity = true
   in the checkout's .arc/policy.toml. A checkout or linked worktrees with
-  core.bare = true, and local commit.gpgsign or tag.gpgsign = false overriding
+  core.bare = true, including inherited settings, and local commit.gpgsign or
+  tag.gpgsign = false overriding
   global signing, are problems regardless of that exception. Config includes
   and worktree scope are inspected together; diagnostics never repair config.
 
