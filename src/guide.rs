@@ -2154,7 +2154,8 @@ WORKBENCHES (working material in the journal)
   index arc writes, `WORKBENCH.md`, and anything else: lane indexes and
   reports, drafts, raw measurements, a notebook appended to across sessions.
   Arc records the acts on it and never its content, which it reads only to
-  count files and bytes and to see when anything in it last changed.
+  count files and bytes and to see when anything in it last changed. Which
+  material belongs in one is the rule in the map's KEEP WHAT YOU LEARN.
     arc journal workbench <slug> --purpose TEXT
                          Open `workbench/<slug>-<YYYYMMDD>/` and print its
                          absolute path as the last line, so a caller can
@@ -6793,6 +6794,8 @@ KEEP WHAT YOU LEARN
   arc keep                       a checked premise or rejected approach, as it arises
   arc journal todo, arc fr       separate work, filed when you notice it
   arc journal memory             project facts; --global for operator practices
+  arc journal workbench <slug>   working material a later session or lane reads;
+                                 a cache directory holds only what can be rebuilt
 
 END A SESSION
   arc journal handoff <topic> --derive   for unfinished work
