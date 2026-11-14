@@ -5915,7 +5915,9 @@ GATE CONFINEMENT
   native hooks; target mutations pin their destination before moving refs.
   Forwarding is the default for Git subcommands; only named hook-free plumbing
   bypasses it. Global option values are not subcommands. Discovery is cached
-  per process and invalidated when configuration or hook directories change.
+  per process and invalidated when configuration dependencies, HEAD or hook
+  directories change. Conditional include targets are inspected even while
+  inactive, so changing branches cannot activate an unexamined hook command.
   Configuration-defined hook.<name>.command entries refuse the operation by
   name when confinement is declared; native execution beside wrappers is denied.
   Programs Git runs from configuration are the operator's configuration and

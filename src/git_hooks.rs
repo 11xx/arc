@@ -371,43 +371,55 @@ fn query(
     ))
 }
 
-fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option<Inventory>> {
-    let workdir = working_directory(cwd, global);
-    let configuration = query(
-        command,
-        cwd,
-        global,
-        &["config", "--null", "--show-origin", "--list"],
-    )?
-    .unwrap_or_default();
-    let records = configuration.split_terminator('\0').collect::<Vec<_>>();
+struct Configuration {
+    hook_path: Option<PathBuf>,
+    hooks: Vec<String>,
+    origins: Vec<PathBuf>,
+    includes: Vec<PathBuf>,
+}
+
+fn configuration(
+    command: &Command,
+    cwd: &Path,
+    global: &[OsString],
+    file: Option<&Path>,
+) -> Result<Configuration> {
+    let mut options = vec!["config"];
+    if let Some(file) = file {
+        options.extend([
+            "--file",
+            file.to_str()
+                .context("Git configuration path is not UTF-8")?,
+            "--no-includes",
+        ]);
+    }
+    let mut arguments = options.clone();
+    arguments.extend(["--null", "--show-origin", "--list"]);
+    let text = query(command, cwd, global, &arguments)?.unwrap_or_default();
+    let records = text.split_terminator('\0').collect::<Vec<_>>();
     if records.len() % 2 != 0 {
         bail!("invalid Git hook configuration records; refusing Git invocation");
     }
-    let mut configured = None;
-    let mut configured_hooks = Vec::new();
-    let pointer = workdir.join(".git");
-    let mut paths = if pointer.is_file() {
-        vec![pointer]
-    } else {
-        Vec::new()
+    let mut result = Configuration {
+        hook_path: None,
+        hooks: Vec::new(),
+        origins: Vec::new(),
+        includes: Vec::new(),
     };
+    let workdir = working_directory(cwd, global);
     let mut expanded = HashMap::new();
     for record in records.chunks_exact(2) {
         let (key, value) = record[1].split_once('\n').unwrap_or((record[1], ""));
         if (key == "core.hookspath"
             || key == "include.path"
             || (key.starts_with("includeif.") && key.ends_with(".path")))
-            && value.starts_with('~')
+            && (value.starts_with('~') || value.starts_with("%("))
             && !expanded.contains_key(key)
         {
-            let values = query(
-                command,
-                cwd,
-                global,
-                &["config", "--null", "--path", "--get-all", key],
-            )?
-            .context("Git configuration path disappeared during discovery")?;
+            let mut arguments = options.clone();
+            arguments.extend(["--null", "--path", "--get-all", key]);
+            let values = query(command, cwd, global, &arguments)?
+                .context("Git configuration path disappeared during discovery")?;
             expanded.insert(
                 key,
                 values
@@ -429,7 +441,7 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
                 }
             });
         let (key, value) = record[1].split_once('\n').unwrap_or((record[1], ""));
-        let path_value = expanded
+        let path = expanded
             .get_mut(key)
             .map(|values| {
                 values
@@ -439,17 +451,16 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
             .transpose()?
             .unwrap_or_else(|| PathBuf::from(value));
         if let Some(origin) = &origin {
-            paths.push(origin.clone());
+            result.origins.push(origin.clone());
         }
         if key == "core.hookspath" {
-            configured = Some(path_value.clone());
+            result.hook_path = Some(path.clone());
         }
         if key.starts_with("hook.") && key.ends_with(".command") {
-            configured_hooks.push(key.to_string());
+            result.hooks.push(key.to_string());
         }
         if key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path")) {
-            let path = path_value;
-            paths.push(if path.is_absolute() {
+            result.includes.push(if path.is_absolute() {
                 path
             } else {
                 origin
@@ -459,6 +470,49 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
                     .join(path)
             });
         }
+    }
+    Ok(result)
+}
+
+fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option<Inventory>> {
+    let workdir = working_directory(cwd, global);
+    let active = configuration(command, cwd, global, None)?;
+    let configured = active.hook_path;
+    let mut configured_hooks = active.hooks;
+    let mut paths = active.origins;
+    let mut seen = paths
+        .iter()
+        .map(fs::canonicalize)
+        .collect::<std::io::Result<std::collections::HashSet<_>>>()?;
+    let mut pending = active.includes;
+    while let Some(path) = pending.pop() {
+        paths.push(path.clone());
+        if Stamp::read(path.clone())?.value.is_none() {
+            continue;
+        }
+        if !seen.insert(fs::canonicalize(&path)?) {
+            continue;
+        }
+        let included = match configuration(command, cwd, global, Some(&path)) {
+            Ok(included) => included,
+            Err(error) => {
+                if crate::confinement::declaration("included Git hook configuration", cwd)?
+                    .is_some()
+                {
+                    return Err(error).with_context(|| format!("cannot inspect included Git hook configuration {}; refusing Git invocation", path.display()));
+                }
+                return Ok(None);
+            }
+        };
+        configured_hooks.extend(included.hooks);
+        paths.extend(included.origins);
+        pending.extend(included.includes);
+    }
+    configured_hooks.sort();
+    configured_hooks.dedup();
+    let pointer = workdir.join(".git");
+    if pointer.is_file() {
+        paths.push(pointer);
     }
     let Some(locations) = query(
         command,
@@ -472,6 +526,8 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
             "--git-common-dir",
             "--git-path",
             "config.worktree",
+            "--git-path",
+            "HEAD",
         ],
     )?
     else {
@@ -483,7 +539,7 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
         return Ok(None);
     };
     let locations = locations.split('\n').collect::<Vec<_>>();
-    let [directory, common, worktree_config] = locations.as_slice() else {
+    let [directory, common, worktree_config, head] = locations.as_slice() else {
         bail!("Git hook discovery returned invalid administration paths; refusing Git invocation");
     };
     let common = fs::canonicalize(common)?;
@@ -498,6 +554,7 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
         actual_directory.clone(),
         common.join("config"),
         PathBuf::from(worktree_config),
+        PathBuf::from(head),
     ]);
     if environment(command, "GIT_CONFIG_NOSYSTEM").as_deref() != Some(OsStr::new("1")) {
         paths.push(
@@ -520,6 +577,16 @@ fn discover(command: &Command, cwd: &Path, global: &[OsString]) -> Result<Option
             .unwrap_or_else(|| home.join(".config"))
             .join("git/config"),
     );
+    let mut paths = paths
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workdir.join(path)
+            }
+        })
+        .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
     let watched = paths
@@ -570,6 +637,11 @@ pub(crate) fn prepare(command: &mut Command, args: &[OsString]) -> Result<Option
         .get_current_dir()
         .map(Path::to_path_buf)
         .unwrap_or(std::env::current_dir()?);
+    let cwd = if cwd.is_absolute() {
+        cwd
+    } else {
+        std::env::current_dir()?.join(cwd)
+    };
     static INVENTORIES: OnceLock<Mutex<HashMap<Vec<OsString>, Inventory>>> = OnceLock::new();
     let mut key = vec![
         command.get_program().to_os_string(),
@@ -923,6 +995,177 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("hook.cached.command"));
+        assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
+    }
+
+    /// Claim I12: changing HEAD invalidates branch-conditioned classic hook paths.
+    /// Rejects caching a hook-free path while a later branch selects project hooks.
+    #[test]
+    fn cached_discovery_tracks_branch_conditioned_hook_configuration() {
+        if !supported() {
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let include = root.join(".git/branch-config");
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        fs::create_dir(root.join(".branch-hooks")).unwrap();
+        let hook = root.join(".branch-hooks/post-checkout");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+        git(root, &["branch", "other"]);
+        git(
+            root,
+            &["config", "includeIf.onbranch:other.path", "branch-config"],
+        );
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                include.to_str().unwrap(),
+                "core.hooksPath",
+                ".branch-hooks",
+            ],
+        );
+        let _scope = crate::confinement::Scope::new(&Some(crate::confinement::Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        }));
+        assert!(command(root, &["status", "--porcelain"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        git(root, &["symbolic-ref", "HEAD", "refs/heads/other"]);
+        let output = command(
+            root,
+            &["restore", "--source", "HEAD", "--worktree", "--", "."],
+        )
+        .output()
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(decoy).unwrap(),
+            "retained",
+            "cached branch hook escaped"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("ran confined"));
+    }
+
+    /// Claim I12: inactive conditional includes cannot hide configured hook
+    /// commands until a mutation activates them. Rejects inspecting only active config.
+    #[test]
+    fn conditional_hook_entries_are_refused_before_activation() {
+        if !supported() {
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let include = root.join(".git/inactive-config");
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        git(
+            root,
+            &["config", "includeIf.onbranch:other.path", "inactive-config"],
+        );
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                include.to_str().unwrap(),
+                "hook.inactive.command",
+                &format!("printf escaped > '{}'", decoy.display()),
+            ],
+        );
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                include.to_str().unwrap(),
+                "hook.inactive.event",
+                "post-checkout",
+            ],
+        );
+        let _scope = crate::confinement::Scope::new(&Some(crate::confinement::Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        }));
+        let result = command(root, &["status", "--porcelain"]).output();
+        assert!(
+            result.is_err(),
+            "inactive configuration hook was not refused: {result:?}"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("hook.inactive.command"));
+        assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
+    }
+
+    /// Claim I12: a missing relative global configuration is watched at Git's
+    /// effective directory. Rejects a cached empty inventory after its creation.
+    #[test]
+    fn cached_discovery_tracks_relative_global_configuration() {
+        if !supported() {
+            return;
+        }
+        let scratch = fixture();
+        let root = scratch.path();
+        let configuration = root.join("global-config");
+        let decoy = root.join("decoy");
+        fs::write(&decoy, "retained").unwrap();
+        let _scope = crate::confinement::Scope::new(&Some(crate::confinement::Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        }));
+        let make = |args: &[&str]| {
+            let mut arguments = vec!["-C", root.to_str().unwrap()];
+            arguments.extend_from_slice(args);
+            let mut command = command(root.parent().unwrap(), &arguments);
+            command.env("GIT_CONFIG_GLOBAL", "global-config");
+            command
+        };
+        assert!(make(&["status", "--porcelain"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                configuration.to_str().unwrap(),
+                "hook.global.command",
+                &format!("printf escaped > '{}'", decoy.display()),
+            ],
+        );
+        git(
+            root,
+            &[
+                "config",
+                "--file",
+                configuration.to_str().unwrap(),
+                "hook.global.event",
+                "post-checkout",
+            ],
+        );
+        let result = make(&["restore", "--source", "HEAD", "--worktree", "--", "."]).output();
+        assert!(
+            result.is_err(),
+            "cached global discovery admitted a configuration hook: {result:?}"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("hook.global.command"));
         assert_eq!(fs::read_to_string(decoy).unwrap(), "retained");
     }
 }
