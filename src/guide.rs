@@ -753,11 +753,13 @@ SETTLE A QUESTION (before it is work)
   `answer` and the `discussion` summary are its surface, and `note --kind
   discussion` opens one.
 
-  A discussion opens on its conventions, then the opening body under
-  `## The question`, then `## Positions`. `position` appends at the end of
-  the file, so what follows `## Positions` is the argument and nothing else.
-  Any scaffold places the body at its `{{body}}` line, and a template without
-  one is followed by the body.
+  Below its heading, a discussion holds its conventions, then the opening
+  body under `## The question`, then `## Positions`. `position` appends at
+  the end of the file, so what follows `## Positions` is the argument and
+  nothing else. Any scaffold places the body at its `{{body}}` line, and a
+  template without one is followed by the body. A heading the body opens
+  with, on its first non-blank line, stays the artifact's first line, above
+  the template, and the rest of the body takes the template's place.
 
   Every artifact opens on a heading, because a queue row reads its description
   from there and a row that names nothing is a row nobody picks up. `--title`

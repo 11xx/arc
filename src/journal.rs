@@ -6360,8 +6360,13 @@ fn headed(topic: &str, title: Option<&str>, prelude: Option<&str>, body: &str) -
 /// opens with stays the artifact's first line, above the template, so a
 /// template that opens on prose never hides it from [`headed`].
 fn scaffolded(template: &str, content: &str) -> String {
-    let leading = content.len() - content.trim_start_matches(['\n', '\r']).len();
-    let opening = &content[leading..];
+    let mut opening = content;
+    while let Some((line, rest)) = opening.split_once('\n') {
+        if !line.trim().is_empty() {
+            break;
+        }
+        opening = rest;
+    }
     let heading_line = opening
         .lines()
         .next()
@@ -6371,7 +6376,7 @@ fn scaffolded(template: &str, content: &str) -> String {
             let rest = opening[line.len()..].trim_start_matches(['\n', '\r']);
             format!(
                 "{}\n\n{}",
-                line.trim_end(),
+                line.trim(),
                 crate::commands::scaffold::filled(template, rest)
             )
         }
@@ -19306,6 +19311,26 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claim: the heading an authored body opens with is its first
+    /// non-blank line, whatever whitespace-only lines precede it, and it
+    /// goes above the scaffold template with nothing derived. Rejects a
+    /// blank line taken for the heading, which buries the authored one
+    /// under the template.
+    #[test]
+    fn a_heading_after_blank_lines_stays_on_top_of_the_template() {
+        let template = "> Conventions.\n\n{{body}}\n\n## Positions\n";
+        let body = scaffolded(template, " \n\t\n# Authored\n\nBody\n");
+        assert_eq!(
+            body,
+            "# Authored\n\n> Conventions.\n\nBody\n\n## Positions\n"
+        );
+        assert!(opens_with_heading(&body));
+        assert_eq!(
+            scaffolded(template, "Prose first.\n"),
+            "> Conventions.\n\nProse first.\n\n## Positions\n"
+        );
+    }
 
     /// An intake name is a short lowercase slug. Rejects a looser check that
     /// would admit names `--source intake=` cannot round-trip or that a
