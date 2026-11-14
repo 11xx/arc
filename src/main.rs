@@ -4341,6 +4341,11 @@ enum WorkspaceCmd {
         /// Rows carry `pinned: true` only while pinned in that project's journal
         #[arg(long)]
         library: bool,
+        /// Include each project's active progress series in JSON, each as
+        /// `arc workspace progress --json` reports it (arc guide progress). A
+        /// project with no active series carries none
+        #[arg(long)]
+        progress: bool,
     },
     /// Emit the workspace report as one JSON line, then again each time arc
     /// records something that changes it
@@ -4393,6 +4398,11 @@ enum WorkspaceCmd {
         /// pinning or unpinning emits a report
         #[arg(long)]
         library: bool,
+        /// Include each project's active progress series in JSON, each as
+        /// `arc workspace progress --json` reports it (arc guide progress); an
+        /// item edit or a write to a linked change emits a report
+        #[arg(long)]
+        progress: bool,
     },
     /// Retire a registration whose project is gone, recording why, so the
     /// workspace views stop observing it.
@@ -8855,6 +8865,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     previous,
                     retired,
                     library,
+                    progress,
                     json,
                 } => (
                     commands::WorkspaceView::Report {
@@ -8862,6 +8873,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         previous,
                         show_retired: retired,
                         library,
+                        progress,
                     },
                     json,
                 ),
@@ -8872,12 +8884,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     previous,
                     retired,
                     library,
+                    progress,
                 } => (
                     commands::WorkspaceView::Watch {
                         scope: workspace_scope(under, here)?,
                         previous,
                         show_retired: retired,
                         library,
+                        progress,
                     },
                     true,
                 ),

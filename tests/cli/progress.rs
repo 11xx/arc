@@ -1313,3 +1313,56 @@ fn the_default_is_the_unpainted_view_and_plain_keeps_every_fact() {
         "{view}"
     );
 }
+
+/// Claim: `arc workspace report --json` carries a project's active series
+/// only when given `--progress`, and then exactly the series
+/// `arc workspace progress --json` reports for that project. Rejects
+/// progress printed into a report that did not ask for it, a second reading
+/// of the series that differs from the first, and a key on a project that
+/// has no series.
+#[test]
+fn the_workspace_report_carries_series_only_when_asked() {
+    let repo = Repo::new();
+    let report = |flags: &[&str]| {
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "report", "--here", "--json"])
+                .args(flags),
+        )
+    };
+    assert!(report(&["--progress"])["projects"][0]
+        .get("progress")
+        .is_none());
+
+    start(&repo, &repo.root, "carried", &["Linked", "By hand"]);
+    let change = begin_change(&repo, "carried-work", None);
+    progress(&repo, &repo.root, &["link", "carried", "i1", &change]);
+    progress(&repo, &repo.root, &["done", "carried", "i2"]);
+
+    let plain = report(&[]);
+    assert_eq!(plain["schema"], "arc-workspace-report/3");
+    assert!(plain["projects"][0].get("progress").is_none(), "{plain}");
+
+    let asked = report(&["--progress"]);
+    let own = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "progress", "--here", "--json"]),
+    );
+    assert_eq!(
+        asked["projects"][0]["progress"],
+        own["projects"][0]["series"]
+    );
+    assert_eq!(
+        asked["projects"][0]["progress"][0]["items"][0]["stage"],
+        "opened"
+    );
+    let (mut without, mut plain) = (asked.clone(), plain);
+    without["projects"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("progress");
+    for report in [&mut without, &mut plain] {
+        report["observation"] = serde_json::Value::Null;
+    }
+    assert_eq!(without, plain, "--progress changed the rest of the report");
+}

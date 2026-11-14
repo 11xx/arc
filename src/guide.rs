@@ -226,7 +226,7 @@ FROM A WORKSPACE ROOT (outside a project)
                        the forms `arc progress` prints (arc guide progress).
                        Exits 16 when a journal cannot be read.
                        `arc-workspace-progress/1`.
-  arc workspace report [--previous FILE] [--library] --json
+  arc workspace report [--previous FILE] [--library] [--progress] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
                        sections a reader acts from, and attention facts, so
@@ -264,6 +264,8 @@ FROM A WORKSPACE ROOT (outside a project)
                        content rendering are computed for library rows.
                        Without --library the field is absent. Failed library
                        reads enter the collection manifest as `library`.
+                       With --progress, a project that has active progress
+                       series carries them as `progress` (arc guide progress).
   <ai-home>/arc/feed/events.jsonl
                        The workspace feed: after each committed ledger or
                        journal write, one `arc-workspace-feed/1` line. A
@@ -276,7 +278,7 @@ FROM A WORKSPACE ROOT (outside a project)
                        follows its write: failing to append fails nothing,
                        and a follower that missed notices reads again. Past
                        1 MiB the file moves to `events.jsonl.1`, replacing it.
-  arc workspace watch [--previous FILE] [--library]
+  arc workspace watch [--previous FILE] [--library] [--progress]
                        The report as one JSON line, then again each time a
                        notice changes it: only the projects the feed names are
                        read again. Requests on stdin compare with a previous
@@ -284,7 +286,9 @@ FROM A WORKSPACE ROOT (outside a project)
                        closes. --library retains each project's library beside
                        its row and reads it again only when that project is
                        dirty; a library-only change, including a pin or unpin,
-                       emits too. `--help` holds the contract.
+                       emits too. --progress retains each project's progress
+                       series the same way, so an item edit or a write to a
+                       linked change emits. `--help` holds the contract.
   cd <anchor>          Enter one project named by the report, then orient there.
   arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
                        Take a registration whose project is gone (a probe,
@@ -6711,8 +6715,9 @@ SLOTS
 
 PROGRESS
   `arc progress` answers "where does this series of work stand?" for whoever
-  asks. It is pulled, never pushed: no other command prints it, and no
-  status, check, catchup, advisory or hook carries a line of it. The
+  asks. It is pulled, never pushed: a command prints it only when asked
+  for it, and no status, check, catchup, advisory or hook carries a line of
+  it. The
   journal's own history, read by name (`arc journal catchup` and
   `arc journal events`), lists item edits as the journal events they are.
 
@@ -6813,7 +6818,10 @@ PROGRESS
   which the report then shows, and `arc journal retract` withdraws evidence
   or a position filed on it. `arc workspace progress` prints every registered
   project's active series in the same three forms. `--json` prints
-  `arc-progress/1` and `arc-workspace-progress/1`.
+  `arc-progress/1` and `arc-workspace-progress/1`. `arc workspace report`
+  and `arc workspace watch`, given `--progress`, carry the same series per
+  project as `projects[].progress`, for a page that draws the workspace; a
+  series that cannot be read is a failed `progress` component there.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
@@ -6887,7 +6895,7 @@ SCHEMAS
     `arc-perf/1`                     ARC_TRACE=1, one line on stderr at exit
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
-    `arc-workspace-report/3`         arc workspace report|watch; projects[].git_health; optional library
+    `arc-workspace-report/3`         arc workspace report|watch; projects[].git_health; optional library, progress
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-pins/1`           arc workspace pins --json
     `arc-progress/1`                 arc progress --json

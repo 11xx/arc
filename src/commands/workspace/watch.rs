@@ -34,13 +34,13 @@ pub(super) fn watch(
     scope: WorkspaceScope,
     previous: Option<&Path>,
     show_retired: bool,
-    library: bool,
+    journal: JournalRead,
 ) -> Result<i32> {
     crate::store::share_reads();
     // The feed is followed from its end before the first read, so a write
     // that lands during that read is a notice the watch reads after it.
     let mut feed = Feed::open()?;
-    let mut watch = Watch::new(ctx, scope, show_retired, library)?;
+    let mut watch = Watch::new(ctx, scope, show_retired, journal)?;
     if let Some(path) = previous {
         watch.previous = Some(previous_report(path, &watch.scope.view())?);
     }
@@ -151,12 +151,14 @@ struct Watch<'a> {
 }
 
 impl<'a> Watch<'a> {
-    fn new(ctx: &'a Ctx, scope: WorkspaceScope, show_retired: bool, library: bool) -> Result<Self> {
+    fn new(
+        ctx: &'a Ctx,
+        scope: WorkspaceScope,
+        show_retired: bool,
+        journal: JournalRead,
+    ) -> Result<Self> {
         let mut watch = Watch {
-            journal: JournalRead {
-                items: true,
-                library,
-            },
+            journal,
             ctx,
             scope: ResolvedWorkspaceScope::resolve(scope)?,
             listed: Listed {

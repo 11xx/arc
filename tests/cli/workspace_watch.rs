@@ -272,3 +272,74 @@ fn watch_library_emits_non_actionable_writes_and_held_updates() {
     assert!(watch.0.wait().unwrap().success());
     reader.join().unwrap();
 }
+
+/// Claim: a watch given `--progress` prints the report again when an item of
+/// a series changes and when a linked change's ledger does, each time equal
+/// to a fresh report. Rejects a page left showing a stage the ledger has
+/// moved past, and an item edit that reaches no reader until another write.
+#[test]
+fn watch_progress_emits_item_edits_and_linked_ledger_writes() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["progress", "start", "watched", "--title", "Watched"])
+        .args(["--item", "Linked", "--item", "By hand"])
+        .assert()
+        .success();
+    let begun =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "watched-work", "--item", "watched:i1"]),
+        );
+    let change = opened_change_id(&begun);
+    let mut watch =
+        RunningWatch(repo.spawn_arc_piped(&repo.root, &["workspace", "watch", "--progress"]));
+    let stdin = watch.0.stdin.take().unwrap();
+    let (lines, reports) = mpsc::channel::<String>();
+    let output = BufReader::new(watch.0.stdout.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        for line in output.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let fresh = || {
+        bare(json_stdout_any_status(repo.arc(&repo.root).args([
+            "workspace",
+            "report",
+            "--progress",
+            "--json",
+        ])))
+    };
+    let next = |what: &str| -> Value {
+        let line = reports
+            .recv_timeout(OWED)
+            .unwrap_or_else(|_| panic!("the progress watch printed no report {what}"));
+        bare(serde_json::from_str(&line).expect("one JSON report per line"))
+    };
+    let items = |report: &Value| report["projects"][0]["progress"][0]["items"].clone();
+    let started = next("at start");
+    assert_eq!(started, fresh());
+    assert_eq!(items(&started)[0]["change"], change.as_str());
+    assert_eq!(items(&started)[0]["stage"], "opened");
+    assert_eq!(items(&started)[1]["stage"], "open");
+
+    repo.arc(&repo.root)
+        .args(["progress", "done", "watched", "i2"])
+        .assert()
+        .success();
+    let edited = next("after an item was marked done");
+    assert_eq!(edited, fresh());
+    assert_eq!(items(&edited)[1]["stage"], "done");
+
+    let worktree = repo.home.join(".worktrees").join("repo-watched-work");
+    repo.commit(&worktree, "watched.txt", "one\n", "feat: watched");
+    stdout(repo.arc(&worktree).args(["snapshot", "watched-work"]));
+    let snapshotted = next("after the linked change recorded a patchset");
+    assert_eq!(snapshotted, fresh());
+    assert_eq!(items(&snapshotted)[0]["stage"], "snapshotted");
+
+    drop(stdin);
+    drop(watch);
+    reader.join().unwrap();
+}

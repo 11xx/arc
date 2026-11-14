@@ -615,7 +615,7 @@ struct Relation {
 }
 
 #[derive(Serialize)]
-struct SeriesReport {
+pub(crate) struct SeriesReport {
     file: String,
     title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1329,6 +1329,61 @@ struct ProgressFailure {
     reason: String,
 }
 
+/// One project's active series as the workspace reports them: each in full
+/// from the project's own journal and ledger, its relations named without
+/// reading the related series. `labels` gives the label a registry slug is
+/// shown by; without it the registry is read, and only when a series has a
+/// relation.
+pub(crate) fn project_series(
+    journal_dir: &Path,
+    anchor: Option<&Path>,
+    labels: Option<&BTreeMap<String, String>>,
+    now: DateTime<Utc>,
+) -> Result<Vec<SeriesReport>> {
+    let active = series::active_series(journal_dir)?;
+    if active.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registered;
+    let labels = match labels {
+        Some(labels) => labels,
+        None => {
+            registered = if active.iter().any(|series| !series.related.is_empty()) {
+                crate::registry::journal_projects(&crate::config::load()?)?
+                    .iter()
+                    .map(|project| (project.slug.clone(), project.label()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+            &registered
+        }
+    };
+    let ledger = match anchor {
+        Some(anchor) => Ledger::at(anchor),
+        None => Ledger::none(journal_dir),
+    };
+    active
+        .iter()
+        .map(|series| {
+            let relations = series
+                .related
+                .iter()
+                .map(|relation| Relation {
+                    project: labels
+                        .get(&relation.project)
+                        .cloned()
+                        .unwrap_or_else(|| relation.project.clone()),
+                    slug: relation.project.clone(),
+                    file: relation.file.clone(),
+                    mutual: None,
+                })
+                .collect();
+            series_report(series, &ledger, relations, now)
+        })
+        .collect()
+}
+
 /// `arc workspace progress`: every registered project's active series.
 pub(crate) fn workspace(
     includes: impl Fn(Option<&Path>) -> bool,
@@ -1348,35 +1403,12 @@ pub(crate) fn workspace(
         if project.retired.is_some() || !includes(project.anchor.as_deref()) {
             continue;
         }
-        let read = (|| -> Result<Vec<SeriesReport>> {
-            let active = series::active_series(&project.journal_dir)?;
-            if active.is_empty() {
-                return Ok(Vec::new());
-            }
-            let ledger = match project.anchor.as_deref() {
-                Some(anchor) => Ledger::at(anchor),
-                None => Ledger::none(&project.journal_dir),
-            };
-            active
-                .iter()
-                .map(|series| {
-                    let relations = series
-                        .related
-                        .iter()
-                        .map(|relation| Relation {
-                            project: labels
-                                .get(&relation.project)
-                                .cloned()
-                                .unwrap_or_else(|| relation.project.clone()),
-                            slug: relation.project.clone(),
-                            file: relation.file.clone(),
-                            mutual: None,
-                        })
-                        .collect();
-                    series_report(series, &ledger, relations, now)
-                })
-                .collect()
-        })();
+        let read = project_series(
+            &project.journal_dir,
+            project.anchor.as_deref(),
+            Some(&labels),
+            now,
+        );
         match read {
             Ok(series) if series.is_empty() => {}
             Ok(series) => projects.push(ProjectProgress {

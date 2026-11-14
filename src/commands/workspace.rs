@@ -89,12 +89,14 @@ pub enum WorkspaceView {
         previous: Option<PathBuf>,
         show_retired: bool,
         library: bool,
+        progress: bool,
     },
     Watch {
         scope: WorkspaceScope,
         previous: Option<PathBuf>,
         show_retired: bool,
         library: bool,
+        progress: bool,
     },
     Retire {
         project: String,
@@ -432,13 +434,36 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             previous,
             show_retired,
             library,
-        } => workspace_report(ctx, scope, previous.as_deref(), show_retired, library, json),
+            progress,
+        } => workspace_report(
+            ctx,
+            scope,
+            previous.as_deref(),
+            show_retired,
+            JournalRead {
+                items: true,
+                library,
+                progress,
+            },
+            json,
+        ),
         WorkspaceView::Watch {
             scope,
             previous,
             show_retired,
             library,
-        } => watch::watch(ctx, scope, previous.as_deref(), show_retired, library),
+            progress,
+        } => watch::watch(
+            ctx,
+            scope,
+            previous.as_deref(),
+            show_retired,
+            JournalRead {
+                items: true,
+                library,
+                progress,
+            },
+        ),
         WorkspaceView::Retire {
             project,
             reason,
@@ -1051,6 +1076,10 @@ enum DebtMissingBasis {
 struct ProjectBacklog {
     #[serde(skip)]
     library: Option<Library>,
+    /// The project's active progress series, when the read was asked for
+    /// them and the project has any.
+    #[serde(skip)]
+    progress: Option<serde_json::Value>,
     project: String,
     anchor: String,
     /// The journal directory this project's questions and items were read
@@ -1707,6 +1736,7 @@ struct LibraryRow {
 struct JournalRead {
     items: bool,
     library: bool,
+    progress: bool,
 }
 
 /// Observe one reachable project into its backlog row.
@@ -1725,7 +1755,7 @@ fn project_row(
 
     // The journal and the fork inventory read nothing of the ledger, so they
     // are read beside it.
-    let ((queues, changes), (open_queue, forks, library)) = std::thread::scope(|scope| {
+    let ((queues, changes), (open_queue, forks, library, progress)) = std::thread::scope(|scope| {
         let beside = scope.spawn(|| {
             (
                 crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None, true),
@@ -1733,6 +1763,14 @@ fn project_row(
                 journal
                     .library
                     .then(|| crate::journal::library_artifacts(&project.journal_dir)),
+                journal.progress.then(|| {
+                    super::progress::project_series(
+                        &project.journal_dir,
+                        Some(anchor),
+                        None,
+                        chrono::Utc::now(),
+                    )
+                }),
             )
         });
         let ledger = match &project.ledger {
@@ -1878,8 +1916,23 @@ fn project_row(
                     .collect(),
             ))
         });
+    let progress = progress.and_then(|read| {
+        let series = read.and_then(|series| {
+            Ok((!series.is_empty())
+                .then(|| serde_json::to_value(series))
+                .transpose()?)
+        });
+        series.unwrap_or_else(|error: anyhow::Error| {
+            failures.push(ComponentFailure {
+                component: "progress",
+                reason: format!("{error:#}"),
+            });
+            None
+        })
+    });
     ProjectBacklog {
         library,
+        progress,
         project: project.label(),
         anchor: anchor.display().to_string(),
         journal_dir: project.journal_dir.display().to_string(),
@@ -2198,6 +2251,7 @@ fn workspace_backlog(
         JournalRead {
             items: show_items,
             library: false,
+            progress: false,
         },
         scope,
         listed,
@@ -2660,25 +2714,15 @@ fn workspace_report(
     scope: WorkspaceScope,
     previous: Option<&Path>,
     show_retired: bool,
-    library: bool,
+    journal: JournalRead,
     json: bool,
 ) -> Result<i32> {
     let listed = Listed {
         unreachable: false,
         retired: show_retired,
     };
-    let mut collected = collect_backlog(
-        ctx,
-        None,
-        JournalRead {
-            items: true,
-            library,
-        },
-        scope,
-        listed,
-        RankBasis::Blocking,
-        true,
-    )?;
+    let mut collected =
+        collect_backlog(ctx, None, journal, scope, listed, RankBasis::Blocking, true)?;
     let (ledgers, failures) = report_ledger_facts(&collected, project_ledger_facts);
     let previous = match previous {
         Some(path) => Some(previous_report(path, &collected.scope.view())?),
@@ -2856,6 +2900,14 @@ fn build_report(
         .filter_map(|project| Some((project.project.as_str(), project.library.as_ref()?)))
         .collect();
     report.attach_libraries(&libraries);
+    report.attach_progress(
+        collected
+            .backlog
+            .projects
+            .iter()
+            .filter_map(|project| Some((project.project.as_str(), project.progress.as_ref()?)))
+            .collect(),
+    );
     report.attach_git_health(health);
     Ok(report)
 }
@@ -3797,6 +3849,10 @@ mod report {
     struct ProjectSummary {
         #[serde(skip_serializing_if = "Option::is_none")]
         library: Option<super::Library>,
+        /// The project's active progress series, as `arc workspace progress
+        /// --json` reports them, when the report was asked for them.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        progress: Option<Value>,
         project: String,
         anchor: Option<String>,
         journal_dir: Option<String>,
@@ -4058,6 +4114,7 @@ mod report {
             let items = project.get("items").unwrap_or(&Value::Null);
             let mut summary = ProjectSummary {
                 library: None,
+                progress: None,
                 git_health: Vec::new(),
                 project: name.clone(),
                 anchor: opt_text(project, "anchor"),
@@ -4601,6 +4658,12 @@ mod report {
                         })
                         .clone();
                 }
+            }
+        }
+
+        pub(super) fn attach_progress(&mut self, mut series: BTreeMap<&str, &Value>) {
+            for project in &mut self.projects {
+                project.progress = series.remove(project.project.as_str()).cloned();
             }
         }
 
