@@ -29,19 +29,32 @@ pub(crate) struct Selection {
 }
 
 /// The receipt the runner hands over with `ARC_TEST_BIN`: the build it chose
-/// the executable for, named by the identity of Cargo's own `arc` there, and
-/// the chosen executable's debug assertions. A later build replaces Cargo's
-/// executable, so a selection exported into it no longer matches.
-pub(crate) fn selection_receipt(debug_assertions: bool) -> String {
+/// `executable` for, named by the identity of Cargo's own `arc` there; the
+/// executable itself, by resolved path and identity; and its debug
+/// assertions. A later build replaces Cargo's executable and a rebuilt or
+/// substituted executable has another identity, so a receipt vouches for one
+/// file of one build. `None` when `executable` cannot be read.
+pub(crate) fn selection_receipt(executable: &Path, debug_assertions: bool) -> Option<String> {
+    let resolved = executable.canonicalize().ok()?;
+    Some(format!(
+        "build={} executable={}:{} debug-assertions={debug_assertions}",
+        file_identity(Path::new(env!("CARGO_BIN_EXE_arc")))?,
+        file_identity(&resolved)?,
+        resolved.display()
+    ))
+}
+
+/// A file's device, inode, modification time in nanoseconds and size.
+fn file_identity(path: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
-    let built = fs::metadata(env!("CARGO_BIN_EXE_arc")).expect("Cargo's arc executable exists");
-    format!(
-        "build={}:{}:{}:{} debug-assertions={debug_assertions}",
-        built.dev(),
-        built.ino(),
-        built.mtime() as i128 * 1_000_000_000 + built.mtime_nsec() as i128,
-        built.size()
-    )
+    let file = fs::metadata(path).ok()?;
+    Some(format!(
+        "{}:{}:{}:{}",
+        file.dev(),
+        file.ino(),
+        file.mtime() as i128 * 1_000_000_000 + file.mtime_nsec() as i128,
+        file.size()
+    ))
 }
 
 fn selection() -> &'static Selection {
@@ -62,11 +75,13 @@ fn read_selection() -> Result<Selection, String> {
     let receipt = std::env::var("ARC_TEST_BIN_RECEIPT").unwrap_or_default();
     let debug_assertions = [true, false]
         .into_iter()
-        .find(|assertions| receipt == selection_receipt(*assertions))
+        .find(|assertions| {
+            selection_receipt(Path::new(&path), *assertions).as_deref() == Some(&*receipt)
+        })
         .ok_or_else(|| {
             format!(
-                "ARC_TEST_BIN selects {path}, but the runner did not select it for this build \
-                 of arc. Unset ARC_TEST_BIN to test Cargo's executable, or run \
+                "ARC_TEST_BIN selects {path}, but the runner did not select that executable \
+                 for this build of arc. Unset ARC_TEST_BIN to test Cargo's executable, or run \
                  `python3 .arc/test-binary.py invariants`, `area` or `release`, which select one."
             )
         })?;

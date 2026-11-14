@@ -5,10 +5,11 @@ invariant and caller-visible claim. The runner validates every full name against
 libtest's inventory before dispatching it with `--exact`; missing, ignored and
 unexecuted witnesses fail. It selects the spawned executable from Cargo's artifact
 receipts and hands it to the harness as `ARC_TEST_BIN` with `ARC_TEST_BIN_RECEIPT`,
-which names the build the selection was made for and whether the selected
-executable carries debug assertions. Only the runner selects: a harness given
-`ARC_TEST_BIN` without a receipt for its own build refuses to start, so a plain
-`cargo test` never runs an exported, stale executable. Development artifacts share one profile: the crate is unoptimized, so
+which names the build the selection was made for, the selected executable by
+resolved path and identity, and whether it carries debug assertions. Only the
+runner selects: a harness given `ARC_TEST_BIN` without a receipt for that file of
+its own build refuses to start, so a plain `cargo test` never runs an exported,
+stale or substituted executable. Development artifacts share one profile: the crate is unoptimized, so
 an incremental rebuild after a source edit stays short, and dependencies are
 optimized. Debug symbols are disabled; debug assertions and integer overflow
 checks stay enabled. Preparation declared in `.arc/worktrees.toml` builds the
@@ -46,17 +47,26 @@ Run that artifact check with `python3 .arc/test-binary.py release`. A publicatio
 the remaining tree is fixed, or the test removed, before the release.
 
 Both harnesses enter through `src/harness_entry.rs` before their first test.
+The kernel confines each harness, and every process it starts, to writing
+beneath the build's target directory and the system temporary directory, through
+Landlock: whatever path a test, a helper or the `arc` under test names, the
+checkout's repository, the operator's home and Git configuration, and other
+repositories are not written. A kernel without the Landlock rights this needs
+leaves a plain `cargo test` unconfined with a notice; the runner sets
+`ARC_TEST_CONFINEMENT=required`, and a harness that cannot confine itself then
+refuses to run.
+
 Started with `GIT_DIR` or `GIT_WORK_TREE` set, as Git sets them for hooks and
 `rebase --exec` steps, the harness and the runner refuse to start and name the
-variable. Every other variable through which Git selects a repository, index,
-object directory, common directory, namespace or configuration is removed from
-the harness's environment, so no fixture command, a helper's or one a test builds, can
-reach a repository the fixture did not create. Git discovery never climbs into
-the checkout, the build's temporary directory or the system temporary directory
-from below, so Git in a directory a test forgot to initialize finds no
-repository; a test that means this checkout names it. Global configuration is a
-file of the harness process's own and system configuration is not read. A
-helper's own settings for its command still apply.
+variable. Every other inherited `GIT_` variable is removed, and the harness sets
+the few it needs: Git discovery never climbs into the checkout or the system
+temporary directory from below, so Git in a directory a test forgot to
+initialize finds no repository and a test that means this checkout names it;
+`git init` copies no template; global configuration is a file in a directory the
+harness process created, removed when it exits; system configuration is not
+read. A helper's own settings for its command still apply. A child-mode switch,
+a variable named `ARC_TEST_CHILD_*`, reaches a harness only from the harness
+that started it, carrying that parent's token; the runner passes none.
 
 CLI fixtures copy independent Git files with empty hooks and exclude locations,
 disable automatic maintenance and retain explicit collection and pruning. Child

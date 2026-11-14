@@ -54,17 +54,31 @@ class RunnerClaims(unittest.TestCase):
             self.assertEqual(runner.cargo_artifacts(["cargo"])["arc"],
                              runner.Artifact("/selected/release/arc", False))
 
-    def test_selection_names_the_build_and_the_selected_profile(self):
-        """Claim: a selection's receipt names the build by Cargo's own executable and states the
-        selected executable's debug assertions; rejects a receipt a later build would still accept
-        or one that reports the harness's profile for a release executable."""
-        cargo_arc = runner.Artifact(__file__, True)
-        built = runner.os.stat(__file__)
-        selected = runner.selection(runner.Artifact("/selected/release/arc", False), cargo_arc)
+    def test_selection_names_the_build_the_executable_and_its_profile(self):
+        """Claim: a selection's receipt names the build by Cargo's own executable, the selected
+        executable by resolved path and identity, and its debug assertions; rejects a receipt that
+        a later build, another file at another path, or a release executable's profile would match."""
+        here = Path(__file__).resolve()
+        built = runner.os.stat(here)
+        identity = f"{built.st_dev}:{built.st_ino}:{built.st_mtime_ns}:{built.st_size}"
+        selected = runner.selection(runner.Artifact(str(here), False), runner.Artifact(str(here), True))
         self.assertEqual(selected, {
-            "ARC_TEST_BIN": "/selected/release/arc",
-            "ARC_TEST_BIN_RECEIPT": f"build={built.st_dev}:{built.st_ino}:{built.st_mtime_ns}:"
-                                    f"{built.st_size} debug-assertions=false"})
+            "ARC_TEST_BIN": str(here),
+            "ARC_TEST_BIN_RECEIPT": f"build={identity} executable={identity}:{here} "
+                                    "debug-assertions=false"})
+        other = here.with_name("test-binary.py")
+        self.assertNotEqual(runner.selection(runner.Artifact(str(other), False),
+                                             runner.Artifact(str(here), True))["ARC_TEST_BIN_RECEIPT"],
+                            selected["ARC_TEST_BIN_RECEIPT"])
+
+    def test_harness_environment_drops_child_switches_and_demands_confinement(self):
+        """Claim: the harnesses never inherit a child-mode switch through the runner, and are told
+        to refuse running unconfined; rejects an exported switch reaching a witness and a gate run
+        that proceeds without kernel confinement."""
+        env = runner.harness_environment({"PATH": "/bin", "ARC_TEST_CHILD_FIXTURE_ISOLATION": "1:2"},
+                                         {"ARC_TEST_BIN": "/selected/arc"})
+        self.assertEqual(env, {"PATH": "/bin", "ARC_TEST_BIN": "/selected/arc",
+                               "ARC_TEST_CONFINEMENT": "required"})
 
     def test_failed_build_shows_compiler_messages_and_refuses(self):
         """Claim: a build failure prints rustc's message and refuses; rejects a silent or green failed build."""

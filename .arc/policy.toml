@@ -132,10 +132,14 @@ paths = [
   # can make the gate pass without proving anything.
   ".arc/test-binary.py",
   ".arc/invariants.tsv",
-  # Every test harness enters through this file, which keeps Git's
-  # repository-selecting variables from its fixtures: a defect lets a fixture
-  # rewrite the configuration or history of the repository running the suite.
+  # Every test harness enters through this file, which confines its writes
+  # and keeps inherited Git variables from its fixtures: a defect lets a
+  # fixture rewrite the configuration or history of the repository running
+  # the suite.
   "src/harness_entry.rs",
+  # The kernel confinement the entry applies: a defect lets a test write the
+  # checkout's repository or the operator's files.
+  "src/harness_entry/confine.rs",
   # The changelog renderer runs the program `.arc/changelog.toml` declares,
   # with the invoking user's authority, the way a gate runs its command.
   ".arc/changelog.toml",

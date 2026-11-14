@@ -1349,7 +1349,7 @@ fn adopt_refuses_a_bare_repository() {
     for (path, refusal) in [
         (holder.clone(), "holds a Git repository"),
         (bare.clone(), "is a Git repository"),
-        (bare.join("hooks"), "lies inside the Git repository"),
+        (bare.join("refs"), "lies inside the Git repository"),
     ] {
         let stderr = adopt_refused(&repo, &path);
         assert!(path.is_dir(), "{}: {stderr}", path.display());

@@ -61,16 +61,33 @@ def artifacts(profile=PROFILE):
     return found
 
 
+def identity(path):
+    status = os.stat(path)
+    return f"{status.st_dev}:{status.st_ino}:{status.st_mtime_ns}:{status.st_size}"
+
+
 def selection(executable, cargo_arc):
     """The environment selecting `executable` for the fixtures of the harnesses
     built beside `cargo_arc`. The receipt names that build by the identity of
-    Cargo's own arc executable, which the harness compares with its own, so a
-    selection exported into a later build is refused there."""
-    built = os.stat(cargo_arc.path)
-    identity = f"{built.st_dev}:{built.st_ino}:{built.st_mtime_ns}:{built.st_size}"
+    Cargo's own arc executable and the executable by its resolved path and
+    identity, which the harness compares with what it finds, so a receipt
+    vouches for one file of one build."""
+    resolved = str(Path(executable.path).resolve())
     assertions = "true" if executable.debug_assertions else "false"
     return {"ARC_TEST_BIN": executable.path,
-            "ARC_TEST_BIN_RECEIPT": f"build={identity} debug-assertions={assertions}"}
+            "ARC_TEST_BIN_RECEIPT": f"build={identity(cargo_arc.path)} "
+                                    f"executable={identity(resolved)}:{resolved} "
+                                    f"debug-assertions={assertions}"}
+
+
+def harness_environment(environ, selected):
+    """What the harnesses run under: the caller's environment without any
+    child-mode switch, which only a parent harness may set, the selection, and
+    a demand that the harness confine its writes or refuse to run."""
+    env = {name: value for name, value in environ.items() if not name.startswith("ARC_TEST_CHILD_")}
+    env.update(selected)
+    env["ARC_TEST_CONFINEMENT"] = "required"
+    return env
 
 
 def inventory(binary, env):
@@ -141,8 +158,7 @@ def main():
     refuse_inside_git_operation(os.environ)
     os.chdir(ROOT)
     binaries = artifacts()
-    env = os.environ.copy()
-    env.update(selection(binaries["arc"], binaries["arc"]))
+    env = harness_environment(os.environ, selection(binaries["arc"], binaries["arc"]))
     if args.mode == "invariants":
         with (ROOT / ".arc/invariants.tsv").open() as file:
             return run_invariants(witnesses(file), binaries, env)
