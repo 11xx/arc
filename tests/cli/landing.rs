@@ -423,7 +423,7 @@ fn a_stack_lands_with_one_gate_run_and_each_member_keeps_its_own_range() {
 /// landing command recorded on the top member's ledger, and `arc show`
 /// states the figure `arc gates` reports for each member. Rejects counting
 /// that gate run inside a lower member's own time, and a show figure that
-/// reads only the member's own ledger.
+/// differs from the gates report for the same member.
 #[test]
 fn a_stack_members_own_time_excludes_the_gate_its_landing_ran_elsewhere() {
     let repo = gated_repo();
