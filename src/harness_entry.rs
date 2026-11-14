@@ -10,10 +10,11 @@
 //! repositories are out of reach. The environment never chooses a writable
 //! root: an inherited `TMPDIR` naming anything but `/tmp` is replaced by a
 //! directory the harness creates there. A target directory that is, or
-//! contains, the checkout, the home directory or the directory holding the
-//! checkout's shared Git directory, that lies inside that Git directory, in
-//! the checkout other than within its `target`, or in the home's
-//! configuration, is refused rather than granted. Each comparison is between
+//! contains, the checkout, the home directory, the home's configuration or
+//! the directory holding the checkout's shared Git directory, that lies
+//! inside that Git directory, in the checkout other than within its
+//! `target`, or in the home's configuration, is refused rather than granted.
+//! Each comparison is between
 //! fully resolved paths, every symbolic link followed on both sides; a
 //! protected path that does not exist protects nothing there, and one that
 //! cannot be resolved refuses the root. Descriptors the harness inherited
@@ -339,7 +340,8 @@ fn writable_roots(temporary: PathBuf) -> Result<Vec<PathBuf>, String> {
 
 /// Why the build's target directory `target` cannot be granted: what
 /// `root_refusal` says, or it lies inside the checkout other than within
-/// Cargo's own build directory, or inside the home's configuration.
+/// Cargo's own build directory, or it is inside or contains the home's
+/// configuration.
 pub(crate) fn target_refusal(
     target: &Path,
     checkout: &Path,
@@ -378,6 +380,13 @@ fn check_target(
             if target.starts_with(&resolved) {
                 return Err(format!(
                     "the target directory {} lies inside the home's configuration, {}",
+                    target.display(),
+                    resolved.display()
+                ));
+            }
+            if resolved.starts_with(&target) {
+                return Err(format!(
+                    "the target directory {} contains the home's configuration, {}",
                     target.display(),
                     resolved.display()
                 ));
@@ -907,6 +916,34 @@ mod tests {
         assert_eq!(
             super::target_refusal(
                 &home.join("build"),
+                &checkout,
+                Some(&home),
+                Some(&configuration)
+            ),
+            None
+        );
+    }
+
+    /// Claim: a target directory that contains the home's configuration is
+    /// refused, naming it. Rejects `CARGO_TARGET_DIR=$HOME/.local` granting
+    /// an `XDG_CONFIG_HOME` of `$HOME/.local/config` beneath it.
+    #[test]
+    fn a_target_containing_the_home_configuration_is_refused() {
+        let (scratch, home, _main, checkout) = decoy_worktree();
+        let local = scratch.path().join("local");
+        let configuration = local.join("config");
+        std::fs::create_dir_all(configuration.join("git")).unwrap();
+        std::fs::create_dir_all(local.join("build")).unwrap();
+        let refusal = super::target_refusal(&local, &checkout, Some(&home), Some(&configuration));
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("contains the home's configuration")),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            super::target_refusal(
+                &local.join("build"),
                 &checkout,
                 Some(&home),
                 Some(&configuration)

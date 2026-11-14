@@ -58,10 +58,10 @@ naming anything but `/tmp` is replaced, for the harness and every process it
 starts, by a directory the harness creates under `/tmp` and removes when it
 exits. `/tmp` rather than the build directory keeps Unix socket paths beneath
 it within their 108 bytes. A target directory that is, or contains, the
-checkout, the home directory or the directory holding the checkout's shared Git
-directory, that lies inside that Git directory, in the checkout other than
-within its `target`, or in the home's configuration, is refused rather than
-granted. Each comparison is between fully resolved paths, every symbolic link
+checkout, the home directory, the home's configuration or the directory holding
+the checkout's shared Git directory, that lies inside that Git directory, in
+the checkout other than within its `target`, or in the home's configuration, is
+refused rather than granted. Each comparison is between fully resolved paths, every symbolic link
 followed on both sides; a protected path that does not exist protects nothing
 there, and one that cannot be resolved refuses the root. Descriptors inherited
 above standard error are closed, one by one from `/proc/self/fd` where
