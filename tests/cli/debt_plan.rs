@@ -1,6 +1,7 @@
 use super::common::*;
 use super::ineligible_review::{
-    assessment, debt_of, read_by, read_change, repo_forbidding_self_approval, snapshotted,
+    assessment, assessment_for, debt_of, read_by, read_change, repo_forbidding_self_approval,
+    snapshotted,
 };
 
 const REASON: &str = "review owed";
@@ -176,7 +177,15 @@ fn a_dry_run_reports_the_refusal_the_real_run_gives_and_writes_nothing() {
     snapshotted(&repo, "unread");
     read_change(&repo, "eligible");
     read_change(&repo, "shape");
-    let eligible = assessment(&repo, "eligible.json", "eligible", &[]);
+    // Bound to the read's model, so the read clears and nothing is owed.
+    let eligible = assessment_for(
+        &repo,
+        "eligible.json",
+        "eligible",
+        &[],
+        Some(&["fixture-opus"]),
+        Some("medium"),
+    );
     let eligible = eligible.to_str().unwrap();
     let cases: Vec<(&str, Vec<&str>)> = vec![
         (

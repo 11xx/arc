@@ -2907,12 +2907,12 @@ enum Cmd {
         #[arg(long = "read", value_name = "EVENT", requires = "debt")]
         read: Option<String>,
         /// Why routing did not count that read: an `agent-routing assess
-        /// --json` file (schema `agent-routing-assessment/1` or `/2`) whose
-        /// independence is `ineligible`. arc keeps its qualifiers, route
-        /// version and independence, and never its tiers; it validates the
-        /// shape and computes no family, tier or floor. The record reads as
-        /// assessed. A file whose independence is `eligible` is refused,
-        /// whatever its findings and clears answers say
+        /// --json` file (schema `agent-routing-assessment/1` or `/2`). arc
+        /// keeps its qualifiers, route version and independence, and never
+        /// its tiers; it validates the shape and computes no family, tier or
+        /// floor. The record reads as assessed. A file under which that read
+        /// would discharge the debt is refused: without `review_clearance`
+        /// its independence decides, under it the read's clearance does
         #[arg(long = "assessment", value_name = "FILE", requires = "debt", conflicts_with_all = ["qualifiers", "route_version"])]
         assessment: Option<PathBuf>,
         /// A qualifier named by hand, repeatable: `same-model`, `same-family`,
@@ -3056,12 +3056,12 @@ enum Cmd {
         #[arg(long = "read", value_name = "EVENT")]
         read: Option<String>,
         /// Why routing did not count that read: an `agent-routing assess
-        /// --json` file (schema `agent-routing-assessment/1` or `/2`) whose
-        /// independence is `ineligible`. arc keeps its qualifiers, route
-        /// version and independence, and never its tiers; it validates the
-        /// shape and computes no family, tier or floor. The record reads as
-        /// assessed. A file whose independence is `eligible` is refused,
-        /// whatever its findings and clears answers say
+        /// --json` file (schema `agent-routing-assessment/1` or `/2`). arc
+        /// keeps its qualifiers, route version and independence, and never
+        /// its tiers; it validates the shape and computes no family, tier or
+        /// floor. The record reads as assessed. A file under which that read
+        /// would discharge the debt is refused: without `review_clearance`
+        /// its independence decides, under it the read's clearance does
         #[arg(long = "assessment", value_name = "FILE", conflicts_with_all = ["qualifiers", "route_version"])]
         assessment: Option<PathBuf>,
         /// A qualifier named by hand, repeatable: `same-model`, `same-family`,

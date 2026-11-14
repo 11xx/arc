@@ -1373,3 +1373,47 @@ mod basis_time {
         assert_eq!(read(&shown, true)["basis_time"], EARLY);
     }
 }
+
+/// Approve `slug` as Reader at `model`, then declare `ineligible-review` at
+/// integration with `file`, an assessment of that reader.
+fn declare_with(repo: &Repo, slug: &str, model: &str, file: &Path) -> assert_cmd::assert::Assert {
+    let wt = subject(repo, slug, Some(OPUS), "");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reader")
+        .args(["--model", model, "review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "integrate",
+            slug,
+            "--debt",
+            "ladder read",
+            "--kind",
+            "ineligible-review",
+        ])
+        .arg("--assessment")
+        .arg(file)
+        .assert()
+}
+
+/// Claim: under a ladder, an `ineligible-review` declaration is refused when
+/// the ladder clears its read for the authors, whatever the assessment's
+/// `clears` says, and recorded when the ladder does not. Rejects a refusal
+/// decided by the assessment's own answers where the ladder owns capability.
+#[test]
+fn a_declaration_under_a_ladder_is_refused_only_where_the_ladder_clears() {
+    let repo = repo(true, true, None);
+    let file = assessment(&repo, "sol.json", SOL, false);
+    declare_with(&repo, "cross-lab", SOL, &file)
+        .failure()
+        .stderr(predicates::str::contains("no ineligible read to record"));
+    assert!(show(&repo, "cross-lab")["debt"].is_null());
+
+    let file = assessment(&repo, "fable.json", FABLE, true);
+    declare_with(&repo, "same-lab", FABLE, &file).success();
+    assert_eq!(
+        show(&repo, "same-lab")["debt"]["missing"],
+        "ineligible-review"
+    );
+}

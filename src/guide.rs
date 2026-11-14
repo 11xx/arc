@@ -2925,8 +2925,8 @@ REVIEW COVERAGE AND DEBT
   named read, qualifiers and assessment basis; a debt the change already
   carries reads `debt already declared` with its event. A declaration the
   execution would refuse is refused by the plan with the same message and
-  exit code: an unknown qualifier, no verdict to name, an eligible assessment,
-  a read flag on another kind. The plan never invents an approval, and a
+  exit code: an unknown qualifier, no verdict to name, an assessment under
+  which the read clears, a read flag on another kind. The plan never invents an approval, and a
   changes-requested verdict on the exact head still refuses it. `--json`
   carries the debt as `debt` in `arc-integration-plan/1`, with
   `disposition` `would-declare` or `already-declared`; a plan that would
@@ -2991,14 +2991,17 @@ REVIEW COVERAGE AND DEBT
   `ineligible`) and `clears` (true or false); arc stores both beside
   `independence`, and a `/1` file leaves them absent. arc keeps its
   `independence`, `qualifiers` and `route_version`, never a tier or a model
-  string (an audit's binding to its auditor is the one comparison made,
-  below), and validates shape only: qualifier names from the closed set, a
+  string (it compares only the reviewer it describes with the read's model
+  and its authors with the range's coordinates, below), and validates shape only: qualifier names from the closed set, a
   one-token route version, and answers that agree. In `/1` qualifiers are
   present exactly when the independence is `ineligible`; in `/2` a file that
   clears is eligible on both answers, names no qualifier and names its
   reviewer's effort, and one that does not clear names a qualifier. An
-  assessment whose `independence` is `eligible` is refused on this kind,
-  whatever its `findings` and `clears` say. A tier is
+  assessment under which the named read would discharge the debt is refused
+  on this kind, and one under which it would not is recorded: without
+  `review_clearance` its `independence` decides, under it the read's
+  clearance (`arc guide debt-clearance`) does, and a judgment arc cannot
+  establish records the debt. A tier is
   routing's reading at the time it is read, so every read shows the record
   as its route version and basis say, never as current. Within the kind,
   `arc query --debt`, the inbox, catchup and the workspace backlog put a

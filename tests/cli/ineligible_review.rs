@@ -68,7 +68,7 @@ pub(super) fn assessment(
 
 /// An assessment whose reviewer lists the model strings routing accepts for
 /// it and, optionally, its effort, as `agent-routing assess --json` does.
-fn assessment_for(
+pub(super) fn assessment_for(
     repo: &Repo,
     name: &str,
     independence: &str,
@@ -284,15 +284,31 @@ fn it_refuses_without_a_verdict_to_name() {
     assert!(debt_of(&repo, "unread").is_null());
 }
 
+/// Claim: an eligible assessment that binds the named read is refused,
+/// because that read discharges the debt; one that describes another
+/// reviewer binds nothing, so the read does not clear and the debt is
+/// recorded. Rejects a refusal that ignores whether the assessment binds.
 #[test]
-fn it_refuses_an_eligible_assessment() {
+fn it_refuses_an_eligible_assessment_only_where_it_binds_the_read() {
     let repo = repo_forbidding_self_approval();
     read_change(&repo, "eligible");
-    let file = assessment(&repo, "eligible.json", "eligible", &[]);
+    let file = assessment_for(
+        &repo,
+        "eligible.json",
+        "eligible",
+        &[],
+        Some(&["fixture-opus"]),
+        Some("medium"),
+    );
     integrate_ineligible(&repo, "eligible", &["--assessment", file.to_str().unwrap()])
         .failure()
-        .stderr(predicates::str::contains("eligible"));
+        .stderr(predicates::str::contains("no ineligible read to record"));
     assert!(debt_of(&repo, "eligible").is_null());
+
+    read_change(&repo, "unbound");
+    let file = assessment(&repo, "unbound.json", "eligible", &[]);
+    integrate_ineligible(&repo, "unbound", &["--assessment", file.to_str().unwrap()]).success();
+    assert_eq!(debt_of(&repo, "unbound")["missing"], "ineligible-review");
 }
 
 #[test]
@@ -824,14 +840,48 @@ fn arc_debt_after_integration_takes_the_same_inputs() {
     );
 }
 
-/// Claim: an `ineligible-review` declaration refuses an assessment whose
-/// `independence` is `eligible`, whatever its `/2` `findings` and `clears`
-/// answers say, and accepts a `/2` file whose `independence` is
-/// `ineligible`. Rejects a declaration that decides the refusal by `clears`.
+/// A repository whose destination policy asks for clearance.
+fn repo_assessing_clearance() -> Repo {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\nreview_clearance = \"assessed\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+    repo
+}
+
+/// A change read once by Reviewer at `fixture-other#high`, the reviewer
+/// [`assessment_v2`] describes, with that file attached when given.
+fn read_by_other(repo: &Repo, slug: &str, attached: Option<&Path>) -> String {
+    snapshotted(repo, slug);
+    let mut command = repo.arc(&repo.root);
+    command.env("ARC_ACTOR", "Reviewer").args([
+        "--model",
+        "fixture-other#high",
+        "review",
+        slug,
+        "--verdict",
+        "approved",
+    ]);
+    if let Some(file) = attached {
+        command.arg("--assessment").arg(file);
+    }
+    event_of(&stdout(&mut command))
+}
+
+/// Claim: without `review_clearance`, a declaration refuses an assessment
+/// under which its read would discharge the debt, which independence
+/// decides whatever a `/2` file's `clears` says, and records one whose
+/// independence is `ineligible`. Rejects a refusal decided by `clears`
+/// where no policy reads it.
 #[test]
-fn a_declaration_refuses_by_independence_whatever_clears_says() {
+fn without_the_policy_independence_decides_the_refusal() {
     let repo = repo_forbidding_self_approval();
-    read_change(&repo, "independent");
+    read_by_other(&repo, "independent", None);
     let file = assessment_v2(
         &repo,
         "independent.json",
@@ -845,10 +895,11 @@ fn a_declaration_refuses_by_independence_whatever_clears_says() {
         &["--assessment", file.to_str().unwrap()],
     )
     .failure()
-    .stderr(predicates::str::contains("eligible"));
+    .stderr(predicates::str::contains("independence decides"))
+    .stderr(predicates::str::contains("without --kind"));
     assert!(debt_of(&repo, "independent").is_null());
 
-    read_change(&repo, "dependent");
+    read_by_other(&repo, "dependent", None);
     let file = assessment_v2(
         &repo,
         "dependent.json",
@@ -869,4 +920,63 @@ fn a_declaration_refuses_by_independence_whatever_clears_says() {
         "{record}"
     );
     assert_eq!(record["assessment"], "assessed", "{record}");
+}
+
+/// Claim: under `review_clearance = "assessed"`, a declaration records an
+/// assessment whose read does not clear even though its independence is
+/// eligible, as `integrate --debt` derives the same kind from that read, and
+/// refuses one under which the read clears. Rejects a refusal decided by
+/// independence, which refuses a debt the policy keeps owed.
+#[test]
+fn under_assessed_clearance_clears_decides_the_refusal() {
+    let repo = repo_assessing_clearance();
+    let finding = assessment_v2(
+        &repo,
+        "finding.json",
+        "eligible",
+        false,
+        &["below-clearance"],
+    );
+    read_by_other(&repo, "declared", None);
+    integrate_ineligible(
+        &repo,
+        "declared",
+        &["--assessment", finding.to_str().unwrap()],
+    )
+    .success();
+    let declared = debt_of(&repo, "declared");
+    assert_eq!(declared["missing"], "ineligible-review", "{declared}");
+    assert_eq!(
+        declared["ineligible"]["qualifiers"],
+        serde_json::json!(["below-clearance"])
+    );
+    assert_eq!(
+        declared["ineligible"]["assessment"], "assessed",
+        "{declared}"
+    );
+
+    // The same read, assessed the same way, derives the same kind.
+    let read = read_by_other(&repo, "derived", Some(&finding));
+    repo.arc(&repo.root)
+        .args(["integrate", "derived", "--debt", "findings read only"])
+        .assert()
+        .success();
+    let derived = debt_of(&repo, "derived");
+    assert_eq!(derived["missing"], "ineligible-review", "{derived}");
+    assert_eq!(derived["ineligible"]["read"], read.as_str(), "{derived}");
+    assert_eq!(
+        derived["ineligible"]["qualifiers"],
+        serde_json::json!(["below-clearance"])
+    );
+
+    let clearing = assessment_v2(&repo, "clearing.json", "eligible", true, &[]);
+    read_by_other(&repo, "clears", None);
+    integrate_ineligible(
+        &repo,
+        "clears",
+        &["--assessment", clearing.to_str().unwrap()],
+    )
+    .failure()
+    .stderr(predicates::str::contains("review_clearance = \"assessed\""));
+    assert!(debt_of(&repo, "clears").is_null());
 }

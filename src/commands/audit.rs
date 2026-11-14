@@ -39,6 +39,7 @@ impl IneligibleInputs {
         st: &ChangeState,
         subject: Option<&Patchset>,
         kind: Option<DebtMissing>,
+        judge: &ReadJudge<'_>,
     ) -> Result<Option<IneligibleRead>> {
         if kind != Some(DebtMissing::IneligibleReview) {
             if !self.is_empty() {
@@ -49,22 +50,17 @@ impl IneligibleInputs {
             }
             return Ok(None);
         }
-        let (qualifiers, route_version, assessment) = match &self.assessment {
-            Some(path) => {
-                let assessed = crate::assessment::read(path)?;
-                if assessed.independence == Independence::Eligible {
-                    bail!(
-                        "the assessment says the reviewer is eligible, so there is no \
-                         ineligible read to record; declare the debt with the kind its \
-                         ledger shows, or discharge it with the audit"
-                    );
-                }
-                (
-                    assessed.qualifiers,
-                    assessed.route_version,
-                    AssessmentBasis::Assessed,
-                )
-            }
+        let assessed = self
+            .assessment
+            .as_deref()
+            .map(crate::assessment::read)
+            .transpose()?;
+        let (qualifiers, route_version, assessment) = match &assessed {
+            Some(assessed) => (
+                assessed.qualifiers.clone(),
+                assessed.route_version.clone(),
+                AssessmentBasis::Assessed,
+            ),
             None if self.qualifiers.is_empty() => bail!(
                 "--kind ineligible-review needs why the read does not count: \
                  --assessment <agent-routing assess --json file>, or --qualifier <{}> \
@@ -124,6 +120,16 @@ impl IneligibleInputs {
                     )
                 })?,
         };
+        if let (Some(assessed), Some(subject)) = (assessed, subject) {
+            if judge.would_clear(st, &read, assessed, subject) {
+                bail!(
+                    "under this assessment read {read} clears the review an ineligible-review \
+                     debt would owe ({}), so there is no ineligible read to record; declare \
+                     the debt without --kind to record the kind the ledger derives",
+                    judge.clearance_name()
+                );
+            }
+        }
         Ok(Some(IneligibleRead {
             read,
             qualifiers,
@@ -131,6 +137,52 @@ impl IneligibleInputs {
             route_version,
             assessment,
         }))
+    }
+}
+
+/// What judges whether a named read would clear a declared debt: the
+/// destination's review clearance policy, the production the declaration
+/// records, and the `Implemented-by` values of the range it covers.
+pub(super) struct ReadJudge<'a> {
+    clearance: crate::policy::ReviewClearance,
+    production: Option<&'a crate::model::DebtProduction>,
+    implementers: Option<&'a [String]>,
+}
+
+impl ReadJudge<'_> {
+    /// Whether `read`, under `assessed` bound to its own observed or
+    /// recorded model and to the range's authors, discharges an
+    /// `ineligible-review` debt on `subject`. An undetermined judgment
+    /// answers `false`, which records the debt.
+    fn would_clear(
+        &self,
+        st: &ChangeState,
+        read: &str,
+        assessed: crate::assessment::Assessment,
+        subject: &Patchset,
+    ) -> bool {
+        let model = st
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.event_id == read)
+            .map(|verdict| verdict.observed_model.clone().or(verdict.model.clone()))
+            .or_else(|| {
+                st.audit_verdicts
+                    .iter()
+                    .find(|audit| audit.event_id == read)
+                    .map(|audit| audit.observed_model.clone().or(audit.model.clone()))
+            })
+            .flatten();
+        let bound = bind_assessment_to(model.as_deref(), assessed, self.implementers);
+        st.read_would_clear(read, &bound, subject, self.production, self.clearance)
+    }
+
+    fn clearance_name(&self) -> &'static str {
+        if self.clearance.is_assessed() {
+            "review_clearance = \"assessed\""
+        } else {
+            "independence decides without review_clearance"
+        }
     }
 }
 
@@ -475,21 +527,29 @@ fn plan_debt_of(
     };
     // The caller's kind wins: arc reads the ledger, and the ledger cannot
     // distinguish a merge resolution from a repair.
-    let ineligible = inputs.resolve(st, subject, kind)?;
+    // The destination's policy is read only where a judgment needs it.
+    let clearance = if (kind.is_none() && subject.is_some()) || inputs.assessment.is_some() {
+        ctx.declarations(st)?.policy.policy.review_clearance
+    } else {
+        crate::policy::ReviewClearance::default()
+    };
+    let ineligible = inputs.resolve(
+        st,
+        subject,
+        kind,
+        &ReadJudge {
+            clearance,
+            production: production.as_ref(),
+            implementers: production
+                .as_ref()
+                .and_then(|production| production.trailer_implementers.as_deref()),
+        },
+    )?;
     // Under the clearance policy an approval that only finds is the read the
     // obligation names, so the review it did not supply is owed as
     // `ineligible-review`.
     let findings = match (kind, subject) {
-        (None, Some(subject))
-            if ctx
-                .declarations(st)?
-                .policy
-                .policy
-                .review_clearance
-                .is_assessed() =>
-        {
-            st.findings_approval(subject)
-        }
+        (None, Some(subject)) if clearance.is_assessed() => st.findings_approval(subject),
         _ => None,
     };
     let (missing, ineligible) = match findings {

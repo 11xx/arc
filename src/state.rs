@@ -5705,10 +5705,70 @@ impl ChangeState {
         if read.verdict == Verdict::CommentOnly {
             return Some(DischargeBar::CommentOnly);
         }
+        self.judged_bar(
+            debt.missing,
+            debt.production.as_ref(),
+            shipped,
+            read,
+            self.review_clearance,
+        )
+    }
+
+    /// Whether the read `event_id` on `shipped`, judged under `assessment`
+    /// in place of the one it recorded, would discharge an
+    /// `ineligible-review` debt under `clearance`, the destination's review
+    /// clearance policy. `false` when there is no such read or its judgment
+    /// is not established.
+    pub fn read_would_clear(
+        &self,
+        event_id: &str,
+        assessment: &AuditAssessment,
+        shipped: &Patchset,
+        production: Option<&DebtProduction>,
+        clearance: crate::policy::ReviewClearance,
+    ) -> bool {
+        let read = self
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.event_id == event_id)
+            .map(Read::verdict)
+            .or_else(|| {
+                self.audit_verdicts
+                    .iter()
+                    .find(|audit| audit.event_id == event_id)
+                    .map(Read::audit)
+            });
+        let Some(mut read) = read else {
+            return false;
+        };
+        read.assessment = Some(assessment);
+        self.review_eligible(read.event_id, read.origin)
+            && read.verdict != Verdict::CommentOnly
+            && self
+                .judged_bar(
+                    Some(DebtMissing::IneligibleReview),
+                    production,
+                    shipped,
+                    &read,
+                    clearance,
+                )
+                .is_none()
+    }
+
+    /// Why `read`, judged by its reader's identity, model and assessment,
+    /// does not discharge a debt of kind `missing` under `clearance`.
+    fn judged_bar(
+        &self,
+        missing: Option<DebtMissing>,
+        production: Option<&DebtProduction>,
+        shipped: &Patchset,
+        read: &Read<'_>,
+        clearance: crate::policy::ReviewClearance,
+    ) -> Option<DischargeBar> {
         let tiebreak = crate::review_independence::tiebreak(
             self,
             shipped,
-            debt.production.as_ref(),
+            production,
             &crate::review_independence::Reader {
                 actor: read.author,
                 target: read.tiebreak_target,
@@ -5729,7 +5789,7 @@ impl ChangeState {
         )
         .is_some();
         let models = if tiebreak { &[][..] } else { &read.judged };
-        if self.read_uses_assessed(read, self.review_clearance) {
+        if self.read_uses_assessed(read, clearance) {
             if let Some(why) = self.read_clearance_gap(read) {
                 return Some(DischargeBar::FindingsRead(why));
             }
@@ -5741,14 +5801,14 @@ impl ChangeState {
             });
             let ladder_agent =
                 self.ladder_clearance(read).is_some() && !crate::coordinate::is_person(read.author);
-            if debt.missing == Some(DebtMissing::IneligibleReview) && !eligible && !ladder_agent {
+            if missing == Some(DebtMissing::IneligibleReview) && !eligible && !ladder_agent {
                 return Some(DischargeBar::NoEligibleAssessment);
             }
             if read.author_assumed {
                 return Some(DischargeBar::AuthorAssumed);
             }
             return self
-                .authorship_match(shipped, debt.production.as_ref(), read.author, models)
+                .authorship_match(shipped, production, read.author, models)
                 .map(DischargeBar::Authored);
         }
         if let Some(assessment) = read
@@ -5765,13 +5825,13 @@ impl ChangeState {
             assessment.independence == Independence::Eligible
                 && assessment.binding == Some(AuditorBinding::Bound)
         });
-        if debt.missing == Some(DebtMissing::IneligibleReview) && !cleared {
+        if missing == Some(DebtMissing::IneligibleReview) && !cleared {
             return Some(DischargeBar::NoEligibleAssessment);
         }
         if read.author_assumed {
             return Some(DischargeBar::AuthorAssumed);
         }
-        self.authorship_match(shipped, debt.production.as_ref(), read.author, models)
+        self.authorship_match(shipped, production, read.author, models)
             .map(DischargeBar::Authored)
     }
 }
