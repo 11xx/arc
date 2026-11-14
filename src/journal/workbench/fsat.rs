@@ -217,6 +217,25 @@ impl Dir {
         Ok(())
     }
 
+    /// Remove the file `name`.
+    pub(super) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
+        let c = c_name(name)?;
+        // SAFETY: the descriptor is open and `c` is NUL-terminated.
+        check(unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), 0) })?;
+        Ok(())
+    }
+
+    /// Rename `from` over `to`, both in this directory, replacing what
+    /// stands at `to` in one step: a reader opening `to` finds the old file
+    /// or the new one, never part of either.
+    pub(super) fn rename_over(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        let (from, to) = (c_name(from)?, c_name(to)?);
+        let fd = self.fd.as_raw_fd();
+        // SAFETY: the descriptor is open and both names are NUL-terminated.
+        check(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })?;
+        Ok(())
+    }
+
     /// Create the file `name`, refusing when anything is there already.
     pub(super) fn create_new(&self, name: &OsStr) -> io::Result<File> {
         let fd = self.open_at(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o666)?;

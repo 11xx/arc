@@ -29,7 +29,7 @@ use fsat::{Dir, Stat};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::{BufRead, Read, Seek, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
@@ -47,6 +47,10 @@ const INDEX: &str = "WORKBENCH.md";
 /// The first line of every index arc writes: what makes a `WORKBENCH.md`
 /// arc's to rewrite.
 const INDEX_MARKER: &str = "<!-- arc writes this index from the journal's records -->";
+
+/// Where a rewrite of an index is written before it takes the index's
+/// place, so no reader of `WORKBENCH.md` sees one half written.
+const INDEX_DRAFT: &str = ".WORKBENCH.md.arc-draft";
 
 /// Days with no recorded act and no changed file after which an open
 /// workbench is stale: the threshold `journal filed` applies to open items.
@@ -1015,8 +1019,10 @@ fn reindex(events: &[JournalEvent], event: JournalEvent, opened: Option<&Dir>, a
 
 /// Write the index of the workbench opened as `opened`, which lies at
 /// `at`, from `events`. A fresh index is created and never replaces
-/// anything; a rewrite replaces only an index carrying arc's marker,
-/// writing into the file it read.
+/// anything. A rewrite replaces only an index carrying arc's marker: the
+/// new text is written beside it, then renamed over it while it is still
+/// the file that was checked, so a reader finds the old index or the new
+/// one whole, and an interrupted rewrite leaves the old one.
 fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) -> Result<()> {
     let name = at
         .file_name()
@@ -1046,7 +1052,7 @@ fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) ->
     if fresh {
         return create();
     }
-    let mut file = match opened.open_file(OsStr::new(INDEX), true) {
+    let checked = match opened.open_file(OsStr::new(INDEX), false) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return create(),
         Err(_) => bail!(
@@ -1054,32 +1060,90 @@ fn write_index(events: &[JournalEvent], opened: &Dir, at: &Path, fresh: bool) ->
             index.display()
         ),
     };
-    let mut existing = String::new();
-    let _ = (&mut file)
-        .take(INDEX_MARKER.len() as u64 + 1)
-        .read_to_string(&mut existing);
-    if existing.lines().next() != Some(INDEX_MARKER) {
+    if !carries_marker(&checked) {
         bail!(
             "{} is not the index arc writes; arc leaves it as it is",
             index.display()
         );
     }
-    file.set_len(0)
-        .and_then(|()| file.rewind())
-        .and_then(|()| file.write_all(text.as_bytes()))
-        .with_context(|| format!("cannot write {}", index.display()))
+    let checked = checked
+        .metadata()
+        .with_context(|| format!("cannot read {}", index.display()))?;
+    let draft = at.join(INDEX_DRAFT);
+    write_draft(opened, &draft, &text)?;
+    let published = (|| -> Result<()> {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("ARC_TEST_WORKBENCH_INDEX_INTERRUPT").is_some() {
+            std::process::exit(9);
+        }
+        use std::os::unix::fs::MetadataExt;
+        let current = opened.entry(OsStr::new(INDEX))?;
+        if !current
+            .is_some_and(|current| current.dev == checked.dev() && current.ino == checked.ino())
+        {
+            bail!(
+                "{} changed while arc rewrote it; arc leaves it as it is",
+                index.display()
+            );
+        }
+        opened
+            .rename_over(OsStr::new(INDEX_DRAFT), OsStr::new(INDEX))
+            .with_context(|| format!("cannot replace {}", index.display()))
+    })();
+    if published.is_err() {
+        let _ = opened.remove_file(OsStr::new(INDEX_DRAFT));
+    }
+    published
 }
 
-/// Whether the index at the top of `opened` is one arc wrote.
-fn is_arc_index(opened: &Dir) -> bool {
-    let Ok(file) = opened.open_file(OsStr::new(INDEX), false) else {
-        return false;
-    };
+/// Write `text` to the draft beside an index, durably, so the rename that
+/// publishes it never publishes an empty file. A draft an interrupted
+/// rewrite left, which carries arc's marker, is replaced; any other file
+/// of that name is left as it is and stops the rewrite.
+fn write_draft(opened: &Dir, draft: &Path, text: &str) -> Result<()> {
+    let name = OsStr::new(INDEX_DRAFT);
+    let mut file = match opened.create_new(name) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let left = opened
+                .open_file(name, false)
+                .is_ok_and(|file| carries_marker(&file));
+            if !left {
+                bail!(
+                    "{} is not a draft arc wrote, and arc writes its index there first; arc leaves it as it is",
+                    draft.display()
+                );
+            }
+            opened
+                .remove_file(name)
+                .and_then(|()| opened.create_new(name))
+        }
+        created => created,
+    }
+    .with_context(|| format!("cannot create {}", draft.display()))?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    if let Err(error) = written {
+        let _ = opened.remove_file(name);
+        return Err(error).with_context(|| format!("cannot write {}", draft.display()));
+    }
+    Ok(())
+}
+
+/// Whether `file` begins with arc's marker line.
+fn carries_marker(file: &std::fs::File) -> bool {
     let mut first = String::new();
     std::io::BufReader::new(file.take(INDEX_MARKER.len() as u64 + 1))
         .read_line(&mut first)
         .is_ok()
         && first.trim_end_matches('\n') == INDEX_MARKER
+}
+
+/// Whether the index at the top of `opened` is one arc wrote.
+fn is_arc_index(opened: &Dir) -> bool {
+    opened
+        .open_file(OsStr::new(INDEX), false)
+        .is_ok_and(|file| carries_marker(&file))
 }
 
 /// What frees a workbench at `at` whose index name holds a file arc did

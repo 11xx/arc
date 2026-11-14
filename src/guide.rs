@@ -2251,7 +2251,9 @@ WORKBENCHES (working material in the journal)
   do not defeat a process that deliberately swaps directory entries during
   the call, which no rename here can prevent. A record prepared but not yet published is
   the second until the next journal write publishes it. A later act rewrites the index only while it
-  is the one arc wrote, and leaves any other `WORKBENCH.md` as it is.
+  is the one arc wrote, and leaves any other `WORKBENCH.md` as it is. The
+  rewrite is written beside it as `.WORKBENCH.md.arc-draft` and renamed over
+  it, so a reader finds the old index or the new one whole.
   `journal doctor` reports a recorded workbench whose directory is gone, in
   the other storage, or reached through a link out of the journal, a
   `workbench/` or an archive root that is a link, and a directory under

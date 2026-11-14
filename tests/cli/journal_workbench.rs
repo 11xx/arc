@@ -2090,3 +2090,88 @@ fn without_a_no_replace_rename_nothing_moves() {
         .exists());
     assert_eq!(listed(&repo, true)[0]["storage"], "hot");
 }
+
+/// Claim: a rewrite of a workbench's index never alters the file a reader
+/// already has open: that reader reads the old index whole while the path
+/// holds the new one. A rewrite interrupted before its draft takes the
+/// index's place leaves the old index whole, and the next act replaces the
+/// draft it left and publishes. A file at the draft's name that arc did not
+/// write is left as it is, and the index with it. Rejects an index
+/// truncated and rewritten in place, which an interruption leaves partial.
+#[test]
+fn an_index_rewrite_leaves_the_old_index_whole_until_the_new_one_replaces_it() {
+    use std::io::Read;
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "lane-fanout", "lane indexes and reports");
+    let index = path.join("WORKBENCH.md");
+    let draft = path.join(".WORKBENCH.md.arc-draft");
+    let opened = fs::read_to_string(&index).unwrap();
+    let mut reader = fs::File::open(&index).unwrap();
+    let (_, first) = journal_artifact(&repo, "first", "plan", "# First\n");
+    let link = |artifact: &str| {
+        let mut command = repo.arc(&repo.root);
+        command.args([
+            "journal",
+            "workbench",
+            "link",
+            "lane-fanout",
+            "--artifact",
+            artifact,
+        ]);
+        command
+    };
+    stdout(&mut link(&first));
+    let mut held = String::new();
+    reader.read_to_string(&mut held).unwrap();
+    assert_eq!(held, opened, "the open index changed under its reader");
+    let linked = fs::read_to_string(&index).unwrap();
+    assert!(
+        linked.contains(&format!("Linked artifacts: {first}")),
+        "{linked}"
+    );
+
+    let (_, second) = journal_artifact(&repo, "second", "plan", "# Second\n");
+    let interrupted = link(&second)
+        .env("ARC_TEST_WORKBENCH_INDEX_INTERRUPT", "1")
+        .output()
+        .unwrap();
+    assert_eq!(interrupted.status.code(), Some(9), "{interrupted:?}");
+    assert_eq!(fs::read_to_string(&index).unwrap(), linked);
+    assert!(fs::read_to_string(&draft).unwrap().contains(&second));
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "close",
+        "lane-fanout",
+        "--note",
+        "done",
+    ]));
+    let closed = fs::read_to_string(&index).unwrap();
+    assert!(closed.contains(&format!("{first}, {second}")), "{closed}");
+    assert!(closed.contains("State: closed"), "{closed}");
+    assert!(!draft.exists(), "the interrupted draft stayed");
+
+    let other = open_workbench(&repo, "probe-run", "probe output");
+    let foreign = other.join(".WORKBENCH.md.arc-draft");
+    fs::write(&foreign, "my own notes\n").unwrap();
+    let before = fs::read_to_string(other.join("WORKBENCH.md")).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "workbench",
+            "link",
+            "probe-run",
+            "--artifact",
+            &first,
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(stderr.contains("is not a draft arc wrote"), "{stderr}");
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), "my own notes\n");
+    assert_eq!(
+        fs::read_to_string(other.join("WORKBENCH.md")).unwrap(),
+        before
+    );
+}
