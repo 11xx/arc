@@ -670,7 +670,7 @@ pub struct Shell {
 pub fn shell(cwd: &Path) -> Result<Shell> {
     let Some(checkout) = slot_checkout(cwd) else {
         return Ok(Shell {
-            command: Command::new("sh"),
+            command: crate::child_command::command("sh"),
             report: None,
             control: None,
             _lease: None,
@@ -717,7 +717,8 @@ const STOP_FD: &str = "ARC_COMMAND_STOP_FD";
 fn held_shell(lease: Option<UseLease>, exclusive: Option<File>) -> Result<Shell> {
     let (read, write) = pipe_pair()?;
     let control = exclusive.as_ref().map(|_| pipe_pair()).transpose()?;
-    let mut command = Command::new(std::env::current_exe().context("cannot locate arc")?);
+    let mut command =
+        crate::child_command::command(std::env::current_exe().context("cannot locate arc")?);
     command
         .arg(HOLDER)
         .arg("sh")
@@ -824,7 +825,7 @@ pub fn holder_main() -> ! {
         started_ns: monotonic_ns(),
         ..Default::default()
     };
-    let mut command = Command::new(program);
+    let mut command = crate::child_command::command(program);
     command.args(rest).env_remove(STATUS_FD).env_remove(STOP_FD);
     if control.is_some() {
         command.process_group(0);
@@ -983,7 +984,7 @@ pub fn identity(checkout: &Path, declaration: &Declaration) -> Result<String> {
         return Ok(hex::encode(Sha256::digest(b"arc-slot-identity/1\nnone\n")));
     };
     let mut shell = Shell {
-        command: Command::new("sh"),
+        command: crate::child_command::command("sh"),
         report: None,
         control: None,
         _lease: None,

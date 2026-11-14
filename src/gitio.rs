@@ -80,12 +80,73 @@ fn git_program() -> &'static std::ffi::OsStr {
 
 pub fn git_command() -> Command {
     PROCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut command = Command::new(git_program());
+    let mut command = crate::child_command::command(git_program());
     command.env("GIT_NO_LAZY_FETCH", "1");
     command.env("GIT_EDITOR", "true");
     command.env("GIT_SEQUENCE_EDITOR", "true");
     command.env_remove("GIT_REFLOG_ACTION");
     command
+}
+
+/// Resolve a hook parent's repository once, before commands discard its Git
+/// environment. The selected administrative directory must belong to the
+/// checkout used for subsequent Git operations.
+pub fn invocation_directory(cwd: &Path) -> Result<PathBuf> {
+    let git_dir = std::env::var_os("GIT_DIR");
+    let work_tree = std::env::var_os("GIT_WORK_TREE");
+    if git_dir.is_none() && work_tree.is_none() {
+        return Ok(cwd.to_path_buf());
+    }
+    let mut discovery = git_command();
+    if let Some(dir) = &git_dir {
+        discovery.arg("--git-dir").arg(dir);
+    }
+    if let Some(tree) = &work_tree {
+        discovery.arg("--work-tree").arg(tree);
+    }
+    let output = discovery
+        .current_dir(cwd)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .counted_output()?;
+    if !output.status.success() {
+        bail!(
+            "cannot resolve the invoking Git repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let admin = fs::canonicalize(String::from_utf8(output.stdout)?.trim_end())?;
+    let explicit = work_tree.map(PathBuf::from).map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    });
+    let linked = fs::read_to_string(admin.join("gitdir"))
+        .ok()
+        .and_then(|path| {
+            PathBuf::from(path.trim_end())
+                .parent()
+                .map(Path::to_path_buf)
+        });
+    let conventional = (admin.file_name() == Some(std::ffi::OsStr::new(".git")))
+        .then(|| admin.parent().map(Path::to_path_buf))
+        .flatten();
+    for candidate in explicit
+        .into_iter()
+        .chain(std::iter::once(cwd.to_path_buf()))
+        .chain(linked)
+        .chain(conventional)
+        .chain(std::iter::once(admin.clone()))
+    {
+        if worktree_admin_dir(&candidate).is_ok_and(|actual| actual == admin) {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "the invoking Git directory {} has no discoverable checkout; run arc from its work tree",
+        admin.display()
+    )
 }
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -1358,7 +1419,7 @@ fn piped_output(
     input: &[u8],
     setup: impl FnOnce(&mut Command),
 ) -> Result<Vec<u8>> {
-    let mut command = Command::new(program);
+    let mut command = crate::child_command::command(program);
     setup(&mut command);
     piped_output_with(command, program, args, input)
 }
@@ -1738,19 +1799,23 @@ pub fn populate_checkout(path: &Path) -> Result<()> {
         _ => bail!("unsupported Git object format {format:?}"),
     };
     let head = git(path, &["rev-parse", "HEAD"])?;
-    git(
-        path,
-        &[
-            "hook",
-            "run",
-            "--ignore-missing",
-            "post-checkout",
-            "--",
-            &null_oid,
-            &head,
-            "1",
-        ],
-    )?;
+    let hook = git_path(path, "hooks")?.join("post-checkout");
+    use std::os::unix::fs::PermissionsExt;
+    if fs::metadata(&hook)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    {
+        let output = crate::child_command::command(&hook)
+            .args([&null_oid, &head, "1"])
+            .current_dir(path)
+            .counted_output()
+            .context("cannot run post-checkout hook")?;
+        if !output.status.success() {
+            bail!(
+                "post-checkout hook failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
     Ok(())
 }
 

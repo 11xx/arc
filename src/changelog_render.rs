@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -93,7 +93,7 @@ pub fn run(
         .checked_add(timeout)
         .with_context(|| format!("{role} timeout is too large"))?;
     let mut group = match OwnedGroup::spawn(
-        Command::new(program)
+        crate::child_command::command(program)
             .args(arguments)
             .current_dir(cwd)
             .stdin(if request.is_some() {

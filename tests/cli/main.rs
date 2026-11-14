@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "Fixtures own their subprocess environments."
+)]
+
 mod absent_actor;
 mod absent_identity;
 mod accept;
@@ -65,6 +70,7 @@ mod gate_reports;
 mod gate_reuse;
 mod gate_tiers;
 mod gate_together;
+mod git_environment;
 mod guide_bounds;
 mod hooks;
 mod implementer_trailers;

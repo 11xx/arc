@@ -116,7 +116,7 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
 
 /// `program`'s output, if it answers within `deadline`.
 fn run_within(program: &std::ffi::OsStr, deadline: Duration) -> Result<String, &'static str> {
-    run_command_within(Command::new(program), deadline)
+    run_command_within(crate::child_command::command(program), deadline)
 }
 
 fn run_command_within(mut command: Command, deadline: Duration) -> Result<String, &'static str> {

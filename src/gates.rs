@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// How long a declared probe may run when its gate declares no timeout.
@@ -1112,7 +1112,7 @@ fn selector_output(
             timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS),
         ))
         .context("gate selector timeout is too large")?;
-    let child = Command::new("sh")
+    let child = crate::child_command::command("sh")
         .arg("-c")
         .arg(selector)
         .current_dir(cwd)

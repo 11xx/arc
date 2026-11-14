@@ -1,8 +1,9 @@
 use std::path::PathBuf;
-use std::process::Command;
+#[path = "src/child_command.rs"]
+mod child_command;
 
 fn git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let output = child_command::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)
         .output()

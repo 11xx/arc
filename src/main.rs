@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod approval;
 mod artifacts;
 mod assessment;
@@ -11,6 +13,7 @@ mod candidate;
 mod chain;
 mod changelog_render;
 mod check_timings;
+mod child_command;
 mod commands;
 mod config;
 mod context;
@@ -6572,7 +6575,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         guide::show(topic.as_deref(), *all, search.as_deref(), cli_command())?;
         return Ok(0);
     }
-    let cwd = std::env::current_dir()?;
+    let cwd = gitio::invocation_directory(&std::env::current_dir()?)?;
+    std::env::set_current_dir(&cwd)?;
     // The environment is read here rather than through clap's `env`, so that
     // the flag and the variable stay distinguishable even when they carry the
     // same value.

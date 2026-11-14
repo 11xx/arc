@@ -672,15 +672,16 @@ fn start_warm(ctx: &Ctx) -> Result<Option<String>> {
         .mode(0o600)
         .open(&log)
         .with_context(|| format!("cannot open {}", log.display()))?;
-    let child = std::process::Command::new(std::env::current_exe().context("cannot locate arc")?)
-        .args(["slots", "warm", "--limit", "1"])
-        .current_dir(&checkout)
-        .stdin(std::process::Stdio::null())
-        .stdout(output.try_clone()?)
-        .stderr(output)
-        .process_group(0)
-        .spawn()
-        .context("cannot start arc slots warm")?;
+    let child =
+        crate::child_command::command(std::env::current_exe().context("cannot locate arc")?)
+            .args(["slots", "warm", "--limit", "1"])
+            .current_dir(&checkout)
+            .stdin(std::process::Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(output)
+            .process_group(0)
+            .spawn()
+            .context("cannot start arc slots warm")?;
     Ok(Some(format!(
         "started `arc slots warm --limit 1` (pid {}); its output is in {}",
         child.id(),

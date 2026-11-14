@@ -822,7 +822,7 @@ fn hook_outcome(
         .get("change_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    std::process::Command::new("sh")
+    crate::child_command::command("sh")
         .args(["-c", command])
         .env("ARC_EVENT_ID", event_id)
         .env("ARC_EVENT_TYPE", event_type)

@@ -146,7 +146,7 @@ fn parse(text: &str, asked: usize) -> Result<Answer, Reason> {
 /// What a child printed and whether it succeeded, or why it could not run.
 /// Routing prints its answer on stdout and a refusal document on stderr.
 fn run(author: &str, reads: &[String]) -> Result<Output, Reason> {
-    let mut command = Command::new("agent-routing");
+    let mut command = crate::child_command::command("agent-routing");
     command
         .args(["frontier", "--author", author])
         .args(if reads.is_empty() {

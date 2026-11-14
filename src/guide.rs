@@ -579,6 +579,18 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   the row speaks up once the anchor head has moved past it.
 
 SANDBOX (rehearse something destructive)
+  Commands arc runs on a project's behalf inherit no Git repository selectors
+  or command-scoped configuration: GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+  GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_COMMON_DIR,
+  GIT_NAMESPACE, GIT_PREFIX, GIT_CONFIG, GIT_CONFIG_COUNT and its numbered
+  keys and values, and GIT_CONFIG_PARAMETERS are removed. Gates, selectors,
+  probes, preparation, slot warming, renderers, explicit checkout hooks and
+  scratch-checkout commands share this boundary. Global and system Git
+  configuration still apply. A hook parent's GIT_DIR and GIT_WORK_TREE locate
+  arc's checkout once; subsequent Git calls use explicit directories. This
+  protects against inherited redirection, not commands that choose another
+  repository themselves.
+
   arc doctor             Reports the build commit and tracked-tree state
                          (clean, dirty, or unknown) in text and JSON.
                          Opens with the roots this invocation reads and

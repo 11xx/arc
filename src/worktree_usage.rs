@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The one measurement method implemented: `du`'s apparent size, the bytes
 /// the files claim.
@@ -483,7 +482,7 @@ struct FindmntRow {
 /// table by hand would be a second answer to a question the system already
 /// answers, and a wrong filesystem type is worse than none.
 fn mount_facts(path: &Path) -> Option<MountFacts> {
-    let output = Command::new("findmnt")
+    let output = crate::child_command::command("findmnt")
         .arg("-J")
         .arg("-T")
         .arg(path)
@@ -514,7 +513,7 @@ fn compresses(options: &str) -> bool {
 /// to be free. `-k` is explicit because `-P` alone leaves the block size to
 /// the implementation.
 fn df_facts(path: &Path) -> (Option<u64>, Option<String>) {
-    let Some(output) = Command::new("df")
+    let Some(output) = crate::child_command::command("df")
         .arg("-kP")
         .arg(path)
         .counted_output()
@@ -542,7 +541,7 @@ fn df_facts(path: &Path) -> (Option<u64>, Option<String>) {
 /// Total size of a directory tree, in bytes, via portable `du -sk`. A failed
 /// or absent `du` remains an unknown size, never a zero a reader would sum.
 fn du_bytes(cwd: &Path, path: &Path) -> Option<u64> {
-    let output = Command::new("du")
+    let output = crate::child_command::command("du")
         .arg("-sk")
         .arg(path)
         .current_dir(cwd)

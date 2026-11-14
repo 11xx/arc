@@ -75,6 +75,10 @@ paths = [
   "src/commands/slots.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
+  # Subprocess isolation prevents inherited Git state from reaching another repository.
+  "src/child_command.rs",
+  # Publication rejects constructors that bypass subprocess isolation.
+  "clippy.toml",
   # Batched answers `gitio` takes before running Git itself: ancestry,
   # cleanliness and merge outcomes a status report's readiness rests on. A
   # stale held answer reads as what Git would say now.

@@ -3,7 +3,6 @@ use crate::context::shell_quote;
 use crate::perf::Counted;
 use crate::policy;
 use crate::ExecutionRole;
-use std::process::Command;
 
 #[allow(clippy::too_many_arguments)]
 pub fn begin(
@@ -383,7 +382,7 @@ pub fn begin(
     /// worktree it reports on.
     fn free_bytes(path: &Path) -> Option<u64> {
         let probe = path.ancestors().find(|candidate| candidate.exists())?;
-        let output = Command::new("df")
+        let output = crate::child_command::command("df")
             .arg("-kP")
             .arg(probe)
             .counted_output()

@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 pub const WAITER: &str = "--arc-exclusive-wait";
@@ -104,7 +104,7 @@ pub fn acquire(
         }
         let fd = file.as_raw_fd();
         let parent = std::process::id();
-        let mut command = Command::new(std::env::current_exe()?);
+        let mut command = crate::child_command::command(std::env::current_exe()?);
         command
             .arg(WAITER)
             .arg(fd.to_string())
