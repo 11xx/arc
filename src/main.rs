@@ -4028,12 +4028,16 @@ enum GatesCmd {
     },
     /// Write budgets with headroom from serial rounds; see `arc guide gates`
     ///
-    /// Prints each gate's min, worst, spread and written budget. Operator policy
-    /// is untouched and no verification evidence is recorded.
+    /// Prints each gate's min, worst, spread and written budget, and names each
+    /// publication-only gate it skipped. Operator policy is untouched and no
+    /// verification evidence is recorded.
     Init {
         /// Number of measured rounds, greater than zero
         #[arg(long, default_value = "6", value_parser = clap::value_parser!(u32).range(1..))]
         runs: u32,
+        /// Also measure and budget publication-only gates, outside the total
+        #[arg(long)]
+        publication: bool,
     },
     /// Show the newest over-budget run, cost kinds, checks and the order of work
     Over {
@@ -6928,9 +6932,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 let reference = infer(None)?;
                 commands::raise_budget(&ctx, &reference, gate, total, &reason)
             }
-            Some(GatesCmd::Init { runs }) => {
+            Some(GatesCmd::Init { runs, publication }) => {
                 anyhow::ensure!(!json, "gates init does not accept --json");
-                commands::init_budgets(&ctx, runs)
+                commands::init_budgets(&ctx, runs, publication)
             }
             Some(GatesCmd::Over { change, gate }) => {
                 anyhow::ensure!(!json, "gates over does not accept --json");

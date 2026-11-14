@@ -897,7 +897,7 @@ fn budget_insertion(
     bail!("gate declaration has no writable table")
 }
 
-pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
+pub fn init_budgets(ctx: &Ctx, runs: u32, publication: bool) -> Result<i32> {
     anyhow::ensure!(runs > 0, "measurement rounds must be positive");
     let root = gitio::toplevel(&ctx.cwd)?;
     let file = root.join(".arc/gates.toml");
@@ -910,7 +910,21 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
         !declared.has_budgets(),
         "refusing to replace an existing budget"
     );
-    anyhow::ensure!(!declared.gates.is_empty(), "no gates declared");
+    let integration = |gate: &gates::Gate| {
+        gate.events.is_empty() || gate.events.contains(&GateEvent::Integration)
+    };
+    anyhow::ensure!(
+        declared.gates.values().any(integration),
+        "no integration gates declared"
+    );
+    let mut selected = BTreeMap::new();
+    for (name, gate) in &declared.gates {
+        if integration(gate) || publication {
+            selected.insert(name, gate);
+        } else {
+            println!("gate {name}: skipped, publication only; --publication budgets it");
+        }
+    }
     let source = original.as_deref().unwrap_or("");
     let document = toml_edit::ImDocument::parse(source)?;
     let operator: toml_edit::DocumentMut = operator_text.as_deref().unwrap_or("").parse()?;
@@ -921,7 +935,7 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
     };
     let mut measurements: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for round in 1..=runs {
-        for (name, gate) in &declared.gates {
+        for (name, gate) in &selected {
             let run = super::gatekeeping::measure_gate(gate, name, &root)?;
             anyhow::ensure!(
                 run.status.success() && !run.timed_out && !run.admission_expired,
@@ -933,7 +947,10 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
                 .run_ms
                 .context("command run_ms unavailable; no budgets written")?;
             println!("gate {name} {round}/{runs}: run_ms={measured}");
-            measurements.entry(name.clone()).or_default().push(measured);
+            measurements
+                .entry(name.to_string())
+                .or_default()
+                .push(measured);
         }
     }
     let mut total = 0_u64;
@@ -943,9 +960,11 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
         let min = samples[0];
         let max = samples[samples.len() - 1];
         let measured = initial_budget_ms(min, max)?;
-        total = total
-            .checked_add(measured)
-            .context("budget total overflow")?;
+        if integration(&declared.gates[&name]) {
+            total = total
+                .checked_add(measured)
+                .context("budget total overflow")?;
+        }
         let value = toml_edit::Value::from(format!("{measured}ms"));
         if document.get("gates").and_then(|g| g.get(&name)).is_some() {
             insertions.push(budget_insertion(
@@ -973,9 +992,14 @@ pub fn init_budgets(ctx: &Ctx, runs: u32) -> Result<i32> {
             )?);
         }
         println!(
-            "gate {name}: budget {} from {runs} rounds; min {min}ms, worst {max}ms, spread {}ms",
+            "gate {name}: budget {} from {runs} rounds; min {min}ms, worst {max}ms, spread {}ms{}",
             crate::gate_budget::duration(measured),
-            max - min
+            max - min,
+            if integration(&declared.gates[&name]) {
+                ""
+            } else {
+                "; publication only, outside the total"
+            }
         );
     }
     let mut text = source.to_owned();

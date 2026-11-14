@@ -539,7 +539,8 @@ fn initialization_single_round_has_rounded_headroom() {
 }
 
 /// Claim: init inserts budgets while preserving every existing byte, including
-/// comments, ordering, spacing and line endings. Rejects reserialization of the
+/// comments, ordering, spacing and line endings, and a publication-only gate it
+/// was asked to budget stays out of the total. Rejects reserialization of the
 /// author's declaration or mistaking table-like text in a command for a header.
 #[test]
 fn initialization_preserves_the_authored_declaration() {
@@ -550,7 +551,7 @@ fn initialization_preserves_the_authored_declaration() {
         let text = stdout(
             repo.arc(&repo.root)
                 .env("ARC_TEST_COMMAND_RUN_MS", "1000")
-                .args(["gates", "init", "--runs", "1"]),
+                .args(["gates", "init", "--runs", "1", "--publication"]),
         );
         let written = fs::read_to_string(repo.root.join(".arc/gates.toml")).unwrap();
         let expected = original
@@ -562,11 +563,67 @@ fn initialization_preserves_the_authored_declaration() {
                 &format!("command='true' # fast{newline}"),
                 &format!("command='true' # fast{newline}budget = \"1100ms\"{newline}"),
             )
-            + &format!("[budget]{newline}total = \"2200ms\"{newline}");
+            + &format!("[budget]{newline}total = \"1100ms\"{newline}");
         assert_eq!(written, expected, "init rewrote authored bytes");
-        assert!(text.contains("budget total: 2.2s"), "{text}");
+        assert!(text.contains("budget total: 1.1s"), "{text}");
         assert!(!repo.root.join(".git/arc/config.json").exists());
     }
+}
+
+/// Claim: init measures and budgets the integration gates of every profile,
+/// sets the total from those budgets, and skips and names each
+/// publication-only gate unless `--publication` asks for it, which budgets it
+/// outside the total. Rejects running or budgeting a publication-only gate
+/// unasked, counting one in the total, or skipping one silently.
+#[test]
+fn initialization_budgets_integration_gates_and_names_skipped_publication_gates() {
+    let declaration = "[gates.unit]\ncommand='true'\nprofiles=['local']\n\
+                       [gates.lint]\ncommand='true'\nprofiles=['ci']\n\
+                       [gates.release]\ncommand='printf x >> released'\nevents=['publication']\n";
+    let repo = Repo::new();
+    repo.redeclare_gates(declaration);
+    let text = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+            .args(["gates", "init", "--runs", "1"]),
+    );
+    assert!(
+        text.contains("gate release: skipped, publication only; --publication budgets it"),
+        "{text}"
+    );
+    assert!(!repo.root.join("released").exists(), "{text}");
+    let report = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    let budget = |report: &Value, name: &str| {
+        report["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == name)
+            .unwrap()["budget_ms"]
+            .clone()
+    };
+    assert_eq!(budget(&report, "unit"), 1100);
+    assert_eq!(budget(&report, "lint"), 1100);
+    assert!(budget(&report, "release").is_null(), "{report}");
+    assert_eq!(report["budget_rules"]["total"], 2200);
+    assert_eq!(report["budget_errors"], json!([]));
+
+    let asked = Repo::new();
+    asked.redeclare_gates(declaration);
+    let text = stdout(
+        asked
+            .arc(&asked.root)
+            .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+            .args(["gates", "init", "--runs", "1", "--publication"]),
+    );
+    assert!(!text.contains("skipped"), "{text}");
+    assert!(
+        text.contains("gate release: budget 1.1s from 1 rounds; min 1000ms, worst 1000ms, spread 0ms; publication only, outside the total"),
+        "{text}"
+    );
+    let report = json_stdout(asked.arc(&asked.root).args(["gates", "--json"]));
+    assert_eq!(budget(&report, "release"), 1100);
+    assert_eq!(report["budget_rules"]["total"], 2200);
 }
 
 /// Claim: inline and dotted gate declarations receive budgets without changing

@@ -5905,10 +5905,13 @@ GATE COSTS
   Every required integration gate needs a budget when enforcement keys exist
   in that table; a landing-only table requires no individual budgets.
 
-  `arc gates init [--runs N]` measures six serial rounds by default. A budget
-  is worst run_ms plus spread (max minus min), at least 105% of worst, rounded
-  up to two significant digits (minimum 1ms). Total is their sum, with no
-  batch discount. Every other byte of .arc/gates.toml is kept. Operator-only
+  `arc gates init [--runs N] [--publication]` measures six serial rounds of
+  every gate that runs at integration, in any profile, by default. A
+  publication-only gate is skipped and named unless `--publication` asks for
+  it. A budget is worst run_ms plus spread (max minus min), at least 105% of
+  worst, rounded up to two significant digits (minimum 1ms). Total is the
+  sum of the integration gates' budgets, with no batch discount, and leaves
+  publication-only budgets out. With no integration gate it refuses. Every other byte of .arc/gates.toml is kept. Operator-only
   gates are copied into the project. Existing budgets, failed or unmeasured
   rounds, or declaration edits during measurement refuse without writing.
   `arc gates over [CHANGE] [--gate G]` shows the newest measured run exceeding
@@ -6089,8 +6092,8 @@ GATE ROUNDS
   7. Stop at a named floor, as below.
   8. Raise the budget last, within the change's allowance:
      `arc gates raise <gate> --reason <text>`.
-  9. Prove it. `arc gates init` runs six serial rounds of every gate and
-     writes budgets from them; a failed round writes nothing. Where budgets
+  9. Prove it. `arc gates init` runs six serial rounds of every integration
+     gate and writes budgets from them; a failed round writes nothing. Where budgets
      are declared it refuses: `arc gates measure --runs 6` measures six runs
      of each gate, every gate's worst run must fit its budget, and a budget
      may be lowered by hand (`arc guide gate-raises`). The budgets must fit
