@@ -2996,7 +2996,26 @@ impl Store {
     /// refuses one.
     pub fn holds_change(&self, change_id: &str) -> Result<bool> {
         ids::validate_id_component(change_id)?;
-        if self.events_dir(change_id).is_dir() {
+        // Absence is the one answer that is not an error: a directory that
+        // cannot be examined, or a link standing where one should be, is a
+        // ledger that cannot be read. Both the change's directory and the
+        // events directory beneath it are examined without following links.
+        let events = self.events_dir(change_id);
+        let mut present = true;
+        for dir in [self.changes_dir().join(change_id), events] {
+            match fs::symlink_metadata(&dir) {
+                Ok(found) if found.is_dir() => {}
+                Ok(_) => bail!("{} is not a directory of this ledger", dir.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    present = false;
+                    break;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot read {}", dir.display()))
+                }
+            }
+        }
+        if present {
             return Ok(true);
         }
         Ok(self

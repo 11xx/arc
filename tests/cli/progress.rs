@@ -1215,7 +1215,8 @@ fn a_pass_recorded_before_a_rewrite_does_not_verify_the_rewritten_head() {
 
 /// Claim: an item linked to a change this ledger does not hold reads
 /// `unknown` and the report still prints. Rejects failing the whole report
-/// for one absent change, as a ledger that cannot be read does.
+/// for one absent change, and reading a link in the change's place as either
+/// an absent change or the history it points at.
 #[test]
 fn an_item_whose_change_the_ledger_does_not_hold_reads_unknown() {
     let repo = Repo::new();
@@ -1226,7 +1227,19 @@ fn an_item_whose_change_the_ledger_does_not_hold_reads_unknown() {
     );
     let change = opened_change_id(&begun);
     assert_eq!(stage(&repo, &file, "i1")["stage"], "opened");
-    fs::remove_dir_all(repo.root.join(".git/arc/changes").join(&change)).unwrap();
+    let held = repo.root.join(".git/arc/changes").join(&change);
+    let aside = repo.home.join("change-aside");
+    fs::rename(&held, &aside).unwrap();
     assert_eq!(stage(&repo, &file, "i1")["stage"], "unknown");
     assert_eq!(stage(&repo, &file, "i2")["stage"], "open");
+
+    // A link standing where the change's directory should be is a ledger
+    // that cannot be read, not an absent change and not a way to another's
+    // history.
+    std::os::unix::fs::symlink(&aside, &held).unwrap();
+    repo.arc(&repo.root)
+        .args(["progress", &file, "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a directory of this ledger"));
 }
