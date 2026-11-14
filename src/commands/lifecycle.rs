@@ -20,6 +20,7 @@ pub fn begin(
     blocked_by: Vec<String>,
     tags: Vec<String>,
     from_journal: Option<String>,
+    item: Option<String>,
     from_fork: Option<String>,
     dangerous: bool,
     iterating: bool,
@@ -50,6 +51,10 @@ pub fn begin(
     let journal_ref_digest = from_journal
         .as_deref()
         .map(|filename| crate::journal::artifact_digest(ctx, filename))
+        .transpose()?;
+    let item = item
+        .as_deref()
+        .map(|spec| super::progress::preflight_begin_item(ctx, spec))
         .transpose()?;
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
@@ -530,6 +535,11 @@ pub fn begin(
         }
     }
     drop(journal_transition);
+    if let Some(item) = &item {
+        if let Err(error) = super::progress::link_opened(ctx, item, &change_id) {
+            eprintln!("warning: could not link the change to its progress item: {error:#}");
+        }
+    }
     crate::journal::auto_log(ctx, slug, &format!("opened change {change_id}"));
     // Opening a change is the moment a directory provably becomes an arc
     // project, and the journal root is what makes projects enumerable. Record

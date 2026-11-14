@@ -221,6 +221,10 @@ FROM A WORKSPACE ROOT (outside a project)
                        project, and the operator journal's when unscoped
                        (arc guide journal-references). Exits 16 when a
                        journal cannot be read. `arc-workspace-pins/1`.
+  arc workspace progress [--here|--under PATH] [--json]
+                       Each project's active progress series in full
+                       (arc guide progress). Exits 16 when a journal cannot
+                       be read. `arc-workspace-progress/1`.
   arc workspace report [--previous FILE] [--library] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
@@ -6704,6 +6708,64 @@ SLOTS
   status and recovery output. Compiler freshness after a switch stays with
   the project's build, as for path-stable storage.
 
+PROGRESS
+  `arc progress` answers "where does this series of work stand?" for whoever
+  asks. It is pulled, never pushed: no other command prints it, and no
+  status, check, catchup, advisory or hook carries a line of it.
+
+  A series is a journal artifact of kind `progress`, written by
+  `arc progress start <topic> --title T [--follows <plan>] [--item T]...`.
+  It needs no plan; `--follows` records the one it follows. Its items are
+  journal events on it, one per edit, each with its time; nothing is
+  rewritten. Items have short ids (`i1`, `i2`, ...) that survive renames.
+  Edits, each one call on `<series>`, named by filename or topic:
+    add <title> [--before|--after <item>]   rename <item> <title>
+    move <item> --before|--after <item>     drop <item> --reason R
+    done <item> [--note N]                  reopen <item> [--note N]
+    link <item> <change>                    unlink <item>
+    split <item> --into T --into T... --reason R
+  `done` and `reopen` are for items no change carries. A linked item's
+  stage is the ledger's: `arc begin <slug> --item <series>:<item>` links when
+  the change opens. A dropped or split item stays visible and leaves the
+  count; a split's parts follow it in the list.
+
+  Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, from the
+  change in this project's ledger at the moment of reading: `opened`,
+  `committed` (commits beyond its base), `snapshotted`, `gates-green` (every
+  required gate green at the newest patchset), `changes-requested`,
+  `approved` or `commented` (a verdict on the newest patchset), `landed`
+  (with its time and revision), `closed` (closed without integrating). The
+  report also names who holds a live claim on the change and how many review
+  rounds asked for changes. Nothing about external runners is read.
+
+  The share complete is a count: landed and done items over the items that
+  stand, printed as counts first and one percentage after. No estimate of
+  time, no weighting. The report also says how many items were declared at
+  the start and how many were added, dropped and split since.
+
+  `arc progress` prints every series of this project that is not retired, in
+  full, one block per series under a `==` header line; `arc progress
+  <series>` narrows to one and reads a retired series too. After the local
+  blocks come any open journal questions that wait on a person.
+
+  Related series. `arc progress relate <series> <project>::<series>` records,
+  in this journal only, that a series relates to one in another registered
+  project, named by slug or label as other cross-project journal references
+  are. The same call in the other project makes it mutual; until then the
+  block's `related:` line, directly under its header, says `one-sided`. Each
+  related series then prints after the local ones as a compact `--` block:
+  its counts, last landing and in-flight items, read from that project's
+  journal events and ledger only. A related journal that cannot be read
+  prints one line and fails nothing. Relations share no items and roll up no
+  percentage.
+
+  `arc progress retire <series> --by <conclusion>` records the series as
+  `consumed`, outcome `superseded`, naming the conclusion as what resolved it.
+  A retired series leaves the default listing, stays readable by name, and
+  refuses further edits. `arc workspace progress` prints every registered
+  project's active series. `--json` prints `arc-progress/1` and
+  `arc-workspace-progress/1`.
+
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
   change takes one new version per release, counted from the last release:
@@ -6779,6 +6841,8 @@ SCHEMAS
     `arc-workspace-report/3`         arc workspace report|watch; projects[].git_health; optional library
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-pins/1`           arc workspace pins --json
+    `arc-progress/1`                 arc progress --json
+    `arc-workspace-progress/1`       arc workspace progress --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/2`            arc sandbox clone --json
@@ -7150,6 +7214,7 @@ KEEP WHAT YOU LEARN
   arc journal memory             project facts; --global for operator practices
   arc journal workbench <slug>   working material a later session or lane reads;
                                  a cache directory holds only what can be rebuilt
+  arc progress                   where each series of work stands, on request
 
 END A SESSION
   arc journal handoff <topic> --derive   for unfinished work
@@ -7168,7 +7233,7 @@ GO DEEPER
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files
-  gates gates-together base-passes slots schemas boundaries
+  gates gates-together base-passes slots progress schemas boundaries
 "#;
 
 pub fn print() {
@@ -7330,6 +7395,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "gate-raises", family: "gates", title: "Budget raises and trusted growth counting", start: "GATE RAISES" },
     Section { name: "base-passes", family: "base-passes", title: "Project adoption, baseline proofs and publication audits", start: "BASE PASSES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },
+    Section { name: "progress", family: "progress", title: "Where a series of work stands, read on request", start: "PROGRESS" },
     Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
     Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },
 ];

@@ -38,6 +38,7 @@ pub(crate) mod guide_topics;
 mod page;
 mod pins;
 mod private_text;
+pub(crate) mod series;
 mod workbench;
 pub(crate) use workbench::{
     copy_for_sandbox as copy_workbenches_for_sandbox, copy_open as copy_open_file,
@@ -170,10 +171,14 @@ impl JournalKind {
 // new semantics get a new name.
 const RETIRED_JOURNAL_KINDS: [&str; 3] = ["done", "inbox", "spec"];
 
+/// Every kind an artifact name may carry. A progress series is written only
+/// by `arc progress start`, so it is recognized here without being a kind any
+/// journal verb writes.
 fn recognized_journal_kinds() -> impl Iterator<Item = &'static str> {
     JournalKind::value_variants()
         .iter()
         .map(|kind| kind.as_str())
+        .chain([series::KIND])
         .chain(RETIRED_JOURNAL_KINDS)
 }
 
@@ -9296,6 +9301,11 @@ pub(crate) struct JournalEvent {
     /// Where an adopted workbench's material lay before adoption moved it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopted_from: Option<String>,
+    /// What a progress series' events carry: the plan a series follows, the
+    /// item an `item-*` event acts on and where it goes, a split's parts, a
+    /// linked change, and a related series.
+    #[serde(flatten)]
+    series: series::SeriesFields,
 }
 
 /// A change opened in one project from an artifact another project's journal
@@ -9595,6 +9605,7 @@ impl JournalEvent {
             files: None,
             bytes: None,
             adopted_from: None,
+            series: series::SeriesFields::default(),
         }
     }
 
@@ -9966,6 +9977,9 @@ impl JournalEvent {
             | "workbench-closed"
             | "workbench-archived"
             | "workbench-unarchived" => workbench::well_formed(self),
+            "item-added" | "item-renamed" | "item-moved" | "item-dropped" | "item-done"
+            | "item-reopened" | "item-linked" | "item-unlinked" | "item-split"
+            | "series-related" => series::well_formed(self),
             _ => false,
         }
     }
@@ -11031,6 +11045,9 @@ fn event_message(event: &JournalEvent) -> String {
                 .unwrap_or_default()
         ),
         kind if kind.starts_with("workbench-") => workbench::event_message(event),
+        kind if kind.starts_with("item-") || kind == "series-related" => {
+            series::event_message(event)
+        }
         _ => String::new(),
     }
 }

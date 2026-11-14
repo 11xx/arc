@@ -442,6 +442,12 @@ enum Cmd {
         /// given --journal-ref
         #[arg(long = "from-journal")]
         from_journal: Option<String>,
+        /// Link the opened change to an item of a progress series,
+        /// `<series>:<item>` (see `arc progress link`). Checked before
+        /// anything is written; an item linked to an open or integrated
+        /// change is refused
+        #[arg(long, value_name = "SERIES:ITEM")]
+        item: Option<String>,
         /// Open by promoting a fork's work onto a new branch, recording the
         /// fork slug and the source base, head, and tree. Recovery adoption
         /// requires an explicit --base. The fork keeps its
@@ -3626,6 +3632,15 @@ enum Cmd {
         #[command(flatten)]
         write: journal::KindWrite,
     },
+    /// Where each series of work stands: its items, their stages, and what
+    /// waits on a person. Read on request; nothing else prints it.
+    ///
+    /// A series is a `progress` journal artifact whose items are journal
+    /// events, one per edit. A linked item's stage is derived from its change
+    /// in this project's ledger. Without an argument, every series not
+    /// retired, each in full, then each related series of another project in
+    /// compact form. Versioned `arc-progress/1`. See `arc guide progress`.
+    Progress(commands::progress::ProgressArgs),
     /// Cross-harness project and operator journals over plain Markdown.
     ///
     /// Events replay in append order; timestamps record observation time. Project reads
@@ -4156,6 +4171,29 @@ enum WorkspaceCmd {
         here: bool,
         /// Report every registered project and the operator journal, the
         /// default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Every project's active progress series, each in full as `arc progress`
+    /// prints it, grouped by project.
+    ///
+    /// It accepts the same `--under`/`--here`/`--global` scope. Retired
+    /// registrations are skipped; relations are named without reading the
+    /// related series, which the workspace lists in its own project. A
+    /// journal or ledger that cannot be read is named on stderr and the
+    /// command exits 16, keeping the projects it did read. Versioned
+    /// `arc-workspace-progress/1`. Records no events.
+    Progress {
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
         #[arg(long, conflicts_with_all = ["under", "here"])]
         global: bool,
         /// Emit the machine-readable JSON view instead of text
@@ -6812,6 +6850,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             blocked_by,
             tag,
             from_journal,
+            item,
             from_fork,
             dangerous,
             iterating,
@@ -6831,6 +6870,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 blocked_by,
                 tag,
                 from_journal,
+                item,
                 from_fork,
                 dangerous,
                 iterating,
@@ -8771,6 +8811,17 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     },
                     json,
                 ),
+                WorkspaceCmd::Progress {
+                    under,
+                    here,
+                    global: _,
+                    json,
+                } => (
+                    commands::WorkspaceView::Progress {
+                        scope: workspace_scope(under, here)?,
+                    },
+                    json,
+                ),
                 WorkspaceCmd::Inventory {
                     storage,
                     retired,
@@ -8875,6 +8926,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             json,
         } => commands::catchup(&ctx, limit, sessions, json),
         Cmd::Fr { write } => journal::feature_request(&ctx, write),
+        Cmd::Progress(args) => commands::progress::run(&ctx, args),
         Cmd::Journal { cmd, global } => journal::run(&ctx, cmd, global),
     }
 }
@@ -8973,6 +9025,18 @@ mod tests {
             "hooks uninstall",
             "hook-run",
             "fr",
+            "progress start",
+            "progress add",
+            "progress rename",
+            "progress move",
+            "progress drop",
+            "progress done",
+            "progress reopen",
+            "progress link",
+            "progress unlink",
+            "progress split",
+            "progress relate",
+            "progress retire",
             "journal bind",
             "journal spool",
             "journal note",

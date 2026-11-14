@@ -339,6 +339,11 @@ acknowledged_safe = [
   # Projects journal pins into labelled guide text; writes no state and grants
   # no workflow authority.
   "src/journal/guide_topics.rs",
+  # Progress series: items are advisory journal events, and the report reads
+  # the ledger to describe stages. Nothing reads either to decide a merge, and
+  # a defect renders a wrong list rather than a wrong integration.
+  "src/journal/series.rs",
+  "src/commands/progress.rs",
   # CLI acceptance probes write only isolated fixture journals.
   "tests/cli/guide_topics.rs",
   # The journal and the liveness signals over it are advisory by construction:

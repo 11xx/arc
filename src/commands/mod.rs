@@ -34,6 +34,7 @@ pub(crate) mod messaging;
 mod observe;
 mod pass;
 mod policy_cmd;
+pub mod progress;
 mod publication;
 pub use publication::publication;
 pub(crate) mod provisional;
@@ -247,6 +248,8 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "workspace report",
     "workspace watch",
     "workspace pins",
+    "workspace progress",
+    "progress",
     "restack",
     "journal dir",
     "journal doctor",
