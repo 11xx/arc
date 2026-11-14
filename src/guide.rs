@@ -591,6 +591,14 @@ SANDBOX (rehearse something destructive)
   protects against inherited redirection, not commands that choose another
   repository themselves.
 
+  Git configuration health is reported as problems by `arc doctor`, in one
+  line by `arc catchup`, and per registered project by `arc workspace report`.
+  Local user.name and user.email require [git] allow_local_identity = true
+  in the checkout's .arc/policy.toml. A checkout or linked worktrees with
+  core.bare = true, and local commit.gpgsign or tag.gpgsign = false overriding
+  global signing, are problems regardless of that exception. Config includes
+  and worktree scope are inspected together; diagnostics never repair config.
+
   arc doctor             Reports the build commit and tracked-tree state
                          (clean, dirty, or unknown) in text and JSON.
                          Opens with the roots this invocation reads and
@@ -1260,6 +1268,15 @@ RUN A CHANGE
   discharge at exists. Each contributor is its own `--contributors=`
   argument; one the flag cannot spell exactly, because it holds a comma or
   edge whitespace, is left as a placeholder the line names.
+
+  `snapshot` and `integrate` refuse a patchset containing a commit whose raw
+  author or committer address uses .invalid, .example, .test, .localhost,
+  example.com, example.org or example.net, including subdomains. A snapshot
+  base override cannot hide introduced commits. Integration checks recorded
+  patchsets too, including provisional preparation and multi-change landings.
+  The refusal names the commit and explains how to re-author it with a real
+  identity before taking a fresh snapshot. A project's identity-health
+  exception does not permit reserved commit addresses.
 
   `arc rebase` is what `check` names when the selected integration shape
   requires replay onto the target. Where Git can, arc performs the replay
@@ -5339,6 +5356,7 @@ FILES
   `arc doctor` reports an unreadable or malformed policy as the problem
   `policy-unreadable`, naming its file and error, and exits 1.
 
+    [git] allow_local_identity = true           identity health exception; arc guide sandbox
     [policy] forbid_self_approval = true
     [policy] require_declared_actor = true
     [policy] debt_count_threshold = <n>          debt turns advisory past n
@@ -6445,7 +6463,7 @@ SCHEMAS
     `arc-assurance/1`                arc query --assurance --json
     `arc-check/4`                    arc check --json
     `arc-inbox/11`                   arc inbox --json
-    `arc-catchup/12`                 arc catchup --json
+    `arc-catchup/12`                 arc catchup --json; git_health config problems
     `arc-journal-catchup/9`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
     `arc-explain/2`                  arc explain --json
@@ -6494,7 +6512,7 @@ SCHEMAS
     `arc-perf/1`                     ARC_TRACE=1, one line on stderr at exit
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
-    `arc-workspace-report/3`         arc workspace report|watch; optional projects[].library
+    `arc-workspace-report/3`         arc workspace report|watch; projects[].git_health; optional library
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-pins/1`           arc workspace pins --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json
@@ -6944,7 +6962,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "change-bundles", family: "change", title: "History export, objects and custody", start: "  Change history checksums hash compact JSON with recursively sorted object" },
     Section { name: "change-gates", family: "change", title: "Gate execution and atomic review input", start: "  A gate runs where its change lives. `verify`, `snapshot --verify`, `done`," },
     Section { name: "probes", family: "probes", title: "Acceptance probes and brief bases", start: "  Each acceptance probe declared on the patchset's brief blocks readiness" },
-    Section { name: "change-integration", family: "change", title: "Replay, integration shapes and shipped evidence", start: "  `arc rebase` is what `check` names when the selected integration shape" },
+    Section { name: "change-integration", family: "change", title: "Replay, integration shapes and shipped evidence", start: "  `snapshot` and `integrate` refuse a patchset containing a commit whose raw" },
     Section { name: "change-landing", family: "change", title: "Landings and must-land-together relations", start: "  Some changes must reach their target together or not at all. `arc metadata" },
     Section { name: "cleanup", family: "cleanup", title: "Integration cleanup and retained checkouts", start: "  `integration.cleanup` governs branch and worktree cleanup after integration" },
     Section { name: "change-finalization", family: "change", title: "Retention, checkouts and release copy", start: "  Integration prints the integrated revision and closure event before" },

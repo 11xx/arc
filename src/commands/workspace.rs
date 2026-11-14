@@ -2639,7 +2639,14 @@ fn workspace_report(
         Some(path) => Some(previous_report(path, &collected.scope.view())?),
         None => None,
     };
-    let report = build_report(ctx, &mut collected, &ledgers, failures, previous.as_ref())?;
+    let report = build_report(
+        ctx,
+        &mut collected,
+        &ledgers,
+        failures,
+        previous.as_ref(),
+        &mut Default::default(),
+    )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -2682,6 +2689,7 @@ fn build_report(
     ledgers: &BTreeMap<String, report::LedgerFacts>,
     mut failures: Vec<CollectionFailure>,
     previous: Option<&serde_json::Value>,
+    health: &mut std::collections::HashMap<PathBuf, Vec<crate::git_health::Finding>>,
 ) -> Result<report::Report> {
     let backlog = serde_json::to_value(&collected.backlog)?;
     let mut fates = BTreeMap::new();
@@ -2803,6 +2811,7 @@ fn build_report(
         .filter_map(|project| Some((project.project.as_str(), project.library.as_ref()?)))
         .collect();
     report.attach_libraries(&libraries);
+    report.attach_git_health(health);
     Ok(report)
 }
 
@@ -3710,6 +3719,7 @@ mod report {
         project: String,
         anchor: Option<String>,
         journal_dir: Option<String>,
+        git_health: Vec<crate::git_health::Finding>,
         work: u64,
         proposals: u64,
         parked: u64,
@@ -3966,6 +3976,7 @@ mod report {
             let items = project.get("items").unwrap_or(&Value::Null);
             let mut summary = ProjectSummary {
                 library: None,
+                git_health: Vec::new(),
                 project: name.clone(),
                 anchor: opt_text(project, "anchor"),
                 journal_dir: journal_dir.clone(),
@@ -4453,6 +4464,27 @@ mod report {
     }
 
     impl Report {
+        pub(super) fn attach_git_health(
+            &mut self,
+            health: &mut std::collections::HashMap<
+                std::path::PathBuf,
+                Vec<crate::git_health::Finding>,
+            >,
+        ) {
+            for project in &mut self.projects {
+                if let Some(anchor) = project.anchor.as_deref() {
+                    let anchor = std::path::Path::new(anchor);
+                    project.git_health = health
+                        .entry(anchor.to_path_buf())
+                        .or_insert_with(|| match super::has_git_repository(anchor) {
+                            Ok(false) => Vec::new(),
+                            _ => crate::git_health::problems(anchor),
+                        })
+                        .clone();
+                }
+            }
+        }
+
         pub(super) fn attach_libraries(&mut self, libraries: &BTreeMap<&str, &super::Library>) {
             for project in &mut self.projects {
                 project.library = libraries
@@ -4463,6 +4495,14 @@ mod report {
 
         /// A compact text summary; `--json` carries every row.
         pub(crate) fn render(&self) {
+            for project in &self.projects {
+                for finding in &project.git_health {
+                    println!(
+                        "Git config problem  {}  {}  {}",
+                        project.project, finding.code, finding.detail
+                    );
+                }
+            }
             if !self.sections.unfinished_provisional_integrations.is_empty() {
                 println!("Unfinished provisional integrations:");
                 for row in &self.sections.unfinished_provisional_integrations {

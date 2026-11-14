@@ -34,6 +34,7 @@ mod gate_concurrency;
 mod gate_diagnostics;
 mod gate_raise;
 mod gates;
+mod git_health;
 mod gitio;
 mod guide;
 mod ids;
@@ -1736,6 +1737,8 @@ enum Cmd {
     },
     /// Record the current branch head as a patchset with explicit base and brief binding.
     ///
+    /// Refuses reserved-domain author or committer addresses in introduced commits,
+    /// regardless of --base; see `arc guide change-integration` for the domains and re-authoring.
     /// Accept preserves the delivered binding and contributor declaration through
     /// signature-only preparation; snapshots record evidence, never a judgment. A head
     /// whose rewrite invalidated approval requires a fresh patchset, even when the latest
@@ -2665,6 +2668,8 @@ enum Cmd {
     /// Guarded integration of one change, or of a dependency-ordered queue named
     /// by several changes or by --tag.
     ///
+    /// Refuses recorded patchsets with reserved-domain author or committer addresses;
+    /// see `arc guide change-integration` for the domains and re-authoring.
     /// Integration runs where the target is checked out. That checkout's tracked
     /// modifications refuse, staged or unstaged. Untracked or ignored paths
     /// integration does not write are left in place and named in the report; a
@@ -3482,6 +3487,8 @@ enum Cmd {
     /// `clearance-keeps-debt-owed`, naming the change, the debt, that read and the debt's
     /// findings reads.
     ///
+    /// Git identity, bare checkout and signing problems are included; the scoped
+    /// project exception and shared orientation views are defined in `arc guide sandbox`.
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,
     /// with the error on stderr and no report; a usage error exits 2.
@@ -4268,7 +4275,7 @@ enum WorkspaceCmd {
     /// notices it sleeps on one inotify watch and holds no Git process.
     ///
     /// Only arc's own writes reach the feed. A commit made outside arc, a
-    /// moved branch, or a vanished anchor shows at the next refresh, and
+    /// moved branch, Git configuration change, or a vanished anchor shows at the next refresh, and
     /// ages count from the read that gave each project's row.
     ///
     /// Each standard input line is one `arc-workspace-watch-request/1` JSON
@@ -6454,6 +6461,16 @@ fn main() {
         exclusive::waiter_main();
     }
     perf::start();
+    let invocation = (|| -> Result<()> {
+        let cwd = gitio::invocation_directory(&std::env::current_dir()?)?;
+        std::env::set_current_dir(cwd)?;
+        Ok(())
+    })();
+    if let Err(error) = invocation {
+        eprintln!("error: {error:#}");
+        perf::emit(perf::Outcome::Error, Some(1));
+        std::process::exit(1);
+    }
 
     let (cli, reads_only) = match parse_cli() {
         Ok(parsed) => parsed,
@@ -6575,8 +6592,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         guide::show(topic.as_deref(), *all, search.as_deref(), cli_command())?;
         return Ok(0);
     }
-    let cwd = gitio::invocation_directory(&std::env::current_dir()?)?;
-    std::env::set_current_dir(&cwd)?;
+    let cwd = std::env::current_dir()?;
     // The environment is read here rather than through clap's `env`, so that
     // the flag and the variable stay distinguishable even when they carry the
     // same value.

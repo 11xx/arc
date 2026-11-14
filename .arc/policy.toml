@@ -79,6 +79,10 @@ paths = [
   "src/child_command.rs",
   # Publication rejects constructors that bypass subprocess isolation.
   "clippy.toml",
+  # Commit identity admission and configuration health reject contamination.
+  "src/git_health.rs",
+  # Guard witnesses must not report unsafe repository access as green.
+  "tests/cli/git_environment.rs",
   # Batched answers `gitio` takes before running Git itself: ancestry,
   # cleanliness and merge outcomes a status report's readiness rests on. A
   # stale held answer reads as what Git would say now.

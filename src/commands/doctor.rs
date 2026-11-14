@@ -104,7 +104,13 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         .ok()
         .flatten()
         .unwrap_or_default();
-    let mut problems = Vec::new();
+    let mut problems: Vec<Finding> = crate::git_health::problems(&ctx.cwd)
+        .into_iter()
+        .map(|finding| Finding {
+            code: finding.code,
+            detail: finding.detail,
+        })
+        .collect();
     let mut advice = Vec::new();
     if Store::repository_id_at(&root).is_err() {
         problems.push(Finding {
@@ -201,7 +207,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
             }
         }
     }
-    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    let toplevel = crate::git_health::checkout_root(&ctx.cwd)?;
     let mut landing_costs = super::gate_reports::landing::Costs::new(&toplevel, true)?;
     for (id, events) in &readable {
         let integrated_at = states

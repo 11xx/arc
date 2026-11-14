@@ -507,6 +507,8 @@ fn plan(
                 format!("{} has no patchset; snapshot it first", member.change_id),
             );
         };
+        crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
+        crate::git_health::guard_patchset(&ctx.cwd, &target_before, &patchset.head)?;
         if gitio::branch_head(&ctx.cwd, &member.branch).ok().as_deref() != Some(&patchset.head) {
             return refuse(
                 Blocker::NoValidApproval.exit_code(),

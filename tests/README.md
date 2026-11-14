@@ -54,3 +54,10 @@ Markdown embedded in the executable is source and remains covered. `.arc/` is
 protected by the selection contract. Cross-change base passes require committed
 destination adoption and an eligible baseline; declaration changes require fresh
 execution. See `arc guide gates` and `arc guide base-passes`.
+
+Fixture identity exemptions require a debug executable, the explicit
+`ARC_TEST_FIXTURE_IDENTITY=1` flag, and `arc-test-fixture` in that repository's
+common Git directory. They permit fixture commit addresses and suppress only the
+seeded local Tester identity in health reports. Release executables enforce the
+ordinary identity rules. Git environment guard tests remove the flag to exercise
+product refusals.

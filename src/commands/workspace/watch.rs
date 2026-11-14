@@ -140,6 +140,7 @@ struct Watch<'a> {
     /// Each reported project's ledger facts and the failures reading them,
     /// by journal directory.
     facts: HashMap<PathBuf, (Option<report::LedgerFacts>, Vec<CollectionFailure>)>,
+    health: HashMap<PathBuf, Vec<crate::git_health::Finding>>,
     previous: Option<serde_json::Value>,
     /// The last report emitted, serialized without its observation.
     emitted: Option<Vec<u8>>,
@@ -167,6 +168,7 @@ impl<'a> Watch<'a> {
             journals: HashMap::new(),
             rows: HashMap::new(),
             facts: HashMap::new(),
+            health: HashMap::new(),
             previous: None,
             emitted: None,
             hot: Vec::new(),
@@ -345,6 +347,7 @@ impl<'a> Watch<'a> {
             crate::gitio::retain_range_paths(|_| false);
             self.rows.clear();
             self.facts.clear();
+            self.health.clear();
             self.hot.clear();
         }
         let mut stale: BTreeSet<PathBuf> = BTreeSet::new();
@@ -431,6 +434,7 @@ impl<'a> Watch<'a> {
             &ledgers,
             failures,
             self.previous.as_ref(),
+            &mut self.health,
         );
         self.rows = collected
             .backlog

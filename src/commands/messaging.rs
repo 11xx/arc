@@ -1150,6 +1150,10 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         crate::journal::resolve_dir(&ctx.cwd)?;
         None
     };
+    let git_health = store
+        .as_ref()
+        .map(|_| crate::git_health::problems(&ctx.cwd))
+        .unwrap_or_default();
     let replica = store.as_ref().map(crate::replica::status).transpose()?;
     let (mut inbox, reports) = match &store {
         Some(store) => collect_inbox_with_reports(ctx, store, None)?,
@@ -1189,6 +1193,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": "arc-catchup/12",
+                "git_health": git_health,
                 "ledger": store.as_ref().map(|_| &inbox),
                 "journal": journal.as_ref().ok(),
                 "replica": replica,
@@ -1210,6 +1215,16 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         return Ok(0);
     }
 
+    if !git_health.is_empty() {
+        println!(
+            "Git config problems: {} (arc doctor)",
+            git_health
+                .iter()
+                .map(|finding| finding.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
     crate::context::render_build_warning(&ctx.cwd);
     let debts = collect_debts(ctx, &states)?;
     let review_queue = store

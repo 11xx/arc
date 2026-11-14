@@ -651,6 +651,7 @@ pub(super) fn snapshot_holding(
     } = request;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let (default_base, merge_base) = patchset_base(ctx, &st, &head)?;
+    crate::git_health::guard_patchset(&ctx.cwd, &st.target_branch, &head)?;
     let base_rev = match base {
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
         None => default_base,

@@ -5622,6 +5622,12 @@ fn integration_history_with_policy(
     if st.is_closed() {
         return Ok(());
     }
+    if let Some(patchset) = st.latest_patchset() {
+        crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
+        if patchset.base != target_revision {
+            crate::git_health::guard_patchset(&ctx.cwd, target_revision, &patchset.head)?;
+        }
+    }
     if policy.contribution.is_some() || policy.integration_history != crate::policy::History::Squash
     {
         return Ok(());

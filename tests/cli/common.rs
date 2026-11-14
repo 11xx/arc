@@ -150,6 +150,7 @@ impl Repo {
                 self._tmp.path().as_os_str().to_os_string(),
             ),
             ("ARC_ACTOR", "tester".into()),
+            ("ARC_TEST_FIXTURE_IDENTITY", "1".into()),
             ("ARC_HARNESS", "test".into()),
             ("ARC_SESSION", "session-a".into()),
             (
@@ -499,6 +500,9 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&st.stderr)
     );
+    if args == ["config", "user.email", "tester@example.invalid"] && cwd.join(".git").is_dir() {
+        fs::write(cwd.join(".git/arc-test-fixture"), "").unwrap();
+    }
 }
 
 pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> String {
@@ -681,6 +685,7 @@ fn arc_command(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: St
         .env("HOME", &repo.home)
         .env("ARC_SANDBOX", &repo.home)
         .env("ARC_ACTOR", "tester")
+        .env("ARC_TEST_FIXTURE_IDENTITY", "1")
         .env("ARC_HARNESS", "test")
         .env("ARC_SESSION", session)
         .envs(NO_EDITOR)
