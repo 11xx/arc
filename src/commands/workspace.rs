@@ -401,7 +401,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
         WorkspaceView::Pins { scope } => workspace_pins(scope, json),
         WorkspaceView::Progress { scope } => {
             let scope = ResolvedWorkspaceScope::resolve(scope)?;
-            super::progress::workspace(ctx, |anchor| scope.includes(anchor), scope.view(), json)
+            super::progress::workspace(|anchor| scope.includes(anchor), scope.view(), json)
         }
         WorkspaceView::Backlog {
             since,

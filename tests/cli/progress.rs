@@ -69,23 +69,28 @@ fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
     fs::canonicalize(root).unwrap()
 }
 
-/// Claim: a linked item's stage is derived from its change at every read:
-/// it follows the change through commits, a snapshot, green gates, a review
-/// that asked for changes (counted as a round), a fresh snapshot, approval
-/// and integration, with its landing time and revision, while no progress
-/// write happens after the link. A change whose target's declarations cannot
-/// be read stays `snapshotted`, since its requirements are unknown. Rejects
-/// a stage that is written rather than derived, that stops following the
-/// change at any step, or that reads unknown requirements as green.
+/// Claim: a linked item's stage is what its change's events record, read
+/// afresh at every report with no progress write after the link: `opened`,
+/// `snapshotted` once a patchset is recorded, `verified` once a pass is
+/// recorded at it, `reviewed` with the verdict and the rounds that asked for
+/// changes, back to `snapshotted` on a new patchset, and `integrated` with
+/// its time and revision. A failure recorded after a pass at the same
+/// patchset takes the stage back to `snapshotted`. Rejects a stage written
+/// rather than recorded, one that stops following the change, and one that
+/// keeps an earlier pass after a later recorded failure.
 #[test]
 fn a_linked_items_stage_follows_its_change_without_a_progress_write() {
     let repo = Repo::new();
-    repo.redeclare_gates("[gates.unit]\ncommand = \"true\"\n");
+    let flag = repo.home.join("gate-fails");
+    repo.redeclare_gates(&format!(
+        "[gates.unit]\ncommand = \"test ! -e {}\"\n",
+        flag.display()
+    ));
     let file = start(
         &repo,
         &repo.root,
         "ship",
-        &["Wire the reader", "Behind a lost target"],
+        &["Wire the reader", "Fails after passing"],
     );
     let begun = stdout(
         repo.arc(&repo.root)
@@ -99,13 +104,17 @@ fn a_linked_items_stage_follows_its_change_without_a_progress_write() {
 
     let worktree = repo.home.join(".worktrees").join("repo-reader");
     repo.commit(&worktree, "reader.txt", "one\n", "feat: reader");
-    assert_eq!(stage(&repo, &file, "i1")["stage"], "committed");
+    assert_eq!(
+        stage(&repo, &file, "i1")["stage"],
+        "opened",
+        "a commit is not a ledger record"
+    );
 
     stdout(repo.arc(&worktree).args(["snapshot", "reader"]));
     assert_eq!(stage(&repo, &file, "i1")["stage"], "snapshotted");
 
     stdout(repo.arc(&worktree).args(["verify", "reader", "--all"]));
-    assert_eq!(stage(&repo, &file, "i1")["stage"], "gates-green");
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "verified");
 
     stdout(repo.arc(&worktree).args([
         "review",
@@ -116,7 +125,8 @@ fn a_linked_items_stage_follows_its_change_without_a_progress_write() {
         "executor",
     ]));
     let row = stage(&repo, &file, "i1");
-    assert_eq!(row["stage"], "changes-requested");
+    assert_eq!(row["stage"], "reviewed");
+    assert_eq!(row["verdict"], "changes-requested");
     assert_eq!(row["changes_requested_rounds"], 1);
 
     repo.commit(&worktree, "reader.txt", "two\n", "fix: reader");
@@ -126,50 +136,51 @@ fn a_linked_items_stage_follows_its_change_without_a_progress_write() {
     assert_eq!(row["changes_requested_rounds"], 1);
 
     stdout(repo.arc(&worktree).args(["verify", "reader", "--all"]));
+    assert_eq!(stage(&repo, &file, "i1")["stage"], "verified");
     stdout(
         repo.arc(&worktree)
             .args(["review", "reader", "--verdict", "approved"]),
     );
-    assert_eq!(stage(&repo, &file, "i1")["stage"], "approved");
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["stage"], "reviewed");
+    assert_eq!(row["verdict"], "approved");
 
     stdout(repo.arc(&repo.root).args(["integrate", "reader"]));
     let row = stage(&repo, &file, "i1");
-    assert_eq!(row["stage"], "landed");
-    assert!(row["landed_at"].is_string(), "{row}");
+    assert_eq!(row["stage"], "integrated");
+    assert!(row["integrated_at"].is_string(), "{row}");
     assert_eq!(row["revision"], repo.head(&repo.root).as_str());
     let report = report(&repo, &repo.root, &[]);
     let counts = &series(&report, &file)["counts"];
+    assert_eq!(counts["integrated"], 1);
     assert_eq!(counts["complete"], 1);
     assert_eq!(counts["percent"], 50);
-    assert_eq!(series(&report, &file)["last_landing"]["item"], "i1");
+    assert_eq!(series(&report, &file)["last_integration"]["item"], "i1");
 
-    assert_eq!(
-        item_events(&dir),
-        writes,
-        "the stage moved through a progress write rather than the ledger"
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "flaky", "--item", "ship:i2"]),
     );
-
-    git(&repo.root, &["branch", "side", "master"]);
-    stdout(repo.arc(&repo.root).args([
-        "begin",
-        "lost-target",
-        "--target",
-        "side",
-        "--item",
-        "ship:i2",
-    ]));
-    let worktree = repo.home.join(".worktrees").join("repo-lost-target");
-    git(&worktree, &["rm", "-q", ".arc/gates.toml"]);
-    git(
-        &worktree,
-        &["commit", "-q", "-m", "chore: drop declarations"],
+    let worktree = repo.home.join(".worktrees").join("repo-flaky");
+    repo.commit(&worktree, "flaky.txt", "one\n", "feat: flaky");
+    stdout(repo.arc(&worktree).args(["snapshot", "flaky"]));
+    stdout(repo.arc(&worktree).args(["verify", "flaky", "--all"]));
+    assert_eq!(stage(&repo, &file, "i2")["stage"], "verified");
+    fs::write(&flag, "").unwrap();
+    stdout_any_status(
+        repo.arc(&worktree)
+            .args(["verify", "flaky", "--all", "--rerun"]),
     );
-    stdout(repo.arc(&worktree).args(["snapshot", "lost-target"]));
-    git(&repo.root, &["branch", "-D", "side"]);
     assert_eq!(
         stage(&repo, &file, "i2")["stage"],
         "snapshotted",
-        "requirements the target cannot be read for were read as green"
+        "a pass outlived the failure recorded after it"
+    );
+
+    assert_eq!(
+        item_events(&dir),
+        writes + 1,
+        "the stage moved through a progress write rather than the ledger"
     );
 }
 
@@ -663,7 +674,7 @@ fn progress_json_has_the_arc_progress_1_shape() {
             &[
                 ("items", "number"),
                 ("complete", "number"),
-                ("landed", "number"),
+                ("integrated", "number"),
                 ("done", "number"),
                 ("in_flight", "number"),
                 ("open", "number"),
@@ -1036,6 +1047,72 @@ fn unrelate_removes_the_relation_here() {
         .args(["progress", "unrelate", "here", "other::there"])
         .assert()
         .failure();
+}
+
+/// Claim: `arc workspace progress` reports a project whose ledger cannot be
+/// opened as a failure and exits 16, naming the project. Rejects a ledger
+/// error read as an `unknown` stage, which would report a broken ledger as
+/// a series in good order.
+#[test]
+fn workspace_progress_fails_on_a_ledger_it_cannot_open() {
+    let repo = Repo::new();
+    start(&repo, &repo.root, "broken", &["Linked"]);
+    let change = begin_change(&repo, "broken-work", None);
+    progress(&repo, &repo.root, &["link", "broken", "i1", &change]);
+    let config = repo.root.join(".git/arc/config.json");
+    assert!(config.is_file(), "{}", config.display());
+    fs::write(&config, "{ not json").unwrap();
+
+    let output = repo
+        .arc(&repo.root)
+        .args(["workspace", "progress", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(16), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let failures = value["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{value}");
+    assert!(
+        failures[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read the ledger"),
+        "{value}"
+    );
+    assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// Claim: a related series whose project's ledger cannot be opened prints
+/// one `unavailable` line naming the ledger, and the report still exits 0
+/// with the local series in full. Rejects a ledger error that fails the
+/// local report, and one shown as a related block of `unknown` stages.
+#[test]
+fn a_related_series_with_an_unreadable_ledger_is_unavailable() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    start(&repo, &repo.root, "here", &["Local"]);
+    let there = start(&repo, &other, "there", &["Remote"]);
+    let change = begin_change_in(&repo, &other, "remote-work");
+    progress(&repo, &other, &["link", "there", "i1", &change]);
+    progress(&repo, &repo.root, &["relate", "here", "other::there"]);
+    let config = other.join(".git/arc/config.json");
+    assert!(config.is_file(), "{}", config.display());
+    fs::write(&config, "{ not json").unwrap();
+
+    let output = repo.arc(&repo.root).arg("progress").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("== here"), "{text}");
+    let unavailable: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("unavailable"))
+        .collect();
+    assert_eq!(unavailable.len(), 1, "{text}");
+    assert!(
+        unavailable[0].contains(&format!("::{there}")) && unavailable[0].contains("ledger"),
+        "{text}"
+    );
+    assert!(!text.contains("unknown"), "{text}");
 }
 
 /// Claim: a superseded consumption records a successor only when its

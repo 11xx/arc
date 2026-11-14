@@ -3636,8 +3636,9 @@ enum Cmd {
     /// waits on a person. Read on request; nothing else prints it.
     ///
     /// A series is a `progress` journal artifact whose items are journal
-    /// events, one per edit. A linked item's stage is derived from its change
-    /// in this project's ledger. Without an argument, every series not
+    /// events, one per edit. A linked item's stage is what its change's
+    /// events in this project's ledger record; `arc status` is the live
+    /// reading. Without an argument, every series not
     /// retired, each in full, then each related series of another project in
     /// compact form. Versioned `arc-progress/1`. See `arc guide progress`.
     Progress(commands::progress::ProgressArgs),

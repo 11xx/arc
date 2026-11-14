@@ -1,9 +1,11 @@
 //! `arc progress`: where each series of work stands, read on request.
 //!
 //! The list of items is the journal's (see `journal::series`). Everything
-//! else a report shows is read from the ledger at the moment it is asked
-//! for: a linked item's stage, who holds its change, and when it landed.
-//! Nothing here runs unless a caller asks; no other command prints it.
+//! else a report shows is what the ledger has recorded when it is asked: a
+//! linked item's stage, who holds its change, and when it was integrated. A
+//! stage is a record, never a live judgement; `arc status` is the live
+//! reading. Nothing here runs unless a caller asks; no other command prints
+//! it.
 
 use super::Ctx;
 use crate::journal::series::{self, ItemState, Placement, RelatedSeries, Series, SinceStart};
@@ -190,7 +192,9 @@ pub enum ProgressCmd {
     ///
     /// Records `consumed` with outcome `superseded`, naming the conclusion
     /// as what resolved it. A retired series leaves the default listing,
-    /// stays readable by name, and refuses further writes.
+    /// stays readable by name, and refuses further `arc progress` edits. The
+    /// journal's own amendments still apply to it, as to every consumed
+    /// artifact (see `arc guide progress`).
     Retire {
         /// Series filename or topic
         series: String,
@@ -433,31 +437,39 @@ fn relate(ctx: &Ctx, name: &str, target: &str) -> Result<()> {
 }
 
 /// The relation a series records that `target` names. The project matches
-/// the recorded slug, or the slug a registered project of that label or slug
-/// has; the series matches the recorded filename or its topic. Nothing in the
-/// other project is read, so a relation to a project that is gone can still
-/// be removed.
+/// the recorded slug, or else the slug the registry gives a project of that
+/// label; the series matches the recorded filename or its topic. Neither the
+/// other project's journal events nor its ledger is read, so a relation to a
+/// project that is gone can still be removed by its slug.
 fn recorded_relation(ctx: &Ctx, name: &str, target: &str) -> Result<RelatedSeries> {
     let Some((prefix, other)) = target.split_once("::") else {
         bail!("unrelate takes <project>::<series>; got {target:?}");
     };
     let here = crate::journal::resolve_dir(&ctx.cwd)?;
     let local = series::named_series(&here, name)?;
-    let registered = crate::journal::registered_project(prefix)
-        .ok()
-        .map(|project| project.slug);
-    let matches: Vec<&RelatedSeries> = local
+    let names_series = |relation: &&RelatedSeries| {
+        relation.file == other
+            || crate::journal::parse_artifact_name(&relation.file)
+                .is_some_and(|(_, topic, _)| topic == other)
+    };
+    let mut matches: Vec<&RelatedSeries> = local
         .related
         .iter()
-        .filter(|relation| {
-            relation.project == prefix || registered.as_deref() == Some(relation.project.as_str())
-        })
-        .filter(|relation| {
-            relation.file == other
-                || crate::journal::parse_artifact_name(&relation.file)
-                    .is_some_and(|(_, topic, _)| topic == other)
-        })
+        .filter(|relation| relation.project == prefix)
+        .filter(names_series)
         .collect();
+    // A label is not what the relation records, so only then is the
+    // registry asked which slug it names.
+    if matches.is_empty() {
+        if let Ok(project) = crate::journal::registered_project(prefix) {
+            matches = local
+                .related
+                .iter()
+                .filter(|relation| relation.project == project.slug)
+                .filter(names_series)
+                .collect();
+        }
+    }
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
         [] => bail!("{} does not relate to {target}", local.file),
@@ -490,23 +502,27 @@ fn own_slug(cfg: &crate::config::Config, dir: &Path) -> Option<String> {
 struct ItemRow {
     id: String,
     title: String,
-    /// One word. Unlinked: `open`, `done`, `dropped` or `split`. Linked:
-    /// `opened`, `committed`, `snapshotted`, `gates-green`,
-    /// `changes-requested`, `approved`, `commented`, `landed`, or `closed`
-    /// for a change closed without integrating; `unknown` when this
-    /// project's ledger has no such change.
+    /// One word. Unlinked: `open`, `done`, `dropped` or `split`. Linked,
+    /// as the change's events record it: `opened`, `snapshotted`,
+    /// `verified`, `reviewed`, `integrated`, or `closed` for a change closed
+    /// without integrating; `unknown` when this project's ledger has no such
+    /// change.
     stage: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     change: Option<String>,
+    /// For a `reviewed` item, the verdict on the newest patchset:
+    /// `approved`, `changes-requested` or `comment-only`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<&'static str>,
     /// Who holds a live claim on the change.
     #[serde(skip_serializing_if = "Option::is_none")]
     held_by: Option<String>,
     /// Review rounds on the change that asked for changes.
     #[serde(skip_serializing_if = "is_zero")]
     changes_requested_rounds: usize,
-    /// When the change landed, and the revision it landed as.
+    /// When the change was integrated, and the revision it integrated as.
     #[serde(skip_serializing_if = "Option::is_none")]
-    landed_at: Option<String>,
+    integrated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     revision: Option<String>,
     /// The reason or note recorded with a done, dropped, split or reopened item.
@@ -522,7 +538,11 @@ fn is_zero(value: &usize) -> bool {
 
 impl ItemRow {
     fn in_flight(&self) -> bool {
-        self.change.is_some() && !matches!(self.stage, "landed" | "closed" | "dropped" | "split")
+        self.change.is_some()
+            && !matches!(
+                self.stage,
+                "integrated" | "closed" | "dropped" | "split" | "unknown"
+            )
     }
 }
 
@@ -531,9 +551,9 @@ impl ItemRow {
 struct Counts {
     /// Items that stand: every item but the dropped and the split.
     items: usize,
-    /// Landed and done items, the share's numerator.
+    /// Integrated and done items, the share's numerator.
     complete: usize,
-    landed: usize,
+    integrated: usize,
     done: usize,
     in_flight: usize,
     /// Standing items no change carries and nobody marked done.
@@ -547,7 +567,7 @@ struct Counts {
 }
 
 #[derive(Serialize, Clone)]
-struct Landing {
+struct Integration {
     item: String,
     at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -581,7 +601,7 @@ struct SeriesReport {
     items: Vec<ItemRow>,
     counts: Counts,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_landing: Option<Landing>,
+    last_integration: Option<Integration>,
 }
 
 /// A related series from another project, in compact form.
@@ -603,7 +623,7 @@ struct RelatedReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     counts: Option<Counts>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_landing: Option<Landing>,
+    last_integration: Option<Integration>,
     in_flight: Vec<ItemRow>,
 }
 
@@ -630,20 +650,20 @@ struct ProgressReport {
 type Opener = Box<dyn Fn() -> Result<Option<Store>>>;
 
 /// One project's ledger as a report reads it: opened only when an item is
-/// linked into it, and then read one linked change at a time, so what the
-/// report costs follows its linked items and not the size of the ledger.
+/// linked into it, and then read one linked change at a time. A stage is what
+/// the ledger last recorded for the change; nothing here judges the change
+/// live, runs Git, or reads gate declarations.
 struct Ledger {
-    ctx: Ctx,
+    label: String,
     opener: Opener,
-    store: std::cell::OnceCell<Option<Store>>,
+    store: std::cell::OnceCell<std::result::Result<Option<Store>, String>>,
 }
 
 impl Ledger {
     /// The ledger of the checkout `ctx` stands in.
     fn local(ctx: &Ctx) -> Self {
-        let anchor = crate::gitio::toplevel(&ctx.cwd).unwrap_or_else(|_| ctx.cwd.clone());
-        let cwd = anchor.clone();
-        Self::new(ctx, &anchor, move || {
+        let cwd = ctx.cwd.clone();
+        Self::new(&ctx.cwd, move || {
             if crate::gitio::toplevel(&cwd).is_err() {
                 return Ok(None);
             }
@@ -653,9 +673,9 @@ impl Ledger {
 
     /// The ledger of the project at `anchor`, wherever the configuration
     /// keeps it.
-    fn at(ctx: &Ctx, anchor: &Path) -> Self {
+    fn at(anchor: &Path) -> Self {
         let path = anchor.to_path_buf();
-        Self::new(ctx, anchor, move || {
+        Self::new(anchor, move || {
             if !path.is_dir() {
                 return Ok(None);
             }
@@ -667,67 +687,51 @@ impl Ledger {
         })
     }
 
-    fn new(ctx: &Ctx, anchor: &Path, opener: impl Fn() -> Result<Option<Store>> + 'static) -> Self {
+    /// A project with no ledger to read.
+    fn none(place: &Path) -> Self {
+        Self::new(place, || Ok(None))
+    }
+
+    fn new(place: &Path, opener: impl Fn() -> Result<Option<Store>> + 'static) -> Self {
         Self {
-            ctx: ctx.with_cwd(anchor.to_path_buf()),
+            label: place.display().to_string(),
             opener: Box::new(opener),
             store: std::cell::OnceCell::new(),
         }
     }
 
-    fn store(&self) -> Option<&Store> {
-        self.store
-            .get_or_init(|| {
-                (self.opener)().unwrap_or_else(|error| {
-                    eprintln!(
-                        "warning: cannot read the ledger of {}: {error:#}",
-                        self.ctx.cwd.display()
-                    );
-                    None
-                })
-            })
-            .as_ref()
-    }
-
-    /// One change's state, from that change's own events and the
-    /// repository-wide records every reduction reads.
-    fn state(&self, change: &str) -> Option<ChangeState> {
-        self.store()?.state(change).ok()
-    }
-
-    /// Whether every gate the change answers to is green at its newest
-    /// patchset. Requirements that cannot be read are not green: a target
-    /// whose declarations are unreadable leaves them unknown, and unknown
-    /// is never read as none.
-    fn gates_green(&self, state: &ChangeState) -> bool {
-        let Ok(declarations) = crate::declarations::for_change(&self.ctx.cwd, state) else {
-            return false;
-        };
-        if declarations.target_unreadable {
-            return false;
+    fn store(&self) -> Result<Option<&Store>> {
+        match self
+            .store
+            .get_or_init(|| (self.opener)().map_err(|error| format!("{error:#}")))
+        {
+            Ok(store) => Ok(store.as_ref()),
+            Err(error) => bail!("cannot read the ledger of {}: {error}", self.label),
         }
-        let dependencies = crate::status::BlockerStatus {
-            schema: crate::status::BLOCKER_STATUS_SCHEMA,
-            blocked: false,
-            blockers_ready: Vec::new(),
+    }
+
+    /// One change's state, from that change's events and the records every
+    /// reduction reads. `None` when the ledger holds no such change; a ledger
+    /// that cannot be opened, or a change that cannot be reduced, is an error.
+    fn state(&self, change: &str) -> Result<Option<ChangeState>> {
+        if crate::ids::validate_id_component(change).is_err() {
+            return Ok(None);
+        }
+        let Some(store) = self.store()? else {
+            return Ok(None);
         };
-        crate::status::build_as_of(
-            state,
-            &declarations.gates,
-            &declarations.policy,
-            false,
-            dependencies,
-            Vec::new(),
-            Utc::now(),
-            Some(&self.ctx.cwd),
-            None,
-        )
-        .is_ok_and(|report| report.gates.iter().all(|gate| gate.green_at_head))
+        if store.load_events(change)?.is_empty() {
+            return Ok(None);
+        }
+        store
+            .state(change)
+            .map(Some)
+            .with_context(|| format!("cannot read change {change} in {}", self.label))
     }
 
     /// The item as the ledger leaves it. An unlinked item's stage is what
-    /// the series recorded; a linked one's is derived from its change.
-    fn row(&self, item: &series::Item, now: DateTime<Utc>) -> ItemRow {
+    /// the series recorded; a linked one's is what the change last recorded.
+    fn row(&self, item: &series::Item, now: DateTime<Utc>) -> Result<ItemRow> {
         let mut row = ItemRow {
             id: item.id.clone(),
             title: item.title.clone(),
@@ -738,24 +742,24 @@ impl Ledger {
                 ItemState::Split => "split",
             },
             change: item.change.clone(),
+            verdict: None,
             held_by: None,
             changes_requested_rounds: 0,
-            landed_at: None,
+            integrated_at: None,
             revision: None,
             note: item.note.clone(),
             split_into: item.split_into.clone(),
         };
         let Some(change) = item.change.as_deref() else {
-            return row;
+            return Ok(row);
         };
         if !item.stands() {
-            return row;
+            return Ok(row);
         }
-        let Some(state) = self.state(change) else {
+        let Some(state) = self.state(change)? else {
             row.stage = "unknown";
-            return row;
+            return Ok(row);
         };
-        let state = &state;
         row.changes_requested_rounds = state
             .verdicts
             .iter()
@@ -766,58 +770,82 @@ impl Ledger {
                 .active
                 .then(|| format!("{} via {}", claim.owner.actor, claim.owner.harness))
         });
-        row.stage = self.stage(state, &mut row);
-        row
+        row.stage = recorded_stage(&state, &mut row);
+        Ok(row)
     }
 
-    fn stage(&self, state: &ChangeState, row: &mut ItemRow) -> &'static str {
-        if let Some(closure) = &state.closure {
-            if closure.outcome != Closure::Integrated {
-                return "closed";
-            }
-            row.landed_at = Some(
-                closure
-                    .created_at
-                    .to_rfc3339_opts(SecondsFormat::Secs, true),
-            );
-            row.revision = closure
-                .landing
-                .as_ref()
-                .map(|landing| landing.target_after.clone())
-                .or_else(|| closure.integrated_commit.clone());
-            return "landed";
-        }
-        let Some(patchset) = state.latest_patchset() else {
-            // The branch tip is one answer of the shared object reader, not
-            // a Git process per item.
-            let moved = crate::gitio::branch_head(&self.ctx.cwd, &state.branch)
-                .is_ok_and(|head| head != state.base);
-            return if moved { "committed" } else { "opened" };
-        };
-        if let Some(verdict) = state
-            .latest_verdict()
-            .filter(|verdict| verdict.patchset_id == patchset.id)
-        {
-            return match verdict.verdict {
-                Verdict::Approved => "approved",
-                Verdict::ChangesRequested => "changes-requested",
-                Verdict::CommentOnly => "commented",
-            };
-        }
-        if self.gates_green(state) {
-            "gates-green"
-        } else {
-            "snapshotted"
-        }
-    }
-
-    fn rows(&self, series: &Series, now: DateTime<Utc>) -> Vec<ItemRow> {
+    fn rows(&self, series: &Series, now: DateTime<Utc>) -> Result<Vec<ItemRow>> {
         series
             .items
             .iter()
             .map(|item| self.row(item, now))
             .collect()
     }
+}
+
+/// The furthest stage the change's own events record. Integration and
+/// closure come first; then a verdict on the newest patchset; then a
+/// recorded pass at it; then the patchset itself.
+fn recorded_stage(state: &ChangeState, row: &mut ItemRow) -> &'static str {
+    if let Some(closure) = &state.closure {
+        if closure.outcome != Closure::Integrated {
+            return "closed";
+        }
+        row.integrated_at = Some(
+            closure
+                .created_at
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        );
+        row.revision = closure
+            .landing
+            .as_ref()
+            .map(|landing| landing.target_after.clone())
+            .or_else(|| closure.integrated_commit.clone());
+        return "integrated";
+    }
+    let Some(patchset) = state.latest_patchset() else {
+        return "opened";
+    };
+    if let Some(verdict) = state
+        .latest_verdict()
+        .filter(|verdict| verdict.patchset_id == patchset.id)
+    {
+        row.verdict = Some(match verdict.verdict {
+            Verdict::Approved => "approved",
+            Verdict::ChangesRequested => "changes-requested",
+            Verdict::CommentOnly => "comment-only",
+        });
+        return "reviewed";
+    }
+    if verified_at(state, &patchset.head) {
+        "verified"
+    } else {
+        "snapshotted"
+    }
+}
+
+/// Whether the ledger records a passing verification of `head`: at least one
+/// gate has a run recorded at it, and every gate's most recent run there is a
+/// pass. A run that was not admitted ran nothing and is passed over; a
+/// failure, or a bypass, recorded after a pass takes it back.
+fn verified_at(state: &ChangeState, head: &str) -> bool {
+    let mut latest: BTreeMap<&str, crate::model::VerifyResult> = BTreeMap::new();
+    for entry in &state.verifications {
+        let Some(gate) = entry.gate.as_deref() else {
+            continue;
+        };
+        if entry.revision != head
+            || entry.probe.is_some()
+            || entry.result == crate::model::VerifyResult::NotAdmitted
+        {
+            continue;
+        }
+        latest.insert(gate, entry.result);
+    }
+    !latest.is_empty()
+        && latest
+            .values()
+            .all(|result| *result == crate::model::VerifyResult::Pass)
 }
 
 fn counts(series: &Series, rows: &[ItemRow]) -> Counts {
@@ -831,7 +859,7 @@ fn counts(series: &Series, rows: &[ItemRow]) -> Counts {
         }
         counts.items += 1;
         match row.stage {
-            "landed" => counts.landed += 1,
+            "integrated" => counts.integrated += 1,
             "done" => counts.done += 1,
             "closed" => counts.closed += 1,
             "open" => counts.open += 1,
@@ -839,15 +867,15 @@ fn counts(series: &Series, rows: &[ItemRow]) -> Counts {
             _ => counts.open += 1,
         }
     }
-    counts.complete = counts.landed + counts.done;
+    counts.complete = counts.integrated + counts.done;
     counts.percent = (counts.items > 0).then(|| counts.complete * 100 / counts.items);
     counts
 }
 
-fn last_landing(rows: &[ItemRow]) -> Option<Landing> {
+fn last_integration(rows: &[ItemRow]) -> Option<Integration> {
     rows.iter()
         .filter_map(|row| {
-            row.landed_at.as_ref().map(|at| Landing {
+            row.integrated_at.as_ref().map(|at| Integration {
                 item: row.id.clone(),
                 at: at.clone(),
                 revision: row.revision.clone(),
@@ -861,9 +889,9 @@ fn series_report(
     ledger: &Ledger,
     relations: Vec<Relation>,
     now: DateTime<Utc>,
-) -> SeriesReport {
-    let rows = ledger.rows(series, now);
-    SeriesReport {
+) -> Result<SeriesReport> {
+    let rows = ledger.rows(series, now)?;
+    Ok(SeriesReport {
         file: series.file.clone(),
         title: series.title.clone(),
         follows: series.follows.clone(),
@@ -871,9 +899,9 @@ fn series_report(
         retired: series.retired.clone(),
         related: relations,
         counts: counts(series, &rows),
-        last_landing: last_landing(&rows),
+        last_integration: last_integration(&rows),
         items: rows,
-    }
+    })
 }
 
 /// One related series, read once from its own journal and ledger.
@@ -930,20 +958,29 @@ fn related_report(
         title: None,
         retired: None,
         counts: None,
-        last_landing: None,
+        last_integration: None,
         in_flight: Vec::new(),
     };
     match read.result {
         Err(reason) => report.unavailable = Some(reason),
         Ok((series, anchor)) => {
-            let rows = match anchor.as_deref() {
-                Some(anchor) => Ledger::at(ctx, anchor).rows(&series, now),
-                None => Ledger::new(ctx, &ctx.cwd, || Ok(None)).rows(&series, now),
+            let ledger = match anchor.as_deref() {
+                Some(anchor) => Ledger::at(anchor),
+                None => Ledger::none(&ctx.cwd),
+            };
+            // A related series is read on the way, never relied on: a ledger
+            // that cannot be read makes it unavailable, not the report.
+            let rows = match ledger.rows(&series, now) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    report.unavailable = Some(format!("{error:#}").replace(['\n', '\r'], " "));
+                    return report;
+                }
             };
             report.title = Some(series.title.clone());
             report.retired = series.retired.clone();
             report.counts = Some(counts(&series, &rows));
-            report.last_landing = last_landing(&rows);
+            report.last_integration = last_integration(&rows);
             report.in_flight = rows.into_iter().filter(ItemRow::in_flight).collect();
         }
     }
@@ -1005,7 +1042,7 @@ fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
                 mutual,
             });
         }
-        reports.push(series_report(series, &ledger, relations, now));
+        reports.push(series_report(series, &ledger, relations, now)?);
     }
     let related = reads
         .into_iter()
@@ -1112,7 +1149,7 @@ fn render_series(series: &SeriesReport) {
         render_row(row, width);
     }
     render_counts(&series.counts, true);
-    render_last_landing(series.last_landing.as_ref());
+    render_last_integration(series.last_integration.as_ref());
 }
 
 fn render_row(row: &ItemRow, width: usize) {
@@ -1134,9 +1171,12 @@ fn render_row(row: &ItemRow, width: usize) {
     if let Some(holder) = &row.held_by {
         detail.push(format!("held by {holder}"));
     }
-    if let Some(at) = &row.landed_at {
+    if let Some(verdict) = row.verdict {
+        detail.push(verdict.to_string());
+    }
+    if let Some(at) = &row.integrated_at {
         detail.push(format!(
-            "landed {at}{}",
+            "integrated {at}{}",
             row.revision
                 .as_deref()
                 .map(|revision| format!(" at {}", &revision[..revision.len().min(12)]))
@@ -1162,8 +1202,8 @@ fn render_row(row: &ItemRow, width: usize) {
 
 fn render_counts(counts: &Counts, since: bool) {
     let mut line = format!(
-        "  {} of {} complete ({} landed, {} done)",
-        counts.complete, counts.items, counts.landed, counts.done
+        "  {} of {} complete ({} integrated, {} done)",
+        counts.complete, counts.items, counts.integrated, counts.done
     );
     if let Some(percent) = counts.percent {
         line.push_str(&format!(", {percent}% by count of items"));
@@ -1173,7 +1213,7 @@ fn render_counts(counts: &Counts, since: bool) {
         counts.in_flight, counts.open
     ));
     if counts.closed > 0 {
-        line.push_str(&format!("; {} closed without landing", counts.closed));
+        line.push_str(&format!("; {} closed without integrating", counts.closed));
     }
     println!("{line}");
     if since {
@@ -1185,10 +1225,10 @@ fn render_counts(counts: &Counts, since: bool) {
     }
 }
 
-fn render_last_landing(landing: Option<&Landing>) {
+fn render_last_integration(landing: Option<&Integration>) {
     match landing {
         Some(landing) => println!(
-            "  last landing: {} at {}{}",
+            "  last integrated: {} at {}{}",
             landing.item,
             landing.at,
             landing
@@ -1197,7 +1237,7 @@ fn render_last_landing(landing: Option<&Landing>) {
                 .map(|revision| format!(", {}", &revision[..revision.len().min(12)]))
                 .unwrap_or_default()
         ),
-        None => println!("  last landing: none"),
+        None => println!("  last integrated: none"),
     }
 }
 
@@ -1223,7 +1263,7 @@ fn render_related(related: &RelatedReport) {
         }
     );
     render_counts(counts, false);
-    render_last_landing(related.last_landing.as_ref());
+    render_last_integration(related.last_integration.as_ref());
     let width = related
         .in_flight
         .iter()
@@ -1254,7 +1294,6 @@ struct ProgressFailure {
 
 /// `arc workspace progress`: every registered project's active series.
 pub(crate) fn workspace(
-    ctx: &Ctx,
     includes: impl Fn(Option<&Path>) -> bool,
     scope: impl Serialize,
     json: bool,
@@ -1278,10 +1317,10 @@ pub(crate) fn workspace(
                 return Ok(Vec::new());
             }
             let ledger = match project.anchor.as_deref() {
-                Some(anchor) => Ledger::at(ctx, anchor),
-                None => Ledger::new(ctx, &project.journal_dir, || Ok(None)),
+                Some(anchor) => Ledger::at(anchor),
+                None => Ledger::none(&project.journal_dir),
             };
-            Ok(active
+            active
                 .iter()
                 .map(|series| {
                     let relations = series
@@ -1299,7 +1338,7 @@ pub(crate) fn workspace(
                         .collect();
                     series_report(series, &ledger, relations, now)
                 })
-                .collect())
+                .collect()
         })();
         match read {
             Ok(series) if series.is_empty() => {}

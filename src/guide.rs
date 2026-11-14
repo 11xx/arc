@@ -6738,19 +6738,21 @@ PROGRESS
   item's link only when that change closed without integrating, and only
   while the link is still the one the command read.
 
-  Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, from the
-  change in this project's ledger at the moment of reading: `opened`,
-  `committed` (its branch has moved from its base), `snapshotted`,
-  `gates-green` (every gate the target requires is green at the newest
-  patchset; when the target's declarations cannot be read the requirements
-  are unknown and never green, while none required is green),
-  `changes-requested`, `approved` or `commented` (a verdict on the newest
-  patchset), `landed` (with its time and revision), `closed` (closed without
-  integrating), `unknown` (no such change). The report also names who holds a
-  live claim on the change and how many review rounds asked for changes.
+  Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, as the
+  change's own events in this project's ledger record it: `opened`;
+  `snapshotted` (a patchset is recorded); `verified` (at the newest
+  patchset's head at least one gate has a recorded run and every gate's most
+  recent run there is a pass; a run that was not admitted is passed over, and
+  a failure recorded after a pass takes it back to `snapshotted`);
+  `reviewed` (a verdict is recorded on the newest patchset, shown with the
+  rounds that asked for changes); `integrated` (with its time and revision);
+  `closed` (closed without integrating); `unknown` (no such change). A stage
+  is what the ledger last recorded, never a live judgement, so it can lag
+  the change but never run ahead of it; `arc status <change>` is the live
+  reading. The report also names who holds a live claim on the change.
   Nothing about external runners is read.
 
-  The share complete is a count: landed and done items over the items that
+  The share complete is a count: integrated and done items over the items that
   stand, printed as counts first and one percentage after. No estimate of
   time, no weighting. The report also says how many items were declared at
   the start and how many were added, dropped and split since.
@@ -6759,9 +6761,14 @@ PROGRESS
   full, one block per series under a `==` header line; `arc progress
   <series>` narrows to one and reads a retired series too. After the local
   blocks come any open journal questions that wait on a person. A report
-  opens a ledger only for linked items and reads each linked change alone,
-  so its cost follows its series, linked items and related series, never
-  the other changes or projects there are.
+  reads one event log per journal it shows and reduces only the linked
+  changes; it starts Git only to locate a project and open its ledger, never
+  to find a stage. So what it reads follows its series, linked items and
+  related series. Opening a ledger, which happens only for a project with a
+  linked item, has the store's own fixed cost: its repository-wide records,
+  the import batches among them. A ledger that cannot be read fails the
+  report, puts its project among `arc workspace progress`'s failures, and
+  makes a related series unavailable.
 
   Related series. `arc progress relate <series> <project>::<series>` records,
   in this journal only, that a series relates to one in another registered
@@ -6770,7 +6777,7 @@ PROGRESS
   the other project makes it mutual; until then the block's `related:` line,
   directly under its header, says `one-sided`. Each related series then
   prints after the local ones as a compact `--` block: its counts, last
-  landing and in-flight items, read from that project's journal events and
+  integration and in-flight items, read from that project's journal events and
   ledger only. A related journal that cannot be read prints one line and
   fails nothing. Relations share no items and roll up no percentage.
 
