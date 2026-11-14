@@ -12,21 +12,20 @@
 
 use super::{
     append_event, archive_dir, event_identity_label, format_age, lock_journal_transition,
-    parse_artifact_name, print_dir_header, read_events, relocation, resolve_dir,
-    resolve_existing_prefix, uniquified, valid_topic, DoctorFinding, JournalEvent,
-    RecordedIdentity,
+    parse_artifact_name, print_dir_header, read_events, relocation, resolve_dir, uniquified,
+    valid_topic, DoctorFinding, JournalEvent, RecordedIdentity,
 };
 use crate::commands::Ctx;
-use crate::config;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+mod adoption;
 
 /// The directory under the journal, and under its cold archive, that holds
 /// workbenches.
@@ -132,18 +131,31 @@ pub enum WorkbenchCmd {
     /// date. Records a `workbench-adopted` event with where the material was,
     /// its files and its bytes, and prints the new path as the last line.
     ///
-    /// Refuses before anything moves: a path that does not exist, a symbolic
-    /// link, or anything but a file or a directory; a path on another
-    /// filesystem than the journal, which no rename can move atomically; a
-    /// path a Git repository tracks, inside a `.git` directory, or holding a
-    /// repository; a directory holding a relative symbolic link that leads
-    /// out of it, which would point elsewhere once moved; a directory already
-    /// holding `WORKBENCH.md`; a slug already open; and a path that holds, or
-    /// lies inside, storage arc keeps: this journal's own records, artifacts
-    /// and archive, another journal, or arc's home. A directory of the
-    /// journal arc does not own, such as an entry of `loose/`, may be
-    /// adopted. A directory under `workbench/` that no event records is
-    /// adopted where it stands
+    /// Every refusal is decided before anything moves, and leaves the
+    /// material as it was. By what the path names, adoption refuses a path
+    /// that does not exist; a symbolic link, with or without a trailing
+    /// slash; anything but a file or a directory; a filesystem root or a
+    /// mount point; a file named `WORKBENCH.md`; and a path its record
+    /// cannot state on one line of text.
+    ///
+    /// By where it lies: the current directory, the home directory, or a
+    /// directory holding either; anything inside a `.git` or `.arc`
+    /// directory; a path on another filesystem than the journal, which no
+    /// rename can move atomically; a path a Git repository tracks, its name
+    /// read literally; anything inside a Git repository's own directory or
+    /// inside a journal; and a path that holds, or lies inside, storage arc
+    /// keeps: this journal's own records, artifacts and archive, another
+    /// journal, or arc's home.
+    ///
+    /// By what it holds: a Git repository, bare or not; a journal, registered
+    /// or not, known by its bindings, its locks, or an event log beside
+    /// artifacts; a mount point; a relative symbolic link leading out of it,
+    /// which would point elsewhere once moved; and `WORKBENCH.md` at its top.
+    /// A slug already open refuses too.
+    ///
+    /// A directory of the journal arc does not own, such as an entry of
+    /// `loose/`, may be adopted. A directory under `workbench/` that no event
+    /// records is adopted where it stands
     Adopt {
         /// The directory or file to move into the journal
         path: String,
@@ -369,22 +381,65 @@ fn cold_path(dir: &Path, name: &str) -> PathBuf {
     archive_dir(dir).join(DIR).join(name)
 }
 
+/// The workbench `name` under `root`, the journal or its archive, when it is
+/// a directory of it: `workbench/` and the workbench itself are real
+/// directories there, not links that lead somewhere else.
+fn contained(root: &Path, name: &str) -> Option<PathBuf> {
+    let real_dir = |path: &Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    };
+    let holding = root.join(DIR);
+    let path = holding.join(name);
+    (real_dir(&holding) && real_dir(&path)).then_some(path)
+}
+
 /// Where a workbench's directory is: where its records put it, else the
 /// other storage when it is found there, else `missing` at the recorded one.
+/// A directory reached through a link is not the journal's and is missing
+/// here; `journal doctor` names where it leads.
 fn located(dir: &Path, workbench: &Recorded<'_>) -> (PathBuf, &'static str) {
-    let hot = (hot_path(dir, &workbench.name), "hot");
-    let cold = (cold_path(dir, &workbench.name), "archived");
+    let cold = archive_dir(dir);
     let (expected, other) = if workbench.archived {
-        (cold, hot)
+        ((cold.as_path(), "archived"), (dir, "hot"))
     } else {
-        (hot, cold)
+        ((dir, "hot"), (cold.as_path(), "archived"))
     };
-    if expected.0.is_dir() {
-        expected
-    } else if other.0.is_dir() {
-        other
+    if let Some(path) = contained(expected.0, &workbench.name) {
+        (path, expected.1)
+    } else if let Some(path) = contained(other.0, &workbench.name) {
+        (path, other.1)
     } else {
-        (expected.0, "missing")
+        (expected.0.join(DIR).join(&workbench.name), "missing")
+    }
+}
+
+/// The directory under `root` that holds workbenches, for a move or a
+/// creation into it: created when absent, refused unless it is a real
+/// directory there, so nothing arc moves passes through a link to somewhere
+/// outside the journal. `root` is created when absent and resolved.
+fn holding_dir(root: &Path) -> Result<PathBuf> {
+    match std::fs::create_dir(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot create {}", root.display()))
+        }
+    }
+    let root = std::fs::canonicalize(root)
+        .with_context(|| format!("cannot resolve {}", root.display()))?;
+    let holding = root.join(DIR);
+    match std::fs::symlink_metadata(&holding) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(holding),
+        Ok(_) => bail!(
+            "{} is not a directory of the journal but a link or a file; arc moves nothing through it",
+            holding.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&holding)
+                .with_context(|| format!("cannot create {}", holding.display()))?;
+            Ok(holding)
+        }
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", holding.display())),
     }
 }
 
@@ -816,12 +871,209 @@ fn record(
     path: &Path,
 ) -> Result<()> {
     append_event(ctx, dir, &event)?;
+    index_after(events, event, path);
+    Ok(())
+}
+
+fn index_after(events: &[JournalEvent], event: JournalEvent, path: &Path) {
     let mut events = events.to_vec();
     events.push(event);
     if let Err(error) = write_index(&events, path) {
         eprintln!("warning: {error:#}; the next recorded act rewrites it");
     }
-    Ok(())
+}
+
+/// How to take back what an act changed on disk before its record was
+/// written, when the journal shows the record was not written.
+enum Undo {
+    /// Rename the material back from `to` to `from`, never replacing
+    /// anything at `from`, then remove `holder`, a directory arc made for a
+    /// moved file, which is empty once the file is back.
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        holder: Option<PathBuf>,
+    },
+    /// Remove a directory arc created, which only succeeds while it is empty.
+    RemoveEmpty(PathBuf),
+}
+
+impl Undo {
+    fn apply(&self) -> Result<()> {
+        match self {
+            Undo::Rename { from, to, holder } => {
+                rename_new(to, from).with_context(|| {
+                    format!("cannot move {} back to {}", to.display(), from.display())
+                })?;
+                if let Some(holder) = holder {
+                    std::fs::remove_dir(holder)
+                        .with_context(|| format!("cannot remove {}", holder.display()))?;
+                }
+                Ok(())
+            }
+            Undo::RemoveEmpty(path) => std::fs::remove_dir(path)
+                .with_context(|| format!("cannot remove {}", path.display())),
+        }
+    }
+}
+
+/// An act that changed the disk before its record was appended: where its
+/// material is now, how to take the change back, and what `journal doctor`
+/// reports while the disk and the records disagree.
+struct Change {
+    at: PathBuf,
+    undo: Undo,
+    disagreement: String,
+}
+
+/// What the journal holds of one act after its append reported an error.
+/// An error does not prove nothing was written: the append may have been
+/// published, or prepared for the next journal write to publish.
+enum Fate {
+    Recorded,
+    /// Prepared and unpublished, with the command that publishes it.
+    Prepared(String),
+    Absent,
+    Unreadable(anyhow::Error),
+}
+
+/// The last record naming `name` in an event log.
+fn last_record<'a>(log: &'a str, name: &str) -> Option<&'a str> {
+    log.lines().rev().find(|line| {
+        line.contains("\"workbench\"")
+            && serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|record| record["workbench"] == name)
+    })
+}
+
+/// Read what the journal at `dir` holds of `event`: the last record naming
+/// its workbench, published or prepared, is exactly this one or it is not.
+/// The transition lock is held, so no other act on the workbench interleaves.
+fn fate(dir: &Path, event: &JournalEvent) -> Fate {
+    let (line, name) = match serde_json::to_string(event) {
+        Ok(line) => (line, event.workbench.clone().unwrap_or_default()),
+        Err(error) => return Fate::Unreadable(error.into()),
+    };
+    match std::fs::read_to_string(dir.join("events.jsonl")) {
+        Ok(log) if last_record(&log, &name) == Some(line.as_str()) => return Fate::Recorded,
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Fate::Unreadable(error.into()),
+    }
+    let pending = super::exchange_pending_path(dir);
+    let bytes = match std::fs::read(&pending) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Fate::Absent,
+        Err(error) => return Fate::Unreadable(error.into()),
+    };
+    match serde_json::from_slice::<super::ExchangeTransaction>(&bytes) {
+        Ok(prepared) if last_record(&prepared.events, &name) == Some(line.as_str()) => {
+            Fate::Prepared(super::exchange_refusal(
+                dir,
+                &prepared,
+                super::is_global_dir(dir).unwrap_or(false),
+            ))
+        }
+        Ok(_) => Fate::Absent,
+        Err(error) => Fate::Unreadable(error.into()),
+    }
+}
+
+/// Record an act that already changed the disk. On an append error the
+/// journal decides: a published act stands; a prepared one keeps the change,
+/// which its record names once published; an absent one is taken back
+/// without deleting or replacing a file. Whatever cannot be made consistent
+/// stops with where the material is and what `journal doctor` reports.
+fn record_change(
+    ctx: &Ctx,
+    dir: &Path,
+    events: &[JournalEvent],
+    event: JournalEvent,
+    index: &Path,
+    change: Change,
+) -> Result<()> {
+    let error = match append_event(ctx, dir, &event) {
+        Ok(()) => {
+            index_after(events, event, index);
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    let mut fate = fate(dir, &event);
+    if let Fate::Prepared(_) = fate {
+        if super::recover_journal_writes(dir).is_ok() {
+            fate = self::fate(dir, &event);
+        }
+    }
+    let at = change.at.display();
+    match fate {
+        Fate::Recorded => {
+            eprintln!("warning: the journal reported an error after recording this act: {error:#}");
+            index_after(events, event, index);
+            Ok(())
+        }
+        Fate::Prepared(remedy) => bail!(
+            "{error:#}\nthe record of this act is prepared but not published: {remedy}. \
+             The material is at {at}, where that record puts it; until it is published \
+             `arc journal doctor` reports {}.",
+            change.disagreement
+        ),
+        Fate::Absent => match change.undo.apply() {
+            Ok(()) => Err(error.context("nothing was recorded, and the change was taken back")),
+            Err(undo) => bail!(
+                "{error:#}\nnothing was recorded, and taking the change back failed: {undo:#}. \
+                 The material is at {at}; `arc journal doctor` reports {}.",
+                change.disagreement
+            ),
+        },
+        Fate::Unreadable(read) => bail!(
+            "{error:#}\nwhether this act was recorded cannot be read: {read:#}. The material \
+             is at {at}; `arc journal doctor` reports {} unless the record was written.",
+            change.disagreement
+        ),
+    }
+}
+
+/// Rename `from` to `to`, refusing to replace anything already at `to`.
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = |path: &Path| {
+            std::ffi::CString::new(path.as_os_str().as_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        };
+        let (from_c, to_c) = (c_path(from)?, c_path(to)?);
+        // SAFETY: both arguments are NUL-terminated paths that outlive the
+        // call, and renameat2 reads nothing else of this process's memory.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL) | Some(libc::ENOSYS)
+        ) {
+            return Err(error);
+        }
+    }
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} already exists", to.display()),
+        ));
+    }
+    std::fs::rename(from, to)
 }
 
 fn write_index(events: &[JournalEvent], path: &Path) -> Result<()> {
@@ -919,19 +1171,17 @@ fn open(ctx: &Ctx, slug: &str, purpose: &str) -> Result<i32> {
     refuse_open_slug(&recorded, slug)?;
     let now = Utc::now();
     let name = allocate_name(&dir, &recorded, &format!("{slug}-{}", now.format("%Y%m%d")))?;
-    let parent = dir.join(DIR);
-    std::fs::create_dir_all(&parent)
-        .with_context(|| format!("cannot create {}", parent.display()))?;
-    let path = parent.join(&name);
-    std::fs::create_dir(&path).with_context(|| format!("cannot create {}", path.display()))?;
     let mut event = JournalEvent::base(ctx, now, slug, "workbench-opened");
     event.workbench = Some(name.clone());
     event.purpose = Some(purpose);
-    if let Err(error) = record(ctx, &dir, &events, event, &path) {
-        let _ = std::fs::remove_file(path.join(INDEX));
-        let _ = std::fs::remove_dir(&path);
-        return Err(error);
-    }
+    let path = holding_dir(&dir)?.join(&name);
+    std::fs::create_dir(&path).with_context(|| format!("cannot create {}", path.display()))?;
+    let change = Change {
+        at: path.clone(),
+        undo: Undo::RemoveEmpty(path.clone()),
+        disagreement: format!("{} as unrecorded-workbench", path.display()),
+    };
+    record_change(ctx, &dir, &events, event, &path, change)?;
     println!("opened: {name}");
     println!("{}", path.display());
     Ok(0)
@@ -1073,34 +1323,19 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
             if to_cold { "archived" } else { "live" }
         );
     }
-    let (source, destination) = if to_cold {
-        (hot_path(&dir, name), cold_path(&dir, name))
+    let cold = archive_dir(&dir);
+    let (from_root, to_root) = if to_cold {
+        (dir.as_path(), cold.as_path())
     } else {
-        (cold_path(&dir, name), hot_path(&dir, name))
+        (cold.as_path(), dir.as_path())
     };
-    if !source.is_dir() {
-        bail!("{name} has no directory at {}", source.display());
-    }
-    if std::fs::symlink_metadata(&destination).is_ok() {
+    let Some(source) = contained(from_root, name) else {
         bail!(
-            "{} already exists; move it aside first",
-            destination.display()
+            "{name} has no directory of the journal at {}; `arc journal doctor` says where it is",
+            from_root.join(DIR).join(name).display()
         );
-    }
-    let parent = destination
-        .parent()
-        .context("a workbench path has a parent")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("cannot create {}", parent.display()))?;
-    refuse_other_filesystem(&source, parent)?;
-    std::fs::rename(&source, &destination).with_context(|| {
-        format!(
-            "cannot move {} to {}",
-            source.display(),
-            destination.display()
-        )
-    })?;
-    let measure = walk(&destination, None, |_, _| Ok(()));
+    };
+    let measure = walk(&source, None, |_, _| Ok(()))?;
     let kind = if to_cold {
         "workbench-archived"
     } else {
@@ -1109,14 +1344,30 @@ fn move_storage(ctx: &Ctx, address: &str, to_cold: bool, note: Option<String>) -
     let mut event = JournalEvent::base(ctx, Utc::now(), &workbench.slug, kind);
     event.workbench = Some(name.clone());
     event.note = note;
-    if let Ok(measure) = &measure {
-        event.files = Some(measure.files);
-        event.bytes = Some(measure.bytes);
+    event.files = Some(measure.files);
+    event.bytes = Some(measure.bytes);
+    if !event.known() {
+        bail!("the record of this move would not be read back; nothing moved");
     }
-    if let Err(error) = record(ctx, &dir, &events, event, &destination) {
-        let _ = std::fs::rename(&destination, &source);
-        return Err(error);
-    }
+    let destination = holding_dir(to_root)?.join(name);
+    refuse_other_filesystem(&source, destination.parent().unwrap_or(to_root))?;
+    rename_new(&source, &destination).with_context(|| {
+        format!(
+            "cannot move {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    let change = Change {
+        at: destination.clone(),
+        undo: Undo::Rename {
+            from: source.clone(),
+            to: destination.clone(),
+            holder: None,
+        },
+        disagreement: format!("{name} as misplaced-workbench"),
+    };
+    record_change(ctx, &dir, &events, event, &destination, change)?;
     println!(
         "{}: {name}",
         if to_cold { "archived" } else { "unarchived" }
@@ -1142,229 +1393,6 @@ fn refuse_other_filesystem(path: &Path, parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The material an adoption names, as it stands before anything moves.
-struct Source {
-    /// Absolute, with every directory above it resolved and the material's
-    /// own name kept, so a link is never followed in its place.
-    path: PathBuf,
-    name: OsString,
-    is_dir: bool,
-    metadata: std::fs::Metadata,
-}
-
-fn adoption_source(ctx: &Ctx, raw: &str) -> Result<Source> {
-    let requested = config::expand_tilde(raw)?;
-    let requested = if requested.is_absolute() {
-        requested
-    } else {
-        ctx.cwd.join(requested)
-    };
-    let metadata = match std::fs::symlink_metadata(&requested) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            bail!("{} does not exist", requested.display())
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot read {}", requested.display()))
-        }
-    };
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "{} is a symbolic link; adopt the material it points to",
-            requested.display()
-        );
-    }
-    if !metadata.is_dir() && !metadata.is_file() {
-        bail!(
-            "{} is neither a regular file nor a directory",
-            requested.display()
-        );
-    }
-    let Some(Component::Normal(name)) = requested.components().next_back() else {
-        bail!("{} does not name the material itself", requested.display());
-    };
-    let name = name.to_os_string();
-    let parent = match requested.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => ctx.cwd.clone(),
-    };
-    let parent = std::fs::canonicalize(&parent)
-        .with_context(|| format!("cannot resolve {}", parent.display()))?;
-    Ok(Source {
-        path: parent.join(&name),
-        name,
-        is_dir: metadata.is_dir(),
-        metadata,
-    })
-}
-
-/// Refuse material that holds or lies inside storage arc keeps. Inside this
-/// journal, only directories arc does not own are material: the records,
-/// artifacts, locks, exchange receipts and workbenches are the journal's.
-fn refuse_arc_storage(dir: &Path, source: &Source, in_place: bool) -> Result<()> {
-    let path = &source.path;
-    if path
-        .components()
-        .any(|component| component.as_os_str() == ".git")
-    {
-        bail!("{} is inside a Git directory", path.display());
-    }
-    let hot =
-        std::fs::canonicalize(dir).with_context(|| format!("cannot resolve {}", dir.display()))?;
-    if hot.starts_with(path) {
-        bail!(
-            "{} holds this journal; adopt material inside it, such as one entry of a loose directory",
-            path.display()
-        );
-    }
-    if let Ok(inside) = path.strip_prefix(&hot) {
-        let first = inside
-            .components()
-            .next()
-            .map(|component| component.as_os_str().to_string_lossy().to_string())
-            .unwrap_or_default();
-        if first == DIR {
-            if in_place {
-                return Ok(());
-            }
-            bail!(
-                "{} is already inside this journal's workbenches",
-                path.display()
-            );
-        }
-        if first.starts_with('.')
-            || first == super::EXCHANGE_DIR
-            || (inside.components().count() == 1 && !source.is_dir)
-        {
-            bail!(
-                "{} is part of the journal arc keeps; adopt material arc does not own, such as a directory under it",
-                path.display()
-            );
-        }
-        return Ok(());
-    }
-    let cfg = config::load()?;
-    let mut kept = vec![
-        (archive_dir(&hot), "this journal's archive"),
-        (cfg.ai_home.clone(), "arc's home"),
-    ];
-    if let Some(data_root) = &cfg.data_root {
-        kept.push((data_root.clone(), "arc's data root"));
-    }
-    for (_, journal) in crate::registry::known_journals(&cfg)? {
-        kept.push((archive_dir(&journal), "another journal's archive"));
-        kept.push((journal, "another journal"));
-    }
-    for (root, what) in kept {
-        let root = resolve_existing_prefix(&root)?;
-        if path.starts_with(&root) {
-            bail!(
-                "{} is inside {} ({}); adopt material from outside it, or from its own project",
-                path.display(),
-                root.display(),
-                what
-            );
-        }
-        if root.starts_with(path) {
-            bail!(
-                "{} holds {} ({}); adopt material inside it instead",
-                path.display(),
-                root.display(),
-                what
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Refuse material a Git repository tracks: moving it would delete files
-/// from that repository's checkout.
-fn refuse_tracked(source: &Source) -> Result<()> {
-    let (probe, spec) = if source.is_dir {
-        (source.path.clone(), ".".to_string())
-    } else {
-        (
-            source
-                .path
-                .parent()
-                .context("adopted material has a parent")?
-                .to_path_buf(),
-            source.name.to_string_lossy().to_string(),
-        )
-    };
-    let Ok(toplevel) = crate::gitio::git(&probe, &["rev-parse", "--show-toplevel"]) else {
-        return Ok(());
-    };
-    let tracked = crate::gitio::git(&probe, &["ls-files", "-z", "--", &spec])?;
-    if !tracked.is_empty() {
-        bail!(
-            "{} is tracked by the Git repository at {toplevel}; adopt material no repository tracks",
-            source.path.display()
-        );
-    }
-    Ok(())
-}
-
-/// `path` with `.` and `..` resolved by name, without touching the
-/// filesystem.
-fn lexical(path: &Path) -> PathBuf {
-    let mut resolved = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                resolved.pop();
-            }
-            other => resolved.push(other),
-        }
-    }
-    resolved
-}
-
-/// Walk the material, refusing what a move would break or what a
-/// repository owns, and measure it.
-fn survey(source: &Source, in_place: bool) -> Result<Measure> {
-    if !source.is_dir {
-        let mut measure = Measure {
-            files: 1,
-            bytes: source.metadata.len(),
-            newest: None,
-            partial: false,
-        };
-        measure.touch(&source.metadata);
-        return Ok(measure);
-    }
-    let root = &source.path;
-    if !in_place && std::fs::symlink_metadata(root.join(INDEX)).is_ok() {
-        bail!(
-            "{} already holds {INDEX}, the index arc writes in every workbench; rename it before adopting",
-            root.display()
-        );
-    }
-    walk(root, None, |path, metadata| {
-        if path.file_name().is_some_and(|name| name == ".git") {
-            bail!(
-                "{} holds a Git repository at {}; adopt material no repository tracks",
-                root.display(),
-                path.display()
-            );
-        }
-        if metadata.file_type().is_symlink() {
-            let target = std::fs::read_link(path)
-                .with_context(|| format!("cannot read link {}", path.display()))?;
-            let parent = path.parent().unwrap_or(root);
-            if target.is_relative() && !lexical(&parent.join(&target)).starts_with(root) {
-                bail!(
-                    "{} is a relative link leading out of {}, which would point elsewhere once moved",
-                    path.display(),
-                    root.display()
-                );
-            }
-        }
-        Ok(())
-    })
-}
-
 /// A material name's slug and the date it carries, when it ends in a valid
 /// `-YYYYMMDD`.
 fn split_date(stem: &str) -> (&str, Option<&str>) {
@@ -1387,7 +1415,7 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
-    let source = adoption_source(ctx, raw)?;
+    let source = adoption::resolve(ctx, raw)?;
     let _transition = lock_journal_transition(&dir)?;
     let events = read_events(&dir)?;
     let recorded = recorded(&events);
@@ -1400,13 +1428,13 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
             source.path.display()
         );
     }
-    refuse_arc_storage(&dir, &source, in_place)?;
-    refuse_tracked(&source)?;
-    let measure = survey(&source, in_place)?;
+    // Everything that can refuse is settled before anything moves.
+    adoption::refuse_location(ctx, &dir, &hot, &source, in_place)?;
     if !in_place {
-        refuse_other_filesystem(&source.path, &dir)?;
+        refuse_other_filesystem(&source.path, &hot)?;
     }
-    let workbenches = dir.join(DIR);
+    let measure = adoption::survey(&source)?;
+    adoption::refuse_tracked(&source)?;
     let stem = if source.is_dir {
         material.as_str()
     } else {
@@ -1432,15 +1460,27 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
             .unwrap_or_else(|| Utc::now().format("%Y%m%d").to_string());
         allocate_name(&dir, &recorded, &format!("{slug}-{date}"))?
     };
-    let target = workbenches.join(&name);
-    if !in_place {
-        std::fs::create_dir_all(&workbenches)
-            .with_context(|| format!("cannot create {}", workbenches.display()))?;
+    let mut event = JournalEvent::base(ctx, Utc::now(), slug, "workbench-adopted");
+    event.workbench = Some(name.clone());
+    event.purpose = Some(purpose);
+    event.adopted_from = Some(source.recorded.clone());
+    event.files = Some(measure.files);
+    event.bytes = Some(measure.bytes);
+    if !event.known() {
+        bail!(
+            "the record of this adoption would not be read back; nothing moved from {}",
+            source.path.display()
+        );
+    }
+    let (target, undo) = if in_place {
+        (source.path.clone(), None)
+    } else {
+        let target = holding_dir(&dir)?.join(&name);
         if source.is_dir {
-            std::fs::rename(&source.path, &target)
+            rename_new(&source.path, &target)
         } else {
             std::fs::create_dir(&target).and_then(|()| {
-                std::fs::rename(&source.path, target.join(&source.name)).inspect_err(|_| {
+                rename_new(&source.path, &target.join(&source.name)).inspect_err(|_| {
                     let _ = std::fs::remove_dir(&target);
                 })
             })
@@ -1452,24 +1492,28 @@ fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32>
                 target.display()
             )
         })?;
-    }
-    let mut event = JournalEvent::base(ctx, Utc::now(), slug, "workbench-adopted");
-    event.workbench = Some(name.clone());
-    event.purpose = Some(purpose);
-    event.adopted_from = Some(source.path.display().to_string());
-    event.files = Some(measure.files);
-    event.bytes = Some(measure.bytes);
-    if let Err(error) = record(ctx, &dir, &events, event, &target) {
-        if !in_place {
-            let _ = std::fs::remove_file(target.join(INDEX));
-            if source.is_dir {
-                let _ = std::fs::rename(&target, &source.path);
-            } else {
-                let _ = std::fs::rename(target.join(&source.name), &source.path);
-                let _ = std::fs::remove_dir(&target);
-            }
+        let (to, holder) = if source.is_dir {
+            (target.clone(), None)
+        } else {
+            (target.join(&source.name), Some(target.clone()))
+        };
+        let undo = Undo::Rename {
+            from: source.path.clone(),
+            to,
+            holder,
+        };
+        (target, Some(undo))
+    };
+    match undo {
+        Some(undo) => {
+            let change = Change {
+                at: target.clone(),
+                undo,
+                disagreement: format!("{} as unrecorded-workbench", target.display()),
+            };
+            record_change(ctx, &dir, &events, event, &target, change)?;
         }
-        return Err(error);
+        None => record(ctx, &dir, &events, event, &target)?,
     }
     println!(
         "adopted: {} as {name}, {} in {} {}",
@@ -1495,12 +1539,49 @@ pub(super) fn inspect(
         .iter()
         .map(|workbench| workbench.name.as_str())
         .collect();
+    let cold = archive_dir(dir);
+    let mut holdings = Vec::new();
+    for (root, is_cold) in [(dir, false), (cold.as_path(), true)] {
+        let holding = root.join(DIR);
+        match std::fs::symlink_metadata(&holding) {
+            Ok(metadata) if metadata.file_type().is_dir() => holdings.push((holding, is_cold)),
+            Ok(_) => problems.push(DoctorFinding {
+                code: "workbench-outside-journal",
+                detail: format!(
+                    "{}: {}, not a directory of the journal; arc moves nothing through it",
+                    holding.display(),
+                    leads(&holding)
+                ),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", holding.display()))
+            }
+        }
+    }
     for workbench in &recorded {
         let (path, storage) = located(dir, workbench);
         if storage == "missing" {
-            problems.push(DoctorFinding {
-                code: "missing-workbench",
-                detail: format!("{}: no directory at {}", workbench.name, path.display()),
+            let linked = [
+                hot_path(dir, &workbench.name),
+                cold_path(dir, &workbench.name),
+            ]
+            .into_iter()
+            .find(|path| path.is_dir());
+            problems.push(match linked {
+                Some(linked) => DoctorFinding {
+                    code: "workbench-outside-journal",
+                    detail: format!(
+                        "{}: {} {}, not a directory of the journal",
+                        workbench.name,
+                        linked.display(),
+                        leads(&linked)
+                    ),
+                },
+                None => DoctorFinding {
+                    code: "missing-workbench",
+                    detail: format!("{}: no directory at {}", workbench.name, path.display()),
+                },
             });
         } else if (storage == "archived") != workbench.archived {
             problems.push(DoctorFinding {
@@ -1518,17 +1599,12 @@ pub(super) fn inspect(
             });
         }
     }
-    for (root, cold) in [(dir.join(DIR), false), (archive_dir(dir).join(DIR), true)] {
-        let entries = match std::fs::read_dir(&root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", root.display()))
-            }
-        };
+    for (holding, is_cold) in holdings {
         let mut unrecorded = Vec::new();
-        for entry in entries {
-            let entry = entry.with_context(|| format!("cannot read {}", root.display()))?;
+        for entry in std::fs::read_dir(&holding)
+            .with_context(|| format!("cannot read {}", holding.display()))?
+        {
+            let entry = entry.with_context(|| format!("cannot read {}", holding.display()))?;
             let name = entry.file_name().to_string_lossy().to_string();
             if !names.contains(name.as_str()) {
                 unrecorded.push((entry.path(), entry.file_type()?.is_dir()));
@@ -1536,7 +1612,7 @@ pub(super) fn inspect(
         }
         unrecorded.sort();
         for (path, is_dir) in unrecorded {
-            let remedy = if !cold && is_dir {
+            let remedy = if !is_cold && is_dir {
                 format!(
                     "; adopt it where it stands with `arc journal workbench adopt {} --purpose TEXT`, or remove it",
                     path.display()
@@ -1553,9 +1629,105 @@ pub(super) fn inspect(
     Ok(())
 }
 
+/// What a path that is not a directory of the journal is: a link and where
+/// it leads, or something else.
+fn leads(path: &Path) -> String {
+    match std::fs::read_link(path) {
+        Ok(target) => format!("is a link to {}", target.display()),
+        Err(_) => "is not a directory".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opened(name: &str) -> JournalEvent {
+        serde_json::from_value(serde_json::json!({
+            "schema": "journal-events/2",
+            "ts": "2026-01-02T03:04:05Z",
+            "topic": "notes",
+            "event": "workbench-opened",
+            "workbench": name,
+            "purpose": "notes",
+        }))
+        .unwrap()
+    }
+
+    fn line(event: &JournalEvent) -> String {
+        format!("{}\n", serde_json::to_string(event).unwrap())
+    }
+
+    fn prepare(dir: &Path, events: String) {
+        let pending = super::super::ExchangeTransaction {
+            bodies: Vec::new(),
+            body_bases: Some(Vec::new()),
+            events,
+            events_basis: Some(String::new()),
+            receipt: None,
+            promotion: None,
+        };
+        let path = super::super::exchange_pending_path(dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(&pending).unwrap()).unwrap();
+    }
+
+    /// Claim: after an append error the journal's own files decide what was
+    /// recorded: the act's exact record, last for its workbench in the event
+    /// log, is recorded; the same in a prepared exchange is prepared; a
+    /// later record for the workbench, or none, is absent. Rejects reading
+    /// an append error as proof nothing was written, which takes back a
+    /// change whose record stands or will be published.
+    #[test]
+    fn the_journal_decides_whether_an_act_was_recorded() {
+        let event = opened("notes-20260102");
+        let mut later = opened("notes-20260102");
+        later.event = "workbench-closed".to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(fate(dir.path(), &event), Fate::Absent));
+
+        std::fs::write(dir.path().join("events.jsonl"), line(&event)).unwrap();
+        assert!(matches!(fate(dir.path(), &event), Fate::Recorded));
+
+        let log = format!("{}{}", line(&event), line(&later));
+        std::fs::write(dir.path().join("events.jsonl"), log).unwrap();
+        assert!(matches!(fate(dir.path(), &event), Fate::Absent));
+
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), line(&event));
+        assert!(matches!(fate(dir.path(), &event), Fate::Prepared(_)));
+        prepare(dir.path(), line(&opened("other-20260102")));
+        assert!(matches!(fate(dir.path(), &event), Fate::Absent));
+    }
+
+    /// Claim: taking a move back never replaces what stands at the
+    /// material's old path: it fails and leaves both entries as they were.
+    /// Rejects a rollback that overwrites a file another process made there
+    /// meanwhile.
+    #[test]
+    fn taking_a_move_back_never_replaces_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("plan.md");
+        let holder = dir.path().join("plan-20260102");
+        std::fs::create_dir(&holder).unwrap();
+        let to = holder.join("plan.md");
+        std::fs::write(&to, "moved\n").unwrap();
+        std::fs::write(&from, "made meanwhile\n").unwrap();
+        let undo = Undo::Rename {
+            from: from.clone(),
+            to: to.clone(),
+            holder: Some(holder.clone()),
+        };
+        assert!(undo.apply().is_err());
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "made meanwhile\n");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "moved\n");
+
+        std::fs::remove_file(&from).unwrap();
+        undo.apply().unwrap();
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "moved\n");
+        assert!(!holder.exists());
+    }
 
     /// Claim: a walk given a limit stops after that many entries and marks
     /// its counts as lower bounds; without one it counts every file. Rejects

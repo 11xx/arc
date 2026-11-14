@@ -596,9 +596,9 @@ fn adopt_refuses_a_repository_or_its_git_directory() {
     fs::create_dir_all(material.join("clone")).unwrap();
     git(&material.join("clone"), &["init", "-q"]);
     let stderr = adopt_refused(&repo, &material);
-    assert!(stderr.contains("holds a Git repository at"), "{stderr}");
+    assert!(stderr.contains("holds a Git repository"), "{stderr}");
     let stderr = adopt_refused(&repo, &repo.root.join(".git"));
-    assert!(stderr.contains("is inside a Git directory"), "{stderr}");
+    assert!(stderr.contains("is inside a `.git` directory"), "{stderr}");
     assert!(material.join("clone/.git").is_dir());
 }
 
@@ -656,7 +656,6 @@ fn adopt_refuses_the_storage_arc_keeps() {
         (dir.join("events.jsonl"), "is part of the journal arc keeps"),
         (dir.join(".locks"), "is part of the journal arc keeps"),
         (dir.clone(), "holds this journal"),
-        (repo.home.clone(), "holds this journal"),
         (
             PathBuf::from(format!("{}-archive", dir.display())),
             "this journal's archive",
@@ -886,4 +885,501 @@ fn journal_exchange_carries_no_workbench() {
         stderr.contains("is not a journal artifact name"),
         "{stderr}"
     );
+}
+
+/// The problem codes `journal doctor` reports.
+fn doctor_codes(repo: &Repo) -> Vec<String> {
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|problem| problem["code"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A directory of loose material holding one file.
+fn material(at: &Path) -> PathBuf {
+    fs::create_dir_all(at).unwrap();
+    fs::write(at.join("notes.txt"), "loose notes\n").unwrap();
+    at.to_path_buf()
+}
+
+/// What a workbench holds of its material: every entry but arc's index.
+fn material_digests(root: &Path) -> BTreeMap<String, String> {
+    let mut found = digests(root);
+    found.remove("WORKBENCH.md");
+    found
+}
+
+/// Claim: adoption refuses a file named `WORKBENCH.md`, and a directory
+/// under `workbench/` holding one arc did not write, and leaves its bytes as
+/// they were. Rejects an adoption that moves such a file to where arc writes
+/// the index and then replaces or deletes it.
+#[test]
+fn adopt_refuses_a_file_named_like_the_index_wherever_it_stands() {
+    let repo = Repo::new();
+    let loose = repo.home.join("loose");
+    fs::create_dir(&loose).unwrap();
+    let own = loose.join("WORKBENCH.md");
+    fs::write(&own, "my own notes\n").unwrap();
+    let stderr = refused(
+        &repo,
+        &[
+            "journal",
+            "workbench",
+            "adopt",
+            own.to_str().unwrap(),
+            "--slug",
+            "notebook",
+            "--purpose",
+            "notes",
+        ],
+    );
+    assert_eq!(fs::read_to_string(&own).unwrap(), "my own notes\n");
+    assert!(stderr.contains("is named like the index"), "{stderr}");
+
+    open_workbench(&repo, "first", "makes the workbench directory");
+    let dir = journal_dir(&repo);
+    let stray = dir.join("workbench/stray");
+    fs::create_dir(&stray).unwrap();
+    fs::write(stray.join("WORKBENCH.md"), "written by hand\n").unwrap();
+    let stderr = adopt_refused(&repo, &stray);
+    assert_eq!(
+        fs::read_to_string(stray.join("WORKBENCH.md")).unwrap(),
+        "written by hand\n"
+    );
+    assert!(stderr.contains("already holds WORKBENCH.md"), "{stderr}");
+    assert_eq!(workbench_events(&dir).len(), 1);
+}
+
+/// Claim: when an adoption's record is prepared but cannot be published,
+/// adoption exits non-zero, leaves the material where that record puts it
+/// and says where; the next journal write publishes the record and the
+/// journal agrees with the disk. Rejects moving the material back while its
+/// record stays prepared, which later publishes a workbench with no
+/// directory.
+#[test]
+fn an_adoption_whose_record_is_only_prepared_keeps_the_material_where_it_names() {
+    let repo = Repo::new();
+    open_workbench(&repo, "first", "starts the event log");
+    let dir = journal_dir(&repo);
+    let source = material(&repo.home.join("loose-notes"));
+    let before = digests(&source);
+    let log = dir.join("events.jsonl");
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o444)).unwrap();
+    let stderr = adopt_refused(&repo, &source);
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let name = format!("loose-notes-{today}");
+    let target = dir.join("workbench").join(&name);
+    assert!(!source.exists(), "{stderr}");
+    assert_eq!(material_digests(&target), before);
+    assert!(stderr.contains("prepared but not published"), "{stderr}");
+    assert!(stderr.contains(target.to_str().unwrap()), "{stderr}");
+
+    open_workbench(&repo, "second", "publishes what was prepared");
+    let rows = listed(&repo, false);
+    let adopted = rows.iter().find(|row| row["name"] == name.as_str());
+    assert_eq!(adopted.map(|row| &row["storage"]), Some(&"hot".into()));
+    assert_eq!(doctor_codes(&repo), Vec::<String>::new());
+}
+
+/// Claim: an archive whose record is prepared but cannot be published
+/// leaves the workbench in the archive, where that record puts it, and
+/// exits non-zero; once published, the journal agrees with the disk.
+/// Rejects moving it back into the journal while its archived record stays
+/// prepared, which leaves the record and the directory disagreeing.
+#[test]
+fn an_archive_whose_record_is_only_prepared_keeps_the_workbench_archived() {
+    let repo = Repo::new();
+    let path = open_workbench(&repo, "finished", "finished work");
+    fs::write(path.join("result.txt"), "done\n").unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "close",
+        &name,
+        "--note",
+        "kept for reference",
+    ]));
+    let dir = journal_dir(&repo);
+    let log = dir.join("events.jsonl");
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o444)).unwrap();
+    let stderr = refused(&repo, &["journal", "archive", &name]);
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+    let cold = PathBuf::from(format!("{}-archive", dir.display()))
+        .join("workbench")
+        .join(&name);
+    assert!(!path.exists(), "{stderr}");
+    assert!(cold.join("result.txt").is_file(), "{stderr}");
+    assert!(stderr.contains("prepared but not published"), "{stderr}");
+
+    open_workbench(&repo, "second", "publishes what was prepared");
+    let rows = listed(&repo, true);
+    let archived = rows.iter().find(|row| row["name"] == name.as_str());
+    assert_eq!(
+        archived.map(|row| &row["storage"]),
+        Some(&"archived".into())
+    );
+    assert_eq!(doctor_codes(&repo), Vec::<String>::new());
+}
+
+/// Claim: when an adoption's record is never written, adoption exits
+/// non-zero and puts the material back where it was, every byte kept, and
+/// the journal records nothing. Rejects a failed adoption that strands the
+/// material in an unrecorded workbench.
+#[test]
+fn an_adoption_with_no_record_puts_the_material_back() {
+    let repo = Repo::new();
+    open_workbench(&repo, "first", "starts the exchange directory");
+    let dir = journal_dir(&repo);
+    for source in [
+        material(&repo.home.join("loose-notes")),
+        repo.home.join("plan.md"),
+    ] {
+        if !source.exists() {
+            fs::write(&source, "# Plan\n").unwrap();
+        }
+        let before = fs::read_dir(dir.join("workbench")).unwrap().count();
+        let exchange = dir.join("exchange");
+        fs::set_permissions(&exchange, fs::Permissions::from_mode(0o555)).unwrap();
+        let stderr = adopt_refused(&repo, &source);
+        fs::set_permissions(&exchange, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(source.exists(), "{stderr}");
+        assert_eq!(
+            fs::read_dir(dir.join("workbench")).unwrap().count(),
+            before,
+            "{stderr}"
+        );
+        assert!(stderr.contains("the change was taken back"), "{stderr}");
+    }
+    assert_eq!(workbench_events(&dir).len(), 1);
+    assert_eq!(
+        fs::read_to_string(repo.home.join("loose-notes/notes.txt")).unwrap(),
+        "loose notes\n"
+    );
+}
+
+/// Claim: arc moves and creates nothing through a `workbench/` that is a
+/// link, in the journal or in its archive, and leaves the material where it
+/// was. Rejects an adoption, open or archive landing material outside the
+/// journal while its records say it is inside.
+#[test]
+fn nothing_moves_through_a_workbench_directory_that_is_a_link() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let elsewhere = repo.home.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("workbench")).unwrap();
+    let source = material(&repo.home.join("loose"));
+    let stderr = adopt_refused(&repo, &source);
+    assert!(source.join("notes.txt").is_file(), "{stderr}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{stderr}");
+    assert!(
+        stderr.contains("is not a directory of the journal"),
+        "{stderr}"
+    );
+    let stderr = refused(
+        &repo,
+        &["journal", "workbench", "probe", "--purpose", "probe"],
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{stderr}");
+    assert!(
+        stderr.contains("is not a directory of the journal"),
+        "{stderr}"
+    );
+
+    fs::remove_file(dir.join("workbench")).unwrap();
+    let path = open_workbench(&repo, "finished", "finished work");
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "close",
+        &name,
+        "--note",
+        "kept for reference",
+    ]));
+    let cold = PathBuf::from(format!("{}-archive", dir.display()));
+    fs::create_dir_all(&cold).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, cold.join("workbench")).unwrap();
+    let stderr = refused(&repo, &["journal", "archive", &name]);
+    assert!(path.is_dir(), "{stderr}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{stderr}");
+    assert!(
+        stderr.contains("is not a directory of the journal"),
+        "{stderr}"
+    );
+}
+
+/// Claim: `journal doctor` reports a recorded workbench whose directory is
+/// reached through a link out of the journal. Rejects a doctor that follows
+/// the link and reports agreement while the material is outside.
+#[test]
+fn doctor_reports_a_workbench_reached_through_a_link() {
+    let repo = Repo::new();
+    open_workbench(&repo, "kept", "kept work");
+    let dir = journal_dir(&repo);
+    let moved = repo.home.join("moved");
+    fs::rename(dir.join("workbench"), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, dir.join("workbench")).unwrap();
+    let codes = doctor_codes(&repo);
+    assert!(
+        codes.iter().any(|code| code == "workbench-outside-journal"),
+        "{codes:?}"
+    );
+}
+
+/// Claim: a path naming a link refuses as a link with or without a
+/// trailing slash, and the link and what it leads to stay as they were.
+/// Rejects following the link to check what it leads to, then moving the
+/// link itself.
+#[test]
+fn adopt_refuses_a_link_named_with_a_trailing_slash() {
+    let repo = Repo::new();
+    let real = material(&repo.home.join("real"));
+    let link = repo.home.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let stderr = refused(
+        &repo,
+        &[
+            "journal",
+            "workbench",
+            "adopt",
+            &format!("{}/", link.display()),
+            "--purpose",
+            "old material",
+        ],
+    );
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "{stderr}"
+    );
+    assert!(real.join("notes.txt").is_file());
+    assert!(stderr.contains("is a symbolic link"), "{stderr}");
+}
+
+/// Claim: adoption reads a file's name literally when asking Git whether it
+/// is tracked. Rejects pathspec magic in a name, such as `:(literal)`,
+/// making a tracked file look untracked and moving it out of its checkout.
+#[test]
+fn adopt_refuses_a_tracked_file_whose_name_is_pathspec_magic() {
+    let repo = Repo::new();
+    let name = ":(literal)notes.txt";
+    fs::write(repo.root.join(name), "tracked\n").unwrap();
+    git(&repo.root, &["--literal-pathspecs", "add", name]);
+    git(
+        &repo.root,
+        &["commit", "-qm", "add a file with a magic name"],
+    );
+    let stderr = refused(
+        &repo,
+        &[
+            "journal",
+            "workbench",
+            "adopt",
+            name,
+            "--slug",
+            "notes",
+            "--purpose",
+            "notes",
+        ],
+    );
+    assert!(repo.root.join(name).is_file(), "{stderr}");
+    assert!(
+        stderr.contains("is tracked by the Git repository"),
+        "{stderr}"
+    );
+}
+
+/// Claim: adoption refuses a journal, registered or not, anything inside
+/// one, and anything holding one, including a journal under this journal.
+/// Rejects moving another project's journal because it sits under this one
+/// or was never registered.
+#[test]
+fn adopt_refuses_another_journal_wherever_it_lies() {
+    let repo = Repo::new();
+    open_workbench(&repo, "first", "starts this journal");
+    let dir = journal_dir(&repo);
+    let body = repo.home.join("body.md");
+    fs::write(&body, "# Other\n").unwrap();
+    let write_journal = |at: &Path| {
+        stdout(repo.arc(&repo.root).env("ARC_JOURNAL_DIR", at).args([
+            "journal",
+            "note",
+            "other",
+            "--kind",
+            "note",
+            "--body-file",
+            body.to_str().unwrap(),
+        ]));
+    };
+    let unregistered = repo.home.join("projects/other-journal");
+    write_journal(&unregistered);
+    let nested = dir.join("loose/other");
+    write_journal(&nested);
+    let registered = repo.home.join("registered/journal");
+    write_journal(&registered);
+    let config = repo.home.join(".local/ai/arc/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[journals.dirs]\n\"{}\" = \"{}\"\n\"{}\" = \"{}\"\n",
+        repo.home.join("elsewhere-a").display(),
+        nested.display(),
+        repo.home.join("elsewhere-b").display(),
+        registered.display()
+    ));
+    fs::write(&config, text).unwrap();
+    for (path, refusal) in [
+        (unregistered.clone(), "is a journal"),
+        (
+            unregistered.parent().unwrap().to_path_buf(),
+            "holds a journal",
+        ),
+        (unregistered.join("unrelated"), "lies inside the journal"),
+        (nested.clone(), "lies inside the journal"),
+        (dir.join("loose"), "holds the journal"),
+        (registered.clone(), "lies inside the journal"),
+    ] {
+        fs::create_dir_all(&path).unwrap();
+        let stderr = adopt_refused(&repo, &path);
+        assert!(path.is_dir(), "{}: {stderr}", path.display());
+        assert!(stderr.contains(refusal), "{}: {stderr}", path.display());
+    }
+    assert_eq!(workbench_events(&dir).len(), 1);
+    assert_eq!(workbench_events(&nested).len(), 0);
+    assert!(nested.join("events.jsonl").is_file());
+}
+
+/// Claim: adoption refuses a bare Git repository, a directory holding one,
+/// and anything inside one. Rejects moving a repository because it has no
+/// `.git` entry.
+#[test]
+fn adopt_refuses_a_bare_repository() {
+    let repo = Repo::new();
+    let holder = repo.home.join("material");
+    fs::create_dir(&holder).unwrap();
+    let bare = holder.join("store.git");
+    git(&holder, &["init", "-q", "--bare", "store.git"]);
+    for (path, refusal) in [
+        (holder.clone(), "holds a Git repository"),
+        (bare.clone(), "is a Git repository"),
+        (bare.join("hooks"), "lies inside the Git repository"),
+    ] {
+        let stderr = adopt_refused(&repo, &path);
+        assert!(path.is_dir(), "{}: {stderr}", path.display());
+        assert!(stderr.contains(refusal), "{}: {stderr}", path.display());
+    }
+    assert!(bare.join("HEAD").is_file());
+}
+
+/// Claim: adoption refuses the current directory, the home directory and
+/// any directory holding either, whatever else they hold. Rejects moving
+/// the directory a caller stands in, or their home, because no journal or
+/// repository happens to lie inside it.
+#[test]
+fn adopt_refuses_the_current_and_home_directories() {
+    let repo = Repo::new();
+    let standing = material(&repo.root.join("scratch/here"));
+    let scratch = repo.root.join("scratch");
+    for path in [".", "..", scratch.to_str().unwrap()] {
+        let output = repo
+            .arc(&standing)
+            .args(["journal", "workbench", "adopt", path, "--purpose", "here"])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+        assert!(standing.join("notes.txt").is_file(), "{path}: {stderr}");
+        assert!(stderr.contains("is the current directory"), "{stderr}");
+    }
+
+    let homes = repo.home.parent().unwrap().join("homes");
+    let home = material(&homes.join("someone"));
+    for path in [home.clone(), homes.clone()] {
+        let output = repo
+            .arc(&repo.root)
+            .env("HOME", &home)
+            .args([
+                "journal",
+                "workbench",
+                "adopt",
+                path.to_str().unwrap(),
+                "--purpose",
+                "home",
+            ])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+        assert!(home.join("notes.txt").is_file(), "{stderr}");
+        assert!(stderr.contains("is the home directory"), "{stderr}");
+    }
+}
+
+/// Claim: adoption refuses a path whose record cannot state it on one line,
+/// before anything moves. Rejects a reported success whose record the
+/// journal cannot read back, which leaves an unlisted directory.
+#[test]
+fn adopt_refuses_a_path_its_record_cannot_state() {
+    let repo = Repo::new();
+    let source = material(&repo.home.join("two\nlines"));
+    let stderr = refused(
+        &repo,
+        &[
+            "journal",
+            "workbench",
+            "adopt",
+            source.to_str().unwrap(),
+            "--slug",
+            "two-lines",
+            "--purpose",
+            "notes",
+        ],
+    );
+    assert!(source.join("notes.txt").is_file(), "{stderr}");
+    assert!(stderr.contains("cannot be recorded"), "{stderr}");
+    let dir = journal_dir(&repo);
+    assert!(workbench_events(&dir).is_empty());
+    assert!(
+        !dir.join("workbench").exists()
+            || fs::read_dir(dir.join("workbench")).unwrap().count() == 0
+    );
+}
+
+/// Claim: adoption refuses anything inside a `.arc` or `.git` directory,
+/// which hold a checkout's ledger, spooled journal writes and repository.
+/// Rejects moving pending journal writes away from where `journal spool`
+/// reads them.
+#[test]
+fn adopt_refuses_a_checkouts_arc_directory() {
+    let repo = Repo::new();
+    let outbox = repo.root.join(".arc/outbox");
+    fs::create_dir_all(&outbox).unwrap();
+    fs::write(outbox.join("pending.json"), "{}\n").unwrap();
+    let stderr = adopt_refused(&repo, &outbox);
+    assert!(outbox.join("pending.json").is_file(), "{stderr}");
+    assert!(stderr.contains("is inside a `.arc` directory"), "{stderr}");
+}
+
+/// Claim: adoption refuses a filesystem root and a mount point. Rejects
+/// moving a whole mounted tree into the journal.
+#[test]
+fn adopt_refuses_a_filesystem_root_and_a_mount_point() {
+    let repo = Repo::new();
+    let stderr = adopt_refused(&repo, Path::new("/"));
+    assert!(stderr.contains("is a filesystem root"), "{stderr}");
+    let mount = Path::new("/proc");
+    if fs::metadata(mount).map(|metadata| metadata.dev()).ok()
+        == fs::metadata("/").map(|metadata| metadata.dev()).ok()
+    {
+        eprintln!("coverage limit: /proc is not a mount point here; the refusal is not exercised");
+        return;
+    }
+    let stderr = adopt_refused(&repo, mount);
+    assert!(stderr.contains("is a mount point"), "{stderr}");
 }

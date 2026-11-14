@@ -224,6 +224,9 @@ paths = [
   # a workbench between storages: a defect loses or alters the only copy of
   # the working material, and the refusals decide what may be moved at all.
   "src/journal/workbench.rs",
+  # Decides what adoption may move: a defect moves a repository, a journal,
+  # tracked files or the directory a caller stands in.
+  "src/journal/workbench/adoption.rs",
   # Decides which ignored content counts as a disposable build artifact.
   # Integration cleanup removes a checkout on this recognition, so a
   # recognizer that over-matches deletes work nobody meant to discard.
