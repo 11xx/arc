@@ -340,19 +340,68 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// How long, in wall milliseconds, that process had been running when it
-    /// issued the event's identity. Present exactly beside `invocation_id`.
+    /// issued the event's identity. Written together with `invocation_id` and
+    /// `invocation_gated_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_elapsed_ms: Option<u64>,
+    /// The gate run and preparation time, in milliseconds, on the receipts
+    /// that process had recorded by then which landing gate and preparation
+    /// time count (`Payload::landing_gate_time`). Written together with
+    /// `invocation_id` and `invocation_elapsed_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_gated_ms: Option<u64>,
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,
 }
 
+/// What this process has recorded, for the invocation stamp: the kind of
+/// each gate run it started, and the gate run and preparation time on the
+/// receipts landing time counts, `None` once one of them lacked either.
+struct Recorded {
+    runs: BTreeMap<String, GateEvent>,
+    gated_ms: Option<u64>,
+}
+
+static RECORDED: std::sync::Mutex<Recorded> = std::sync::Mutex::new(Recorded {
+    runs: BTreeMap::new(),
+    gated_ms: Some(0),
+});
+
 impl Event {
-    /// Record this process and its running time on the event.
+    /// Record this process, its running time and the gate and preparation
+    /// time it has recorded on the event, counting the event itself when it
+    /// is a receipt landing time counts. The three are written together, or
+    /// none of them when that gate time is unknown. Called once, as the
+    /// event's identity is issued.
     pub fn stamp_invocation(&mut self) {
-        self.invocation_id = Some(crate::ids::invocation_id().to_string());
-        self.invocation_elapsed_ms = Some(crate::perf::elapsed_ms());
+        let mut recorded = RECORDED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &self.payload {
+            Payload::VerificationRunStarted { event: kind, .. } => {
+                recorded.runs.insert(self.event_id.clone(), *kind);
+            }
+            Payload::VerificationRecorded { run_id, .. } => {
+                let kind = run_id
+                    .as_ref()
+                    .and_then(|run| recorded.runs.get(run))
+                    .copied()
+                    .unwrap_or_default();
+                if let Some((run_ms, prepare_ms)) = self.payload.landing_gate_time(kind) {
+                    recorded.gated_ms = recorded.gated_ms.and_then(|total| {
+                        [run_ms, prepare_ms]
+                            .into_iter()
+                            .try_fold(total, |total, ms| total.checked_add(ms?))
+                    });
+                }
+            }
+            _ => {}
+        }
+        let gated_ms = recorded.gated_ms;
+        self.invocation_id = gated_ms.map(|_| crate::ids::invocation_id().to_string());
+        self.invocation_elapsed_ms = gated_ms.map(|_| crate::perf::elapsed_ms());
+        self.invocation_gated_ms = gated_ms;
     }
 
     /// The model the session store observed where it contradicted the model
@@ -4421,6 +4470,27 @@ impl GateEvent {
     }
 }
 
+impl Payload {
+    /// The gate run and preparation time a verification receipt adds to a
+    /// landing's gate and preparation time, as recorded, given the kind of
+    /// its run: an executed, named integration gate that was admitted counts;
+    /// any other event adds nothing (`None`).
+    pub fn landing_gate_time(&self, kind: GateEvent) -> Option<(Option<u64>, Option<u64>)> {
+        match self {
+            Payload::VerificationRecorded {
+                gate: Some(_),
+                attested: false,
+                result,
+                timing,
+                ..
+            } if *result != VerifyResult::NotAdmitted && kind == GateEvent::Integration => {
+                Some((timing.run_ms, timing.prepare_ms))
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeltaSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4814,7 +4884,7 @@ mod tests {
 
     /// Claim: an event written before arc stamped invocations loads with no
     /// invocation and serializes back to the same bytes its ledger file
-    /// holds, while a stamped one keeps both fields. Rejects requiring the
+    /// holds, while a stamped one keeps all three fields. Rejects requiring the
     /// fields of old history, or writing them, even as null, on rewrite, which
     /// would make a republished event differ from its ledger file.
     #[test]
@@ -4832,6 +4902,7 @@ mod tests {
         let event: Event = serde_json::from_slice(old).unwrap();
         assert_eq!(event.invocation_id, None);
         assert_eq!(event.invocation_elapsed_ms, None);
+        assert_eq!(event.invocation_gated_ms, None);
         assert_eq!(
             String::from_utf8(serde_json::to_vec_pretty(&event).unwrap()).unwrap(),
             String::from_utf8(old.to_vec()).unwrap()
@@ -4842,11 +4913,13 @@ mod tests {
         let written = serde_json::to_value(&stamped).unwrap();
         assert_eq!(written["invocation_id"], crate::ids::invocation_id());
         assert!(written["invocation_elapsed_ms"].is_u64(), "{written}");
+        assert!(written["invocation_gated_ms"].is_u64(), "{written}");
         let read: Event = serde_json::from_value(written).unwrap();
         assert_eq!(
             read.invocation_id.as_deref(),
             Some(crate::ids::invocation_id())
         );
+        assert_eq!(read.invocation_gated_ms, stamped.invocation_gated_ms);
     }
 
     #[test]

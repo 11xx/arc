@@ -877,6 +877,7 @@ impl Ctx {
             session_resolution_reason,
             invocation_id: None,
             invocation_elapsed_ms: None,
+            invocation_gated_ms: None,
             created_at,
             payload,
         }))

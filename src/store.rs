@@ -255,7 +255,7 @@ impl LedgerRead<'_> {
         Ok(self.landings.get_or_init(|| gathered))
     }
 
-    pub(crate) fn repository_events(&self) -> Result<&[Event]> {
+    fn repository_events(&self) -> Result<&[Event]> {
         if let Some(held) = self.repository_events.get() {
             return Ok(held);
         }

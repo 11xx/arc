@@ -6034,21 +6034,21 @@ GATE COSTS
 
   Landing time is what a landing cost the person waiting: gate time,
   preparation and arc's own commands, summed per landing, window and
-  period, and by `arc show` for an integrated change. arc's own time takes
-  the change's events from the shipped patchset's `patchset-added` through
-  the integration event (the `arc stats --round-trip` window), groups them
-  by `invocation_id`, and sums each command's `invocation_elapsed_ms` at the
-  change's last event in it, less the gate run and preparation on
-  integration-gate receipts it had recorded by then on the change's ledger
-  or that of a member of any landing attempt it prepared or completed. A
-  ledger among those that is absent or unreadable leaves the figure
-  unmeasured. Time between commands, waiting on a reviewer or the operator,
-  is not counted. Work a command does after its last event is not seen, so
-  each command's time is a lower bound; a command landing several changes
-  counts in each. An event without the fields
-  leaves its landing's own time and sum unmeasured, under the rules above.
-  The sum is reported, never budgeted: it includes time a project cannot
-  change, and the landing budget judges gate time alone.
+  period, and by `arc show` for an integrated change. Each event's stamp
+  (`arc guide schemas`) gives its process's running time and the gate and
+  preparation time it had recorded, as the two columns count it, on any
+  change. arc's own time sums, over the processes that wrote the change's
+  events from the shipped patchset's `patchset-added` through the
+  integration event (the `arc stats --round-trip` window), running time
+  less that gate time at the change's last event in each; no other ledger
+  is read. Admission waiting (`wait_ms`) and publication or not-admitted
+  gate runs stay in arc's own time; a process its concurrent gates outran
+  counts zero. Time between commands is not counted. Work after a
+  command's last event on the change is not seen, so each command's time
+  is a lower bound; a command landing several changes counts in each. An
+  event lacking a stamp field leaves its landing's own time and sum
+  unmeasured. The sum is reported, never budgeted: it includes time a
+  project cannot change, and the landing budget judges gate time alone.
 
   Total bounds the worst-case integration suite and is enforced.
   Landing declares typical executed cost and is advisory, reported against
@@ -6810,11 +6810,13 @@ SCHEMAS
   valid under store format 7.
 
   Each change or repository event carries optional `invocation_id` (`inv-`
-  and a lowercase ULID, one per arc process) and `invocation_elapsed_ms`
-  (how long that process had run when it issued the event's identity). They
-  stamp no store format: events with or without them are valid, an older
-  reader ignores both, and export and import keep them as recorded.
-  `arc guide gate-costs` reads them.
+  and a lowercase ULID, one per arc process), `invocation_elapsed_ms` (how
+  long that process had run when it issued the event's identity) and
+  `invocation_gated_ms` (the gate and preparation time it had recorded by
+  then), written together when the identity is issued and never on import,
+  replay or republishing. They stamp no store format: events with or
+  without them are valid, an older reader ignores them, and export and
+  import keep them as recorded. `arc guide gate-costs` reads them.
 
   The bypass fields in state, status, check and explain retain historical
   judgements, including check.bypassed; gate authorization uses eligible passes.

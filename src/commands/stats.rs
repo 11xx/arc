@@ -1356,6 +1356,7 @@ mod tests {
             session_resolution_reason: None,
             invocation_id: None,
             invocation_elapsed_ms: None,
+            invocation_gated_ms: None,
             created_at: DateTime::<Utc>::from_timestamp(1_000_000 + seconds, 0).unwrap(),
             payload,
         }

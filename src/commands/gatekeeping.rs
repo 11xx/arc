@@ -3243,6 +3243,10 @@ fn execute_verification(
                 let duration_ms = started.elapsed().as_millis() as u64;
                 timing = observed.timing;
                 timing.prepare_ms = timing.prepare_ms.map(|ms| ms + preparation_ms);
+                #[cfg(debug_assertions)]
+                if let Ok(raw) = std::env::var("ARC_TEST_COMMAND_PREPARE_MS") {
+                    timing.prepare_ms = Some(raw.parse().context("invalid test prepare_ms")?);
+                }
                 let result = VerifyResult::observed(
                     observed.status.success(),
                     observed.status.code(),

@@ -908,16 +908,22 @@ fn change_events(repo: &Repo, id: &str) -> Vec<Value> {
 }
 
 /// Claim: every event an arc command writes names that command's invocation,
-/// `inv-` and a lowercase ULID shared by all of its events, and how long it
-/// had been running when it wrote each one. Rejects an unstamped event, an id
-/// per event or shared across commands, and a running time longer than the
-/// command took or running backwards within it.
+/// `inv-` and a lowercase ULID shared by all of its events, how long it had
+/// been running, and the gate run and preparation time it had recorded, a
+/// receipt counting its own. Rejects an unstamped event, an id per event or
+/// shared across commands, a running time longer than the command took or
+/// running backwards within it, and gate time a receipt leaves out.
 #[test]
 fn each_event_names_its_command_invocation_and_running_time() {
     let repo = declared("true");
     let (id, wt, _) = change_with_patchset(&repo, "stamped");
     let started = std::time::Instant::now();
-    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .env("ARC_TEST_COMMAND_PREPARE_MS", "300")
+        .args(["verify", "--all"])
+        .assert()
+        .success();
     let wall_ms = started.elapsed().as_millis() as u64;
     let events = change_events(&repo, &id);
     for event in &events {
@@ -925,6 +931,7 @@ fn each_event_names_its_command_invocation_and_running_time() {
         let ulid = invocation.strip_prefix("inv-").unwrap_or_default();
         assert!(ulid.len() == 26 && ulid == ulid.to_lowercase(), "{event}");
         assert!(event["invocation_elapsed_ms"].is_u64(), "{event}");
+        assert!(event["invocation_gated_ms"].is_u64(), "{event}");
     }
     let of = |kind: &str| {
         events
@@ -946,6 +953,8 @@ fn each_event_names_its_command_invocation_and_running_time() {
     let elapsed = |event: &Value| event["invocation_elapsed_ms"].as_u64().unwrap();
     assert!(elapsed(run) <= elapsed(recorded), "{run} {recorded}");
     assert!(elapsed(recorded) <= wall_ms, "{recorded} ran {wall_ms}ms");
+    assert_eq!(run["invocation_gated_ms"], 0, "{run}");
+    assert_eq!(recorded["invocation_gated_ms"], 1300, "{recorded}");
 }
 
 fn close_at(repo: &Repo, id: &str, at: chrono::DateTime<chrono::Utc>) {
@@ -1064,12 +1073,10 @@ fn timed_landing(repo: &Repo, slug: &str) -> (String, PathBuf) {
     let (id, wt, _) = change_with_patchset(repo, slug);
     repo.arc(&wt)
         .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .env("ARC_TEST_COMMAND_PREPARE_MS", "300")
         .args(["verify", "--all"])
         .assert()
         .success();
-    rewrite_event(repo, &id, "verification-recorded", |v| {
-        v["prepare_ms"] = json!(300);
-    });
     close_at(repo, &id, chrono::Utc::now());
     rewrite_event(repo, &id, "change-closed", |v| {
         v["invocation_id"] = json!(format!(
@@ -1091,9 +1098,9 @@ fn timed_landing(repo: &Repo, slug: &str) -> (String, PathBuf) {
 }
 
 /// Claim: a landing's own time is, for each command from the one that
-/// recorded the shipped patchset through the integration event, the longest
-/// running time among its events, less the gate run and preparation time it
-/// recorded, summed; landing time adds gate and preparation, in `arc gates`
+/// recorded the shipped patchset through the integration event, its running
+/// time at the change's last event in it less the gate run and preparation
+/// time it had recorded by then, summed; landing time adds gate and preparation, in `arc gates`
 /// per landing, window and period, text and JSON, and in `arc show`, while
 /// the landing budget keeps judging gate time. Rejects summing every event's
 /// running time, a command's first event standing for it, gate or
@@ -1145,12 +1152,12 @@ fn landing_time_is_gate_preparation_and_each_commands_longest_running_time() {
     );
 }
 
-/// Claim: a landing with an event that names no invocation has no own time
-/// or landing time, its events still load, and the window states a
-/// percentile or a period total of either only when no value the unmeasured
-/// landing could hold would change it. Rejects reading unstamped events as
-/// zero, a window median the unmeasured landing could move, and a refusal to
-/// read history written before the stamp.
+/// Claim: a landing with an event that lacks part of the invocation stamp
+/// has no own time or landing time, its events still load, and the window
+/// states a percentile or a period total of either only when no value the
+/// unmeasured landing could hold would change it. Rejects reading a partly
+/// stamped event as measured or as zero, a window median the unmeasured
+/// landing could move, and a refusal to read such history.
 #[test]
 fn a_landing_with_unstamped_events_reads_unmeasured() {
     let repo = Repo::new();
@@ -1158,9 +1165,7 @@ fn a_landing_with_unstamped_events_reads_unmeasured() {
     let (_, wt) = timed_landing(&repo, "stamped");
     let (legacy, _) = timed_landing(&repo, "legacy");
     rewrite_event(&repo, &legacy, "verification-run-started", |v| {
-        let object = v.as_object_mut().unwrap();
-        object.remove("invocation_id");
-        object.remove("invocation_elapsed_ms");
+        v.as_object_mut().unwrap().remove("invocation_gated_ms");
     });
     let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
     assert_eq!(report["failures"], json!([]), "{report}");

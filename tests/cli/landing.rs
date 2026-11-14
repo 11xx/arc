@@ -1970,45 +1970,52 @@ fn a_failed_landing_splits_within_its_budget_and_closes_only_what_landed() {
     );
 }
 
-/// Rewrite the running time of each event file in `dir`, in ID order, to what
-/// `at` answers for it, and zero the preparation of every receipt.
+/// Rewrite the running time of each event file in `dir` to what `at`
+/// answers for it.
 fn retime(dir: &Path, mut at: impl FnMut(&Value) -> Option<u64>) {
-    let mut paths: Vec<_> = fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    paths.sort();
-    for path in paths {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
         let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        if value["event_type"] == "verification-recorded" {
-            value["prepare_ms"] = json!(0);
-        }
         if let Some(ms) = at(&value) {
             value["invocation_elapsed_ms"] = json!(ms);
+            fs::write(&path, json_file_bytes(&value)).unwrap();
         }
-        fs::write(&path, json_file_bytes(&value)).unwrap();
     }
 }
 
-fn own_ms_in_gates(repo: &Repo, change: &str) -> Value {
+fn figures(repo: &Repo, change: &str) -> (Value, Value) {
     let gates = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
-    gates["landing"]["changes"]
+    let row = gates["landing"]["changes"]
         .as_array()
         .unwrap()
         .iter()
         .find(|row| row["change_id"] == change)
-        .unwrap()["own_ms"]
-        .clone()
+        .unwrap()
+        .clone();
+    let shown = json_stdout(repo.arc(&repo.root).args(["show", change, "--json"]));
+    (row, shown["landing_time"].clone())
+}
+
+/// Every command that wrote `change`'s events except `command` ran no time.
+fn only_command_counts(repo: &Repo, change: &str, command: &Value) {
+    retime(
+        &repo
+            .root
+            .join(".git/arc/changes")
+            .join(change)
+            .join("events"),
+        |event| (event["invocation_id"] != *command).then_some(0),
+    );
 }
 
 /// Claim: a member a split landing closed counts that landing command up to
-/// its own completion, less the gate runs the command recorded by then on any
-/// member's ledger, and `arc gates` and `arc show` agree: a failed parent gate
-/// of 1s, the prefix gate of 1s and the prefix completion at 4s give the
-/// prefix member 2s, whatever the command runs after it. Rejects subtracting
-/// the suffix gate the command ran after the member landed, leaving out the
-/// parent gate recorded on another member's ledger, and two figures for one
-/// landing.
+/// its own completion, less the gate runs the command had recorded by then
+/// on any member's ledger, and `arc gates` and `arc show` agree: a failed
+/// parent gate of 1s, the prefix gate of 1s and the prefix completion at 4s
+/// give the prefix member 2s, whatever the command runs after it. Rejects
+/// subtracting the suffix gate the command ran after the member landed,
+/// leaving out the parent gate recorded on another member's ledger, and two
+/// figures for one landing.
 #[test]
 fn a_split_landing_counts_each_member_up_to_its_own_completion() {
     let repo = Repo::new();
@@ -2018,6 +2025,7 @@ fn a_split_landing_counts_each_member_up_to_its_own_completion() {
     let split = repo
         .arc(&repo.root)
         .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .env("ARC_TEST_COMMAND_PREPARE_MS", "0")
         .args([
             "land",
             a,
@@ -2031,79 +2039,97 @@ fn a_split_landing_counts_each_member_up_to_its_own_completion() {
         .unwrap();
     assert_eq!(split.status.code(), Some(5), "{}", stderr_of(&split));
     assert_eq!(status(&repo, a)["closure"]["outcome"], "integrated");
-    let lander = repository_events(&repo)
+    assert!(status(&repo, d)["closure"].is_null());
+    let completion = repository_events(&repo)
         .into_iter()
         .find(|event| event["event_type"] == "landing-completed")
-        .unwrap()["invocation_id"]
-        .clone();
-    let changes = repo.root.join(".git/arc/changes");
-    let by_lander = |event: &Value| event["invocation_id"] == lander;
-    let receipt = |event: &Value| event["event_type"] == "verification-recorded";
+        .unwrap();
+    assert_eq!(completion["invocation_gated_ms"], 2000, "{completion}");
+    let lander = &completion["invocation_id"];
     retime(&repo.root.join(".git/arc/repository/events"), |event| {
         (event["event_type"] == "landing-completed").then_some(4000)
     });
-    retime(&changes.join(a).join("events"), |event| {
-        Some(match () {
-            _ if !by_lander(event) => 0,
-            _ if receipt(event) => 3000,
-            _ => 2000,
-        })
-    });
-    let mut gates_on_d = [1500, 5000].into_iter();
-    retime(&changes.join(d).join("events"), |event| {
-        (by_lander(event) && receipt(event)).then(|| gates_on_d.next().unwrap())
-    });
-    assert_eq!(
-        gates_on_d.next(),
-        None,
-        "the parent and suffix gates ran on d"
+    retime(
+        &repo.root.join(".git/arc/changes").join(a).join("events"),
+        |event| (event["invocation_id"] == *lander).then_some(3000),
     );
+    only_command_counts(&repo, a, lander);
 
-    assert_eq!(own_ms_in_gates(&repo, a), 4000 - 1000 - 1000);
-    let shown = json_stdout(repo.arc(&repo.root).args(["show", a, "--json"]));
-    assert_eq!(
-        shown["landing_time"]["own_ms"], 2000,
-        "{}",
-        shown["landing_time"]
-    );
-    assert_eq!(
-        shown["landing_time"]["gate_ms"], 1000,
-        "{}",
-        shown["landing_time"]
-    );
+    let (row, shown) = figures(&repo, a);
+    assert_eq!(row["own_ms"], 4000 - 1000 - 1000, "{row}");
+    assert_eq!(shown["own_ms"], 2000, "{shown}");
+    assert_eq!(shown["gate_ms"], 1000, "{shown}");
 }
 
-/// Claim: a change whose landing partner's ledger this store does not hold,
-/// as after a member-only import, shows as before with arc's own landing
-/// time unmeasured, stamped history or not, and `arc gates` counts that
-/// landing unmeasured. Rejects `arc show` failing on the absent change, and
-/// a measured figure missing the gate time the partner's ledger holds.
+/// Claim: of changes one `arc integrate` queue integrates, each counts the
+/// queue command up to its own integration, less every gate run the command
+/// had recorded by then, whichever change it ran for: A's gate of 1s, B's
+/// gate of 1s and B's integration at 4s give B 2s, in `arc gates` and
+/// `arc show`. Rejects leaving A's gate, recorded on A's ledger, inside B's
+/// own time.
 #[test]
-fn a_landing_whose_partner_is_absent_reads_unmeasured() {
+fn an_integration_queue_counts_each_change_up_to_its_own_integration() {
+    let repo = gated_repo();
+    let ((first, _, _), (second, _, _)) = stack(&repo);
+    let (first, second) = (&first, &second);
+    repo.arc(&repo.root)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .env("ARC_TEST_COMMAND_PREPARE_MS", "0")
+        .args(["integrate", first, second])
+        .assert()
+        .success();
+    let integrated = change_events(&repo, second)
+        .into_iter()
+        .find(|event| event["event_type"] == "change-integrated")
+        .unwrap();
+    assert_eq!(integrated["invocation_gated_ms"], 2000, "{integrated}");
+    let queue = &integrated["invocation_id"];
+    retime(
+        &repo
+            .root
+            .join(".git/arc/changes")
+            .join(second)
+            .join("events"),
+        |event| {
+            (event["invocation_id"] == *queue).then(|| {
+                if event["event_type"] == "change-integrated" {
+                    4000
+                } else {
+                    3000
+                }
+            })
+        },
+    );
+    only_command_counts(&repo, second, queue);
+
+    let (row, shown) = figures(&repo, second);
+    assert_eq!(row["own_ms"], 4000 - 1000 - 1000, "{row}");
+    assert_eq!(shown["own_ms"], 2000, "{shown}");
+    assert_eq!(shown["gate_ms"], 1000, "{shown}");
+}
+
+/// Claim: a change's landing figure comes from its own events alone, so a
+/// landing partner whose ledger this store does not hold, as after a
+/// member-only import, changes nothing: `arc show` reads as before and both
+/// commands state the same figure with and without the partner's history,
+/// stamped or not. Rejects `arc show` failing on the absent change, and a
+/// figure that depends on another change's ledger.
+#[test]
+fn a_landing_figure_does_not_need_its_partners_ledger() {
     let repo = gated_repo();
     let ((lower, _, _), (upper, _, _)) = stack(&repo);
     repo.arc(&repo.root)
         .args(["land", &lower, &upper])
         .assert()
         .success();
+    let (row, shown) = figures(&repo, &lower);
+    assert!(shown["own_ms"].is_u64(), "{shown}");
+    assert_eq!(row["own_ms"], shown["own_ms"]);
     fs::remove_dir_all(repo.root.join(".git/arc/changes").join(&upper)).unwrap();
-    let shown = json_stdout(repo.arc(&repo.root).args(["show", &lower, "--json"]));
-    assert_eq!(shown["closure"]["outcome"], "integrated", "{shown}");
-    assert!(shown["landing_time"]["own_ms"].is_null(), "{shown}");
     let text = stdout(repo.arc(&repo.root).args(["show", &lower]));
-    assert!(
-        text.contains("## Landing time") && text.contains("arc's own commands unmeasured"),
-        "{text}"
-    );
-    assert!(own_ms_in_gates(&repo, &lower).is_null());
+    assert!(text.contains("## Landing time"), "{text}");
+    assert_eq!(figures(&repo, &lower), (row, shown));
 
-    let unstamp = |event: &Value| {
-        let mut event = event.clone();
-        let object = event.as_object_mut().unwrap();
-        object.remove("invocation_id");
-        object.remove("invocation_elapsed_ms");
-        event
-    };
     for dir in [
         repo.root.join(".git/arc/repository/events"),
         repo.root
@@ -2113,12 +2139,23 @@ fn a_landing_whose_partner_is_absent_reads_unmeasured() {
     ] {
         for entry in fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
-            let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            fs::write(&path, json_file_bytes(&unstamp(&value))).unwrap();
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let object = value.as_object_mut().unwrap();
+            for field in [
+                "invocation_id",
+                "invocation_elapsed_ms",
+                "invocation_gated_ms",
+            ] {
+                object.remove(field);
+            }
+            fs::write(&path, json_file_bytes(&value)).unwrap();
         }
     }
-    let shown = json_stdout(repo.arc(&repo.root).args(["show", &lower, "--json"]));
-    assert!(shown["landing_time"]["own_ms"].is_null(), "{shown}");
+    let (row, shown) = figures(&repo, &lower);
+    assert!(
+        shown["own_ms"].is_null() && row["own_ms"].is_null(),
+        "{shown}"
+    );
 }
 
 /// Claim: a landing whose must-land-together components and prerequisites

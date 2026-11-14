@@ -251,7 +251,6 @@ fn collect_declarations(
     let mut landing_costs = landing::Costs::new(cwd, repository)?;
     if let Some(store) = store {
         let read = store.read()?;
-        landing_costs.reach(read.repository_events()?);
         for id in read.change_ids()? {
             let events = match read.held_events(&id) {
                 Ok(events) => events,

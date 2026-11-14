@@ -372,6 +372,7 @@ mod tests {
             session_resolution_reason: None,
             invocation_id: None,
             invocation_elapsed_ms: None,
+            invocation_gated_ms: None,
             created_at: Utc::now(),
             payload,
         }
