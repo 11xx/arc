@@ -42,7 +42,7 @@ integration gate; publication runs them with the rest of the tree.
 The invariant gate is the only integration gate. It needs the crate built to
 run its witnesses, so it is also the build check. The build is declared as
 preparation in `.arc/worktrees.toml`: arc runs it before the gate and times it
-apart, and the gate's 20 s budget judges the witnesses. A check joins it only as a witness of something
+apart, and the gate's 10 s budget judges the witnesses. A check joins it only as a witness of something
 that must never pass; a budget overrun is answered by the order of work in
 `arc guide gate-rounds`, with a larger budget last.
 Publication adds clippy, formatting, five release-artifact checks against

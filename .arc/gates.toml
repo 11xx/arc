@@ -12,14 +12,14 @@ writes = [
 # also the build check. Lint, the release-artifact checks and the whole
 # remaining suite run at publication, which is rare and off the landing path.
 [budget]
-total = "20s"
+total = "10s"
 
 [selection]
 base_passes = true
 inert = ["*.md", "tests/*.md", "UNLICENSE"]
 
 [gates.invariants]
-budget = "20s"
+budget = "10s"
 command = "python3 .arc/test-binary.py invariants"
 paths = ["src/", "tests/", ".arc/", "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "Makefile", ".gitignore"]
 events = ["integration", "publication"]
