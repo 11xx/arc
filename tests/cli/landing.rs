@@ -1970,6 +1970,157 @@ fn a_failed_landing_splits_within_its_budget_and_closes_only_what_landed() {
     );
 }
 
+/// Rewrite the running time of each event file in `dir`, in ID order, to what
+/// `at` answers for it, and zero the preparation of every receipt.
+fn retime(dir: &Path, mut at: impl FnMut(&Value) -> Option<u64>) {
+    let mut paths: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    for path in paths {
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if value["event_type"] == "verification-recorded" {
+            value["prepare_ms"] = json!(0);
+        }
+        if let Some(ms) = at(&value) {
+            value["invocation_elapsed_ms"] = json!(ms);
+        }
+        fs::write(&path, json_file_bytes(&value)).unwrap();
+    }
+}
+
+fn own_ms_in_gates(repo: &Repo, change: &str) -> Value {
+    let gates = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    gates["landing"]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == change)
+        .unwrap()["own_ms"]
+        .clone()
+}
+
+/// Claim: a member a split landing closed counts that landing command up to
+/// its own completion, less the gate runs the command recorded by then on any
+/// member's ledger, and `arc gates` and `arc show` agree: a failed parent gate
+/// of 1s, the prefix gate of 1s and the prefix completion at 4s give the
+/// prefix member 2s, whatever the command runs after it. Rejects subtracting
+/// the suffix gate the command ran after the member landed, leaving out the
+/// parent gate recorded on another member's ledger, and two figures for one
+/// landing.
+#[test]
+fn a_split_landing_counts_each_member_up_to_its_own_completion() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.no-d]\ncommand = \"test ! -f d.txt\"\n");
+    let members = approved(&repo, &["a", "d"]);
+    let (a, d) = (&members[0], &members[1]);
+    let split = repo
+        .arc(&repo.root)
+        .env("ARC_TEST_COMMAND_RUN_MS", "1000")
+        .args([
+            "land",
+            a,
+            d,
+            "--debt",
+            "context unread",
+            "--max-attempts",
+            "3",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(split.status.code(), Some(5), "{}", stderr_of(&split));
+    assert_eq!(status(&repo, a)["closure"]["outcome"], "integrated");
+    let lander = repository_events(&repo)
+        .into_iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .unwrap()["invocation_id"]
+        .clone();
+    let changes = repo.root.join(".git/arc/changes");
+    let by_lander = |event: &Value| event["invocation_id"] == lander;
+    let receipt = |event: &Value| event["event_type"] == "verification-recorded";
+    retime(&repo.root.join(".git/arc/repository/events"), |event| {
+        (event["event_type"] == "landing-completed").then_some(4000)
+    });
+    retime(&changes.join(a).join("events"), |event| {
+        Some(match () {
+            _ if !by_lander(event) => 0,
+            _ if receipt(event) => 3000,
+            _ => 2000,
+        })
+    });
+    let mut gates_on_d = [1500, 5000].into_iter();
+    retime(&changes.join(d).join("events"), |event| {
+        (by_lander(event) && receipt(event)).then(|| gates_on_d.next().unwrap())
+    });
+    assert_eq!(
+        gates_on_d.next(),
+        None,
+        "the parent and suffix gates ran on d"
+    );
+
+    assert_eq!(own_ms_in_gates(&repo, a), 4000 - 1000 - 1000);
+    let shown = json_stdout(repo.arc(&repo.root).args(["show", a, "--json"]));
+    assert_eq!(
+        shown["landing_time"]["own_ms"], 2000,
+        "{}",
+        shown["landing_time"]
+    );
+    assert_eq!(
+        shown["landing_time"]["gate_ms"], 1000,
+        "{}",
+        shown["landing_time"]
+    );
+}
+
+/// Claim: a change whose landing partner's ledger this store does not hold,
+/// as after a member-only import, shows as before with arc's own landing
+/// time unmeasured, stamped history or not, and `arc gates` counts that
+/// landing unmeasured. Rejects `arc show` failing on the absent change, and
+/// a measured figure missing the gate time the partner's ledger holds.
+#[test]
+fn a_landing_whose_partner_is_absent_reads_unmeasured() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, _)) = stack(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    fs::remove_dir_all(repo.root.join(".git/arc/changes").join(&upper)).unwrap();
+    let shown = json_stdout(repo.arc(&repo.root).args(["show", &lower, "--json"]));
+    assert_eq!(shown["closure"]["outcome"], "integrated", "{shown}");
+    assert!(shown["landing_time"]["own_ms"].is_null(), "{shown}");
+    let text = stdout(repo.arc(&repo.root).args(["show", &lower]));
+    assert!(
+        text.contains("## Landing time") && text.contains("arc's own commands unmeasured"),
+        "{text}"
+    );
+    assert!(own_ms_in_gates(&repo, &lower).is_null());
+
+    let unstamp = |event: &Value| {
+        let mut event = event.clone();
+        let object = event.as_object_mut().unwrap();
+        object.remove("invocation_id");
+        object.remove("invocation_elapsed_ms");
+        event
+    };
+    for dir in [
+        repo.root.join(".git/arc/repository/events"),
+        repo.root
+            .join(".git/arc/changes")
+            .join(&lower)
+            .join("events"),
+    ] {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            fs::write(&path, json_file_bytes(&unstamp(&value))).unwrap();
+        }
+    }
+    let shown = json_stdout(repo.arc(&repo.root).args(["show", &lower, "--json"]));
+    assert!(shown["landing_time"]["own_ms"].is_null(), "{shown}");
+}
+
 /// Claim: a landing whose must-land-together components and prerequisites
 /// form a cycle once contracted cannot be split, and says so. Rejects a
 /// split that separates a component or lands a member before its

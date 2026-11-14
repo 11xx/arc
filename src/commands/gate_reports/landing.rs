@@ -20,8 +20,9 @@ pub(in crate::commands) struct ChangeCost {
     own_ms: Option<u64>,
     /// Gate, preparation and arc's own time summed, when all three are known.
     total_ms: Option<u64>,
-    /// The landing's commands by invocation, each with its largest running
-    /// time; `None` when an event in the landing carries no invocation.
+    /// The landing's commands by invocation, each with its running time at
+    /// the change's last event in it; `None` when an event in the landing
+    /// carries no invocation.
     #[serde(skip)]
     commands: Option<BTreeMap<String, u64>>,
 }
@@ -65,13 +66,22 @@ pub(in crate::commands) struct Period {
     total_paid_ms: Option<u64>,
 }
 
+/// The exact sum of `values`; `None` when one is unknown or the sum
+/// overflows.
+fn paid(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    values
+        .into_iter()
+        .try_fold(0u64, |total, value| total.checked_add(value?))
+}
+
 impl Period {
     fn of(changes: &[ChangeCost], since: DateTime<Utc>, until: DateTime<Utc>) -> Self {
         let mut period = Self::default();
-        for change in changes
+        let landed = changes
             .iter()
             .filter(|c| c.integrated_at >= since && c.integrated_at <= until)
-        {
+            .collect::<Vec<_>>();
+        for change in &landed {
             period.landings += 1;
             period.measured_ms = period.measured_ms.saturating_add(change.measured_ms);
             period.unmeasured += usize::from(change.run_ms.is_none());
@@ -85,11 +95,10 @@ impl Period {
             period.own_unmeasured += usize::from(change.own_ms.is_none());
             period.total_unmeasured += usize::from(change.total_ms.is_none());
         }
-        period.paid_ms = (period.unmeasured == 0).then_some(period.measured_ms);
-        period.prepare_paid_ms =
-            (period.prepare_unmeasured == 0).then_some(period.measured_prepare_ms);
-        period.own_paid_ms = (period.own_unmeasured == 0).then_some(period.measured_own_ms);
-        period.total_paid_ms = sum([period.paid_ms, period.prepare_paid_ms, period.own_paid_ms]);
+        period.paid_ms = paid(landed.iter().map(|c| c.run_ms));
+        period.prepare_paid_ms = paid(landed.iter().map(|c| c.prepare_ms));
+        period.own_paid_ms = paid(landed.iter().map(|c| c.own_ms));
+        period.total_paid_ms = paid(landed.iter().map(|c| c.total_ms));
         period
     }
 }
@@ -117,22 +126,28 @@ pub(in crate::commands) struct Report {
     changes: Vec<ChangeCost>,
 }
 
+/// One receipt gate time counts, as its invocation recorded it: the ledger
+/// it sits on, the invocation's running time there, and its gate run plus
+/// preparation (`None` when either is missing).
+struct Receipt {
+    ledger: String,
+    at_ms: u64,
+    gated_ms: Option<u64>,
+}
+
 #[derive(Default)]
 pub(in crate::commands) struct Costs {
     branch: Option<String>,
     destination: Option<(DateTime<Utc>, String)>,
     changes: Vec<ChangeCost>,
-    /// Gate run and preparation time each invocation recorded on the
-    /// receipts gate time counts, from every change observed; `None` when
-    /// one of them lacks either.
-    inside: BTreeMap<String, Option<u64>>,
-}
-
-/// `a + b + c` when all are known.
-fn sum(parts: [Option<u64>; 3]) -> Option<u64> {
-    parts
-        .into_iter()
-        .try_fold(0u64, |total, part| total.checked_add(part?))
+    /// Receipts by the invocation that recorded them, from every ledger read.
+    receipts: BTreeMap<String, Vec<Receipt>>,
+    /// The changes whose ledgers were read.
+    read: BTreeSet<String>,
+    /// The members of every landing attempt each invocation prepared or
+    /// completed: the ledgers besides a change's own it may have recorded
+    /// receipts on. `None` until the repository events are read.
+    reach: Option<BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// When a change was integrated: its latest integration event, its own or one
@@ -166,9 +181,10 @@ fn invocation(event: &Event) -> Option<(&str, u64)> {
 }
 
 /// The commands of a change's final landing, from the one that recorded the
-/// shipped patchset through the integration event, each with the largest
-/// running time among its events there. `None` when the change has no
-/// landing window or an event in it carries no invocation.
+/// shipped patchset through the integration event, each with its running
+/// time at the change's last event in it, which is the largest there. `None`
+/// when the change has no landing window or an event in it carries no
+/// invocation.
 fn landing_commands(events: &[Event]) -> Option<BTreeMap<String, u64>> {
     let (start, end) = super::super::stats::final_landing(events)?;
     let mut commands = BTreeMap::new();
@@ -180,16 +196,6 @@ fn landing_commands(events: &[Event]) -> Option<BTreeMap<String, u64>> {
     Some(commands)
 }
 
-/// arc's own time on a landing: each command's running time less the gate
-/// run and preparation time it recorded, summed. `None` when a command's
-/// receipt lacks either.
-fn own_ms(commands: &BTreeMap<String, u64>, inside: &BTreeMap<String, Option<u64>>) -> Option<u64> {
-    commands.iter().try_fold(0u64, |total, (id, elapsed)| {
-        let gated = inside.get(id).copied().unwrap_or(Some(0))?;
-        total.checked_add(elapsed.saturating_sub(gated))
-    })
-}
-
 impl Costs {
     pub(in crate::commands) fn new(cwd: &Path, repository: bool) -> Result<Self> {
         Ok(Self {
@@ -198,32 +204,53 @@ impl Costs {
             } else {
                 None
             },
-            destination: None,
-            changes: Vec::new(),
-            inside: BTreeMap::new(),
+            ..Self::default()
         })
     }
 
-    /// One change's landing time, reading the other members of the landing
-    /// that integrated it for the gate time its command recorded on their
-    /// ledgers.
+    /// Which ledgers each landing command reached, from the repository events.
+    pub(in crate::commands) fn reach(&mut self, repository_events: &[Event]) {
+        let mut reach: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for event in repository_events {
+            let members = match &event.payload {
+                Payload::LandingPrepared { members, .. } => {
+                    members.iter().map(|m| &m.change_id).collect::<Vec<_>>()
+                }
+                Payload::LandingCompleted { members, .. } => {
+                    members.iter().map(|m| &m.change_id).collect()
+                }
+                _ => continue,
+            };
+            if let Some((invocation, _)) = invocation(event) {
+                reach
+                    .entry(invocation.to_string())
+                    .or_default()
+                    .extend(members.into_iter().cloned());
+            }
+        }
+        self.reach = Some(reach);
+    }
+
+    /// One change's landing time, reading the ledgers its landing's commands
+    /// reached. A ledger this store does not hold or cannot read leaves arc's
+    /// own time unmeasured rather than failing the read.
     pub(in crate::commands) fn of_change(store: &Store, id: &str) -> Result<Option<Figure>> {
         let read = store.read()?;
-        let events = read.events_with_landings(id)?;
-        let attempt = events.iter().rev().find_map(|event| match &event.payload {
-            Payload::ChangeIntegrated {
-                landing: Some(landing),
-                ..
-            } => Some(landing.attempt.as_str()),
-            _ => None,
-        });
-        let landings = read.landings()?;
-        let completion = attempt.and_then(|attempt| landings.completion(attempt));
         let mut costs = Self::default();
-        if let Some(Payload::LandingCompleted { members, .. }) = completion.map(|c| &c.payload) {
-            for member in members.iter().filter(|member| member.change_id != id) {
-                let theirs = read.events_with_landings(&member.change_id)?;
-                costs.observe(&member.change_id, &theirs, None);
+        costs.reach(read.repository_events()?);
+        let events = read.events_with_landings(id)?;
+        let reach = costs.reach.as_ref().expect("reach was just read");
+        let others = landing_commands(&events)
+            .into_iter()
+            .flat_map(BTreeMap::into_keys)
+            .filter_map(|invocation| reach.get(&invocation))
+            .flatten()
+            .filter(|other| *other != id)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for other in others {
+            if let Ok(theirs) = read.events_with_landings(&other) {
+                costs.observe(&other, &theirs, None);
             }
         }
         costs.observe(id, &events, integrated_at(&events));
@@ -236,15 +263,54 @@ impl Costs {
         }))
     }
 
-    /// Each observed landing's own and total time, once every change's
-    /// receipts are in.
+    /// arc's own time on `change`'s landing: for each command, its running
+    /// time at the change's last event in it, less the gate run and
+    /// preparation it had recorded by then on the change's ledger and every
+    /// ledger it reached, summed. `None` when a command's receipt lacks
+    /// either, one of those ledgers was not read, or the sum overflows.
+    fn own_ms(&self, change: &str, commands: &BTreeMap<String, u64>) -> Option<u64> {
+        let reach = self.reach.as_ref()?;
+        commands
+            .iter()
+            .try_fold(0u64, |total, (invocation, cutoff)| {
+                let ledgers = reach
+                    .get(invocation)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .chain([change])
+                    .collect::<BTreeSet<_>>();
+                if !ledgers.iter().all(|ledger| self.read.contains(*ledger)) {
+                    return None;
+                }
+                let gated = paid(
+                    self.receipts
+                        .get(invocation)
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| r.at_ms <= *cutoff && ledgers.contains(r.ledger.as_str()))
+                        .map(|r| r.gated_ms),
+                )?;
+                total.checked_add(cutoff.saturating_sub(gated))
+            })
+    }
+
+    /// Each observed landing's own and total time, once every ledger it
+    /// needs is read.
     fn settle(&mut self) {
-        for change in &mut self.changes {
-            change.own_ms = change
-                .commands
-                .as_ref()
-                .and_then(|commands| own_ms(commands, &self.inside));
-            change.total_ms = sum([change.run_ms, change.prepare_ms, change.own_ms]);
+        let owns = self
+            .changes
+            .iter()
+            .map(|change| {
+                change
+                    .commands
+                    .as_ref()
+                    .and_then(|commands| self.own_ms(&change.change_id, commands))
+            })
+            .collect::<Vec<_>>();
+        for (change, own_ms) in self.changes.iter_mut().zip(owns) {
+            change.own_ms = own_ms;
+            change.total_ms = paid([change.run_ms, change.prepare_ms, own_ms]);
         }
     }
 
@@ -254,6 +320,7 @@ impl Costs {
         events: &[Event],
         integrated_at: Option<DateTime<Utc>>,
     ) {
+        self.read.insert(id.to_string());
         let mut run_events = BTreeMap::new();
         let mut cost = integrated_at.map(|integrated_at| ChangeCost {
             change_id: id.into(),
@@ -302,13 +369,15 @@ impl Costs {
                     {
                         continue;
                     }
-                    if let Some((id, _)) = invocation(event) {
-                        let gated = timing
-                            .run_ms
-                            .zip(timing.prepare_ms)
-                            .and_then(|(run, prepare)| run.checked_add(prepare));
-                        let inside = self.inside.entry(id.to_string()).or_insert(Some(0));
-                        *inside = inside.zip(gated).and_then(|(a, b)| a.checked_add(b));
+                    if let Some((invocation, at_ms)) = invocation(event) {
+                        self.receipts
+                            .entry(invocation.to_string())
+                            .or_default()
+                            .push(Receipt {
+                                ledger: id.to_string(),
+                                at_ms,
+                                gated_ms: paid([timing.run_ms, timing.prepare_ms]),
+                            });
                     }
                     let Some(cost) = &mut cost else {
                         continue;
@@ -512,5 +581,39 @@ impl Report {
                 period.total_unmeasured
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claim: a period's paid totals are exact sums or absent: landings whose
+    /// gate, own and landing times each fit but whose sums overflow leave
+    /// those paid totals unavailable while the landings stay measured.
+    /// Rejects a saturated sum published as an exact total.
+    #[test]
+    fn a_period_total_that_overflows_is_unavailable() {
+        let half = 1u64 << 63;
+        let at = Utc::now();
+        let landing = |id: &str| ChangeCost {
+            change_id: id.into(),
+            integrated_at: at,
+            executions: 1,
+            run_ms: Some(half),
+            measured_ms: half,
+            prepare_ms: Some(1),
+            measured_prepare_ms: 1,
+            own_ms: Some(half),
+            total_ms: Some(half),
+            commands: None,
+        };
+        let period = Period::of(&[landing("a"), landing("b")], at - Duration::days(1), at);
+        assert_eq!(period.landings, 2);
+        assert_eq!((period.unmeasured, period.own_unmeasured), (0, 0));
+        assert_eq!(period.paid_ms, None);
+        assert_eq!(period.own_paid_ms, None);
+        assert_eq!(period.total_paid_ms, None);
+        assert_eq!(period.prepare_paid_ms, Some(2));
     }
 }

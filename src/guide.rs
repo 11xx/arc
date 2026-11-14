@@ -6023,8 +6023,9 @@ GATE COSTS
   landings. Empty history has no median or share.
   The 7/30-day windows use closure time and include every readable change
   landed within that period, charging its complete landing cost there.
-  Paid totals are null if any such change is unmeasured; measured_ms retains
-  the known lower bound. Unreadable changes remain collection failures.
+  Paid totals are null if any such change is unmeasured or the sum
+  overflows; measured_ms retains the known lower bound. Unreadable changes
+  remain collection failures.
   Preparation paid is reported beside gate time for the same landings and
   windows, and for each gate over its runs, from prepare_ms on the same
   receipts by the same rules: a receipt without prepare_ms leaves its
@@ -6036,12 +6037,15 @@ GATE COSTS
   period, and by `arc show` for an integrated change. arc's own time takes
   the change's events from the shipped patchset's `patchset-added` through
   the integration event (the `arc stats --round-trip` window), groups them
-  by `invocation_id`, takes each command's largest `invocation_elapsed_ms`
-  less the gate run and preparation time on integration-gate receipts it
-  recorded on any ledger, and sums them. Time between commands, waiting on
-  a reviewer or the operator, is not counted. Work a command does after its
-  last event is not seen, so each command's time is a lower bound; a command
-  landing several changes counts in each. An event without the fields
+  by `invocation_id`, and sums each command's `invocation_elapsed_ms` at the
+  change's last event in it, less the gate run and preparation on
+  integration-gate receipts it had recorded by then on the change's ledger
+  or that of a member of any landing attempt it prepared or completed. A
+  ledger among those that is absent or unreadable leaves the figure
+  unmeasured. Time between commands, waiting on a reviewer or the operator,
+  is not counted. Work a command does after its last event is not seen, so
+  each command's time is a lower bound; a command landing several changes
+  counts in each. An event without the fields
   leaves its landing's own time and sum unmeasured, under the rules above.
   The sum is reported, never budgeted: it includes time a project cannot
   change, and the landing budget judges gate time alone.
