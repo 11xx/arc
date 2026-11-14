@@ -1160,16 +1160,13 @@ RUN A CHANGE
   accounting, supplies no CPU figure. Work delegated to an existing external service
   is outside that accounting. Unavailable host observations are absent.
 
-  The busy-host rule (`arc guide gates`) keeps a loaded machine from being
-  blamed on a change; it is not proof against a change built to deceive it.
-  Work a gate hands to processes outside its tree (a service, a container
-  daemon, an emulator) counts as other load, before and during the gate. An
-  exec the counters cannot follow shows as a tree clock covering less of the
-  run's waited CPU than its reference's did: beyond 5% less is not excused,
-  and less than that hides. The comparison is with the reference because wait
-  also reports process teardown the clock never sees, about a tenth of the
-  CPU of a command that starts many processes. A descendant that narrows its
-  own CPU set is not seen. A pass on a quiet host exposes each: nothing is
+  The busy-host rule (`arc guide gate-costs`) keeps a loaded machine from
+  being blamed on a change; it is not proof against a change built to
+  deceive it. Work a gate hands to processes outside its tree (a service, a
+  container daemon, an emulator) counts as other load, before and during the
+  gate. An exec the counters cannot follow lowers the tree clock's share of
+  waited CPU, and a drop within the rule's coverage slack hides. A
+  descendant that narrows its own CPU set is not seen. A pass on a quiet host exposes each: nothing is
   excused there.
   Attestations, bypasses and older events supply no missing measurements.
   `arc stats` uses `run_ms`, falling back to `duration_ms` only for events
@@ -5691,7 +5688,7 @@ GATES
 
   A command outcome remains pass in the ledger even when its run_ms exceeds
   the budget in force. Clock equality passes. An overrun passes only under
-  the busy-host rule below. Ordinary
+  the busy-host rule of `arc guide gate-costs`. Ordinary
   verify exits 1 for a budget refusal, including parallel preflight whose
   receipts retain unknown cleanliness. Status, check and show project current
   budget applicability beside the raw result. Show JSON adds gate_status beside
@@ -5713,40 +5710,9 @@ GATES
   without work references needs no recorded budget judgement to count. See
   `arc guide gate-costs` for cost warnings.
 
-  The busy-host rule excuses an overrun only with at most 3% more user-space
-  instructions than the newest eligible reference and at least 25% unrelated
-  CPU use both before and during the gate. Before means verification startup
-  to just before spawn, at least 100 ms; subtract arc's process CPU and every
-  earlier tree it ran. During means host busy CPU less the gate tree and arc's
-  other measured CPU. Unattributed concurrent batches get no excuse. Other
-  arc invocations' parallel lanes qualify only through the prior-load condition.
-  The clock must fit reference.run_ms * (1 - reference_share) / (1 -
-  other_share), with 25% slack: each run's capacity left by other work.
-  Zero counts and instruction rates below 10% of the reference's instructions
-  per tree user-CPU second are absent evidence. Missing or incomplete counters
-  and host readings grant no excuse.
-
-  A reference is a clean, unmoved, unexcused direct pass, outside parallel
-  probes, of the same gate and declaration on the same known hostname,
-  logical CPU count and CPU model. Its tree is this run's tree or its revision
-  leads to this run's destination. Its clock must fit the budget in force.
-  Cached receipts never supply references.
-  Legitimate added work becomes its own reference after one clock-fitting pass
-  on a quiet host. A holder or leader with restricted CPUs gets no excuse.
-  Thresholds must match the named version.
-  The receipt carries its reference, rule version and thresholds. Readers use
-  those thresholds and the current budget, without replacing the reference or
-  consulting live load. A threshold change takes a new rule version. Lowering
-  the budget retires an excuse whose reference stops fitting. Excused runs never become references, raise
-  evidence or base-pass seeds, including after a raise.
-
-  Kernel instructions are uncounted. Known limit: added waiting on an
-  already busy host can fit the measured delay allowance; a quiet run exposes
-  it. `arc gates` counts excused runs and names the last; `gates measure` prints
-  instructions and other processes' share. See `arc guide gate-costs` for CPU
-  accounting. Work references, excuses and copied work adopt store format 12
-  before publication
-  or import; readers through format 11 refuse it.
+  `arc gates` counts excused runs and names the last. Work references,
+  excuses and copied work adopt store format 12 before publication or
+  import; readers through format 11 refuse it.
 
   A ledger adopts store format 9 before gate verification or reuse under any
   budget declaration, including a total with missing individual budgets,
@@ -5974,6 +5940,46 @@ GATE COSTS
   lifetime. Arc also samples from invocation startup to gate spawn, subtracting
   its process and known child-tree CPU, and excludes its measured CPU during runs.
   Incomplete, multiplexed or refused perf counters are absent measurements.
+
+  The busy-host rule excuses a command time over its budget only when every
+  condition of the rule version its receipt names holds. Version 2, the
+  current rule, requires, against the newest eligible reference:
+  - at most 3% more user-space instructions, at a rate of at least 10% of
+    the reference's instructions per tree user-CPU second; zero counts and
+    lower rates are absent evidence.
+  - at least 25% unrelated CPU use both before and during the gate. Before
+    is verification startup to just before spawn, at least 100 ms, less
+    arc's process CPU and every earlier tree it ran. During is host busy CPU
+    less the gate tree and arc's other measured CPU.
+  - a clock within reference.run_ms * (1 - reference_share) / (1 -
+    other_share), with 25% slack: each run's capacity left by other work.
+  - a tree clock covering the run's waited user and system CPU at a share
+    at most 5% below the reference's own share. Wait also reports process
+    teardown the clock never sees, about a tenth of the CPU of a command
+    that starts many processes, so the share is compared with the
+    reference's and never with a fixed bound.
+  Version 1 holds the same thresholds without the coverage condition. A
+  receipt carries its reference, rule version and thresholds; readers judge
+  it by the thresholds of the version it names, which must match that
+  version's exactly, and by the current budget, without replacing the
+  reference or consulting live load. A threshold change takes a new rule
+  version. Unattributed concurrent batches, a holder or leader with
+  restricted CPUs, and missing or incomplete counters, tree clock or host
+  readings get no excuse. Other arc invocations' parallel lanes qualify
+  only through the before condition.
+
+  A reference is a clean, unmoved, unexcused direct pass, outside parallel
+  probes, of the same gate and declaration on the same known hostname,
+  logical CPU count and CPU model. Its tree is this run's tree or its revision
+  leads to this run's destination. Its clock must fit the budget in force.
+  Cached receipts never supply references.
+  Legitimate added work becomes its own reference after one clock-fitting pass
+  on a quiet host. Lowering the budget retires an excuse whose reference
+  stops fitting. Excused runs never become references, raise evidence or
+  base-pass seeds, including after a raise. Kernel instructions are
+  uncounted. Known limit: added waiting on an already busy host can fit the
+  measured delay allowance; a quiet run exposes it. What the counters cannot
+  follow is in `arc guide change-gates`.
 
   Refusals include this change's per-change increment and maximum from its
   destination budget, including the first observed refusal. They name command
