@@ -10345,6 +10345,9 @@ pub(crate) struct JournalHoldings {
     pub pending: Vec<String>,
     /// Open claims on hot artifacts.
     pub claims: Vec<HeldClaim>,
+    /// Open workbenches, as `journal workbench list` lists them. They stay in
+    /// the journal with their records, so they refuse nothing.
+    pub workbenches: Vec<WorkbenchRow>,
 }
 
 impl JournalHoldings {
@@ -10359,16 +10362,24 @@ impl JournalHoldings {
     }
 }
 
-/// Read what a journal holds. Takes no lock, so the retirement can repeat it
-/// under the events lock.
+/// Read what a journal holds, open workbenches measured, from one read of
+/// its events. Takes no lock.
 pub(crate) fn journal_holdings(dir: &Path) -> Result<JournalHoldings> {
     let events = read_events(dir)?;
+    let mut holdings = artifact_holdings(dir, &events)?;
+    holdings.workbenches = workbench::open_rows_in(dir, &events);
+    Ok(holdings)
+}
+
+/// What a journal's artifacts hold, the part a retirement can refuse on.
+/// Takes no lock, so the retirement can repeat it under the events lock.
+fn artifact_holdings(dir: &Path, events: &[JournalEvent]) -> Result<JournalHoldings> {
     let now = Utc::now();
     let mut holdings = JournalHoldings::default();
     let mut names = sorted_artifact_names(dir)?;
     for event in events.iter().filter(|e| e.event == "storage-intent") {
         if let Some(file) = &event.file {
-            if pending_storage(&events, file).is_some() && !names.contains(file) {
+            if pending_storage(events, file).is_some() && !names.contains(file) {
                 names.push(file.clone());
             }
         }
@@ -10377,11 +10388,11 @@ pub(crate) fn journal_holdings(dir: &Path) -> Result<JournalHoldings> {
         let Some((_, _, kind)) = parse_artifact_name(&name) else {
             continue;
         };
-        if pending_storage(&events, &name).is_some() || pending_transition(dir, &events, &name) {
+        if pending_storage(events, &name).is_some() || pending_transition(dir, events, &name) {
             holdings.pending.push(name);
             continue;
         }
-        for claim in open_artifact_claims(&events, &name) {
+        for claim in open_artifact_claims(events, &name) {
             holdings.claims.push(HeldClaim {
                 file: name.clone(),
                 claim_id: claim.state.claim_id.clone(),
@@ -10390,9 +10401,9 @@ pub(crate) fn journal_holdings(dir: &Path) -> Result<JournalHoldings> {
                 active: state::claim_timing_at(&claim.state, now).active,
             });
         }
-        if is_actionable_kind(&kind) && !is_consumed(&events, &name) {
+        if is_actionable_kind(&kind) && !is_consumed(events, &name) {
             holdings.unresolved.push(HeldArtifact {
-                open_questions: unanswered_questions(&events, &name).len(),
+                open_questions: unanswered_questions(events, &name).len(),
                 file: name,
                 kind,
             });
@@ -10417,7 +10428,7 @@ pub(crate) fn retire_registration(
     archive_unresolved: bool,
 ) -> Result<Vec<String>> {
     let _transition = lock_journal_transition(dir)?;
-    let holdings = journal_holdings(dir)?;
+    let holdings = artifact_holdings(dir, &read_events(dir)?)?;
     refuse_retirement(&holdings, archive_unresolved)?;
     let mut archived = Vec::new();
     if archive_unresolved {
@@ -10433,7 +10444,7 @@ pub(crate) fn retire_registration(
         }
     }
     let _events = lock_journal_events(dir)?;
-    let holdings = journal_holdings(dir)?;
+    let holdings = artifact_holdings(dir, &read_events(dir)?)?;
     refuse_retirement(&holdings, false)
         .context("the journal changed while it was being retired")?;
     if Path::new(anchor).is_dir() {
@@ -13528,6 +13539,7 @@ pub(crate) fn todo_records(cwd: &Path) -> Result<Vec<TodoRecord>> {
 }
 
 /// Who filed an artifact, as the event that filed it recorded them.
+#[derive(Clone, Debug)]
 pub(crate) struct RecordedIdentity {
     pub(crate) harness: Option<String>,
     pub(crate) session: Option<String>,

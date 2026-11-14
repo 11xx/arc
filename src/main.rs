@@ -4337,9 +4337,12 @@ enum WorkspaceCmd {
     ///
     /// It first shows what the project still holds: unconsumed actionable
     /// artifacts (with their open questions), open claims, unfinished
-    /// transitions or storage moves, and the open changes and owed debts of a
-    /// ledger kept under `data_root` (a ledger inside the project's Git
-    /// directory went with the anchor). It refuses while the anchor exists, a
+    /// transitions or storage moves, open workbenches with their purpose, size
+    /// and age, and the open changes and owed debts of a ledger kept under
+    /// `data_root` (a ledger inside the project's Git directory went with the
+    /// anchor). An open workbench refuses nothing: it stays in the journal
+    /// directory with its records, where `ARC_JOURNAL_DIR` reaches it. It
+    /// refuses while the anchor exists, a
     /// ledger holds open changes or owed debts, a transition or storage move
     /// is unfinished, or a claim is active. Unresolved artifacts refuse it
     /// unless `--archive-unresolved` moves each to the cold archive, shelved

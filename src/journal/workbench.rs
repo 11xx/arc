@@ -612,7 +612,7 @@ fn walk(
 }
 
 /// One workbench as the listings show it.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct WorkbenchRow {
     name: String,
     slug: String,
@@ -653,7 +653,7 @@ pub(crate) struct WorkbenchRow {
 }
 
 /// What closing a workbench recorded.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Closure {
     at: String,
     by: RecordedIdentity,

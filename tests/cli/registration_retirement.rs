@@ -335,3 +335,52 @@ fn an_artifact_filed_during_retirement_refuses_it() {
     );
     assert_eq!(bindings(&journal).pop().unwrap()["event"], "restored");
 }
+
+/// Claim: retiring a registration reports each open workbench of its
+/// journal among the holdings, with purpose and size, in the dry run and in
+/// the retirement, and the retirement leaves the workbench where it is.
+/// Rejects a retirement that drops working material in progress out of every
+/// view without showing it to whoever retires the project.
+#[test]
+fn retirement_reports_open_workbenches_among_its_holdings() {
+    let repo = Repo::new();
+    let probe = repo.home.join("bench-probe");
+    fs::create_dir_all(&probe).unwrap();
+    git(&probe, &["init", "-b", "master"]);
+    let opened = stdout(repo.arc(&probe).args([
+        "journal",
+        "workbench",
+        "sweep",
+        "--purpose",
+        "raw sweep output",
+    ]));
+    let workbench = PathBuf::from(opened.lines().last().unwrap());
+    fs::write(workbench.join("run.csv"), "a,b\n").unwrap();
+    let journal = PathBuf::from(stdout(repo.arc(&probe).args(["journal", "dir"])).trim());
+    fs::remove_dir_all(&probe).unwrap();
+
+    let (code, value) = retire(&repo, &journal, &["--dry-run"]);
+    assert_eq!(code, Some(0), "{value}");
+    let held = value["holdings"]["workbenches"].as_array().unwrap();
+    assert_eq!(held.len(), 1, "{value}");
+    assert_eq!(held[0]["purpose"], "raw sweep output");
+    assert_eq!(held[0]["files"], 1);
+    assert_eq!(held[0]["bytes"], 4);
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "retire"])
+            .arg(&journal)
+            .args(["--reason", "probe repository deleted", "--dry-run"]),
+    );
+    assert!(text.contains("open workbenches: 1"), "{text}");
+    assert!(text.contains("; raw sweep output"), "{text}");
+
+    let (code, value) = retire(&repo, &journal, &[]);
+    assert_eq!(code, Some(0), "{value}");
+    assert_eq!(
+        value["holdings"]["workbenches"][0]["purpose"],
+        "raw sweep output"
+    );
+    assert_eq!(bindings(&journal).pop().unwrap()["event"], "retired");
+    assert!(workbench.join("run.csv").is_file());
+}

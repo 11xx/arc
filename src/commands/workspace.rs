@@ -2975,6 +2975,20 @@ impl RetirementReport {
             for file in &holdings.pending {
                 println!("  unfinished transition or storage move: {file}");
             }
+            if !holdings.workbenches.is_empty() {
+                println!(
+                    "open workbenches: {} (they stay in the journal with their records)",
+                    holdings.workbenches.len()
+                );
+                for workbench in &holdings.workbenches {
+                    println!(
+                        "  {}  {}; {}",
+                        workbench.name(),
+                        workbench.facts(),
+                        workbench.purpose()
+                    );
+                }
+            }
         }
         if let Some(ledger) = &self.ledger {
             match &ledger.root {
