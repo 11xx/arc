@@ -985,14 +985,14 @@ pub fn holder_main() -> ! {
             .and_then(|counter| counter.cpu_ms())
             .map(Box::new);
         observation.timing.instructions = counter.and_then(|counter| counter.finish());
-        // An exec the counters cannot follow still reports its CPU to wait,
-        // user and system alike; the task clock then reads short of it.
-        let waited = (user + system) / 1000;
+        // A clock below waited user CPU alone cannot have followed the tree.
+        // Smaller gaps are judged against the reference's, where both are
+        // known: wait also reports process teardown the clock never sees.
         if observation
             .timing
             .tree_cpu_ms
             .as_deref()
-            .is_some_and(|cpu| cpu.saturating_add(2 + waited / 20) < waited)
+            .is_some_and(|cpu| cpu.saturating_add(2) < user / 1000)
         {
             observation.timing.instructions = None;
             observation.timing.tree_cpu_ms = None;

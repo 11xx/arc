@@ -90,9 +90,16 @@ pub struct Rule {
     pub minimum_other_basis_points: u64,
     pub wall_slack_basis_points: u64,
     pub minimum_prior_window_ms: u64,
+    /// Zero under rule 1, which has no coverage condition.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub clock_coverage_slack_basis_points: u64,
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 impl Rule {
-    fn current() -> Self {
+    /// Receipts judged before the coverage condition keep the rule they name.
+    fn version_one() -> Self {
         Self {
             version: 1,
             instruction_ceiling_basis_points: 10300,
@@ -100,17 +107,23 @@ impl Rule {
             minimum_other_basis_points: 2500,
             wall_slack_basis_points: 12500,
             minimum_prior_window_ms: 100,
+            clock_coverage_slack_basis_points: 0,
         }
+    }
+    fn version_two() -> Self {
+        Self {
+            version: 2,
+            clock_coverage_slack_basis_points: 500,
+            ..Self::version_one()
+        }
+    }
+    fn supported(&self) -> bool {
+        self == &Self::version_one() || self == &Self::version_two()
     }
 }
 impl Default for Rule {
     fn default() -> Self {
-        Self::current()
-    }
-}
-impl Rule {
-    fn supported(&self) -> bool {
-        self == &Self::current()
+        Self::version_two()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,6 +195,27 @@ pub fn other_cpu_basis_points(timing: &VerificationTiming) -> Option<u64> {
     Some((u128::from(busy.saturating_sub(own)) * 10000 / u128::from(capacity)) as u64)
 }
 
+/// The tree clock's share of waited CPU, against the reference's own share.
+/// The two accountings differ by a stable amount for a given command (process
+/// teardown reaches wait and not the clock), so a run is compared with its
+/// reference, never with an absolute bound: a share that fell marks CPU the
+/// counters could not follow.
+fn covered(
+    clock: u64,
+    waited: u64,
+    reference_clock: u64,
+    reference_waited: u64,
+    slack: u64,
+) -> bool {
+    let left = u128::from(clock)
+        .checked_mul(u128::from(reference_waited))
+        .and_then(|n| n.checked_mul(10000));
+    let allowed = u128::from(reference_clock)
+        .checked_mul(u128::from(waited))
+        .and_then(|n| n.checked_mul(u128::from(10000_u64.saturating_sub(slack))));
+    left.zip(allowed).is_some_and(|(l, r)| l >= r)
+}
+
 fn plausible_rate(
     count: u64,
     reference_user: u64,
@@ -217,6 +251,10 @@ pub fn excuse(timing: &VerificationTiming, budget: u64) -> Option<Excuse> {
     // The reference's clock already holds the delay of the load it ran under,
     // so the allowance scales by the capacity each run had left.
     let source_share = other_cpu_basis_points(source).filter(|s| *s < 10000)?;
+    let waited_ms = user_ms.checked_add(timing.cpu_system_ms?)?;
+    let source_waited_ms = source_user_ms.checked_add(source.cpu_system_ms?)?;
+    let clock_ms = timing.tree_cpu_ms.as_deref().copied();
+    let source_clock_ms = source.tree_cpu_ms.as_deref().copied();
     if !rule.supported()
         || !host.unrestricted
         || conditions.concurrent_unattributed
@@ -234,6 +272,14 @@ pub fn excuse(timing: &VerificationTiming, budget: u64) -> Option<Excuse> {
             user_ms,
             rule.minimum_instruction_rate_basis_points,
         )
+        || (rule.clock_coverage_slack_basis_points > 0
+            && !covered(
+                clock_ms?,
+                waited_ms,
+                source_clock_ms?,
+                source_waited_ms,
+                rule.clock_coverage_slack_basis_points,
+            ))
         || u128::from(timing.run_ms?) * u128::from(10000 - share) * 10000
             > u128::from(reference.run_ms)
                 * u128::from(rule.wall_slack_basis_points)

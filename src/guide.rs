@@ -1164,9 +1164,13 @@ RUN A CHANGE
   blamed on a change; it is not proof against a change built to deceive it.
   Work a gate hands to processes outside its tree (a service, a container
   daemon, an emulator) counts as other load, before and during the gate. An
-  exec the counters cannot follow hides work within the checks' tolerances,
-  and a descendant that narrows its own CPU set is not seen. A pass on a
-  quiet host exposes each: nothing is excused there.
+  exec the counters cannot follow shows as a tree clock covering less of the
+  run's waited CPU than its reference's did: beyond 5% less is not excused,
+  and less than that hides. The comparison is with the reference because wait
+  also reports process teardown the clock never sees, about a tenth of the
+  CPU of a command that starts many processes. A descendant that narrows its
+  own CPU set is not seen. A pass on a quiet host exposes each: nothing is
+  excused there.
   Attestations, bypasses and older events supply no missing measurements.
   `arc stats` uses `run_ms`, falling back to `duration_ms` only for events
   without command timing. These observations impose no cost limit.

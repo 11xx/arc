@@ -11,7 +11,7 @@ pub(super) fn readings(instructions: Option<u64>, other: u64) -> String {
         "host_capacity_ms": 10000, "cpu_user_ms": 90, "cpu_system_ms": 10,
         "prior": {"busy_ms":2600,"capacity_ms":10000,"arc_cpu_ms":100,"elapsed_ms":1000},
         "host": {"logical_cpus":10,"cpu_model":"fixture cpu","unrestricted":true},
-        "rule": {"version":1,"instruction_ceiling_basis_points":10300,"minimum_instruction_rate_basis_points":1000,"minimum_other_basis_points":2500,"wall_slack_basis_points":12500,"minimum_prior_window_ms":100}})
+        "rule": {"version":2,"instruction_ceiling_basis_points":10300,"minimum_instruction_rate_basis_points":1000,"minimum_other_basis_points":2500,"wall_slack_basis_points":12500,"minimum_prior_window_ms":100,"clock_coverage_slack_basis_points":500}})
     .to_string()
 }
 fn run(
@@ -927,47 +927,32 @@ fn an_execute_only_command_cannot_seed_a_dropped_counter_reference() {
     );
 }
 
-/// I5: work the counters cannot follow shows as waited CPU the tree clock never
-/// saw, kernel time included. Rejects hiding user work from an execute-only
-/// program behind the kernel CPU of the visible part of the command.
-#[cfg(target_os = "linux")]
+/// I5: a run whose tree clock covers less of its waited CPU than its
+/// reference's did holds work the counters could not follow. Rejects excusing
+/// it on an unchanged instruction count, and refusing a run inside the slack.
 #[test]
-fn hidden_user_work_cannot_shelter_behind_visible_kernel_cpu() {
-    use std::os::unix::fs::PermissionsExt;
-    let repo = Repo::new();
-    let opaque = repo.home.join("opaque-python");
-    fs::copy("/usr/bin/python3", &opaque).unwrap();
-    fs::set_permissions(&opaque, fs::Permissions::from_mode(0o111)).unwrap();
-    let command = r#"dd if=/dev/zero of=/dev/null bs=1M count=16000 2>/dev/null; "$W1_PYTHON" -c 'sum(range(6000000))'"#;
-    repo.declare_gates_locally(&format!(
-        "[gates.unit]\ncommand={}\nbudget='60s'\n",
-        serde_json::to_string(command).unwrap()
-    ));
-    let (id, wt, _) = change_with_patchset(&repo, "hidden-behind-kernel");
-    let run = |python: &Path| {
-        repo.arc(&wt)
-            .env("W1_PYTHON", python)
-            .args(["verify", "--all", "--rerun"])
-            .assert()
-            .success();
-        latest(&repo, &wt, &id)
-    };
-    let ordinary = run(Path::new("/usr/bin/python3"));
-    if ordinary["instructions"].is_null() || ordinary["tree_cpu_ms"].is_null() {
-        return;
+fn a_clock_that_covers_less_than_the_reference_cannot_excuse() {
+    // The fixture's reference clock covers all 100 ms of its waited CPU.
+    let (repo, _, wt) = fixture("clock-coverage");
+    for (clock, code) in [(95, 0), (94, 1)] {
+        let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+        facts["tree_cpu_ms"] = json!(clock);
+        controlled_run(&repo, &wt, 1100, facts, code);
     }
-    // The fixture discriminates only while the visible kernel CPU exceeds the
-    // user CPU about to be hidden, and that user CPU exceeds the holder's
-    // tolerance of 2 ms plus a twentieth of waited CPU. A host where either
-    // fails is not a counterexample.
-    let system = ordinary["cpu_system_ms"].as_u64().unwrap();
-    let user = ordinary["cpu_user_ms"].as_u64().unwrap();
-    if system <= user || user <= 2 * (2 + (system + user) / 20) {
-        return;
-    }
-    let hidden = run(&opaque);
-    assert!(
-        hidden["instructions"].is_null() && hidden["tree_cpu_ms"].is_null(),
-        "hidden user work passed as measured: {hidden}"
-    );
+}
+
+/// I2: a receipt judged under rule 1 names thresholds without a coverage
+/// condition and stays readable and judged by them. Rejects a reader that
+/// requires the newer threshold of every recorded rule, and one that applies
+/// the newer condition to an older receipt.
+#[test]
+fn a_rule_one_receipt_keeps_its_thresholds() {
+    let (repo, id, wt) = fixture("rule-one");
+    let mut facts: Value = serde_json::from_str(&readings(Some(1000), 5000)).unwrap();
+    facts["rule"] = json!({"version":1,"instruction_ceiling_basis_points":10300,
+        "minimum_instruction_rate_basis_points":1000,"minimum_other_basis_points":2500,
+        "wall_slack_basis_points":12500,"minimum_prior_window_ms":100});
+    facts["tree_cpu_ms"] = json!(94);
+    controlled_run(&repo, &wt, 1100, facts, 0);
+    assert_eq!(verdict(&repo, &wt, &id), "excused");
 }
