@@ -837,3 +837,319 @@ fn over_from_another_checkout_includes_change_only_checks() {
         "{report}"
     );
 }
+
+fn close_at(repo: &Repo, id: &str, at: chrono::DateTime<chrono::Utc>) {
+    copy_event(repo, id, "patchset-added", |v| {
+        v["event_type"] = json!("change-closed");
+        v["outcome"] = json!("integrated");
+        v["created_at"] = json!(at);
+    });
+}
+
+/// Claim: a landing pays every executed integration gate, including failed reruns
+/// and removed declarations, exactly once. Rejects charging reuse, publication,
+/// attestation or denied admission, and substituting legacy duration for run_ms.
+#[test]
+fn landing_cost_counts_executions_and_preserves_missing_measurements() {
+    let repo = declared("true");
+    let (id, wt, _) = change_with_patchset(&repo, "paid");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        v["run_ms"] = json!(20);
+    });
+    repo.arc(&wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["verify", "--all", "--event", "publication"])
+        .assert()
+        .success();
+    copy_event(&repo, &id, "verification-recorded", |v| {
+        v["gate"] = json!("removed-gate");
+        v.as_object_mut().unwrap().remove("run_id");
+        v["result"] = json!("fail");
+        v["run_ms"] = json!(30);
+    });
+    copy_event(&repo, &id, "verification-recorded", |v| {
+        v["result"] = json!("not-admitted");
+        v["run_ms"] = json!(9000);
+    });
+    copy_event(&repo, &id, "verification-recorded", |v| {
+        v["attested"] = json!(true);
+        v["result"] = json!("pass");
+    });
+    close_at(&repo, &id, chrono::Utc::now());
+    let (zero, _, _) = change_with_patchset(&repo, "zero-paid");
+    close_at(&repo, &zero, chrono::Utc::now());
+    let (legacy, legacy_wt, _) = change_with_patchset(&repo, "unknown-paid");
+    repo.arc(&legacy_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    rewrite_event(&repo, &legacy, "verification-recorded", |v| {
+        v.as_object_mut().unwrap().remove("run_ms");
+        v["duration_ms"] = json!(5000);
+    });
+    close_at(&repo, &legacy, chrono::Utc::now());
+    let before = tree_bytes(&repo.root.join(".git/arc"));
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let landing = &report["landing"];
+    assert_eq!(landing["landings"], 3);
+    assert_eq!(landing["unmeasured"], 1);
+    assert_eq!(landing["timing"]["samples"], 2);
+    assert_eq!(landing["timing"]["median_ms"], 0);
+    assert_eq!(landing["timing"]["p90_ms"], 50);
+    assert_eq!(landing["zero_execution_share"], 1.0 / 3.0);
+    let paid = landing["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["change_id"] == id)
+        .unwrap();
+    assert_eq!(paid["executions"], 2);
+    assert_eq!(paid["run_ms"], 50);
+    assert!(landing["last_7_days"]["paid_ms"].is_null());
+    assert_eq!(landing["last_30_days"]["measured_ms"], 50);
+    assert_eq!(landing["last_30_days"]["unmeasured"], 1);
+    let text = stdout(repo.arc(&wt).arg("gates"));
+    assert!(text.contains("3 landings, 1 unmeasured"), "{text}");
+    assert!(text.contains("paid -; measured 0.050s"), "{text}");
+    assert_eq!(before, tree_bytes(&repo.root.join(".git/arc")));
+}
+
+/// Claim: landing declarations are destination-owned, combined with the operator
+/// by minimum, and only advise on excessive median cost. Rejects change-head
+/// overrides, required per-gate budgets, raise requirements or a doctor error.
+#[test]
+fn landing_budget_is_destination_owned_and_advisory() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[budget]\nlanding = '10ms'\n[gates.unit]\ncommand = 'true'\n");
+    let (id, wt, _) = change_with_patchset(&repo, "typical");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        v["run_ms"] = json!(50);
+    });
+    close_at(&repo, &id, chrono::Utc::now());
+    let (_, open, _) = change_with_patchset(&repo, "advisory-edit");
+    fs::write(
+        open.join(".arc/gates.toml"),
+        "[budget]\nlanding = '999s'\n[gates.unit]\ncommand = 'true'\n",
+    )
+    .unwrap();
+    git(&open, &["add", ".arc/gates.toml"]);
+    git(&open, &["commit", "-qm", "test: edit typical budget"]);
+    repo.arc(&open).args(["verify", "--all"]).assert().success();
+    let report = json_stdout(repo.arc(&open).args(["gates", "--json"]));
+    assert_eq!(report["landing"]["budget_destination"], "master");
+    assert_eq!(report["landing"]["budget_ms"], 10);
+    assert_eq!(report["landing"]["median_exceeds_budget"], true);
+    assert_eq!(report["budget_errors"], json!([]));
+    assert_eq!(report["budget_declared"], false);
+    let doctor = json_stdout_any_status(repo.arc(&open).args(["doctor", "--json"]));
+    assert!(
+        doctor["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "landing-budget-exceeded"),
+        "{doctor}"
+    );
+    assert!(
+        !doctor["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "gate-budget-invalid"),
+        "{doctor}"
+    );
+    repo.declare_gates_locally("[budget]\nlanding = '5ms'\n");
+    let report = json_stdout(repo.arc(&open).args(["gates", "--json"]));
+    assert_eq!(report["landing"]["budget_ms"], 5);
+    repo.declare_gates_locally("[budget]\nlanding = '20ms'\n");
+    let report = json_stdout(repo.arc(&open).args(["gates", "--json"]));
+    assert_eq!(report["landing"]["budget_ms"], 10);
+}
+
+/// Claim: reports use the latest 100 landings while 7/30-day totals include every
+/// landing in each period. Rejects an unbounded median, execution-date charging,
+/// oldest-first selection, missing zero landings or a zero median for no history.
+#[test]
+fn landing_window_and_calendar_periods_are_independent() {
+    let repo = declared("true");
+    let empty = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    assert!(empty["landing"]["timing"]["median_ms"].is_null());
+    assert!(empty["landing"]["zero_execution_share"].is_null());
+    let (id, wt, _) = change_with_patchset(&repo, "window");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    let now = chrono::Utc::now();
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        v["run_ms"] = json!(1000);
+        v["created_at"] = json!(now - chrono::Duration::days(60));
+    });
+    close_at(&repo, &id, now - chrono::Duration::days(10));
+    let template = fs::read_dir(event_dir(&repo, &id))
+        .unwrap()
+        .map(|e| serde_json::from_slice::<Value>(&fs::read(e.unwrap().path()).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    for i in 0..101 {
+        let change = format!("window-{i}");
+        let dir = event_dir(&repo, &change);
+        fs::create_dir_all(&dir).unwrap();
+        for e in template
+            .iter()
+            .filter(|e| e["event_type"] == "change-opened" || e["event_type"] == "change-closed")
+        {
+            let mut e = e.clone();
+            let event_id = ulid::Ulid::new().to_string();
+            e["event_id"] = json!(event_id);
+            e["change_id"] = json!(change);
+            e["created_at"] = json!(now - chrono::Duration::hours(i + 1));
+            fs::write(
+                dir.join(format!("{event_id}.json")),
+                serde_json::to_vec(&e).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    let report = json_stdout(repo.arc(&wt).args(["gates", "--json"]));
+    let l = &report["landing"];
+    assert_eq!(l["window"], 100);
+    assert_eq!(l["landings"], 100);
+    assert_eq!(l["timing"]["median_ms"], 0);
+    assert_eq!(l["timing"]["p90_ms"], 0);
+    assert_eq!(l["zero_execution_share"], 1.0);
+    assert_eq!(l["last_7_days"]["landings"], 101);
+    assert_eq!(l["last_7_days"]["paid_ms"], 0);
+    assert_eq!(l["last_30_days"]["landings"], 102);
+    assert_eq!(l["last_30_days"]["paid_ms"], 1000);
+}
+
+/// Claim: each completed stack member is a landing and shared execution is paid
+/// once by its recording member. Rejects missing derived closures or duplicating
+/// the shared receipt across members.
+#[test]
+fn landing_stack_members_charge_shared_execution_once() {
+    let repo = declared("true");
+    let (a, a_wt, a_head) = change_with_patchset(&repo, "paid-stack-a");
+    let b = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "paid-stack-b",
+        "--base",
+        &a_head,
+    ])));
+    let b_wt = repo.home.join(".worktrees/repo-paid-stack-b");
+    repo.commit(&b_wt, "stack-b.txt", "b\n", "test: stack member");
+    repo.arc(&b_wt).args(["snapshot", &b]).assert().success();
+    for (id, wt) in [(&a, &a_wt), (&b, &b_wt)] {
+        repo.arc(wt)
+            .args(["review", id, "--verdict", "approved"])
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .args(["land", &a, &b])
+        .assert()
+        .success();
+    rewrite_event(&repo, &b, "verification-recorded", |v| {
+        v["run_ms"] = json!(20);
+    });
+    let report = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
+    assert_eq!(report["landing"]["landings"], 2);
+    assert_eq!(report["landing"]["zero_execution_share"], 0.5);
+    assert_eq!(report["landing"]["timing"]["median_ms"], 0);
+    assert_eq!(report["landing"]["timing"]["p90_ms"], 20);
+    assert_eq!(report["landing"]["last_30_days"]["paid_ms"], 20);
+}
+
+/// Claim: workspace projects rank by measured paid time in 30 days, expose the
+/// total and landing distribution, and retain unreadable projects as unobserved.
+/// Rejects registry order, caller-ledger substitution or an unreadable zero cost.
+#[test]
+fn workspace_ranks_paid_landings_and_retains_unobserved_projects() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[budget]\ntotal='2s'\n[gates.unit]\ncommand='true'\nbudget='1s'\n");
+    let (id, wt, _) = change_with_patchset(&repo, "cheap-paid");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    rewrite_event(&repo, &id, "verification-recorded", |v| {
+        v["run_ms"] = json!(10);
+    });
+    close_at(&repo, &id, chrono::Utc::now());
+    let other = repo.home.join("expensive");
+    git(
+        &repo.home,
+        &[
+            "clone",
+            "-q",
+            repo.root.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    let expensive = opened_change_id(&stdout(repo.arc(&other).args([
+        "begin",
+        "expensive-paid",
+        "--no-worktree",
+    ])));
+    repo.arc(&other)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    let other_events = other
+        .join(".git/arc/changes")
+        .join(&expensive)
+        .join("events");
+    let mut receipt = None;
+    for entry in fs::read_dir(&other_events).unwrap() {
+        let path = entry.unwrap().path();
+        let mut e: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if e["event_type"] == "verification-recorded" {
+            e["run_ms"] = json!(1000);
+            fs::write(path, serde_json::to_vec(&e).unwrap()).unwrap();
+            receipt = Some(e);
+        }
+    }
+    let mut e = receipt.unwrap();
+    e["event_type"] = json!("change-closed");
+    e["event_id"] = json!(ulid::Ulid::new().to_string());
+    e["outcome"] = json!("integrated");
+    e["created_at"] = json!(chrono::Utc::now());
+    fs::write(
+        other_events.join(format!("{}.json", e["event_id"].as_str().unwrap())),
+        serde_json::to_vec(&e).unwrap(),
+    )
+    .unwrap();
+    let report =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "gates", "--global", "--json"]),
+        );
+    let projects = report["projects"].as_array().unwrap();
+    assert_eq!(projects[0]["anchor"], other.to_str().unwrap());
+    assert_eq!(projects[0]["report"]["budget_rules"]["total"], 2000);
+    assert_eq!(
+        projects[0]["report"]["landing"]["timing"]["median_ms"],
+        1000
+    );
+    assert_eq!(
+        projects[0]["report"]["landing"]["last_7_days"]["paid_ms"],
+        1000
+    );
+    assert_eq!(
+        projects[1]["report"]["landing"]["last_30_days"]["paid_ms"],
+        10
+    );
+    fs::write(other.join(".git/arc/config.json"), "malformed").unwrap();
+    let report = json_stdout_any_status(repo.arc(&repo.root).args([
+        "workspace",
+        "gates",
+        "--global",
+        "--json",
+    ]));
+    assert_eq!(report["collection"]["failed"], 1);
+    assert!(report["projects"][1]["report"].is_null());
+    let text = stdout_any_status(
+        repo.arc(&repo.root)
+            .args(["workspace", "gates", "--global"]),
+    );
+    assert!(text.contains("unobserved"), "{text}");
+}
