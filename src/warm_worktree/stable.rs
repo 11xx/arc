@@ -41,6 +41,7 @@ impl Storage {
             if resolved.starts_with(path) && !resolved.starts_with(&common) {
                 bail!("path-stable build directory must be outside the source checkout or inside Git common administrative storage");
             }
+            crate::confinement::require_external(path, &resolved)?;
             resolved
         } else {
             let arc = private_directory(&common, "arc")?;
@@ -77,11 +78,16 @@ impl Storage {
         let cache = owned_cache(&common, &cache_key(hook, timeout))?;
         Ok(Self {
             build: build.clone(),
-            cache,
+            cache: cache.clone(),
             incomplete: control_path(&build, INCOMPLETE)?,
             guard: CommandLease {
                 files: vec![file],
                 build_lease: Some(build_lease),
+                storage: Some(CommandStorage {
+                    build: build.clone(),
+                    cache,
+                    owned_build: hook.directory.is_none(),
+                }),
             },
         })
     }

@@ -175,6 +175,7 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
     // occupy is reported before it exists rather than discovered later.
     crate::worktree_usage::report_root_free(&worktree_root);
     // Git allocates the worktree and its branch together.
+    let _confinement = crate::confinement::Scope::at(cwd, &base);
     crate::gitio::add_worktree_new_branch(cwd, &worktree, &branch, &base)?;
     let admin = crate::gitio::worktree_admin_dir(&worktree)?;
     crate::gitio::populate_worktree(&worktree).with_context(|| {

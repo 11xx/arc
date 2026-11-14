@@ -1,5 +1,12 @@
 [confine]
-writes = ["target", "$CARGO_HOME"]
+writes = [
+  "target",
+  "${CARGO_HOME:-~/.cargo}/registry",
+  "${CARGO_HOME:-~/.cargo}/git",
+  "${CARGO_HOME:-~/.cargo}/.package-cache",
+  "${CARGO_HOME:-~/.cargo}/.package-cache-mutate",
+  "${CARGO_HOME:-~/.cargo}/.global-cache",
+]
 
 # Integration runs the named invariant witnesses and nothing else: the list is
 # .arc/invariants.tsv, and the gate compiles the crate to run them, so it is

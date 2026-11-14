@@ -29,6 +29,7 @@ pub fn raise_budget(
     for name in subjects.iter().flatten() {
         if let Some(gate) = target_gates.gates.get(name) {
             if let Some(probe) = &gate.environment {
+                let _confinement = crate::confinement::Scope::new(&gate.confine);
                 let observed = gates::environment_probe(&ctx.cwd, probe, gate.timeout)?;
                 let entry = state.verifications.iter().rev().find(|e| {
                     state.direct_executions.contains_key(&e.event_id)

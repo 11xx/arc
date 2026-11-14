@@ -660,7 +660,9 @@ pub fn measure_gates(
             .map_or_else(|| "unmeasured".into(), |n| n.to_string())
     );
     let root = gitio::toplevel(&ctx.cwd)?;
-    let declared = gates::inspect(&root)?;
+    let mut declared = gates::inspect(&root)?;
+    declared.destination_confinement(&root)?;
+    let _confinement = crate::confinement::Scope::new(&declared.confine);
     declared.ensure_unconflicted()?;
     if let Some(name) = selected {
         anyhow::ensure!(
@@ -770,7 +772,9 @@ struct PathsReport {
 /// The tracked inventory uses the same coverage rules as delta selection.
 pub fn gate_paths(ctx: &Ctx, json: bool) -> Result<i32> {
     let root = gitio::toplevel(&ctx.cwd)?;
-    let declared = gates::inspect(&root)?;
+    let mut declared = gates::inspect(&root)?;
+    declared.destination_confinement(&root)?;
+    let _confinement = crate::confinement::Scope::new(&declared.confine);
     declared.ensure_unconflicted()?;
     let mut unclaimed_paths = Vec::new();
     let mut paths = Vec::new();
@@ -914,7 +918,9 @@ pub fn init_budgets(ctx: &Ctx, runs: u32, publication: bool) -> Result<i32> {
     let original = declaration_text(&file)?;
     let operator_file = crate::policy::operator_path(&root)?;
     let operator_text = declaration_text(&operator_file)?;
-    let declared = gates::inspect(&root)?;
+    let mut declared = gates::inspect(&root)?;
+    declared.destination_confinement(&root)?;
+    let _confinement = crate::confinement::Scope::new(&declared.confine);
     declared.ensure_unconflicted()?;
     anyhow::ensure!(
         !declared.has_budgets(),

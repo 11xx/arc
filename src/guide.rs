@@ -5835,57 +5835,96 @@ GATE CONFINEMENT
   A project declares writable roots in .arc/gates.toml:
 
     [confine]
-    writes = ["target", "~/.cargo"]
+    writes = ["target", "${CARGO_HOME:-~/.cargo}/registry"]
     required = true                    default; false permits unavailable fallback
 
-  The table opts every project command into Linux Landlock write confinement:
-  gates, selectors, environment probes, preparation, slot identity and warm
-  commands, explicit checkout hooks, changelog renderers, and commands in
-  acceptance and publication scratch checkouts. Without the table commands
-  retain ordinary write authority; doctor advises `gates-unconfined` when gates
-  are declared without confinement. Reads and network access are unrestricted.
-  A project must list its package caches and other writable outputs.
+  Project commands run under the committed destination's declaration:
+  gates, selectors, environment probes, preparation, slot identity, invalidate
+  and warm commands, checkout hooks, Git-fired hooks, changelog renderers, and
+  commands in acceptance and publication scratch checkouts. Every launch needs
+  an explicit destination scope; a missing scope refuses and names the site.
+  The checkout being evaluated cannot select its own authority. Without the
+  table, an explicitly scoped command retains ordinary write authority; doctor
+  advises `gates-unconfined` when gates have no confinement declaration.
 
-  Relative roots are inside the evaluated checkout. `~`, `$VAR` and `${VAR}`
-  expand using arc's environment; unset variables refuse execution. Roots
-  resolve symlinks before enforcement. An absent root is created as a directory
-  only inside the checkout or its arc-managed build storage. External roots
-  must already exist. A file root grants writes to that file only.
+  Operator [confine] roots supplement destination roots; either layer can
+  require enforcement. A change can adopt confinement when the destination has
+  none, or require enforcement, but cannot widen an existing destination's
+  roots. Declaration differences name both sides. Confinement participates in
+  execution identity, so a pass under another declaration, including an
+  unconfined pass, cannot silently remain green. Measurement and budget init
+  can run working-copy commands, but use the associated open or closed change's destination
+  confinement, or the primary branch's committed confinement outside a change.
+  An unowned detached checkout requires an explicit destination.
 
-  Commands can also write the build and cache storage arc manages for this
-  checkout, /tmp, TMPDIR, and the process devices /dev/null, /dev/zero,
-  /dev/random, /dev/urandom, /dev/tty and existing /dev/pts nodes. The source
-  checkout and its Git directories receive no implicit write permission.
-  Automatic roots still apply when a checkout lives beneath one of them.
+  Relative roots must stay inside the evaluated checkout, through every
+  symlink and parent component. Absolute roots name destination-authorized
+  locations; an absolute path inside the checkout obeys the same containment
+  rule. `~`, `$VAR` and `${VAR}` expand using arc's environment. `${VAR:-PATH}`
+  uses PATH when VAR is unset or empty; its default can contain `~` and other
+  expansions. No shell is run. An unset variable without a default refuses.
+  An absent root is created as a directory only inside the checkout or owned
+  build storage. External roots must exist; a file root grants file writes.
 
-  The destination's committed declaration governs a change, including scratch
-  runs. Operator [confine] roots supplement it, and either layer may require
-  enforcement. A head can adopt confinement when its destination has none,
-  or require enforcement, but cannot add writable roots to an existing
-  destination declaration. Declaration differences name both sides. Changing
-  confinement changes execution identity: a pass under another declaration,
-  including an unconfined pass, cannot silently remain green.
+  A root cannot be the home directory, its immediate entries, or an ancestor
+  of home or the checkout. The checkout itself is refused; declared checkout
+  subdirectories remain usable. Git administration and everything beneath the
+  shared Git directory are refused, except the build/cache storage Arc owns
+  and configures for that command. A project's [prepare] directory is external
+  storage: it must also be covered by destination writes and never becomes an
+  implicit root merely because preparation names it. Installed executables
+  and configuration directories should not be granted as package caches.
 
-  Arc queries the kernel ABI and requires ABI 3 for truncation protection.
-  It handles supported filesystem write rights, including cross-directory
-  rename and, from ABI 5, device ioctls; it requests no unsupported right.
-  Unavailable Landlock or missing required rights refuse project execution.
-  Only `required = false` permits an unconfined fallback, labelled in diagnostics
-  and the receipt. Failure to install a prepared ruleset before exec refuses
-  execution. The child installs the restriction before exec, inherits it across
-  all descendants, and cannot lift it. Nested restrictions intersect.
+  Arc-owned build/cache storage, /tmp and process devices /dev/null, /dev/zero,
+  /dev/random, /dev/urandom and /dev/tty are implicit. TMPDIR is writable only
+  when it does not overlap home, the checkout or Git administration; an unsafe
+  TMPDIR refuses the command. /tmp remains writable even when it contains a
+  repository: a repository kept under the temporary directory is not protected.
+  A declared directory under /dev grants the same directory rights as another
+  declared directory; individual device nodes receive file and device rights.
 
-  Gate receipts include `confinement`: whether enforced, ABI, resolved writable
-  roots, and `identity`, a SHA-256 digest of those roots and ABI. An unavailable
+  Suites must declare their own package caches and other outputs. For shared
+  memory, declare /dev/shm. For pseudo-terminals, declare /dev/ptmx and /dev/pts;
+  device access can still be constrained by an enclosing policy or permissions.
+  Declare the directory holding a Unix socket a test binds outside its other
+  roots. Declare individual /dev/kvm or /dev/fuse nodes for those device ioctls.
+  Setuid helpers such as fusermount3 and newuidmap cannot gain privileges under
+  no_new_privs; a write declaration cannot enable them. A test committing in
+  the checkout's own repository is denied because its Git directory is not
+  writable; create an independent fixture repository under an allowed root.
+
+  Arc queries Landlock's ABI and requires ABI 3 for truncation protection. It
+  handles supported filesystem write rights, cross-directory rename and,
+  from ABI 5, device ioctls, requesting no unsupported right. Unavailable
+  Landlock or missing required rights refuse execution. Only required = false
+  permits a labelled unconfined fallback. Installation failure before exec
+  refuses execution. The child installs its restriction before exec; every
+  descendant inherits it and cannot lift it. Nested restrictions intersect.
+
+  Git retains authority for Arc's own ref, object and index operations. Hooks
+  it fires, including rebase's checkout/rewrite hooks and commit's pre-commit,
+  message and post-commit hooks, pass through the project-command constructor.
+  Hook forwarding controls live outside writable build/cache roots and remain
+  until Git exits. Git-configured filters, merge drivers and fsmonitor programs
+  are configuration programs, not Git hooks, and are outside this forwarding.
+  Operator-supplied `watch --exec` and `events --exec` handlers are not project
+  commands and retain operator authority, subject to inherited restrictions.
+  Switching branches without a project command does not evaluate confinement.
+
+  Gate receipts include confinement: whether enforced, ABI, resolved writable
+  roots and identity, a SHA-256 digest of those roots and ABI. An unavailable
   fallback records its reason. A failed confined command prints its writable
-  roots once. Declaration identity binds the declared paths and required flag;
-  the receipt digest describes the resolved execution, including automatic roots.
+  roots once. Declaration identity binds declared paths and the required flag;
+  receipt identity describes resolved execution, including automatic roots.
 
-  Landlock protects filesystem content writes, creation, removal, rename and
-  truncation. It does not mediate every metadata operation, writes through
-  descriptors opened before confinement, or requests sent to an external
-  service. Arc retains its own authority to populate checkouts and record
-  evidence; the restriction applies to project commands and their descendants.
+  Confinement guards against a command reaching what it should not by accident
+  or by naming it outright. Reads and network access remain unrestricted. It
+  does not defeat a machine prepared in advance with hard links, bind mounts
+  or substituted configuration; metadata-only changes; already-open writable
+  descriptors; or a service outside the process tree writing on the command's
+  behalf. Existing build daemons, D-Bus, systemd, Docker and tmux can act for a
+  process through sockets. This boundary applies to project commands, while
+  Arc retains the authority it needs to populate checkouts and record evidence.
 
 GATE COSTS
   `arc gates` in text and JSON and `arc gates over` diagnose command costs

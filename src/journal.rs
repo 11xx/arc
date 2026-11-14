@@ -5946,6 +5946,10 @@ fn journal_queue_depth(ctx: &Ctx) -> Option<usize> {
 /// The `arc` on PATH beside the repository head, because the build a
 /// successor will run is not necessarily the one this checkout would produce.
 fn installed_label(cwd: &Path) -> String {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Arc reads the installed executable version as operator metadata."
+    )]
     let installed = crate::child_command::command("arc")
         .arg("--version")
         .counted_output()

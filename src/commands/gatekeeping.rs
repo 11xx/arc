@@ -12,7 +12,6 @@ use crate::integration::{
 use crate::operation_println as println;
 use crate::process_group::join_before_deadline;
 use std::collections::BTreeMap;
-use std::os::unix::process::CommandExt;
 use std::process::{ExitStatus, Stdio};
 use std::sync::mpsc::{self, TryRecvError};
 pub fn check_selection(
@@ -2451,6 +2450,7 @@ pub fn rebase(
     // the branch has moved.
     let transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &st.target_branch);
     if st.is_closed() {
         eprintln!("{change_id} is closed; its branch has nothing left to replay");
         return Ok(status::Blocker::Closed.exit_code());
@@ -7097,6 +7097,7 @@ mod pipe_deadline_tests {
         output_root: &Path,
         producing_store: &str,
     ) -> Result<GateRun> {
+        let _confinement = crate::confinement::Scope::new(&None);
         run_gate_in_shell(
             crate::slots::shell(cwd)?,
             0,

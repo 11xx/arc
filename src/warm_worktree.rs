@@ -1,6 +1,7 @@
 //! Project-owned build preparation with isolated or persistent output directories.
 
 use crate::perf::Counted;
+use crate::project_command::Command;
 use crate::{gitio, process_group};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -9,9 +10,8 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 mod stable;
@@ -58,15 +58,36 @@ enum Mode {
     PathStable,
 }
 
+#[derive(Clone)]
+pub(crate) struct CommandStorage {
+    build: PathBuf,
+    cache: PathBuf,
+    owned_build: bool,
+}
+impl CommandStorage {
+    pub(crate) fn owned(&self) -> Vec<PathBuf> {
+        std::iter::once(self.cache.clone())
+            .chain(self.owned_build.then(|| self.build.clone()))
+            .collect()
+    }
+    pub(crate) fn external(&self) -> Option<&Path> {
+        (!self.owned_build).then_some(self.build.as_path())
+    }
+}
+
 /// Keeps a configured command's mutable build storage exclusively leased.
 #[derive(Default)]
 pub struct CommandLease {
     files: Vec<File>,
     build_lease: Option<PathBuf>,
+    storage: Option<CommandStorage>,
 }
 
 impl CommandLease {
     fn inherit(&self, command: &mut Command) {
+        if let Some(storage) = &self.storage {
+            command.storage(storage.clone());
+        }
         if let Some(path) = &self.build_lease {
             command.env("ARC_WORKTREE_BUILD_LEASE", path).env(
                 "ARC_WORKTREE_BUILD_LEASE_FD",
@@ -437,6 +458,11 @@ fn configure(command: &mut Command, path: &Path, usage: Use) -> Result<CommandLe
             .join(source_path)
             .join(&source.tree);
     }
+    command.storage(CommandStorage {
+        build: build.clone(),
+        cache: cache.clone(),
+        owned_build: true,
+    });
     command
         .envs(environment(
             &path,
@@ -626,6 +652,7 @@ fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()
     let lease = CommandLease {
         files: vec![lease(&cache)?],
         build_lease: None,
+        storage: None,
     };
     let admin = gitio::worktree_admin_dir(path)?;
     let build_root = private_directory(&admin, "arc-warm-build")?;
@@ -640,6 +667,12 @@ fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()
             source.tree
         ),
     )?;
+    let mut lease = lease;
+    lease.storage = Some(CommandStorage {
+        build: build.clone(),
+        cache: cache.clone(),
+        owned_build: true,
+    });
     let identity = preparation_identity(source);
     if already_prepared(&build.join("prepared"), &identity)? {
         return Ok(());
@@ -753,6 +786,10 @@ fn run_hook(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Lease witnesses use inert operator programs under fixture ownership."
+)]
 mod tests {
     use super::*;
 
@@ -764,14 +801,15 @@ mod tests {
         let guard = CommandLease {
             files: vec![lease(directory.path()).unwrap()],
             build_lease: None,
+            storage: None,
         };
         let descriptor = guard.files[0].as_raw_fd();
-        let mut owned = Command::new("sh");
+        let mut owned = crate::project_command::operator("sh");
         owned
             .args(["-c", "test -e \"/proc/self/fd/$LEASE_FD\""])
             .env("LEASE_FD", descriptor.to_string());
         guard.inherit(&mut owned);
-        let mut unrelated = Command::new("sh");
+        let mut unrelated = crate::project_command::operator("sh");
         unrelated
             .args(["-c", "test ! -e \"/proc/self/fd/$LEASE_FD\""])
             .env("LEASE_FD", descriptor.to_string());

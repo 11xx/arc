@@ -822,9 +822,11 @@ fn hook_outcome(
         .get("change_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The operator supplied this watch/events handler explicitly; project policy does not constrain it."
+    )]
     let mut child_command = crate::child_command::command("sh");
-    let confinement = crate::confinement::apply(&mut child_command, &std::env::current_dir()?)
-        .map_err(std::io::Error::other)?;
     child_command
         .args(["-c", command])
         .env("ARC_EVENT_ID", event_id)
@@ -837,13 +839,6 @@ fn hook_outcome(
             let written = crate::process_group::write_input(&mut stdin, input);
             drop(stdin);
             let status = child.wait()?;
-            if !status.success() {
-                if let Some(receipt) = confinement {
-                    if receipt.confined {
-                        receipt.failed();
-                    }
-                }
-            }
             // A hook may exit without reading its payload; its exit status
             // is its answer.
             match written {

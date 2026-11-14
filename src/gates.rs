@@ -16,7 +16,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -790,6 +789,13 @@ impl Gate {
 }
 
 impl GatesFile {
+    pub(crate) fn destination_confinement(&mut self, cwd: &Path) -> Result<()> {
+        self.confine = crate::confinement::for_checkout(cwd)?;
+        for gate in self.gates.values_mut() {
+            gate.confine = self.confine.clone();
+        }
+        Ok(())
+    }
     pub fn retired_bypass_keys(&self) -> Vec<String> {
         self.gates
             .iter()
@@ -1135,8 +1141,7 @@ fn selector_output(
             timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS),
         ))
         .context("gate selector timeout is too large")?;
-    let mut command = crate::child_command::command("sh");
-    let confinement = crate::confinement::apply(&mut command, cwd)?;
+    let mut command = crate::project_command::new("sh", cwd, "gate selector")?;
     let child = command
         .arg("-c")
         .arg(selector)
@@ -1196,7 +1201,7 @@ fn selector_output(
             break;
         }
         if Instant::now() >= deadline {
-            if let Some(receipt) = confinement {
+            if let Some(receipt) = command.confinement() {
                 if receipt.confined {
                     receipt.failed();
                 }
@@ -1206,7 +1211,7 @@ fn selector_output(
         std::thread::sleep(Duration::from_millis(10));
     }
     if status != Some(true) {
-        if let Some(receipt) = confinement {
+        if let Some(receipt) = command.confinement() {
             if receipt.confined {
                 receipt.failed();
             }
@@ -1298,6 +1303,19 @@ mod tests {
 #[cfg(test)]
 mod pipe_deadline_tests {
     use super::*;
+    fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Result<ProbeRun> {
+        let _scope = crate::confinement::Scope::new(&None);
+        super::environment_probe(cwd, probe, timeout)
+    }
+    fn selector_output(
+        cwd: &Path,
+        selector: &str,
+        input: &str,
+        timeout: Option<u64>,
+    ) -> Result<Option<Vec<u8>>> {
+        let _scope = crate::confinement::Scope::new(&None);
+        super::selector_output(cwd, selector, input, timeout)
+    }
 
     /// A gate selector that exits without reading its whole delta has not
     /// answered for that delta, so the gate runs. Rejects the input writer

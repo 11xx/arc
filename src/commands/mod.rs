@@ -955,7 +955,9 @@ impl Ctx {
         selected.target_branch = target.to_string();
         let declarations = crate::declarations::for_change(&self.cwd, &selected)?;
         let slug = selected.slug.clone();
+        let confinement = declarations.gates.confine.clone();
         let create = |tree: &str| -> Result<Box<dyn status::EvaluationCheckout>> {
+            let _confinement = crate::confinement::Scope::new(&confinement);
             let commit =
                 gitio::commit_tree_with_parents(&self.cwd, tree, &[], "arc probe checkout")?;
             let path = lifecycle::worktree_path_for(&self.cwd, &format!("{slug}-probe"))?;

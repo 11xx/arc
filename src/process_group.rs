@@ -7,7 +7,9 @@
 
 use crate::perf::Counted;
 use std::io::Read;
-use std::process::{Child, Command, ExitStatus};
+#[cfg(test)]
+use std::process::Command;
+use std::process::{Child, ExitStatus};
 
 /// Bound on the stderr a child's failure report carries.
 pub const STDERR_TAIL_BYTES: usize = 4096;
@@ -101,9 +103,13 @@ pub(crate) struct OwnedGroup {
 
 impl OwnedGroup {
     /// Spawn `command`, which must lead its own process group.
-    pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
+    pub(crate) fn spawn(command: &mut impl Counted) -> std::io::Result<Self> {
         let _answers = crate::gitio::answers::WriteScope::project();
-        Ok(Self::adopt(command.counted_spawn()?))
+        let mut group = Self::adopt(command.counted_spawn()?);
+        let receipt = command.confinement();
+        group.set_confinement(receipt.clone());
+        group.observation.timing.confinement = receipt.map(Box::new);
+        Ok(group)
     }
 
     /// Hold `child`, spawned as the leader of its own process group and not

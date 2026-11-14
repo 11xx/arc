@@ -1127,6 +1127,8 @@ fn render_with_command(
         projection: masked_projection(projection)?,
     };
     let request = serde_json::to_vec(&request)?;
+    let confinement = crate::confinement::for_checkout(&root)?;
+    let _confinement = crate::confinement::Scope::new(&confinement);
     let outcome = changelog_render::run(
         "changelog renderer",
         &command.argv,

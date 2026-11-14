@@ -69,6 +69,7 @@ pub fn squash(
             worktree.display()
         );
     }
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &st.target_branch);
     let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let base = gitio::merge_base(&ctx.cwd, &target_head, &head)?;

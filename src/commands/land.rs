@@ -1968,6 +1968,8 @@ fn gate_composed(
 ) -> Result<(i32, BTreeMap<String, String>)> {
     let commit = plan.after().to_string();
     let tree = plan.installed_tree().to_string();
+    let confinement = crate::confinement::at(&ctx.cwd, &plan.target_before)?;
+    let _confinement = crate::confinement::Scope::new(&confinement);
     let checkout = gate_checkout(ctx, store, attempt, &commit)?;
     let mut state = store.state(top)?;
     state.target_branch = plan.target_branch.clone();

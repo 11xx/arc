@@ -146,6 +146,10 @@ fn parse(text: &str, asked: usize) -> Result<Answer, Reason> {
 /// What a child printed and whether it succeeded, or why it could not run.
 /// Routing prints its answer on stdout and a refusal document on stderr.
 fn run(author: &str, reads: &[String]) -> Result<Output, Reason> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The operator selects the routing utility; it is not a project command."
+    )]
     let mut command = crate::child_command::command("agent-routing");
     command
         .args(["frontier", "--author", author])

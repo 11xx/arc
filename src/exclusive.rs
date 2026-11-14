@@ -104,6 +104,10 @@ pub fn acquire(
         }
         let fd = file.as_raw_fd();
         let parent = std::process::id();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "The Arc admission waiter owns supervision, not a project program."
+        )]
         let mut command = crate::child_command::command(std::env::current_exe()?);
         command
             .arg(WAITER)

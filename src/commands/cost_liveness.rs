@@ -115,6 +115,10 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
 }
 
 /// `program`'s output, if it answers within `deadline`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Agent-status is an operator liveness utility, not project code."
+)]
 fn run_within(program: &std::ffi::OsStr, deadline: Duration) -> Result<String, &'static str> {
     run_command_within(crate::child_command::command(program), deadline)
 }

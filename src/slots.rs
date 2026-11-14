@@ -23,7 +23,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -662,8 +662,7 @@ pub fn exclusive_in(cwd: &Path) -> Result<Option<UseLease>> {
 /// under a use holder that keeps the slot in use until its last descendant
 /// has exited; elsewhere it is plain `sh`.
 pub struct Shell {
-    pub command: Command,
-    project: Option<PathBuf>,
+    pub command: crate::project_command::Command,
     report: Option<(OwnedFd, OwnedFd)>,
     control: Option<(OwnedFd, OwnedFd)>,
     _lease: Option<UseLease>,
@@ -673,17 +672,14 @@ pub struct Shell {
 pub fn shell(cwd: &Path) -> Result<Shell> {
     let Some(checkout) = slot_checkout(cwd) else {
         return Ok(Shell {
-            command: crate::child_command::command("sh"),
-            project: Some(cwd.to_path_buf()),
+            command: crate::project_command::new("sh", cwd, "slot shell")?,
             report: None,
             control: None,
             _lease: None,
             _exclusive: None,
         });
     };
-    let mut shell = held_shell(Some(UseLease::shared(&checkout)?), None, false)?;
-    shell.project = Some(cwd.to_path_buf());
-    Ok(shell)
+    held_shell(cwd, Some(UseLease::shared(&checkout)?), None, false)
 }
 
 /// A command holder that accounts for the command's entire descendant tree.
@@ -700,8 +696,7 @@ pub fn measured_shell_with_lock(cwd: &Path, exclusive: Option<File>) -> Result<(
         }
         None => (None, 0),
     };
-    let mut shell = held_shell(lease, exclusive, true)?;
-    shell.project = Some(cwd.to_path_buf());
+    let shell = held_shell(cwd, lease, exclusive, true)?;
     Ok((shell, wait_ms))
 }
 
@@ -723,13 +718,21 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
 const STOP_FD: &str = "ARC_COMMAND_STOP_FD";
 const STOP_ON_DISCONNECT: &str = "ARC_COMMAND_STOP_ON_DISCONNECT";
 
-fn held_shell(lease: Option<UseLease>, exclusive: Option<File>, measured: bool) -> Result<Shell> {
+fn held_shell(
+    cwd: &Path,
+    lease: Option<UseLease>,
+    exclusive: Option<File>,
+    measured: bool,
+) -> Result<Shell> {
     let (read, write) = pipe_pair()?;
     let control = (measured || exclusive.is_some())
         .then(pipe_pair)
         .transpose()?;
-    let mut command =
-        crate::child_command::command(std::env::current_exe().context("cannot locate arc")?);
+    let mut command = crate::project_command::new(
+        std::env::current_exe().context("cannot locate arc")?,
+        cwd,
+        "slot command holder",
+    )?;
     command
         .arg(HOLDER)
         .arg("sh")
@@ -767,7 +770,6 @@ fn held_shell(lease: Option<UseLease>, exclusive: Option<File>, measured: bool) 
     }
     Ok(Shell {
         command,
-        project: None,
         report: Some((read, write)),
         control,
         _lease: lease,
@@ -778,16 +780,7 @@ fn held_shell(lease: Option<UseLease>, exclusive: Option<File>, measured: bool) 
 impl Shell {
     /// Spawn the shell as the leader of its own process group.
     pub fn spawn(&mut self) -> std::io::Result<OwnedGroup> {
-        let receipt = self
-            .project
-            .as_deref()
-            .map(|checkout| crate::confinement::apply(&mut self.command, checkout))
-            .transpose()
-            .map_err(std::io::Error::other)?
-            .flatten();
         let mut group = OwnedGroup::spawn(&mut self.command)?;
-        group.set_confinement(receipt.clone());
-        group.observation.timing.confinement = receipt.map(Box::new);
         if let Some((read, write)) = self.report.take() {
             drop(write);
             group.report_through(read)?;
@@ -854,6 +847,10 @@ pub fn holder_main() -> ! {
         started_ns: monotonic_ns(),
         ..Default::default()
     };
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The command holder inherits its typed launcher's kernel restriction."
+    )]
     let mut command = crate::child_command::command(program);
     command
         .args(rest)
@@ -1081,8 +1078,7 @@ pub fn identity(checkout: &Path, declaration: &Declaration) -> Result<String> {
         return Ok(hex::encode(Sha256::digest(b"arc-slot-identity/1\nnone\n")));
     };
     let mut shell = Shell {
-        command: crate::child_command::command("sh"),
-        project: Some(checkout.to_path_buf()),
+        command: crate::project_command::new("sh", checkout, "slot identity")?,
         report: None,
         control: None,
         _lease: None,
@@ -1677,7 +1673,7 @@ fn empty_outbox(path: &Path) -> bool {
 fn invalidate(path: &Path, declaration: &Declaration, cwd: &Path) -> Result<()> {
     if let Some(script) = &declaration.invalidate {
         let lease = UseLease::exclusive(path)?.context("slot is in use")?;
-        let mut shell = held_shell(Some(lease), None, false)?;
+        let mut shell = held_shell(path, Some(lease), None, false)?;
         let _storage = crate::warm_worktree::configure_invalidation(&mut shell.command, path)?;
         let (code, _, err) = captured(&mut shell, path, script, INVALIDATE_TIMEOUT)?;
         if code != 0 {

@@ -292,6 +292,9 @@ fn git_site(command: &std::process::Command, caller: &std::panic::Location<'_>) 
 
 /// Run a command to completion, counted as a child.
 pub(crate) trait Counted {
+    fn confinement(&self) -> Option<crate::confinement::Receipt> {
+        None
+    }
     /// The command's output, bounded by the thread's deadline scope; see
     /// `gitio::bounded_output`.
     #[track_caller]

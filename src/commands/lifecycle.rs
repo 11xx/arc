@@ -165,8 +165,7 @@ pub fn begin(
         _ => None,
     };
     let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
-    let confinement = crate::confinement::at(&ctx.cwd, &target_head)?;
-    let _confinement = crate::confinement::Scope::new(&confinement);
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &target_head);
     // Read the promotion source before anything is created: a `--from-fork`
     // naming no fork refuses by name, and the record is the fork as it stood
     // at promotion rather than whatever it becomes while this runs.
@@ -384,6 +383,10 @@ pub fn begin(
     /// worktree it reports on.
     fn free_bytes(path: &Path) -> Option<u64> {
         let probe = path.ancestors().find(|candidate| candidate.exists())?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Arc reads filesystem space with a fixed utility and fixed arguments."
+        )]
         let output = crate::child_command::command("df")
             .arg("-kP")
             .arg(probe)

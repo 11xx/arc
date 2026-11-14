@@ -16,7 +16,6 @@ use crate::process_group::{read_tail, OwnedGroup, STDERR_TAIL_BYTES};
 use anyhow::{Context, Result};
 use std::fmt;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -86,14 +85,51 @@ pub fn run(
     request: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<std::result::Result<String, Refusal>> {
-    let (program, arguments) = argv
+    let program = argv
+        .first()
+        .with_context(|| format!("{role} command is empty"))?;
+    let command = crate::project_command::new(program, cwd, "changelog renderer")?;
+    run_command(role, argv, cwd, request, timeout, command)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Intake programs are explicitly operator-configured rather than project commands."
+)]
+pub(crate) fn run_operator(
+    role: &str,
+    argv: &[String],
+    cwd: &Path,
+    request: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<std::result::Result<String, Refusal>> {
+    let program = argv
+        .first()
+        .with_context(|| format!("{role} command is empty"))?;
+    run_command(
+        role,
+        argv,
+        cwd,
+        request,
+        timeout,
+        crate::project_command::operator(program),
+    )
+}
+
+fn run_command(
+    role: &str,
+    argv: &[String],
+    cwd: &Path,
+    request: Option<&[u8]>,
+    timeout: Duration,
+    mut command: crate::project_command::Command,
+) -> Result<std::result::Result<String, Refusal>> {
+    let (_, arguments) = argv
         .split_first()
         .with_context(|| format!("{role} command is empty"))?;
     let deadline = Instant::now()
         .checked_add(timeout)
         .with_context(|| format!("{role} timeout is too large"))?;
-    let mut command = crate::child_command::command(program);
-    let confinement = crate::confinement::apply(&mut command, cwd)?;
     let mut group = match OwnedGroup::spawn(
         command
             .args(arguments)
@@ -115,7 +151,6 @@ pub fn run(
             }))
         }
     };
-    group.set_confinement(confinement);
     let child = group.child();
     let stdout = child
         .stdout
@@ -248,6 +283,16 @@ fn read_capped(mut reader: impl Read, limit: usize) -> std::io::Result<(Vec<u8>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn run(
+        role: &str,
+        argv: &[String],
+        cwd: &Path,
+        request: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<std::result::Result<String, Refusal>> {
+        let _scope = crate::confinement::Scope::new(&None);
+        super::run(role, argv, cwd, request, timeout)
+    }
 
     /// A command renderer that answers without reading its whole request is
     /// judged by its own exit status and output. Rejects the request writer

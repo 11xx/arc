@@ -8,7 +8,9 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
         "--concurrent requires five rounds of the complete batch; --gate is standalone"
     );
     let root = gitio::toplevel(&ctx.cwd)?;
-    let declared = gates::inspect(&root)?;
+    let mut declared = gates::inspect(&root)?;
+    declared.destination_confinement(&root)?;
+    let _confinement = crate::confinement::Scope::new(&declared.confine);
     declared.ensure_unconflicted()?;
     let required = declared
         .gates

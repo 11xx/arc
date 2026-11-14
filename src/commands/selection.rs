@@ -437,6 +437,7 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
         return Ok(1);
     };
     let declarations = candidate_declarations(ctx, &st, &chosen.tree)?;
+    let _confinement = crate::confinement::Scope::new(&declarations.gates.confine);
     if declarations.gates.has_budgets() {
         store.adopt_budgets()?;
     }

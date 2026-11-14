@@ -110,6 +110,10 @@ impl Drop for Pending {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Intake count programs are selected by the operator."
+)]
 fn count(name: &str, command: &IntakeCommand, cwd: &Path) -> Result<u64, String> {
     if !crate::journal::valid_intake_name(name) {
         return Err("the name does not match [a-z][a-z0-9-]{0,31}".to_string());
@@ -117,9 +121,10 @@ fn count(name: &str, command: &IntakeCommand, cwd: &Path) -> Result<u64, String>
     if command.argv.is_empty() {
         return Err("argv is empty".to_string());
     }
-    let stdout = crate::changelog_render::run("intake command", &command.argv, cwd, None, TIMEOUT)
-        .map_err(|error| format!("{error:#}"))?
-        .map_err(|refusal| refusal.cause.to_string())?;
+    let stdout =
+        crate::changelog_render::run_operator("intake command", &command.argv, cwd, None, TIMEOUT)
+            .map_err(|error| format!("{error:#}"))?
+            .map_err(|refusal| refusal.cause.to_string())?;
     total(&stdout).ok_or_else(|| "output has no integer total".to_string())
 }
 

@@ -98,19 +98,25 @@ fn allowed_writes_reads_and_stacked_rulesets_compose() {
     let (mut command, receipt) = shell(scratch.path(), "mkdir target/sub && cat source > target/sub/file && mv target/sub/file target/file && truncate -s 2 target/file && rm target/file && rmdir target/sub", &["target"]);
     assert!(command.status().unwrap().success());
     assert!(receipt.identity.unwrap().starts_with("sha256:"));
-    let (mut command, _) = shell(scratch.path(), "printf forbidden > source", &["target"]);
+    fs::create_dir(scratch.path().join("wider")).unwrap();
+    fs::write(scratch.path().join("wider/source"), "readable").unwrap();
+    let (mut command, _) = shell(
+        scratch.path(),
+        "printf forbidden > wider/source",
+        &["target"],
+    );
     apply_declared(
         &mut command,
         scratch.path(),
         &Declaration {
-            writes: vec![".".into()],
+            writes: vec!["target".into(), "wider".into()],
             required: true,
         },
     )
     .unwrap();
     assert!(!command.status().unwrap().success());
     assert_eq!(
-        fs::read_to_string(scratch.path().join("source")).unwrap(),
+        fs::read_to_string(scratch.path().join("wider/source")).unwrap(),
         "readable"
     );
 }
@@ -227,4 +233,215 @@ fn destination_roots_and_declaration_identity_are_binding() {
         }),
     );
     assert_eq!(project.unwrap().writes, ["/cache", "target"]);
+}
+
+/// Claim I5: a caller without destination authority refuses before choosing any
+/// writable roots. Rejects a detached checkout selecting its own declaration.
+#[test]
+fn unscoped_commands_refuse_the_checkout_declaration() {
+    let scratch = scratch();
+    fs::create_dir(scratch.path().join(".arc")).unwrap();
+    fs::write(
+        scratch.path().join(".arc/gates.toml"),
+        "[confine]\nwrites=['target']\n",
+    )
+    .unwrap();
+    assert!(crate::child_command::command("git")
+        .args(["init", "-q"])
+        .current_dir(scratch.path())
+        .status()
+        .unwrap()
+        .success());
+    let mut command = crate::child_command::command("true");
+    let result = apply(&mut command, scratch.path());
+    assert!(
+        result.is_err(),
+        "unscoped command accepted checkout declaration: {result:?}"
+    );
+}
+
+/// Claim I12: project-selected build directories never acquire implicit write
+/// authority. Rejects trusting ARC_WORKTREE_BUILD as proof of arc ownership.
+#[test]
+fn project_selected_storage_is_not_an_implicit_root() {
+    if !supported() {
+        return;
+    }
+    let scratch = scratch();
+    let checkout = scratch.path().join("checkout");
+    let decoy = scratch.path().join("decoy");
+    fs::create_dir(&checkout).unwrap();
+    fs::create_dir(&decoy).unwrap();
+    let mut command = crate::child_command::command("true");
+    command.env("ARC_WORKTREE_BUILD", &decoy);
+    let result = apply_declared(
+        &mut command,
+        &checkout,
+        &Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "project-selected storage became writable: {result:?}"
+    );
+}
+
+/// Claim I5: relative writable roots cannot escape the checkout by symlink or
+/// parent traversal. Rejects an evaluated head redirecting a destination root.
+#[test]
+fn relative_roots_cannot_follow_symlinks_or_parents_outside() {
+    if !supported() {
+        return;
+    }
+    let scratch = scratch();
+    let checkout = scratch.path().join("checkout");
+    let decoy = scratch.path().join("decoy");
+    fs::create_dir(&checkout).unwrap();
+    fs::create_dir(&decoy).unwrap();
+    std::os::unix::fs::symlink(&decoy, checkout.join("target")).unwrap();
+    for root in ["target", "../decoy"] {
+        let mut command = crate::child_command::command("true");
+        let result = apply_declared(
+            &mut command,
+            &checkout,
+            &Declaration {
+                writes: vec![root.into()],
+                required: true,
+            },
+        );
+        assert!(result.is_err(), "relative root escaped: {root}: {result:?}");
+    }
+}
+
+/// Claim I12: a declaration cannot grant the whole checkout, home, or a path
+/// above either. Rejects roots that erase the confinement boundary.
+#[test]
+fn broad_roots_and_tmpdir_do_not_erase_the_boundary() {
+    if !supported() {
+        return;
+    }
+    let scratch = scratch();
+    let checkout = scratch.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    assert!(crate::child_command::command("git")
+        .args(["init", "--template=", "-q"])
+        .current_dir(&checkout)
+        .status()
+        .unwrap()
+        .success());
+    for root in [
+        ".".to_string(),
+        checkout.display().to_string(),
+        "~".into(),
+        "/".into(),
+        checkout.join(".git/arc").display().to_string(),
+        checkout.join(".git/hooks").display().to_string(),
+        checkout.join(".git/objects").display().to_string(),
+    ] {
+        let mut command = crate::child_command::command("true");
+        let result = apply_declared(
+            &mut command,
+            &checkout,
+            &Declaration {
+                writes: vec![root.clone()],
+                required: true,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "overbroad root accepted: {root}: {result:?}"
+        );
+    }
+    let mut command = crate::child_command::command("true");
+    command.env("TMPDIR", &checkout);
+    let result = apply_declared(
+        &mut command,
+        &checkout,
+        &Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        },
+    );
+    assert!(result.is_err(), "TMPDIR granted checkout: {result:?}");
+}
+
+/// Claim: cache declarations can use Cargo's default home without granting
+/// installed executables or Cargo configuration. Rejects the entire Cargo home.
+#[test]
+fn cargo_cache_roots_exclude_tools_and_support_an_unset_home_variable() {
+    let text = include_str!("../../.arc/gates.toml");
+    let declared: crate::gates::GatesFile = toml::from_str(text).unwrap();
+    let writes = declared.confine.unwrap().writes;
+    assert!(
+        !writes
+            .iter()
+            .any(|path| path == "$CARGO_HOME" || path == "${CARGO_HOME}" || path == "~/.cargo"),
+        "Cargo home grants installed tools: {writes:?}"
+    );
+    assert_eq!(
+        expand("${ARC_CONFINE_TEST_ABSENT:-~/.cargo}/registry").unwrap(),
+        expand("~/.cargo/registry").unwrap()
+    );
+}
+
+/// Claim: a declared directory under /dev supports creation and removal just
+/// like another directory. Rejects stripping directory rights from /dev/shm.
+#[test]
+fn declared_shared_memory_directory_supports_file_creation() {
+    if !supported() {
+        return;
+    }
+    let shared = match tempfile::tempdir_in("/dev/shm") {
+        Ok(scratch) => scratch,
+        Err(error) => {
+            let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("SKIP shared-memory witness: enclosing policy cannot create /dev/shm fixture: {error}\n"));
+            return;
+        }
+    };
+    let checkout = scratch();
+    let root = shared.path().to_str().unwrap();
+    let script = format!("printf shared > '{root}/file' && rm '{root}/file'");
+    let (mut command, _) = shell(checkout.path(), &script, &[root]);
+    assert!(
+        command.status().unwrap().success(),
+        "declared shared-memory directory denied creation"
+    );
+}
+
+/// Claim: switching branches without project hooks does not evaluate a malformed
+/// confinement declaration. Rejects policy validation before any project command.
+#[test]
+fn a_hookless_switch_does_not_evaluate_confinement() {
+    let scratch = scratch();
+    let cwd = scratch.path();
+    let git = |args: &[&str]| {
+        let status = crate::child_command::command("git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.org",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    git(&["init", "-q", "-b", "master"]);
+    fs::create_dir(cwd.join(".arc")).unwrap();
+    fs::write(cwd.join(".arc/gates.toml"), "[confine]\nwrites = broken\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "test: malformed declaration"]);
+    git(&["branch", "side"]);
+    assert!(
+        crate::gitio::git(cwd, &["switch", "side"]).is_ok(),
+        "hookless switch evaluated confinement"
+    );
 }

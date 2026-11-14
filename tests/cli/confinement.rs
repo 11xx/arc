@@ -327,3 +327,278 @@ fn publication_and_slot_commands_are_confined_and_doctor_advises() {
     let gates = json_stdout(repo.arc(&repo.root).args(["gates", "--json"]));
     assert_eq!(gates["confine"]["writes"], serde_json::json!(["target"]));
 }
+
+/// Claim I12: invalidating a stale slot identity is confined like warming it.
+/// Rejects a holder without a project path executing invalidate with full authority.
+#[test]
+fn invalidation_cannot_write_outside_destination_roots() {
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("invalidate-decoy");
+    fs::write(&decoy, "retained").unwrap();
+    repo.redeclare_gates(&declaration("true"));
+    repo.commit(&repo.root, "identity", "one", "test: first identity");
+    repo.commit(
+        &repo.root,
+        ".arc/worktrees.toml",
+        &format!(
+            "[slots]\nsize=1\nroot={:?}\nidentity='cat identity'\nwarm='true'\ninvalidate={:?}\n",
+            repo.home.join("slots").display().to_string(),
+            format!("printf escaped > '{}'", decoy.display())
+        ),
+        "test: declare invalidation",
+    );
+    stdout(repo.arc(&repo.root).args(["slots", "warm"]));
+    repo.commit(&repo.root, "identity", "two", "test: change identity");
+    let output = repo
+        .arc(&repo.root)
+        .args(["slots", "warm"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "unconfined invalidation succeeded: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
+}
+
+/// Claim I5: a landing's preparation answers to its destination even when its
+/// head removes confinement. Rejects a scratch checkout trusting its own table.
+#[test]
+fn landing_preparation_cannot_drop_destination_confinement() {
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("landing-decoy");
+    fs::write(&decoy, "retained").unwrap();
+    repo.redeclare_gates(&declaration("true"));
+    let change = open(&repo);
+    repo.commit(
+        &repo.root,
+        ".arc/gates.toml",
+        "[gates.guard]\ncommand='true'\n",
+        "test: remove head confinement",
+    );
+    repo.commit(
+        &repo.root,
+        ".arc/worktrees.toml",
+        &format!(
+            "[prepare]\nmode='path-stable'\ncommand={:?}\n",
+            format!("printf escaped > '{}'", decoy.display())
+        ),
+        "test: preparation escape",
+    );
+    stdout(repo.arc(&repo.root).args(["snapshot", &change]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", &change, "--verdict", "approved"]),
+    );
+    let target = repo.home.join("target-checkout");
+    git(
+        &repo.root,
+        &["worktree", "add", target.to_str().unwrap(), "master"],
+    );
+    repo.commit(
+        &target,
+        "target-only",
+        "advance",
+        "test: advance landing destination",
+    );
+    git(
+        &repo.root,
+        &["worktree", "remove", target.to_str().unwrap()],
+    );
+    let output = repo
+        .arc(&repo.root)
+        .args(["land", &change, "--debt", "fixture replay"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "landing ran unconfined: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
+}
+
+/// Claim: operator watch/events handlers retain operator authority rather than
+/// project roots. Rejects applying project confinement to explicit --exec code.
+#[test]
+fn operator_event_and_watch_handlers_are_not_project_commands() {
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("operator-output");
+    repo.redeclare_gates(&declaration("true"));
+    let change = open(&repo);
+    stdout(repo.arc(&repo.root).args(["snapshot", &change]));
+    let command = format!("cat >/dev/null; printf operator > '{}'", decoy.display());
+    stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        &change,
+        "--type",
+        "patchset-added",
+        "--exec",
+        &command,
+    ]));
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "operator");
+    fs::remove_file(&decoy).unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "watch",
+        &change,
+        "--until",
+        "snapshot",
+        "--timeout",
+        "2",
+        "--exec",
+        &command,
+    ]));
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "operator");
+}
+
+/// Claim I12: hooks fired by Git's own commit path are confined individually,
+/// while Git retains authority to restore the checkout after a refused hook.
+/// Rejects squash running a tracked pre-commit hook with operator write authority.
+#[test]
+fn git_commit_hooks_cannot_escape_through_squash() {
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("commit-hook-decoy");
+    fs::write(&decoy, "retained").unwrap();
+    repo.redeclare_gates(&declaration("true"));
+    let change = open(&repo);
+    repo.commit(&repo.root, "feature", "one", "test: first feature");
+    repo.commit(&repo.root, "feature", "two", "test: second feature");
+    fs::create_dir(repo.root.join(".hooks")).unwrap();
+    let hook = repo.root.join(".hooks/pre-commit");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(&repo.root, &["add", ".hooks"]);
+    git(&repo.root, &["commit", "-m", "test: tracked hook"]);
+    git(&repo.root, &["config", "core.hooksPath", ".hooks"]);
+    let head = repo.head(&repo.root);
+    let output = repo
+        .arc(&repo.root)
+        .args(["squash", &change, "--message", "test: squash"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "squash hook was unconfined");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ran confined"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
+    assert_eq!(repo.head(&repo.root), head);
+}
+
+/// Claim I5: measurements for open or closed changes use destination roots
+/// even when the working table widens them. Rejects measurement/init treating a working declaration as authority.
+#[test]
+fn measurement_and_init_cannot_choose_working_tree_roots() {
+    if !supported() {
+        return;
+    }
+    for (operation, closed) in [
+        ("measure", false),
+        ("init", false),
+        ("measure", true),
+        ("init", true),
+    ] {
+        let (repo, scratch) = fixture();
+        let other = scratch.path().join("measurement-other");
+        fs::create_dir(&other).unwrap();
+        let decoy = other.join("measurement-decoy");
+        fs::write(&decoy, "retained").unwrap();
+        let script = format!("printf escaped > '{}'", decoy.display());
+        repo.redeclare_gates(&declaration(&script));
+        let change = open(&repo);
+        if closed {
+            stdout(repo.arc(&repo.root).args(["close", &change, "--abandoned"]));
+        }
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!(
+                "[confine]\nwrites=[{:?}]\n[gates.guard]\ncommand={script:?}\n",
+                other.display().to_string()
+            ),
+        )
+        .unwrap();
+        let output = repo
+            .arc(&repo.root)
+            .args(["gates", operation, "--runs", "1"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{operation} used working roots");
+        assert_eq!(fs::read_to_string(&decoy).unwrap(), "retained");
+    }
+}
+
+/// Claim I12: Git's native rebase checkout/rewrite hooks inherit destination
+/// confinement. Rejects the fallback rebase command running hooks unconfined.
+#[test]
+fn git_rebase_hooks_cannot_escape_the_destination_scope() {
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let decoy = scratch.path().join("rebase-hook-decoy");
+    fs::write(&decoy, "retained").unwrap();
+    repo.redeclare_gates(&declaration("true"));
+    let change = open(&repo);
+    repo.commit(&repo.root, "feature", "branch", "test: branch feature");
+    stdout(repo.arc(&repo.root).args(["snapshot", &change]));
+    let target = repo.home.join("target-checkout");
+    git(
+        &repo.root,
+        &["worktree", "add", target.to_str().unwrap(), "master"],
+    );
+    repo.commit(
+        &target,
+        "target-only",
+        "advance",
+        "test: advance rebase destination",
+    );
+    git(
+        &repo.root,
+        &["worktree", "remove", target.to_str().unwrap()],
+    );
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["post-checkout", "post-rewrite"] {
+        let hook = repo.root.join(".git/hooks").join(name);
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf escaped > '{}'\n", decoy.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = repo
+        .arc(&repo.root)
+        .env("PATH", path_without_git_replay(&repo))
+        .args(["rebase", &change])
+        .output()
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&decoy).unwrap(),
+        "retained",
+        "native rebase hook escaped"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ran confined"),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

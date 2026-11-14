@@ -433,7 +433,8 @@ pub(super) fn refuse_tracked(source: &Source) -> Result<()> {
             .env("LC_ALL", "C")
             .arg("--literal-pathspecs")
             .args(args);
-        crate::gitio::bounded_output(&mut command)
+        command
+            .output()
             .with_context(|| format!("cannot run git in {}", probe.display()))
     };
     let toplevel = git(&["rev-parse".as_ref(), "--show-toplevel".as_ref()])?;

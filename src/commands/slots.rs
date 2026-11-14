@@ -80,6 +80,12 @@ pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
     }
     let pool = Pool::existing(&ctx.cwd, &root)?;
     let top = gitio::toplevel(&ctx.cwd)?;
+    let confinement = declaration
+        .identity
+        .as_ref()
+        .map(|_| crate::confinement::for_checkout(&top))
+        .transpose()?;
+    let _confinement = confinement.as_ref().map(crate::confinement::Scope::new);
     let identity = slots::identity(&top, &declaration).ok();
     let target = gitio::primary_worktree_branch(&ctx.cwd)
         .ok()
@@ -544,8 +550,7 @@ pub fn warm(ctx: &Ctx, target: Option<&str>, limit: u32) -> Result<()> {
             gitio::branch_head(&ctx.cwd, &branch)?
         }
     };
-    let confinement = crate::confinement::at(&ctx.cwd, &target)?;
-    let _confinement = crate::confinement::Scope::new(&confinement);
+    let _confinement = crate::confinement::Scope::at(&ctx.cwd, &target);
     deprioritize();
     let identity = slots::identity(&gitio::toplevel(&ctx.cwd)?, &declaration)?;
     let open_worktrees: Vec<(PathBuf, String)> = ctx
@@ -645,6 +650,10 @@ pub(crate) fn warm_after_integration(ctx: &Ctx) {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The detached Arc warm coordinator establishes destination authority in its own process."
+)]
 fn start_warm(ctx: &Ctx) -> Result<Option<String>> {
     let top = gitio::toplevel(&ctx.cwd)?;
     let Some(declaration) = crate::warm_worktree::slot_declaration(&top, false)? else {

@@ -37,6 +37,7 @@ mod gate_raise;
 mod gate_work;
 mod gates;
 mod git_health;
+mod git_hooks;
 mod gitio;
 mod guide;
 #[cfg(test)]
@@ -57,6 +58,7 @@ mod perf;
 mod policy;
 mod process_group;
 mod project;
+mod project_command;
 mod provisional;
 mod received_evidence;
 mod registry;
@@ -1291,10 +1293,11 @@ enum Cmd {
         /// reservations; a cursor crossing one refuses and names the boundary
         #[arg(long)]
         since: Option<ulid::Ulid>,
-        /// Run `sh -c <cmd>` for every emitted event, with its NDJSON line on
+        /// Run an operator command `sh -c <cmd>` for every emitted event, with its NDJSON line on
         /// stdin and ARC_EVENT_ID, ARC_EVENT_TYPE, and ARC_CHANGE_ID set. A
         /// handler may exit without reading its line. A failing handler is a
-        /// warning and never stops the stream
+        /// warning and never stops the stream. Project write confinement does
+        /// not apply to this operator handler.
         #[arg(long = "exec")]
         exec_command: Option<String>,
     },
@@ -1362,12 +1365,13 @@ enum Cmd {
         /// reports the timeout
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
-        /// Run `sh -c <cmd>` once when a condition is reached, with the
+        /// Run an operator command `sh -c <cmd>` once when a condition is reached, with the
         /// reached `arc-watch/1` document `--json` prints on stdin and
         /// ARC_EVENT_TYPE set to `watch-reached`. ARC_EVENT_ID and
         /// ARC_CHANGE_ID carry the document's values, empty where it names
         /// none. The hook may exit without reading its stdin; a hook that
-        /// fails is a warning, and the watch still exits 0
+        /// fails is a warning, and the watch still exits 0. Project write
+        /// confinement does not apply to this operator handler.
         #[arg(long = "exec")]
         exec_command: Option<String>,
         /// Emit the outcome as one `arc-watch/1` JSON object: `schema`,
@@ -6501,6 +6505,9 @@ fn main() {
         exclusive::waiter_main();
     }
     gate_work::begin_invocation();
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(git_hooks::ENTRY)) {
+        git_hooks::main();
+    }
     perf::start();
     let invocation = (|| -> Result<()> {
         let cwd = gitio::invocation_directory(&std::env::current_dir()?)?;
