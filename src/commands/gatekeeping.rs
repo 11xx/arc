@@ -369,8 +369,6 @@ fn verify_with_landing(
     if let Some((target, _)) = landing_gates {
         st.target_branch = target.to_string();
     }
-    let confinement = ctx.declarations(&st)?.gates.confine;
-    let _confinement = crate::confinement::Scope::new(&confinement);
     if after_integration {
         return verify_after_integration(
             ctx,
@@ -392,6 +390,9 @@ fn verify_with_landing(
         );
     }
     refuse_late_attestation(&st, attest)?;
+    let mut declared = Some(ctx.declarations(&st)?);
+    let confinement = declared.as_ref().and_then(|d| d.gates.confine.clone());
+    let _confinement = crate::confinement::Scope::new(&confinement);
     // Gates and final probes run where the change lives. Baseline probes
     // choose between the invoking checkout and a scratch checkout at the base.
     // Attestation and merge evidence have no recorded worktree to choose.
@@ -598,7 +599,7 @@ fn verify_with_landing(
                 ..Default::default()
             }
         } else {
-            ctx.declarations(&st)?.gates
+            declared.take().context("declarations are read once")?.gates
         };
         let required = gates.required_for_event(&st.profile, event);
         if required.is_empty() {
@@ -742,8 +743,9 @@ fn verify_with_landing(
     if adopt_budget_format {
         store.adopt_budgets()?;
     }
-    if ctx
-        .declarations(&st)?
+    if declared
+        .as_ref()
+        .context("declarations are read once")?
         .gates
         .gates
         .values()
