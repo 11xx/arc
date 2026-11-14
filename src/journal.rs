@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 mod page;
 mod pins;
 mod private_text;
+mod workbench;
 
 pub(crate) use pins::{pin_rows, render_pin_row, PinRow};
 
@@ -1540,6 +1541,30 @@ pub enum JournalCmd {
         #[command(subcommand)]
         command: LaneCmd,
     },
+    /// Open a workbench: a directory in the journal for working material that
+    /// outlives a session
+    ///
+    /// `arc journal workbench <slug> --purpose TEXT` creates
+    /// `workbench/<slug>-<YYYYMMDD>/` under the journal with an index file,
+    /// `WORKBENCH.md`, records a `workbench-opened` event, and prints the
+    /// directory's absolute path as its last line. Anything may be written
+    /// inside it. Arc records opening, linking, closing and archiving,
+    /// never the content, and reads the content only to count
+    /// files and bytes and to see when anything in it last changed. It
+    /// rewrites the index from those records at each one.
+    ///
+    /// Opening a slug already open with the same purpose records nothing and
+    /// prints that workbench's path; another purpose refuses. A second
+    /// workbench of one slug and day takes a numeric suffix. `catchup` and
+    /// `journal open` list open workbenches with purpose, size and age, and
+    /// mark one stale once neither a record nor a file in it has changed for
+    /// 14 days. `journal archive <name>` moves a closed workbench to the cold
+    /// archive and `journal unarchive <name>` brings it back. The subcommands
+    /// below name a workbench by its name, or by its slug while one workbench
+    /// of that slug is open. Journal exchange carries no workbench:
+    /// `arc guide journal-workbenches`
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Workbench(workbench::WorkbenchArgs),
     /// Mark an artifact consumed so it leaves the `open` queue
     Consume {
         /// Artifact filename inside the journal dir (a name, not a path)
@@ -1633,9 +1658,13 @@ pub enum JournalCmd {
         filename: String,
     },
     /// Move artifacts to the cold sibling archive without deleting history.
-    /// A pinned artifact refuses until `journal unpin`
+    /// A pinned artifact refuses until `journal unpin`. A closed workbench's
+    /// name moves its whole directory there by one rename; an open one
+    /// refuses until `journal workbench close`, and `--consumed` moves
+    /// artifacts only
     Archive {
-        /// Artifact filename inside the hot dir (a name, not a path)
+        /// Artifact filename inside the hot dir (a name, not a path), or a
+        /// closed workbench's name
         #[arg(required_unless_present = "consumed", conflicts_with = "consumed")]
         filename: Option<String>,
         /// Archive every consumed actionable artifact, including lower-priority
@@ -1655,9 +1684,10 @@ pub enum JournalCmd {
         #[arg(long, conflicts_with_all = ["consumed", "older_than_days"])]
         unresolved: bool,
     },
-    /// Restore one archived artifact to hot storage.
+    /// Restore one archived artifact, or one archived workbench, to hot storage.
     Unarchive {
-        /// Archived artifact filename inside the journal dir (a name, not a path)
+        /// Archived artifact filename inside the journal dir (a name, not a
+        /// path), or an archived workbench's name
         filename: String,
     },
     /// Move artifacts out of this journal into a directory arc does not read,
@@ -1844,6 +1874,7 @@ impl JournalCmd {
                 command,
                 LaneCmd::Open { .. } | LaneCmd::Renew { .. } | LaneCmd::Close { .. }
             ),
+            JournalCmd::Workbench(args) => args.writes(),
             JournalCmd::Transition { dry_run, .. }
             | JournalCmd::Relocate { dry_run, .. }
             | JournalCmd::Redact { dry_run, .. } => !dry_run,
@@ -2193,6 +2224,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Rebind { from } => rebind(ctx, &from),
         JournalCmd::Stamp => stamp(),
         JournalCmd::Lane { command } => lane(ctx, command),
+        JournalCmd::Workbench(args) => workbench::run(ctx, args),
         JournalCmd::Consume {
             filename,
             outcome,
@@ -2232,6 +2264,20 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             no_planner,
         ),
         JournalCmd::Archive {
+            filename: Some(name),
+            note,
+            unresolved,
+            acknowledge_claim,
+            ..
+        } if workbench::names_workbench(&name) => {
+            if unresolved || !acknowledge_claim.is_empty() {
+                bail!(
+                    "--unresolved and --acknowledge-claim apply to artifacts, not to a workbench"
+                );
+            }
+            workbench::archive(ctx, &name, note.as_deref())
+        }
+        JournalCmd::Archive {
             filename,
             consumed,
             older_than_days,
@@ -2247,6 +2293,9 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             unresolved,
             &acknowledge_claim,
         ),
+        JournalCmd::Unarchive { filename } if workbench::names_workbench(&filename) => {
+            workbench::unarchive(ctx, &filename)
+        }
         JournalCmd::Unarchive { filename } => unarchive(ctx, &filename),
         JournalCmd::Relocate {
             files,
@@ -4997,6 +5046,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     inspect_amendments(&dir, &events, &mut problems);
     inspect_entry_blocks(&dir, &cold, &events, &mut problems)?;
     inspect_relocations_and_redactions(&dir, &cold, &events, &mut problems)?;
+    workbench::inspect(&dir, &events, &mut problems)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -9195,6 +9245,32 @@ pub(crate) struct JournalEvent {
     /// holds no record of a change opened elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     promotion: Option<ForeignPromotion>,
+    /// The workbench a `workbench-*` event acts on: the name of its directory
+    /// under `workbench/`. These events name no `file`, so no artifact view
+    /// reads them as activity on an artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workbench: Option<String>,
+    /// What a workbench was opened or adopted for, one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
+    /// Changes a workbench event links, or names as what the workbench
+    /// produced, as full change IDs of this project's ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    changes: Vec<String>,
+    /// Artifacts of this journal a workbench event links, or names as what
+    /// the workbench produced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifacts: Vec<String>,
+    /// Files inside a workbench when the event was recorded, its index
+    /// excluded. Counted from directory entries; no content is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files: Option<u64>,
+    /// Bytes those files hold, from their metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bytes: Option<u64>,
+    /// Where an adopted workbench's material lay before adoption moved it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adopted_from: Option<String>,
 }
 
 /// A change opened in one project from an artifact another project's journal
@@ -9486,6 +9562,13 @@ impl JournalEvent {
             supersedes_checkpoints: None,
             digest: None,
             promotion: None,
+            workbench: None,
+            purpose: None,
+            changes: Vec::new(),
+            artifacts: Vec::new(),
+            files: None,
+            bytes: None,
+            adopted_from: None,
         }
     }
 
@@ -9850,6 +9933,12 @@ impl JournalEvent {
                     && parse_artifact_name(self.file.as_deref().unwrap_or_default()).is_some()
                     && self.supersedes.as_deref() != self.file.as_deref()
             }
+            "workbench-opened"
+            | "workbench-adopted"
+            | "workbench-linked"
+            | "workbench-closed"
+            | "workbench-archived"
+            | "workbench-unarchived" => workbench::well_formed(self),
             _ => false,
         }
     }
@@ -10903,6 +10992,7 @@ fn event_message(event: &JournalEvent) -> String {
                 .map(|v| format!(": {v}"))
                 .unwrap_or_default()
         ),
+        kind if kind.starts_with("workbench-") => workbench::event_message(event),
         _ => String::new(),
     }
 }
@@ -14060,18 +14150,25 @@ pub(crate) fn collect_open_in(
 
 fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
     let items = collect_open(ctx, kind.as_deref())?;
+    // A kind filter selects artifacts; a workbench is not one.
+    let workbenches = match kind {
+        None => workbench::open_rows(Path::new(items.dir()))?,
+        Some(_) => Vec::new(),
+    };
     if json {
         #[derive(Serialize)]
         struct OpenReport<'a> {
             schema: &'static str,
             #[serde(flatten)]
             items: &'a OpenItems,
+            workbenches: &'a [workbench::WorkbenchRow],
         }
         println!(
             "{}",
             serde_json::to_string_pretty(&OpenReport {
                 schema: "arc-journal-open/1",
                 items: &items,
+                workbenches: &workbenches,
             })?
         );
     } else {
@@ -14103,6 +14200,9 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         }
         for f in &items.feature_requests {
             render_open_entry(f);
+        }
+        if kind.is_none() {
+            workbench::render_open(&workbenches);
         }
     }
     Ok(0)
@@ -19544,6 +19644,8 @@ pub(crate) struct Orientation {
     /// back to, kept out of the queue below.
     pins: Vec<pins::PinRow>,
     lanes: Vec<LaneEntry>,
+    /// Open workbenches: working material in progress, beside the lanes.
+    workbenches: Vec<workbench::WorkbenchRow>,
     memories: Vec<ArtifactEntry>,
     global_memories: Vec<ArtifactEntry>,
     global_memory_error: Option<String>,
@@ -19573,40 +19675,44 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
         Ok((
             pins::pin_rows(&dir)?,
             lanes_from_journal(&read_events(&dir)?, now),
+            workbench::open_rows(&dir)?,
             live_memories(&dir)?,
             open_questions(&dir)?,
             collect_open(ctx, None)?,
         ))
     })();
-    let (pins, lanes, memories, open_questions, queue, project_journal_error) = match project {
-        Ok((pins, lanes, memories, questions, queue)) => {
-            (pins, lanes, memories, questions, queue, None)
-        }
-        Err(error) => {
-            let source = resolve_dir(&ctx.cwd)
-                .map(|dir| dir.display().to_string())
-                .unwrap_or_else(|_| "project journal".to_string());
-            let queue = OpenItems {
-                dir: source.clone(),
-                open: Vec::new(),
-                later: Vec::new(),
-                feature_requests: Vec::new(),
-                pending: Vec::new(),
-                questions: Vec::new(),
-            };
-            (
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                queue,
-                Some(format!("{source}: {error:#}")),
-            )
-        }
-    };
+    let (pins, lanes, workbenches, memories, open_questions, queue, project_journal_error) =
+        match project {
+            Ok((pins, lanes, workbenches, memories, questions, queue)) => {
+                (pins, lanes, workbenches, memories, questions, queue, None)
+            }
+            Err(error) => {
+                let source = resolve_dir(&ctx.cwd)
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|_| "project journal".to_string());
+                let queue = OpenItems {
+                    dir: source.clone(),
+                    open: Vec::new(),
+                    later: Vec::new(),
+                    feature_requests: Vec::new(),
+                    pending: Vec::new(),
+                    questions: Vec::new(),
+                };
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    queue,
+                    Some(format!("{source}: {error:#}")),
+                )
+            }
+        };
     Ok(Orientation {
         pins,
         lanes,
+        workbenches,
         memories,
         global_memories,
         global_memory_error,
@@ -19646,6 +19752,7 @@ impl Orientation {
             pins::render_pins(&self.pins, Utc::now());
         }
         render_lanes(&self.lanes, Utc::now());
+        workbench::render_catchup(&self.workbenches);
         if !self.open_questions.is_empty() {
             println!(
                 "questions awaiting settlement ({}):",

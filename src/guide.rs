@@ -2149,6 +2149,43 @@ STANDING REFERENCES (what a project keeps coming back to)
   text. Rendering to the same `--out` path each time lets a publisher that
   maps a path to a copy update that copy.
 
+WORKBENCHES (working material in the journal)
+  A workbench is a directory under the journal's `workbench/` holding an
+  index arc writes, `WORKBENCH.md`, and anything else: lane indexes and
+  reports, drafts, raw measurements, a notebook appended to across sessions.
+  Arc records the acts on it and never its content, which it reads only to
+  count files and bytes and to see when anything in it last changed.
+    arc journal workbench <slug> --purpose TEXT
+                         Open `workbench/<slug>-<YYYYMMDD>/` and print its
+                         absolute path as the last line, so a caller can
+                         `cd` to it. Opening a slug already open with the
+                         same purpose prints that workbench's path and
+                         records nothing; another purpose refuses.
+    arc journal workbench link <name> (--change C | --artifact FILE)
+                         Record a change or an artifact the material serves.
+    arc journal workbench close <name> --produced C|FILE... [--note TEXT]
+                         Record what it produced: changes begun, artifacts
+                         filed. One that produced nothing says why with
+                         `--note`.
+    arc journal workbench list [--all] [--json]
+                         Open workbenches, or all of them with what each
+                         produced (`arc-journal-workbenches/1`).
+    arc journal archive <name>, arc journal unarchive <name>
+                         Move a closed workbench to the cold archive, and
+                         back.
+  A subcommand names a workbench by its name, or by its slug while one
+  workbench of that slug is open. `catchup` and `journal open` list each open
+  workbench with its purpose, size and age. One open 14 days with no recorded
+  act and no file in it changed is stale: the listing marks it and `catchup`
+  counts it, as `journal filed` marks open items untouched that long.
+  Journal exchange and its bundles carry no workbench: not its directory, its
+  index, or its events. An artifact a workbench links or produced travels as
+  any artifact does, without the link, and the workbench stays with the
+  journal that holds it. Workbench commands need the journal directory
+  itself and never spool. `journal doctor` reports a recorded workbench whose
+  directory is gone or in the other storage, and a directory under
+  `workbench/` that no event records.
+
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.
   arc journal conclusion <topic> --body-file - Finished the thing.
@@ -6375,6 +6412,7 @@ SCHEMAS
     `arc-journal-entry/1`            arc journal show <entry address> --json
     `arc-journal-open/1`             arc journal open --json
     `arc-journal-pins/1`             arc journal pins --json
+    `arc-journal-workbenches/1`      arc journal workbench list --json
     `arc-journal-render/1`           arc journal render --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
@@ -6480,7 +6518,9 @@ SCHEMAS
   Owned claim and lane lifecycle events require their complete identities;
   an event lacking one is unsupported and cannot change ownership state.
   `journal-events/2` covers that and the `evidence`, `relocated`,
-  `redacted`, `pinned`, `unpinned`, and `published` kinds; `journal-events/1`
+  `redacted`, `pinned`, `unpinned`, `published`, and `workbench-opened`,
+  `-adopted`, `-linked`, `-closed`, `-archived` and `-unarchived` kinds,
+  which name a workbench and no artifact `file`; `journal-events/1`
   events, which carry both keys, are read alongside it, and a value of
   `unknown` in either reads as absent. A journal bundle and a journal spool
   (`arc-journal-spool/1` or current) carry events of either version. A reader
@@ -6855,6 +6895,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "replicas", family: "replicas", title: "Replica pairing, authority and publication", start: "PAIR REPLICA STORES" },
     Section { name: "journal-records", family: "journal", title: "Keeping facts during work", start: "KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)" },
     Section { name: "journal-references", family: "journal", title: "Pinned references, living documents and published pages", start: "STANDING REFERENCES (what a project keeps coming back to)" },
+    Section { name: "journal-workbenches", family: "journal", title: "Workbenches for working material", start: "WORKBENCHES (working material in the journal)" },
     Section { name: "ending", family: "ending", title: "Session endings and global memory", start: "END A SESSION (what the next one reads)" },
     Section { name: "profiles", family: "profiles", title: "Change profiles", start: "PROFILES (--profile, default local)" },
     Section { name: "forge-delivery", family: "forge", title: "Forge identity, delivery and disclosure", start: "FORGE" },

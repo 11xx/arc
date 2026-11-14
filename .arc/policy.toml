@@ -220,6 +220,9 @@ paths = [
   # A pin refuses archive and relocation of a standing reference and exempts
   # it from archive sweeps; a defect moves an artifact its pin protects.
   "src/journal/pins.rs",
+  # Archiving moves a workbench's directory between storages: a defect loses
+  # or alters the only copy of the working material.
+  "src/journal/workbench.rs",
   # Decides which ignored content counts as a disposable build artifact.
   # Integration cleanup removes a checkout on this recognition, so a
   # recognizer that over-matches deletes work nobody meant to discard.

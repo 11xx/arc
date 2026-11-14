@@ -267,6 +267,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "journal discussion",
     "journal stamp",
     "journal lane list",
+    "journal workbench list",
     "journal export",
 ];
 

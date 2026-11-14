@@ -79,6 +79,7 @@ mod journal_living;
 mod journal_pages;
 mod journal_pins;
 mod journal_staging;
+mod journal_workbench;
 mod ladder_clearance;
 mod landing;
 mod landing_budgets;
