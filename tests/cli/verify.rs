@@ -348,28 +348,40 @@ fn failing_gate_keeps_complete_private_diagnostics_beside_its_short_tail() {
     assert_eq!(artifact["observed_bytes"], bytes.len() as u64);
 }
 
-/// Claim: a gate that overruns its timeout fails promptly, is recorded as a
-/// timed-out failure, and has its whole process group killed. Rejects a
-/// background child of the gate holding the run open, and a timeout recorded as
-/// anything but a failure.
+/// Claim: a gate that overruns its timeout is recorded as a timed-out failure
+/// and returns with no live descendant and no natural completion. Rejects
+/// killing only the shell while background work survives the runner, and a
+/// timeout recorded as anything but a failure.
 #[test]
 fn gate_timeout_records_failure_and_kills_the_process_group() {
     let repo = Repo::new();
-    repo.redeclare_gates("[gates.slow]\ncommand = \"sleep 5 &\"\ntimeout = \"1s\"\n");
+    let command = r#"(sleep 5; touch "$ARC_SANDBOX/timeout-completed") & echo $! > "$ARC_SANDBOX/timeout-child""#;
+    repo.redeclare_gates(&format!(
+        "[gates.slow]\ncommand={}\ntimeout='1s'\n",
+        serde_json::to_string(command).unwrap()
+    ));
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "gate-timeout", "--no-worktree"]),
     );
 
-    let started = Instant::now();
     repo.arc(&repo.root)
         .args(["verify", "gate-timeout", "--gate", "slow"])
         .assert()
         .code(1);
     assert!(
-        started.elapsed() < Duration::from_secs(4),
-        "timed-out process group was not terminated promptly"
+        !repo.home.join("timeout-completed").exists(),
+        "descendant reached natural completion after timeout"
     );
+    if let Ok(raw) = fs::read_to_string(repo.home.join("timeout-child")) {
+        let pid: i32 = raw.trim().parse().unwrap();
+        // SAFETY: signal zero observes the fixture's recorded descendant PID.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "timeout returned with a live descendant"
+        );
+    }
 
     let status: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&repo.root).args(["status", "gate-timeout"]),
