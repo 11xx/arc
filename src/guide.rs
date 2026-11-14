@@ -6773,8 +6773,12 @@ PROGRESS
   `closed` (closed without integrating); `unknown` (no such change). A stage
   is what the ledger last recorded, never a live judgement, so it can lag
   the change but never run ahead of it; `arc status <change>` is the live
-  reading. The report also names who holds a live claim on the change,
-  and, for a change in flight, the newest run the ledger records
+  reading. So work done outside the ledger shows only once it is recorded:
+  a review round run outside arc shows when its verdict is recorded
+  (`arc review <change> --verdict changes-requested --cause <cause>
+  --on-behalf-of <reviewer>` per round), and an executor that commits
+  without `arc snapshot` leaves its item at `opened`. The report also names who holds a live claim on the
+  change, and, for a change in flight, the newest run the ledger records
   dispatched against it with no recorded end (`arc run dispatch`, `bind`,
   `end`): to whom (the represented subject, else the route), when, and
   whether a backend session is bound. That is the ledger's record of a
