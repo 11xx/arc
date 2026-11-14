@@ -1727,3 +1727,53 @@ fn raise_scope_net_head_paths_preserve_debits() {
 fn raise_scope_net_outbound_move_debits_source() {
     scope_net_growth("outbound");
 }
+
+/// Claim: the budget-raise movement guard reads the actual destination after
+/// counting. Rejects recording a raise when a read-only counting invocation
+/// overlaps a real ref move and a cached ref still names its earlier value.
+#[test]
+fn raise_refuses_a_target_moved_during_counting() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, id, wt) = setup("counting-move", 10400, 100);
+    verify(&repo, &wt, 10300, 1);
+    let before = repo.head(&repo.root);
+    let tree = git_out(&repo.root, &["rev-parse", "HEAD^{tree}"]);
+    let advanced = git_out(
+        &repo.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &before,
+            "-m",
+            "external advance",
+        ],
+    );
+    let recorded = stdout(repo.arc(&wt).args(["events", "--change", &id]));
+    let bin = repo.home.join("counting-git");
+    fs::create_dir(&bin).unwrap();
+    let real_git = git_out(&repo.root, &["--exec-path"]);
+    let git_program = Path::new(&real_git).join("git");
+    let git_program = if git_program.is_file() {
+        git_program
+    } else {
+        PathBuf::from("/usr/bin/git")
+    };
+    let marker = repo.home.join("moved");
+    let wrapper = bin.join("git");
+    fs::write(&wrapper, format!("#!/bin/sh\nfor arg in \"$@\"; do\n if test \"$arg\" = --raw && test ! -e '{marker}'; then\n  touch '{marker}'\n  '{git}' update-ref refs/heads/master '{advanced}' '{before}' || exit 71\n fi\ndone\nexec '{git}' \"$@\"\n", marker=marker.display(),git=git_program.display())).unwrap();
+    fs::set_permissions(wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    refusal(
+        raise(&repo, &wt).env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        ),
+        "budget raise basis moved while counting",
+    );
+    assert!(marker.exists());
+    assert_eq!(repo.head(&repo.root), advanced);
+    assert_eq!(
+        stdout(repo.arc(&wt).args(["events", "--change", &id])),
+        recorded
+    );
+}

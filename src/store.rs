@@ -73,8 +73,8 @@ pub(crate) enum LockMode {
 
 /// Wait up to `timeout` for `file`, the lock at `path`, announcing a wait
 /// that outlasts `LOCK_NOTICE_AFTER` and refusing past the budget with the
-/// lock's name and a request to retry. Acquiring a contended lock discards
-/// held Git answers because the previous holder may have moved refs or files.
+/// lock's name and a request to retry. Every acquisition discards held Git
+/// answers because a previous holder may have moved refs before releasing it.
 pub(crate) fn wait_for_lock(
     file: &File,
     path: &Path,
@@ -99,9 +99,7 @@ pub(crate) fn wait_for_lock(
         };
         match attempt {
             Ok(()) => {
-                if contended {
-                    gitio::forget_answers();
-                }
+                gitio::forget_answers();
                 return Ok(());
             }
             Err(std::fs::TryLockError::WouldBlock) => {

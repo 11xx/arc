@@ -614,7 +614,7 @@ pub fn record(
     if let Some(reason) = crate::replica::integration_refusal(store)? {
         bail!("baseline requires canonical integration authority: {reason}");
     }
-    if crate::gitio::branch_head(&ctx.cwd, target)? != *revision {
+    if crate::gitio::fresh_read(|| crate::gitio::branch_head(&ctx.cwd, target))? != *revision {
         bail!("baseline target moved after integration");
     }
     let published = match &completion.payload {

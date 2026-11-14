@@ -76,7 +76,7 @@ fn batch(
     acceptance: crate::gate_concurrency::Acceptance,
 ) -> Result<usize> {
     store.adopt_concurrency()?;
-    let revision = gitio::head(&ctx.cwd)?;
+    let revision = gitio::fresh_read(|| gitio::head(&ctx.cwd))?;
     let before = gitio::worktree_tree(&ctx.cwd)?;
     let dirt = gitio::dirt(&ctx.cwd)?;
     let dirty =
@@ -127,7 +127,8 @@ fn batch(
         }
         first_error.map_or(Ok(completed), Err)
     })?;
-    let moved = gitio::worktree_tree(&ctx.cwd)? != before || gitio::head(&ctx.cwd)? != revision;
+    let moved = gitio::worktree_tree(&ctx.cwd)? != before
+        || gitio::fresh_read(|| gitio::head(&ctx.cwd))? != revision;
     let current_state = store.state(change_id)?;
     let current = ctx.declarations(&current_state)?;
     let local = crate::gate_concurrency::load(&ctx.cwd);

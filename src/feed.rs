@@ -143,6 +143,7 @@ fn rotate(dir: &Path) {
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return;
     }
+    crate::gitio::forget_answers();
     let current = dir.join(FILE);
     if std::fs::metadata(&current).is_ok_and(|metadata| metadata.len() > ROTATE_AT) {
         let _ = std::fs::rename(&current, dir.join(PREVIOUS));

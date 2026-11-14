@@ -418,6 +418,7 @@ fn plan(
     debt: Option<&str>,
     attempt: Option<&str>,
 ) -> Result<std::result::Result<Planned, Refusal>> {
+    gitio::forget_mutable_answers();
     use crate::blockers::Blocker;
     if references.is_empty() {
         bail!("name the changes to land, in landing order");
@@ -486,7 +487,7 @@ fn plan(
             );
         }
     }
-    let Ok(target_before) = gitio::branch_head(&ctx.cwd, &target) else {
+    let Ok(target_before) = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &target)) else {
         return refuse(
             Blocker::TargetUnreadable.exit_code(),
             format!("target branch {target:?} cannot be resolved"),
@@ -509,7 +510,11 @@ fn plan(
         };
         crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
         crate::git_health::guard_patchset(&ctx.cwd, &target_before, &patchset.head)?;
-        if gitio::branch_head(&ctx.cwd, &member.branch).ok().as_deref() != Some(&patchset.head) {
+        if gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &member.branch))
+            .ok()
+            .as_deref()
+            != Some(&patchset.head)
+        {
             return refuse(
                 Blocker::NoValidApproval.exit_code(),
                 format!(
@@ -674,6 +679,20 @@ fn plan(
                     crate::integration::Shape::FfOnly,
                 )?;
             }
+        }
+        let observed_tree = gitio::merge_outcome(
+            &ctx.cwd,
+            &target_before,
+            &member
+                .latest_patchset()
+                .context("a planned member has a patchset")?
+                .head,
+        )?
+        .tree;
+        if report.observed_target_head.as_deref() != Some(target_before.as_str())
+            || report.merged_tree != observed_tree
+        {
+            return refuse(1, "landing readiness coordinates moved while planning");
         }
         if member.iterating {
             return refuse(
@@ -869,7 +888,7 @@ fn plan(
             head: patchset.head.clone(),
             replayed: replayed[index],
             replayed_approval,
-            branch_head: gitio::branch_head(&ctx.cwd, &member.branch).ok(),
+            branch_head: gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &member.branch)).ok(),
             brief_digest: brief_digest(member),
             verdicts: member
                 .verdicts
@@ -978,6 +997,9 @@ fn plan(
             );
         }
     }
+    if gitio::fresh_branch_head(&ctx.cwd, &target)? != target_before {
+        return refuse(1, "landing target moved while planning");
+    }
     Ok(Ok(Planned {
         plan: Plan {
             schema: PLAN_SCHEMA,
@@ -1007,11 +1029,12 @@ fn observe(
     members: &[String],
     target: &str,
 ) -> Result<serde_json::Value> {
+    gitio::forget_mutable_answers();
     let states = store.readable_states()?;
     let mut observed = serde_json::Map::new();
     observed.insert(
         "target_before".into(),
-        serde_json::json!(gitio::branch_head(&ctx.cwd, target).ok()),
+        serde_json::json!(gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, target)).ok()),
     );
     for id in members {
         let Some(state) = states.get(id) else {
@@ -1033,7 +1056,7 @@ fn observe(
                 "patchset_id": patchset.map(|patchset| &patchset.id),
                 "base": patchset.map(|patchset| &patchset.base),
                 "head": patchset.map(|patchset| &patchset.head),
-                "branch_head": gitio::branch_head(&ctx.cwd, &state.branch).ok(),
+                "branch_head": gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.branch)).ok(),
                 "brief_digest": brief_digest(state),
                 "verdicts": state.verdicts.iter().map(|verdict| &verdict.event_id).collect::<Vec<_>>(),
                 "external_verdicts": state
@@ -2103,7 +2126,7 @@ fn commit(
             switch_from: None,
         };
         let refusal = (|| -> Result<()> {
-            if gitio::head(path)? != plan.target_before {
+            if gitio::fresh_read(|| gitio::head(path))? != plan.target_before {
                 bail!("{} is not at {}", path.display(), plan.target_before);
             }
             super::gatekeeping::checkout_tracked_dirt(path)?;
@@ -2436,7 +2459,7 @@ fn reconcile_checkout(
     let Some(path) = checkout else {
         return Ok(());
     };
-    if gitio::current_branch(path)?.as_deref() != Some(target) {
+    if gitio::fresh_read(|| gitio::current_branch(path))?.as_deref() != Some(target) {
         bail!("{} no longer holds {target}", path.display());
     }
     // Stat information alone must not read as a modified file.
@@ -2455,7 +2478,7 @@ fn reconcile_checkout(
             crate::render::short_sha(after)
         );
     }
-    if gitio::head(path)? != after
+    if gitio::fresh_read(|| gitio::head(path))? != after
         || gitio::git(path, &["write-tree"])? != after_tree
         || gitio::dirt(path)?.tracked
     {
@@ -2525,7 +2548,7 @@ fn finish(ctx: &Ctx, store: &Store, intent: &landing::Intent) -> Result<()> {
         }
     }
     let applied = landing::applied_ref(&intent.attempt);
-    if gitio::ref_value(&ctx.cwd, &applied)?.is_some() {
+    if gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &applied))?.is_some() {
         gitio::delete_ref(&ctx.cwd, &applied)?;
     }
     release_pin(&ctx.cwd, &intent.attempt)?;
@@ -2536,7 +2559,7 @@ fn finish(ctx: &Ctx, store: &Store, intent: &landing::Intent) -> Result<()> {
 /// attempt completed, and nothing should once it was abandoned.
 fn release_pin(cwd: &std::path::Path, attempt: &str) -> Result<()> {
     let pin = landing::pin_ref(attempt);
-    if gitio::ref_value(cwd, &pin)?.is_some() {
+    if gitio::fresh_read(|| gitio::ref_value(cwd, &pin))?.is_some() {
         gitio::delete_ref(cwd, &pin)?;
     }
     Ok(())
@@ -2646,7 +2669,7 @@ fn finish_attempt(ctx: &Ctx, attempt: &str) -> Result<i32> {
             completion.event_id
         );
         let applied = landing::applied_ref(attempt);
-        if gitio::ref_value(&ctx.cwd, &applied)?.is_some() {
+        if gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &applied))?.is_some() {
             gitio::delete_ref(&ctx.cwd, &applied)?;
         }
         release_pin(&ctx.cwd, attempt)?;
@@ -2662,8 +2685,8 @@ fn finish_attempt(ctx: &Ctx, attempt: &str) -> Result<i32> {
         return Ok(0);
     }
     let intent = store.landing_intent(attempt)?;
-    let applied = gitio::ref_value(&ctx.cwd, &landing::applied_ref(attempt))?;
-    let target_now = gitio::branch_head(&ctx.cwd, &target).ok();
+    let applied = gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &landing::applied_ref(attempt)))?;
+    let target_now = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &target)).ok();
     let authorized = intent
         .as_ref()
         .filter(|intent| intent.phase >= landing::Phase::Authorized && intent.completion.is_some());
@@ -2727,7 +2750,7 @@ fn abandon_command(ctx: &Ctx, attempt: &str, reason: &str) -> Result<i32> {
     if landings.completion(attempt).is_some() {
         bail!("landing {attempt} completed; there is nothing to abandon");
     }
-    if gitio::ref_value(&ctx.cwd, &landing::applied_ref(attempt))?.is_some() {
+    if gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &landing::applied_ref(attempt)))?.is_some() {
         bail!("landing {attempt} moved its target; finish it with `arc land --recover {attempt}`");
     }
     abandon_locked(ctx, &store, attempt, reason)?;

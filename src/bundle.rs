@@ -757,7 +757,9 @@ pub fn publication_pin(
         if crate::gitio::commit_tree(cwd, revision)? != *tree {
             bail!("publication receipt tree disagrees with its commit");
         }
-        if crate::gitio::ref_value(cwd, retention_ref)?.is_some_and(|held| held != *revision) {
+        if crate::gitio::fresh_read(|| crate::gitio::ref_value(cwd, retention_ref))?
+            .is_some_and(|held| held != *revision)
+        {
             bail!("publication retention ref already holds another commit");
         }
         return Ok(Some((retention_ref.clone(), revision.clone())));

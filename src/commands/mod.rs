@@ -933,6 +933,7 @@ impl Ctx {
         target: &str,
         shape: crate::integration::Shape,
     ) -> Result<StatusReport> {
+        gitio::forget_mutable_answers();
         let mut selected = state.clone();
         selected.target_branch = target.to_string();
         let declarations = crate::declarations::for_change(&self.cwd, &selected)?;
@@ -949,6 +950,7 @@ impl Ctx {
         target: &str,
         shape: crate::integration::Shape,
     ) -> Result<StatusReport> {
+        gitio::forget_mutable_answers();
         let mut selected = state.clone();
         selected.target_branch = target.to_string();
         let declarations = crate::declarations::for_change(&self.cwd, &selected)?;

@@ -6856,8 +6856,10 @@ TRACING
   and resolved administrative directory. Repository locations and immutable
   object reads survive Git writes; branch, HEAD and ref reads expire on writes.
   Project commands discard every held Git answer before and after execution.
-  Acquiring a contended lock discards answers the previous holder could alter.
-  Authorization revalidation rereads the destination ref.
+  Every lock acquisition discards held answers, including an uncontended lock.
+  Authorization boundaries start fresh mutable observations. Movement guards
+  take independent observations. Readiness target heads and merge trees must
+  agree with the destination and tree observed by the decision.
 
   `coverage` names what the counters see. `ledger: store` counts ledger
   files read through the store's readers, not a file a diagnostic opens on

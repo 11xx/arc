@@ -43,12 +43,14 @@ type Slot = Arc<Mutex<Option<Option<Vec<u8>>>>>;
 struct Answers {
     /// Repository locations and successful full-OID resolutions, blobs and
     /// trees remain valid through Arc's own Git writes. Absences expire at
-    /// writes because the named object may not exist yet. Project commands and
-    /// explicit refreshes discard them, since either may replace a repository.
+    /// writes because the named object may not exist yet. Project commands,
+    /// lock acquisitions and explicit refreshes discard them, since any may
+    /// replace a repository.
     immutable: HashMap<Key, Slot>,
     /// Branch, HEAD and ref answers last until any Git write. Both sides of
     /// that write discard them; none are retained while a write is running.
-    /// Final destination authorization reads bypass held ref answers.
+    /// Lock acquisitions discard them. Authorization observations and deliberate
+    /// movement guards discard them before reading, including external moves.
     mutable: HashMap<Key, Slot>,
     writers: usize,
     projects: usize,
@@ -128,6 +130,12 @@ pub(super) fn optional_text(
 
 pub(super) fn reads_are_stable() -> bool {
     answers().writers == 0
+}
+
+/// A new observation expires mutable names. Immutable revisions, including
+/// absent paths, keep their write freshness rules across observations.
+pub(super) fn forget_mutable() {
+    answers().mutable.clear();
 }
 
 /// Explicit refreshes discard every answer, including repository locations.
@@ -638,5 +646,51 @@ mod tests {
             (file, paths),
             (Some("first".to_owned()), vec!["other".to_owned()])
         );
+    }
+    /// Invariant I8. Claim: acquiring an uncontended lock observes a ref move
+    /// made by a holder that already released it. Rejects preserving a pre-lock
+    /// answer merely because this caller never saw contention.
+    #[test]
+    fn uncontended_lock_refreshes_the_previous_holders_ref_move() {
+        let (_directory, root) = fixture();
+        let first = head(&root).unwrap();
+        commit(&root, "second");
+        let second = head(&root).unwrap();
+        assert_eq!(gitio::branch_head(&root, "master").unwrap(), second);
+        let path = root.join(".git/previous-holder.lock");
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        holder.lock().unwrap();
+        let status = crate::child_command::command("git")
+            .current_dir(&root)
+            .args(["update-ref", "refs/heads/master", &first, &second])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        holder.unlock().unwrap();
+        let next = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        crate::store::wait_for_lock(
+            &next,
+            &path,
+            "fixture",
+            std::time::Duration::from_secs(1),
+            crate::store::LockMode::Exclusive,
+        )
+        .unwrap();
+        assert_eq!(
+            head(&root).unwrap(),
+            first,
+            "the previous holder moved HEAD before this uncontended acquisition"
+        );
+        assert_eq!(gitio::branch_head(&root, "master").unwrap(), first);
     }
 }

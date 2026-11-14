@@ -793,7 +793,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
 
     let mut pending: Vec<gitio::RefUpdate> = Vec::new();
     for (name, RefMove { old, new }) in &intent.refs {
-        match gitio::ref_value(cwd, name)?.as_deref() {
+        match gitio::fresh_read(|| gitio::ref_value(cwd, name))?.as_deref() {
             // Already where the rewrite is taking it, from a run that got
             // this far.
             Some(value) if value == new => {}

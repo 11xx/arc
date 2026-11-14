@@ -349,7 +349,9 @@ fn verify_with_landing(
         let execution_host = nonempty_attestation_value(execution_host, "--execution-host")?;
         let runner = nonempty_attestation_value(runner, "--runner")?;
         (
-            Some(gitio::rev_parse(&ctx.cwd, &tested_revision)?),
+            Some(gitio::fresh_read(|| {
+                gitio::rev_parse(&ctx.cwd, &tested_revision)
+            })?),
             Some(execution_host),
             Some(runner),
         )
@@ -428,7 +430,7 @@ fn verify_with_landing(
             .base_revision
             .as_deref()
             .context("legacy brief has no base revision for baseline probe evidence")?;
-        if gitio::head(&run_ctx.cwd)? != base {
+        if gitio::fresh_read(|| gitio::head(&run_ctx.cwd))? != base {
             bail!("--waive-dirty cannot be combined with a scratch baseline: the scratch checkout is clean and the waiver would bind to a revision the probe does not test");
         }
     }
@@ -439,7 +441,7 @@ fn verify_with_landing(
                 "--waive-dirty must say why dirty evidence should count; an empty reason waives the gate without recording a reason"
             );
         }
-        let revision = gitio::head(&run_ctx.cwd)?;
+        let revision = gitio::fresh_read(|| gitio::head(&run_ctx.cwd))?;
         let mut ev = ctx.event(
             &store,
             &change_id,
@@ -514,9 +516,15 @@ fn verify_with_landing(
         let falsification =
             resolve_falsification(&store, &change_id, None, &declaration.command, falsified_by)?;
         let scratch = match baseline_base {
-            Some(base) if !attest && gitio::head(&run_ctx.cwd)? != base => Some(
-                create_baseline_checkout(ctx, &st.slug, base, &probe_name, version)?,
-            ),
+            Some(base) if !attest && gitio::fresh_read(|| gitio::head(&run_ctx.cwd))? != base => {
+                Some(create_baseline_checkout(
+                    ctx,
+                    &st.slug,
+                    base,
+                    &probe_name,
+                    version,
+                )?)
+            }
             _ => None,
         };
         let command_cwd = scratch.as_deref().unwrap_or(&run_ctx.cwd);
@@ -600,7 +608,7 @@ fn verify_with_landing(
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
         let mut preparation_ms = preparing.elapsed().as_millis() as u64;
         let total = required.len();
-        let head = gitio::head(&run_ctx.cwd)?;
+        let head = gitio::fresh_read(|| gitio::head(&run_ctx.cwd))?;
         let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
         let mode = if parallel {
             VerificationRunMode::Parallel
@@ -787,7 +795,7 @@ fn verify_with_landing(
             .as_ref()
             .zip(gate.as_ref())
             .map(|(declared, name)| {
-                let head = gitio::head(&run_ctx.cwd)?;
+                let head = gitio::fresh_read(|| gitio::head(&run_ctx.cwd))?;
                 start_verification_run_for_event(
                     run_ctx,
                     &store,
@@ -1475,7 +1483,7 @@ fn gate_run_ctx(ctx: &Ctx, st: &ChangeState) -> Result<Option<Ctx>> {
         return Ok(None);
     }
     if let Some(prefix) = ctx.excluded_by_sandbox(&recorded)? {
-        let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+        let change_head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
         bail!(
             "{}'s recorded checkout {} lies outside the sandbox at {}, so its gates have \
              nowhere to run\n\
@@ -1493,7 +1501,7 @@ fn gate_run_ctx(ctx: &Ctx, st: &ChangeState) -> Result<Option<Ctx>> {
         .ok()
         .filter(|top| config::resolved(top) == config::resolved(&recorded));
     if checkout.is_none() {
-        let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+        let change_head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
         bail!(
             "{}'s worktree {} is not a checkout, so its gates have nowhere to run\n\
              tip: give it one with `git worktree add {} {}`, or record evidence arc did \
@@ -1561,8 +1569,8 @@ fn warn_if_attested_off_head(ctx: &Ctx, st: &state::ChangeState, tested_revision
 /// attested evidence, and a baseline probe — belongs at the call sites, which
 /// know which kind of evidence they are about to record.
 fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
-    let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
-    if gitio::head(&ctx.cwd)? == change_head {
+    let change_head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
+    if gitio::fresh_read(|| gitio::head(&ctx.cwd))? == change_head {
         return Ok(());
     }
     // `worktree_for_branch` answers "who has the branch checked out", so a
@@ -1901,7 +1909,7 @@ fn incremental_evidence(
     if gate.selector.is_none() && !gate.coverage.enabled() {
         return None;
     }
-    let head = gitio::head(&ctx.cwd).ok()?;
+    let head = gitio::fresh_read(|| gitio::head(&ctx.cwd)).ok()?;
     if gitio::commit_tree(&ctx.cwd, &head).ok()?.as_str() != tree
         || !gitio::git(
             &ctx.cwd,
@@ -1937,7 +1945,7 @@ fn incremental_evidence(
         declared_names,
         paths,
     )?;
-    if gitio::head(&ctx.cwd).ok()? != head
+    if gitio::fresh_read(|| gitio::head(&ctx.cwd)).ok()? != head
         || !gitio::git(
             &ctx.cwd,
             &["status", "--porcelain=v1", "--untracked-files=normal"],
@@ -2446,8 +2454,8 @@ pub fn rebase(
         return Ok(status::Blocker::NeedsRebase.exit_code());
     }
 
-    let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
-    let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let target_head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.target_branch))?;
+    let head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
     // Recorded authorship and run evidence are established at the original
     // head, before mechanical replay changes the commits' timestamps.
     let replay_of = st
@@ -2523,7 +2531,7 @@ pub fn rebase(
             // read from the branch it moved like any other snapshot.
             let replayed = match &outcome {
                 gitio::ReplayOutcome::Replayed { tip } => tip.clone(),
-                _ => gitio::branch_head(&ctx.cwd, &st.branch)?,
+                _ => gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?,
             };
             println!(
                 "rebased {} onto {} at {replayed}",
@@ -2726,7 +2734,7 @@ fn verify_all_parallel(
         return Err(error);
     }
     let after = gitio::worktree_tree(&ctx.cwd)?;
-    let post = gitio::head(&ctx.cwd)?;
+    let post = gitio::fresh_read(|| gitio::head(&ctx.cwd))?;
     if post != revision {
         eprintln!(
             "warning: head moved during parallel verification ({revision} -> {post}); evidence recorded at {revision}"
@@ -3060,7 +3068,7 @@ fn record_verification_at(
     }
     let revision = match &input.tested_revision {
         Some(revision) => revision.clone(),
-        None => gitio::head(command_cwd)?,
+        None => gitio::fresh_read(|| gitio::head(command_cwd))?,
     };
     let hostname = match &input.execution_host {
         Some(hostname) => hostname.clone(),
@@ -3087,7 +3095,7 @@ fn record_verification_at(
         change_id,
     )?;
     if !completed.attested {
-        let post = gitio::head(command_cwd)?;
+        let post = gitio::fresh_read(|| gitio::head(command_cwd))?;
         if post != revision {
             eprintln!(
                 "warning: head moved during verification ({revision} -> {post}); \
@@ -4803,7 +4811,7 @@ fn integrate_one(
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
     }
-    let Ok(target_head) = gitio::branch_head(&ctx.cwd, &target) else {
+    let Ok(target_head) = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &target)) else {
         let report = ctx.report_for_integration(&store, &st, &target, shape)?;
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(status::check_exit_code(&report));
@@ -4965,8 +4973,8 @@ fn integrate_one(
 
         // Already-contained integrations retain the observed target; advancing
         // fast-forwards land at the approved head without a merge commit.
-        if gitio::current_branch(&wt)?.as_deref() != Some(target.as_str())
-            || gitio::head(&wt)? != old_target
+        if gitio::fresh_read(|| gitio::current_branch(&wt))?.as_deref() != Some(target.as_str())
+            || gitio::fresh_read(|| gitio::head(&wt))? != old_target
         {
             bail!("target moved during integration before merge; nothing recorded");
         }
@@ -5003,9 +5011,9 @@ fn integrate_one(
                 return Err(cause);
             }
             let head =
-                gitio::head(&wt)?;
+                gitio::fresh_read(|| gitio::head(&wt))?;
             if head != approved_head
-                || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
+                || gitio::fresh_read(|| gitio::branch_head(&wt, &target)).ok().as_deref() != Some(approved_head.as_str())
             {
                 return Err(anyhow::anyhow!("fast-forward target moved during integration"));
             }
@@ -5030,7 +5038,7 @@ fn integrate_one(
                 bail!("merge failed: {e}");
             }
 
-            let merged = gitio::head(&wt)?;
+            let merged = gitio::fresh_read(|| gitio::head(&wt))?;
             let parents = gitio::commit_parents(&wt, &merged)?;
             if parents != vec![old_target.clone(), approved_head.clone()] {
                 bail!(
@@ -5057,18 +5065,18 @@ fn integrate_one(
         if actual_shape == crate::model::IntegrationShape::FastForward {
             let index_tree = gitio::git(&wt, &["write-tree"])?;
             let approved_tree = gitio::commit_tree(&wt, &approved_head)?;
-            if gitio::head(&wt).ok().as_deref() != Some(approved_head.as_str())
-                || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
-                || gitio::current_branch(&wt).ok().flatten().as_deref() != Some(target.as_str())
+            if gitio::fresh_read(|| gitio::head(&wt)).ok().as_deref() != Some(approved_head.as_str())
+                || gitio::fresh_read(|| gitio::branch_head(&wt, &target)).ok().as_deref() != Some(approved_head.as_str())
+                || gitio::fresh_read(|| gitio::current_branch(&wt)).ok().flatten().as_deref() != Some(target.as_str())
                 || index_tree != approved_tree
                 || gitio::dirt(&wt).map(|dirt| dirt.tracked).unwrap_or(true)
             {
                 return Err(anyhow::anyhow!("fast-forward target or checkout moved during integration"));
             }
         }
-        if gitio::head(&wt)? != merged
-            || gitio::branch_head(&wt, &target)? != merged
-            || gitio::current_branch(&wt)?.as_deref() != Some(target.as_str())
+        if gitio::fresh_read(|| gitio::head(&wt))? != merged
+            || gitio::fresh_read(|| gitio::branch_head(&wt, &target))? != merged
+            || gitio::fresh_read(|| gitio::current_branch(&wt))?.as_deref() != Some(target.as_str())
         {
             bail!("target or checkout moved during integration verification");
         }
@@ -5781,7 +5789,7 @@ fn record_ready_to_send(
     authorization: AuthorizationBasis,
 ) -> Result<i32> {
     contribution_shape(ctx, target, head, contribution.history)?;
-    if gitio::branch_head(&ctx.cwd, target)? != target_revision {
+    if gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, target))? != target_revision {
         bail!("contribution destination moved during authorization; nothing recorded");
     }
     if st.ready_to_send.as_ref().is_some_and(|ready| {
@@ -5893,10 +5901,11 @@ fn transition_failure(
 }
 
 fn integration_recovery(checkout: &Path, target: &str, cause: anyhow::Error) -> anyhow::Error {
-    let revision =
-        gitio::branch_head(checkout, target).unwrap_or_else(|error| format!("unreadable: {error}"));
-    let head = gitio::head(checkout).unwrap_or_else(|error| format!("unreadable: {error}"));
-    let branch = gitio::current_branch(checkout)
+    let revision = gitio::fresh_read(|| gitio::branch_head(checkout, target))
+        .unwrap_or_else(|error| format!("unreadable: {error}"));
+    let head = gitio::fresh_read(|| gitio::head(checkout))
+        .unwrap_or_else(|error| format!("unreadable: {error}"));
+    let branch = gitio::fresh_read(|| gitio::current_branch(checkout))
         .map(|branch| branch.unwrap_or_else(|| "detached".into()))
         .unwrap_or_else(|error| format!("unreadable: {error}"));
     let index = gitio::git(checkout, &["write-tree"])
@@ -5932,6 +5941,7 @@ fn integration_facts(
     selection: &IntegrationStyle,
     evaluating: bool,
 ) -> IntegrationFacts {
+    gitio::forget_mutable_answers();
     let shape = selection.shape;
     let approved = st.latest_patchset().map(|patchset| integration::Approved {
         patchset_id: patchset.id.clone(),
@@ -5952,12 +5962,14 @@ fn integration_facts(
     });
     // Read after the first basis: agreement between the two is the evidence
     // that the configuration held still across the decision.
+    gitio::forget_mutable_answers();
     let confirmation = if evaluating {
         ctx.report_evaluating_integration(store, st, target, shape)
     } else {
         ctx.report_for_integration(store, st, target, shape)
     }
     .map(|confirmation| integration::Confirmation {
+        readiness: integration::Readiness::of(&confirmation),
         ready: confirmation.integrate_ready(),
         basis: authorization_basis(
             ctx,
@@ -6028,6 +6040,7 @@ fn integration_facts(
         approval: integration::approval(st, report, &patchset_id),
         declarations,
         approved,
+        readiness: integration::Readiness::of(report),
         ready: report.integrate_ready(),
         basis,
         confirmation,
@@ -6403,7 +6416,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     }
     let (payload, integrated_rev) = match (assert_integrated, abandoned, superseded_by) {
         (Some(rev), false, None) => {
-            let rev = gitio::rev_parse(&ctx.cwd, &rev)?;
+            let rev = gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &rev))?;
             let patchset = match patchset {
                 Some(id) => st
                     .patchsets
@@ -6455,7 +6468,11 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
                     &patchset.head[..patchset.head.len().min(8)]
                 );
             }
-            if !gitio::is_ancestor(&ctx.cwd, &rev, &gitio::branch_head(&ctx.cwd, &target)?)? {
+            if !gitio::is_ancestor(
+                &ctx.cwd,
+                &rev,
+                &gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &target))?,
+            )? {
                 bail!("{rev} is not on {target}; nothing there integrated this change");
             }
             // A merge's first parent is the prior target when the merge itself
@@ -6465,7 +6482,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
             let target_before = match (target_before, parents.len()) {
                 (Some(named), _) => {
-                    let base = gitio::rev_parse(&ctx.cwd, &named)?;
+                    let base = gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &named))?;
                     if !gitio::is_ancestor(&ctx.cwd, &base, &rev)? {
                         bail!("--target-before {named} ({base}) is not an ancestor of {rev}");
                     }

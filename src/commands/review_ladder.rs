@@ -16,7 +16,7 @@ pub fn import(ctx: &Ctx, reference: &str, file: &Path) -> Result<i32> {
     let top = gitio::toplevel(&ctx.cwd)?;
     let current = crate::context::infer_change(&store, &top)?;
     if current.as_deref() != Some(id.as_str())
-        || gitio::current_branch(&top)?.as_deref() != Some(&state.branch)
+        || gitio::fresh_read(|| gitio::current_branch(&top))?.as_deref() != Some(&state.branch)
     {
         bail!("review-ladder import requires the current open change's worktree; no other checkout is written");
     }

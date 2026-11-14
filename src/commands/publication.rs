@@ -12,7 +12,7 @@ pub fn publication(
     expected_revision: Option<&str>,
     associated_change: Option<&str>,
 ) -> Result<i32> {
-    let revision = gitio::branch_head(&ctx.cwd, target)
+    let revision = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, target))
         .with_context(|| format!("cannot resolve publication target {target:?}"))?;
     if let Some(expected) = expected_revision {
         if !matches!(expected.len(), 40 | 64)
@@ -27,7 +27,7 @@ pub fn publication(
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
     let _target_lock = store.lock_target(target)?;
-    if gitio::branch_head(&ctx.cwd, target)? != revision {
+    if gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, target))? != revision {
         bail!("publication target moved before checks");
     }
     let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
@@ -218,7 +218,7 @@ pub fn publication(
                     if !(clean_before
                         && clean_after
                         && environment_known
-                        && gitio::head(&scratch.path)? == revision) =>
+                        && gitio::fresh_read(|| gitio::head(&scratch.path))? == revision) =>
                 {
                     VerifyResult::Fail
                 }
@@ -292,7 +292,7 @@ pub fn publication(
             }
         }
     }
-    if gitio::branch_head(&ctx.cwd, target)? != revision {
+    if gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, target))? != revision {
         failed = true;
         eprintln!("publication target moved while checks ran; rerun the guard");
     }
@@ -396,7 +396,7 @@ fn publication_gates(
     let (mut required, authority) = if let Some(state) = associated {
         if state.is_closed()
             || state.branch != target
-            || gitio::branch_head(&ctx.cwd, &state.branch)? != revision
+            || gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.branch))? != revision
         {
             bail!("publication --change must name the open change owning the target branch at this revision");
         }
@@ -422,7 +422,7 @@ fn publication_gates(
                 })
         };
         let default_head = branch
-            .map(|branch| gitio::branch_head(&ctx.cwd, &branch))
+            .map(|branch| gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &branch)))
             .transpose()?;
         let baseline = default_head.or_else(|| {
             states.values().find_map(|state| {

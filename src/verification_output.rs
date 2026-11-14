@@ -70,6 +70,7 @@ impl Storage {
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(io::Error::last_os_error().into());
         }
+        crate::gitio::forget_answers();
         self.directory.rename(&self.temporary, &self.name)?;
         for name in self.directory.names()? {
             let Some((id, pid)) = name

@@ -400,6 +400,7 @@ fn rationale(raw: &str) -> Result<String> {
 }
 
 pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
+    gitio::forget_mutable_answers();
     let rationale = rationale(&args.rationale)?;
     let store = ctx.store()?;
     let change_id = store
@@ -410,7 +411,8 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
     let proposed_target = if args.target.is_empty() || args.target.starts_with('-') {
         None
     } else {
-        gitio::rev_parse(&ctx.cwd, &format!("{}^{{commit}}", args.target)).ok()
+        gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &format!("{}^{{commit}}", args.target)))
+            .ok()
     };
     let Some(proposed_target) = proposed_target else {
         bail!("unknown-revision: {:?} names no commit", args.target);
@@ -434,8 +436,8 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
             st.change_id
         );
     }
-    let observed_target = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
-    let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let observed_target = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.target_branch))?;
+    let head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
 
     // The environment is observed where the shipped content is checked out,
     // as an evaluation observed it.
@@ -599,6 +601,7 @@ pub fn promote(ctx: &Ctx, selection_id: &str) -> Result<i32> {
 /// the patchset and then `candidate-promoted`. The target lock is not taken:
 /// the branch that moves is the destination's own.
 fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool) -> Result<i32> {
+    gitio::forget_mutable_answers();
     let change_id = {
         let ledger = load_ledger(store)?;
         let Some(selection) = ledger.selection(selection_id) else {
@@ -631,9 +634,9 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     patchset_admitted(&st).map_err(|error| anyhow::anyhow!("destination-closed: {error:#}"))?;
     let reference = candidate::promotion_ref(&selection.candidate_id, selection_id);
-    let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
 
-    if let Some(commit) = gitio::ref_value(&ctx.cwd, &reference)? {
+    if let Some(commit) = gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &reference))? {
         if head == commit {
             candidate_declarations(ctx, &st, &selection.tree)?;
             println!("completing: {} already points at {reference}", st.branch);
@@ -652,7 +655,7 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
         return Ok(0);
     }
 
-    let target = gitio::branch_head(&ctx.cwd, &selection.target_branch)?;
+    let target = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &selection.target_branch))?;
     let mut moved = Vec::new();
     if head != selection.head {
         moved.push(format!(

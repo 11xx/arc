@@ -24,7 +24,7 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
     let store = ctx.store()?;
     crate::gate_concurrency::revoke(&store, &host)?;
     crate::warm_worktree::prepare(&root)?;
-    let revision = gitio::head(&root)?;
+    let revision = gitio::fresh_read(|| gitio::head(&root))?;
     let tree = gitio::commit_tree(&root, &revision)?;
     let dirt = gitio::dirt(&root)?;
     anyhow::ensure!(
@@ -133,7 +133,7 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
         anyhow::ensure!(
             !dirt.tracked
                 && !dirt.untracked
-                && gitio::head(&root)? == revision
+                && gitio::fresh_read(|| gitio::head(&root))? == revision
                 && gitio::worktree_tree(&root)? == tree,
             "worktree moved during concurrent measurement; no acceptance recorded"
         );

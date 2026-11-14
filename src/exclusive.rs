@@ -141,6 +141,7 @@ pub fn acquire(
         }
         anyhow::ensure!(waiter.0.wait()?.success(), "exclusive lock wait failed");
     }
+    crate::gitio::forget_answers();
     let owner = Owner {
         project: crate::gitio::primary_worktree(cwd)?.display().to_string(),
         change,

@@ -56,9 +56,9 @@ pub fn divergence_guidance(st: &ChangeState, target: &str) -> String {
 
 pub const PLAN_SCHEMA: &str = "arc-integration-plan/1";
 
-const CONFIGURATION_MOVED: &str = "gate or policy configuration changed while preparing the \
-                                   merge; nothing was written — re-run once the worktree has \
-                                   settled";
+const CONFIGURATION_MOVED: &str = "integration target, merge tree, gate or policy configuration \
+                                   changed while preparing the merge; nothing was written; \
+                                   re-run once the worktree has settled";
 
 /// The checkout a merge into a target runs in, or a promotion moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,9 +94,26 @@ pub struct Declarations {
     pub policy: NormalizedPolicy,
 }
 
+/// The exact destination and merge tree a readiness report judged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Readiness {
+    pub target_revision: Option<String>,
+    pub merged_tree: Option<String>,
+}
+
+impl Readiness {
+    pub fn of(report: &StatusReport) -> Self {
+        Self {
+            target_revision: report.observed_target_head.clone(),
+            merged_tree: report.merged_tree.clone(),
+        }
+    }
+}
+
 /// The second reading of readiness and the basis, taken after the first so
 /// configuration moving between the two is caught.
 pub struct Confirmation {
+    pub readiness: Readiness,
     pub ready: bool,
     pub basis: anyhow::Result<AuthorizationBasis>,
 }
@@ -116,7 +133,8 @@ pub struct IntegrationFacts {
     pub target_is_ancestor: anyhow::Result<bool>,
     pub target: String,
     pub approved: Option<Approved>,
-    /// Readiness under the locks.
+    /// Readiness under the locks, bound to the coordinates it actually judged.
+    pub readiness: Readiness,
     pub ready: bool,
     pub approval: Approval,
     pub declarations: anyhow::Result<Declarations>,
@@ -568,17 +586,34 @@ fn decision(facts: IntegrationFacts) -> Decision {
         return Decision::Refused(Refusal::ConfigurationMoved);
     }
 
+    let target_revision = observed!(facts.target_revision);
+    if facts.readiness.target_revision.as_ref() != Some(&target_revision)
+        || confirmation.readiness.target_revision.as_ref() != Some(&target_revision)
+    {
+        return Decision::Refused(Refusal::ConfigurationMoved);
+    }
+    let evaluated_tree =
+        if facts.mode == Mode::Provisional || matches!(&facts.contribution, Ok(None)) {
+            let tree = observed!(facts.evaluated_tree);
+            if facts.readiness.merged_tree != tree || confirmation.readiness.merged_tree != tree {
+                return Decision::Refused(Refusal::ConfigurationMoved);
+            }
+            tree
+        } else {
+            None
+        };
+
     if facts.mode == Mode::Provisional {
         let Some(recipient) = facts.recipient else {
             return Decision::Refused(Refusal::Failed(anyhow!("provisional recipient is missing")));
         };
-        let Some(tree) = observed!(facts.evaluated_tree) else {
+        let Some(tree) = evaluated_tree else {
             return Decision::Refused(Refusal::Diverged);
         };
         return Decision::Provisional(ProvisionalPlan {
             publication_target: facts.publication_target,
             staging_branch: facts.target,
-            staging_before: observed!(facts.target_revision),
+            staging_before: target_revision,
             approved,
             evaluated_tree: tree,
             recipient,
@@ -589,7 +624,7 @@ fn decision(facts: IntegrationFacts) -> Decision {
     if let Some(contribution) = observed!(facts.contribution) {
         return Decision::ReadyToSend(SendPlan {
             target: facts.target,
-            target_revision: observed!(facts.target_revision),
+            target_revision,
             approved,
             contribution,
             authorization,
@@ -600,8 +635,7 @@ fn decision(facts: IntegrationFacts) -> Decision {
     if let Err(refusal) = guard_tracked_dirt(&checkout.path, observed!(facts.tracked_dirt)) {
         return Decision::Refused(refusal);
     }
-    let old_target = observed!(facts.target_revision);
-    let evaluated_tree = observed!(facts.evaluated_tree);
+    let old_target = target_revision;
     if let Err(refusal) = guard_writes(&checkout.path, observed!(facts.write_collisions)) {
         return Decision::Refused(refusal);
     }
@@ -885,6 +919,10 @@ mod tests {
                 patchset_id: "ps-1".to_string(),
                 head: HEAD.to_string(),
             }),
+            readiness: Readiness {
+                target_revision: Some(OLD_TARGET.into()),
+                merged_tree: Some(TREE.into()),
+            },
             ready: true,
             approval: Approval {
                 verdict_event_id: Some("verdict-1".to_string()),
@@ -897,6 +935,10 @@ mod tests {
             }),
             basis: Ok(basis()),
             confirmation: Ok(Confirmation {
+                readiness: Readiness {
+                    target_revision: Some(OLD_TARGET.into()),
+                    merged_tree: Some(TREE.into()),
+                },
                 ready: true,
                 basis: Ok(basis()),
             }),
@@ -1037,6 +1079,10 @@ mod tests {
         moved_basis.policy.forbid_self_approval = true;
         let differs = IntegrationFacts {
             confirmation: Ok(Confirmation {
+                readiness: Readiness {
+                    target_revision: Some(OLD_TARGET.into()),
+                    merged_tree: Some(TREE.into()),
+                },
                 ready: true,
                 basis: Ok(moved_basis),
             }),
@@ -1045,6 +1091,10 @@ mod tests {
         assert!(matches!(refusal(differs), Refusal::ConfigurationMoved));
         let unready = IntegrationFacts {
             confirmation: Ok(Confirmation {
+                readiness: Readiness {
+                    target_revision: Some(OLD_TARGET.into()),
+                    merged_tree: Some(TREE.into()),
+                },
                 ready: false,
                 basis: Ok(basis()),
             }),
@@ -1131,10 +1181,15 @@ mod tests {
 
     #[test]
     fn a_moved_target_is_named_without_changing_a_permitting_decision() {
-        let facts = IntegrationFacts {
-            target_revision: Ok(NEW_TARGET.to_string()),
-            ..ready()
-        };
+        let mut facts = ready();
+        facts.target_revision = Ok(NEW_TARGET.to_string());
+        facts.readiness.target_revision = Some(NEW_TARGET.to_string());
+        facts
+            .confirmation
+            .as_mut()
+            .unwrap()
+            .readiness
+            .target_revision = Some(NEW_TARGET.to_string());
         let outcome = decide(facts, Some(&prior()));
         assert!(matches!(outcome.decision, Decision::Merge(_)));
         assert_eq!(
@@ -1364,5 +1419,41 @@ mod tests {
             ..ready()
         };
         assert!(decide(facts, Some(&prior())).moved.is_empty());
+    }
+    /// Invariant I8. Claim: no readiness reading can authorize another destination or merge
+    /// tree. Rejects either report's cached coordinates agreeing with itself
+    /// while disagreeing with the fresh facts, independently of cache invalidation.
+    #[test]
+    fn readiness_coordinates_must_match_fresh_observations() {
+        let mut accepted = Vec::new();
+        for case in ["target", "tree", "confirmed-target", "confirmed-tree"] {
+            let mut facts = ready();
+            match case {
+                "target" => facts.readiness.target_revision = Some("different".into()),
+                "tree" => facts.readiness.merged_tree = Some("different".into()),
+                "confirmed-target" => {
+                    facts
+                        .confirmation
+                        .as_mut()
+                        .unwrap()
+                        .readiness
+                        .target_revision = Some("different".into())
+                }
+                _ => {
+                    facts.confirmation.as_mut().unwrap().readiness.merged_tree =
+                        Some("different".into())
+                }
+            }
+            if !matches!(
+                decide(facts, None).decision,
+                Decision::Refused(Refusal::ConfigurationMoved)
+            ) {
+                accepted.push(case);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "mismatched readiness accepted: {accepted:?}"
+        );
     }
 }

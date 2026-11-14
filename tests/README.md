@@ -135,3 +135,9 @@ Arc history and are measured separately from acceptance tests.
 Retained-history launch targets are 650 for `begin` and `review`, and 700 for
 `integrate`; the other commands use the same ceilings. Distinct immutable
 revisions still need individual file queries until object reads are batched.
+
+Launch guards pin the measured counts below the command ceilings. Lock
+acquisition discards all held answers; authorization observations and deliberate
+movement checks read mutable state afresh. The scaling fixture adds four unrelated
+changes, refs and worktrees at the same revision: `status`, `verify` and
+`integrate` launch the same number of Git processes with or without them.

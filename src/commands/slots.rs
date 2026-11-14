@@ -466,7 +466,8 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
                 );
             }
             if lease.branch.as_deref() != Some(change.branch.as_str())
-                || gitio::current_branch(&path)?.as_deref() != Some(change.branch.as_str())
+                || gitio::fresh_read(|| gitio::current_branch(&path))?.as_deref()
+                    != Some(change.branch.as_str())
             {
                 bail!("{name} does not hold change {} on branch {}; inspect it before recording its lease", change.change_id, change.branch);
             }
@@ -496,7 +497,7 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
             let branch = lease.branch.as_deref().unwrap_or_default();
             let made = !branch.is_empty()
                 && gitio::branch_exists(&ctx.cwd, branch)
-                && gitio::branch_head(&ctx.cwd, branch)? == lease.target;
+                && gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, branch))? == lease.target;
             match slots::detach(&pool, &ctx.cwd, &name, token, None, None)? {
                 Finished::Kept(reason) => bail!("{reason}; {name} keeps its lease"),
                 Finished::Detached(_use) => {

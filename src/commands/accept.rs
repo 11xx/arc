@@ -362,7 +362,7 @@ fn plan_acceptance(
                 .context("delivered patchset is unavailable")?;
             let delivered_head = delivered.head.clone();
             let expected = rewrites.signature_successor(&delivered_head)?;
-            let head = match gitio::branch_head(&ctx.cwd, &args.branch) {
+            let head = match gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &args.branch)) {
             Ok(head) => head,
             Err(_) => return refuse(6, format!("required branch {:?} is unavailable; fetch that branch and its Git objects before accepting", args.branch)),
         };
@@ -386,18 +386,19 @@ fn plan_acceptance(
                 }
                 return refuse(1, format!("branch {:?} head {head} differs from delivered head {delivered_head} and its recorded signature-only successor {expected}; {}", args.branch, publishing_remedy(&state)));
             }
-            let target = match gitio::branch_head(&ctx.cwd, &state.target_branch) {
-                Ok(head) => head,
-                Err(_) => {
-                    return refuse(
-                        6,
-                        format!(
+            let target =
+                match gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.target_branch)) {
+                    Ok(head) => head,
+                    Err(_) => {
+                        return refuse(
+                            6,
+                            format!(
                             "required target {:?} is unavailable; fetch the authoritative target",
                             state.target_branch
                         ),
-                    )
-                }
-            };
+                        )
+                    }
+                };
             let base = patchset.base.clone();
             for (role, revision) in [("patchset base", &base), ("patchset head", &head)] {
                 if !gitio::commit_exists(&ctx.cwd, revision)? {
@@ -510,8 +511,8 @@ fn plan_acceptance(
                 });
                 if !registered
                     || gitio::common_dir(&checkout).ok() != Some(gitio::common_dir(&ctx.cwd)?)
-                    || gitio::branch_head(&checkout, &args.branch)? != head
-                    || gitio::head(&checkout)? != head
+                    || gitio::fresh_read(|| gitio::branch_head(&checkout, &args.branch))? != head
+                    || gitio::fresh_read(|| gitio::head(&checkout))? != head
                 {
                     return refuse(1, format!("occupied path {} is not a matching registered checkout of {:?} in this repository", checkout.display(), args.branch));
                 }
@@ -686,8 +687,9 @@ fn acceptance_argv(args: &AcceptArgs) -> Vec<String> {
 }
 
 fn revalidate(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result<()> {
+    gitio::forget_mutable_answers();
     authority(&plan.store)?;
-    let head = gitio::branch_head(&ctx.cwd, &plan.state.branch)?;
+    let head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &plan.state.branch))?;
     if head != expected {
         return refuse(
             1,
@@ -698,7 +700,7 @@ fn revalidate(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result<()> {
             ),
         );
     }
-    let target = gitio::branch_head(&ctx.cwd, &plan.state.target_branch)?;
+    let target = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &plan.state.target_branch))?;
     if target != plan.target {
         return refuse(
             1,
@@ -734,8 +736,9 @@ fn validate_checkout(
     });
     if !registered
         || gitio::common_dir(&plan.checkout)? != gitio::common_dir(&plan.invocation)?
-        || gitio::current_branch(&plan.checkout)?.as_deref() != Some(&plan.state.branch)
-        || gitio::head(&plan.checkout)? != expected
+        || gitio::fresh_read(|| gitio::current_branch(&plan.checkout))?.as_deref()
+            != Some(&plan.state.branch)
+        || gitio::fresh_read(|| gitio::head(&plan.checkout))? != expected
     {
         return refuse(
             1,
@@ -1215,7 +1218,7 @@ fn execute_acceptance(
         }
         Ok(())
     })?;
-    let prepared = gitio::branch_head(&ctx.cwd, &plan.state.branch)?;
+    let prepared = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &plan.state.branch))?;
     result.prepared_head = Some(prepared.clone());
     step(result, &run, "signature-confirmation", Vec::new(), || {
         if plan
@@ -1657,7 +1660,8 @@ pub fn accept(ctx: &Ctx, args: AcceptArgs) -> Result<i32> {
         Ok(code) => code,
         Err(error) => {
             if result.prepared_head.is_some() {
-                result.prepared_head = gitio::branch_head(&ctx.cwd, &args.branch).ok();
+                result.prepared_head =
+                    gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &args.branch)).ok();
             }
             result.next_steps.push(format!("{error:#}"));
             if !args.dry_run

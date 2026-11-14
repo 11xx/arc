@@ -493,17 +493,24 @@ pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
     rev_parse(cwd, &name)
 }
 
-/// The destination ref at an authorization boundary. This bypasses held ref
-/// answers because another process can move a destination after a prior read.
+/// Read an independent observation of mutable Git state. Deliberate movement
+/// checks use this boundary, including when no Arc write occurred between reads.
+/// Immutable object answers retain their write freshness rules.
+pub fn fresh_read<T>(read: impl FnOnce() -> T) -> T {
+    forget_mutable_answers();
+    read()
+}
+
+/// Start an authorization observation after prior work or another decision.
+pub(crate) fn forget_mutable_answers() {
+    answers::forget_mutable();
+    forget_shared_answers();
+    close_object_readers();
+}
+
+/// The destination ref at an authorization boundary.
 pub fn fresh_branch_head(cwd: &Path, branch: &str) -> Result<String> {
-    git(
-        cwd,
-        &[
-            "rev-parse",
-            "--verify",
-            &format!("refs/heads/{branch}^{{commit}}"),
-        ],
-    )
+    fresh_read(|| branch_head(cwd, branch))
 }
 
 pub fn current_branch(cwd: &Path) -> Result<Option<String>> {

@@ -723,6 +723,9 @@ pub struct StatusReport {
     pub pending_landing: Option<String>,
     pub claim: Option<ClaimStatus>,
     pub current_head: Option<String>,
+    /// The destination revision used for this report's merged tree and evidence.
+    #[serde(skip)]
+    pub observed_target_head: Option<String>,
     pub needs_rebase: bool,
     /// The tree a merge into the target would ship, which is what the required
     /// gates have to answer for. It is the head's own tree while the change is
@@ -1361,6 +1364,7 @@ pub fn build_at_with_shape(
         danger,
         fork,
     )?;
+    report.observed_target_head = target_head;
     report.advisories.extend(role_advisories);
     Ok(report)
 }
@@ -2238,6 +2242,7 @@ fn build_report(
         pending_landing: state.pending_landing.clone(),
         claim: claim_status_at(state, now, provenance_mode),
         current_head,
+        observed_target_head: None,
         needs_rebase,
         merged_tree,
         latest_patchset,

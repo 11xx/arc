@@ -5648,3 +5648,34 @@ fn cleanup_repository_tracked_component_outside_ignored_paths_ignored_scope() {
 fn cleanup_repository_tracked_component_outside_ignored_paths_artifacts_scope() {
     assert_cleanup_retains_repository_in_tracked_directory("artifacts", false);
 }
+
+/// Invariant I8. Claim: a target advance during confirmation refuses integration
+/// without ledger writes. Rejects shipping a merge tree that no gate evaluated
+/// because the confirming readiness report reused the earlier target ref.
+#[test]
+fn confirmation_target_advance_never_ships_an_unevaluated_tree() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "confirmation-target", "change.txt", "change\n");
+    let recorded = events(&repo, &id);
+    let mut child = spawn_arc_at_rendezvous(
+        &repo,
+        &repo.root,
+        &["integrate", &id, "--shape", "no-ff"],
+        "integration-budget-confirmation",
+        &[],
+    );
+    repo.commit(&repo.root, "other.txt", "other\n", "test: advance target");
+    let advanced = repo.head(&repo.root);
+    release_lock_wait(&mut child);
+    let code = wait_for_exit(&mut child);
+    assert!(
+        !code.success(),
+        "integration must refuse the unevaluated merge tree"
+    );
+    assert_eq!(
+        repo.head(&repo.root),
+        advanced,
+        "integration must not move the target"
+    );
+    assert_eq!(events(&repo, &id), recorded, "refusal must record nothing");
+}

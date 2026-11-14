@@ -119,7 +119,7 @@ impl Source {
     }
     fn observe(path: &Path) -> Result<Self> {
         Ok(Self {
-            revision: gitio::head(path)?,
+            revision: gitio::fresh_read(|| gitio::head(path))?,
             tree: gitio::git(path, &["rev-parse", "HEAD^{tree}"])?,
             tracked: source_bytes(path, &["diff", "--binary", "HEAD", "--"])?,
             staged: source_bytes(path, &["diff", "--cached", "--binary", "HEAD", "--"])?,
@@ -599,6 +599,7 @@ fn acquire_lease(path: &Path, kind: &str) -> Result<File> {
         }
         return Err(error).with_context(|| format!("cannot lease {kind}"));
     }
+    gitio::forget_answers();
     Ok(file)
 }
 

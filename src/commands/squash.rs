@@ -104,7 +104,7 @@ pub fn squash(
             "the single commit failed; restored the original head, index, and tracked files; untracked files are retained",
         );
     }
-    let squashed = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let squashed = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &st.branch))?;
     let squashed_tree = tree_of(&ctx.cwd, &squashed)?;
     let tracked_dirt = gitio::git(
         &worktree,

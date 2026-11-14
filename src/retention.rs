@@ -360,7 +360,7 @@ pub fn delivered(
             continue;
         }
         let name = cited.retained_ref();
-        if gitio::ref_value(cwd, &name)?.is_none() {
+        if gitio::fresh_read(|| gitio::ref_value(cwd, &name))?.is_none() {
             held.insert(cited.commit.clone());
             retain.insert(name, cited.commit);
         }
@@ -408,7 +408,7 @@ pub fn creations(
             .into_iter()
             .collect();
     for (name, commit) in retained {
-        match gitio::ref_value(cwd, name)?.as_deref() {
+        match gitio::fresh_read(|| gitio::ref_value(cwd, name))?.as_deref() {
             Some(value) if value == commit => {}
             Some(value) => bail!(
                 "{name} holds {value}, and a retention ref holds only the commit it is named for; \

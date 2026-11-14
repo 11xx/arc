@@ -1,5 +1,6 @@
 //! Patchset-bound proposals to increase repository budget constraints.
 
+use crate::perf::Counted;
 use crate::{gate_budget, gates, gitio, model::*, state::ChangeState};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -189,7 +190,10 @@ fn matches(patterns: &[String], path: &str) -> bool {
 }
 
 fn raw(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = gitio::git_command().args(args).current_dir(cwd).output()?;
+    let out = gitio::git_command()
+        .args(args)
+        .current_dir(cwd)
+        .counted_output()?;
     if !out.status.success() {
         bail!(
             "budget counting Git failed: {}",

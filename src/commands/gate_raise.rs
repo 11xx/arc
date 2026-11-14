@@ -77,8 +77,8 @@ pub fn raise_budget(
     if !errors.is_empty() {
         bail!("budget raise refused: {}", errors.join("; "));
     }
-    if gitio::branch_head(&ctx.cwd, &state.target_branch)? != target
-        || gitio::branch_head(&ctx.cwd, &state.branch)? != head
+    if gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.target_branch))? != target
+        || gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.branch))? != head
     {
         bail!("budget raise basis moved while counting");
     }

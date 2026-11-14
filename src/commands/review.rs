@@ -1503,7 +1503,8 @@ pub(super) fn record_verdict(
     }
     let snapshot_patchset = if snapshot_first {
         let st = store.state(&change_id)?;
-        if gitio::current_branch(&ctx.cwd)?.as_deref() != Some(st.branch.as_str())
+        if gitio::fresh_read(|| gitio::current_branch(&ctx.cwd))?.as_deref()
+            != Some(st.branch.as_str())
             || !gitio::is_clean(&ctx.cwd)?
         {
             bail!("review --snapshot requires the change branch checked out in a clean worktree");

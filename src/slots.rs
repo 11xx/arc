@@ -536,6 +536,7 @@ fn lock_file(path: &Path, exclusive: bool) -> Result<File> {
     loop {
         // SAFETY: flock takes a descriptor `file` owns.
         if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            gitio::forget_answers();
             return Ok(file);
         }
         let error = std::io::Error::last_os_error();
@@ -550,6 +551,7 @@ fn lock_file_nonblocking(path: &Path, operation: i32) -> Result<Option<File>> {
     let file = open_lock(path)?;
     // SAFETY: flock takes a descriptor `file` owns.
     if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
+        gitio::forget_answers();
         return Ok(Some(file));
     }
     let error = std::io::Error::last_os_error();
@@ -1101,9 +1103,9 @@ pub fn record_built(path: &Path) -> Result<()> {
         .and_then(|name| name.to_str())
         .context("slot name is not UTF-8")?
         .to_string();
-    let revision = gitio::head(&checkout)?;
     let identity = identity(&checkout, &declaration)?;
     let _lock = pool.lock()?;
+    let revision = gitio::fresh_read(|| gitio::head(&checkout))?;
     let mut state = pool.read(&name)?;
     state.built = Some(Built { revision, identity });
     pool.write(&state)
@@ -1403,7 +1405,7 @@ impl Leased {
                     path.display()
                 );
             }
-            if let Some(branch) = gitio::current_branch(path)? {
+            if let Some(branch) = gitio::fresh_read(|| gitio::current_branch(path))? {
                 bail!(
                     "{} at {} has branch {branch} checked out; a free slot is detached",
                     self.name,
@@ -1485,7 +1487,9 @@ impl Leased {
                 )
             );
         }
-        if gitio::head(&self.path)? != target || gitio::current_branch(&self.path)?.is_some() {
+        if gitio::fresh_read(|| gitio::head(&self.path))? != target
+            || gitio::fresh_read(|| gitio::current_branch(&self.path))?.is_some()
+        {
             bail!(
                 "the warm command moved {} off {target}",
                 self.path.display()
@@ -1552,7 +1556,7 @@ impl Leased {
                         path.display()
                     );
                 }
-                if let Some(branch) = gitio::current_branch(path)? {
+                if let Some(branch) = gitio::fresh_read(|| gitio::current_branch(path))? {
                     bail!(
                         "{} at {} has branch {branch} checked out; a free slot is detached",
                         self.name,
@@ -1777,7 +1781,7 @@ pub fn detach(
         pool.update(name, token, |state| state.phase = Phase::Detaching)?;
         let at = match landed {
             Some(commit) => commit.to_string(),
-            None => gitio::head(&path)?,
+            None => gitio::fresh_read(|| gitio::head(&path))?,
         };
         gitio::git(&path, &["switch", "--detach", &at])?;
     } else {

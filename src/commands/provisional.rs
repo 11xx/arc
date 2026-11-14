@@ -101,7 +101,7 @@ fn select(
                     .unwrap_or(&state.target_branch)
             )
         });
-    let primary = gitio::current_branch(&gitio::primary_worktree(&ctx.cwd)?)?;
+    let primary = gitio::fresh_read(|| gitio::current_branch(&gitio::primary_worktree(&ctx.cwd)?))?;
     let states = store.readable_states()?;
     let unreadable: Vec<_> = store
         .list_change_ids()?
@@ -189,10 +189,10 @@ fn select(
         },
         _ => bail!("conflicting --for-replica/--for-forge or blank forge recipient"),
     };
-    let held = gitio::ref_value(&ctx.cwd, &format!("refs/heads/{branch}"))?;
-    let before = held
-        .clone()
-        .unwrap_or(gitio::branch_head(&ctx.cwd, &state.target_branch)?);
+    let held = gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &format!("refs/heads/{branch}")))?;
+    let before = held.clone().unwrap_or(gitio::fresh_read(|| {
+        gitio::branch_head(&ctx.cwd, &state.target_branch)
+    })?);
     Ok(Ok(Selection {
         branch,
         before,
@@ -215,6 +215,7 @@ fn report(
     integration::Declarations,
     Vec<ProvisionalPrerequisite>,
 )> {
+    gitio::forget_mutable_answers();
     let mut declarations = ctx.declarations(state)?;
     declarations.notes.extend(
         declarations
@@ -391,6 +392,7 @@ fn plan(
     selection: &Selection,
     expected: Option<&IntegrationPlan>,
 ) -> Result<std::result::Result<integration::ProvisionalPlan, i32>> {
+    gitio::forget_mutable_answers();
     if let Some(patchset) = state.latest_patchset() {
         crate::git_health::guard_patchset(&ctx.cwd, &patchset.base, &patchset.head)?;
         crate::git_health::guard_patchset(&ctx.cwd, &state.target_branch, &patchset.head)?;
@@ -404,6 +406,7 @@ fn plan(
         declarations.clone(),
         provisional,
     );
+    gitio::forget_mutable_answers();
     let (confirmation, confirmed_declarations, provisional) =
         self::report(ctx, store, state, selection)?;
     let confirmed = basis(
@@ -445,6 +448,23 @@ fn plan(
             }
         }
     }
+    let target_revision = gitio::fresh_read(|| -> Result<String> {
+        match gitio::ref_value(&ctx.cwd, &format!("refs/heads/{}", selection.branch))? {
+            Some(revision) => Ok(revision),
+            None if selection.held.is_none() => gitio::branch_head(&ctx.cwd, &state.target_branch),
+            None => bail!("provisional staging destination disappeared"),
+        }
+    });
+    let evaluated_tree = target_revision
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error:#}"))
+        .and_then(|target| {
+            patchset
+                .context("no patchset recorded")
+                .and_then(|patchset| {
+                    gitio::merge_outcome(&ctx.cwd, target, &patchset.head).map(|m| m.tree)
+                })
+        });
     let facts = IntegrationFacts {
         mode: Mode::Provisional,
         mode_refusal: None,
@@ -461,23 +481,21 @@ fn plan(
             patchset_id: patchset.id.clone(),
             head: patchset.head.clone(),
         }),
+        readiness: integration::Readiness::of(&report),
         ready: report.integrate_ready(),
         approval: integration::approval(state, &report, patchset.map_or("", |p| &p.id)),
         declarations: Ok(declarations),
         basis: authorization,
         confirmation: Ok(integration::Confirmation {
+            readiness: integration::Readiness::of(&confirmation),
             ready: confirmation.integrate_ready(),
             basis: confirmed,
         }),
         contribution: Ok(None),
         checkout: Err(anyhow::anyhow!("provisional staging has no checkout")),
         tracked_dirt: Ok(false),
-        target_revision: Ok(selection.before.clone()),
-        evaluated_tree: patchset
-            .context("no patchset recorded")
-            .and_then(|patchset| {
-                gitio::merge_outcome(&ctx.cwd, &selection.before, &patchset.head).map(|m| m.tree)
-            }),
+        target_revision,
+        evaluated_tree,
         write_collisions: Ok(Vec::new()),
         untouched: Ok(Vec::new()),
         already_contained: Ok(false),
@@ -546,13 +564,14 @@ impl PendingTransition {
         let staging_ref = format!("refs/heads/{staging_branch}");
         let retention_ref =
             crate::provisional::retention_ref(&intent.event.change_id, &intent.event.event_id);
-        let mut read_ref = |reference: &str| match gitio::ref_value(cwd, reference) {
-            Ok(value) => value,
-            Err(error) => {
-                observation_errors.push(format!("{reference}: {error:#}"));
-                None
-            }
-        };
+        let mut read_ref =
+            |reference: &str| match gitio::fresh_read(|| gitio::ref_value(cwd, reference)) {
+                Ok(value) => value,
+                Err(error) => {
+                    observation_errors.push(format!("{reference}: {error:#}"));
+                    None
+                }
+            };
         let staging_head = read_ref(&staging_ref);
         let retention_head = read_ref(&retention_ref);
         let applied = if retention_head.as_deref() == Some(provisional_commit) {
@@ -661,8 +680,8 @@ fn publish_transition(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
         store.clear_provisional_intent(&intent.event.change_id)?;
         return Ok(());
     }
-    let held = gitio::ref_value(&ctx.cwd, &staging)?;
-    let kept = gitio::ref_value(&ctx.cwd, &retention)?;
+    let held = gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &staging))?;
+    let kept = gitio::fresh_read(|| gitio::ref_value(&ctx.cwd, &retention))?;
     if kept.as_deref() == Some(provisional_commit)
         && held.as_deref().is_some_and(|head| {
             gitio::is_ancestor(&ctx.cwd, provisional_commit, head).unwrap_or(false)
@@ -1146,7 +1165,7 @@ fn integrate_provisionally_inner(
         || fresh.held != selection.held
         || fresh.recipient != selection.recipient
         || fresh.authority != selection.authority
-        || gitio::branch_head(&ctx.cwd, &state.branch)? != plan.approved.head
+        || gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.branch))? != plan.approved.head
     {
         bail!("provisional basis/ref moved before publication; no ref moved");
     }

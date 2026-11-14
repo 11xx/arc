@@ -76,8 +76,9 @@ impl Allocation {
             || !ctx.admits_path(&self.worktree)
             || !gitio::worktree_admin_matches(&ctx.cwd, &self.worktree, &self.administrative_dir)
             || gitio::common_dir(&self.worktree)? != gitio::common_dir(&ctx.cwd)?
-            || gitio::current_branch(&self.worktree)?.as_deref() != Some(branch)
-            || gitio::head(&self.worktree)? != head
+            || gitio::fresh_read(|| gitio::current_branch(&self.worktree))?.as_deref()
+                != Some(branch)
+            || gitio::fresh_read(|| gitio::head(&self.worktree))? != head
         {
             bail!("allocation recovery identity or ownership moved for {}; keeping the checkout and owner record", self.worktree.display());
         }
