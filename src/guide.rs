@@ -2167,6 +2167,12 @@ WORKBENCHES (working material in the journal)
                          Record what it produced: changes begun, artifacts
                          filed. One that produced nothing says why with
                          `--note`.
+    arc journal workbench adopt PATH --purpose TEXT [--slug SLUG]
+                         Move an existing directory, such as an entry of a
+                         journal's `loose/`, or a file, such as a notebook
+                         kept outside any journal, into a workbench by one
+                         rename, which keeps every byte. Its help names what
+                         it refuses.
     arc journal workbench list [--all] [--json]
                          Open workbenches, or all of them with what each
                          produced (`arc-journal-workbenches/1`).
@@ -2184,7 +2190,7 @@ WORKBENCHES (working material in the journal)
   journal that holds it. Workbench commands need the journal directory
   itself and never spool. `journal doctor` reports a recorded workbench whose
   directory is gone or in the other storage, and a directory under
-  `workbench/` that no event records.
+  `workbench/` that no event records; `adopt` records one where it stands.
 
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.

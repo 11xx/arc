@@ -1548,8 +1548,8 @@ pub enum JournalCmd {
     /// `workbench/<slug>-<YYYYMMDD>/` under the journal with an index file,
     /// `WORKBENCH.md`, records a `workbench-opened` event, and prints the
     /// directory's absolute path as its last line. Anything may be written
-    /// inside it. Arc records opening, linking, closing and archiving,
-    /// never the content, and reads the content only to count
+    /// inside it. Arc records opening, adopting, linking, closing and
+    /// archiving, never the content, and reads the content only to count
     /// files and bytes and to see when anything in it last changed. It
     /// rewrites the index from those records at each one.
     ///

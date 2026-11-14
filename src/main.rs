@@ -8932,6 +8932,7 @@ mod tests {
             "journal workbench",
             "journal workbench link",
             "journal workbench close",
+            "journal workbench adopt",
             "journal consume",
             "journal transition",
             "journal promote",

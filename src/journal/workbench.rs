@@ -2,27 +2,30 @@
 //!
 //! A workbench is a directory under the journal's `workbench/`, holding an
 //! index file arc writes and anything else a session puts there. The journal
-//! records the acts on it (opening, linking, closing, archiving) and never
-//! its content. Arc reads a workbench only to count its files and bytes and
-//! to find when anything in it last changed, which is what its listings and
-//! its staleness are made of.
+//! records the acts on it (opening or adopting, linking, closing, archiving)
+//! and never its content. Arc reads a workbench only to count its files and
+//! bytes and to find when anything in it last changed, which is what its
+//! listings and its staleness are made of.
 //!
 //! Its events carry the workbench's name and no artifact `file`, so every
 //! artifact view, exchange included, passes them by.
 
 use super::{
     append_event, archive_dir, event_identity_label, format_age, lock_journal_transition,
-    parse_artifact_name, print_dir_header, read_events, relocation, resolve_dir, uniquified,
-    valid_topic, DoctorFinding, JournalEvent, RecordedIdentity,
+    parse_artifact_name, print_dir_header, read_events, relocation, resolve_dir,
+    resolve_existing_prefix, uniquified, valid_topic, DoctorFinding, JournalEvent,
+    RecordedIdentity,
 };
 use crate::commands::Ctx;
+use crate::config;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 /// The directory under the journal, and under its cold archive, that holds
@@ -113,6 +116,38 @@ pub enum WorkbenchCmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Adopt an existing directory or file as a workbench, moving it into the journal
+    ///
+    /// A directory is renamed into `workbench/` whole; a file is moved into a
+    /// workbench directory of its own. A rename keeps every byte, mode and
+    /// time of the material, and arc adds only the index. The workbench is
+    /// named `<slug>-<YYYYMMDD>`: the slug defaults to the path's name
+    /// without its extension, and a name ending in `-YYYYMMDD` keeps that
+    /// date. Records a `workbench-adopted` event with where the material was,
+    /// its files and its bytes, and prints the new path as the last line.
+    ///
+    /// Refuses before anything moves: a path that does not exist, a symbolic
+    /// link, or anything but a file or a directory; a path on another
+    /// filesystem than the journal, which no rename can move atomically; a
+    /// path a Git repository tracks, inside a `.git` directory, or holding a
+    /// repository; a directory holding a relative symbolic link that leads
+    /// out of it, which would point elsewhere once moved; a directory already
+    /// holding `WORKBENCH.md`; a slug already open; and a path that holds, or
+    /// lies inside, storage arc keeps: this journal's own records, artifacts
+    /// and archive, another journal, or arc's home. A directory of the
+    /// journal arc does not own, such as an entry of `loose/`, may be
+    /// adopted. A directory under `workbench/` that no event records is
+    /// adopted where it stands
+    Adopt {
+        /// The directory or file to move into the journal
+        path: String,
+        /// One line saying what the workbench is for
+        #[arg(long)]
+        purpose: String,
+        /// Kebab-case slug, when the path's name is not one
+        #[arg(long)]
+        slug: Option<String>,
+    },
 }
 
 pub(super) fn run(ctx: &Ctx, args: WorkbenchArgs) -> Result<i32> {
@@ -128,6 +163,11 @@ pub(super) fn run(ctx: &Ctx, args: WorkbenchArgs) -> Result<i32> {
             produced,
             note,
         }) => close(ctx, &workbench, &produced, note.as_deref()),
+        Some(WorkbenchCmd::Adopt {
+            path,
+            purpose,
+            slug,
+        }) => adopt(ctx, &path, &purpose, slug.as_deref()),
         None => open(
             ctx,
             args.slug.as_deref().context("a workbench needs a slug")?,
@@ -1075,6 +1115,345 @@ fn refuse_other_filesystem(path: &Path, parent: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The material an adoption names, as it stands before anything moves.
+struct Source {
+    /// Absolute, with every directory above it resolved and the material's
+    /// own name kept, so a link is never followed in its place.
+    path: PathBuf,
+    name: OsString,
+    is_dir: bool,
+    metadata: std::fs::Metadata,
+}
+
+fn adoption_source(ctx: &Ctx, raw: &str) -> Result<Source> {
+    let requested = config::expand_tilde(raw)?;
+    let requested = if requested.is_absolute() {
+        requested
+    } else {
+        ctx.cwd.join(requested)
+    };
+    let metadata = match std::fs::symlink_metadata(&requested) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("{} does not exist", requested.display())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read {}", requested.display()))
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "{} is a symbolic link; adopt the material it points to",
+            requested.display()
+        );
+    }
+    if !metadata.is_dir() && !metadata.is_file() {
+        bail!(
+            "{} is neither a regular file nor a directory",
+            requested.display()
+        );
+    }
+    let Some(Component::Normal(name)) = requested.components().next_back() else {
+        bail!("{} does not name the material itself", requested.display());
+    };
+    let name = name.to_os_string();
+    let parent = match requested.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => ctx.cwd.clone(),
+    };
+    let parent = std::fs::canonicalize(&parent)
+        .with_context(|| format!("cannot resolve {}", parent.display()))?;
+    Ok(Source {
+        path: parent.join(&name),
+        name,
+        is_dir: metadata.is_dir(),
+        metadata,
+    })
+}
+
+/// Refuse material that holds or lies inside storage arc keeps. Inside this
+/// journal, only directories arc does not own are material: the records,
+/// artifacts, locks, exchange receipts and workbenches are the journal's.
+fn refuse_arc_storage(dir: &Path, source: &Source, in_place: bool) -> Result<()> {
+    let path = &source.path;
+    if path
+        .components()
+        .any(|component| component.as_os_str() == ".git")
+    {
+        bail!("{} is inside a Git directory", path.display());
+    }
+    let hot =
+        std::fs::canonicalize(dir).with_context(|| format!("cannot resolve {}", dir.display()))?;
+    if hot.starts_with(path) {
+        bail!(
+            "{} holds this journal; adopt material inside it, such as one entry of a loose directory",
+            path.display()
+        );
+    }
+    if let Ok(inside) = path.strip_prefix(&hot) {
+        let first = inside
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_default();
+        if first == DIR {
+            if in_place {
+                return Ok(());
+            }
+            bail!(
+                "{} is already inside this journal's workbenches",
+                path.display()
+            );
+        }
+        if first.starts_with('.')
+            || first == super::EXCHANGE_DIR
+            || (inside.components().count() == 1 && !source.is_dir)
+        {
+            bail!(
+                "{} is part of the journal arc keeps; adopt material arc does not own, such as a directory under it",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    let cfg = config::load()?;
+    let mut kept = vec![
+        (archive_dir(&hot), "this journal's archive"),
+        (cfg.ai_home.clone(), "arc's home"),
+    ];
+    if let Some(data_root) = &cfg.data_root {
+        kept.push((data_root.clone(), "arc's data root"));
+    }
+    for (_, journal) in crate::registry::known_journals(&cfg)? {
+        kept.push((archive_dir(&journal), "another journal's archive"));
+        kept.push((journal, "another journal"));
+    }
+    for (root, what) in kept {
+        let root = resolve_existing_prefix(&root)?;
+        if path.starts_with(&root) {
+            bail!(
+                "{} is inside {} ({}); adopt material from outside it, or from its own project",
+                path.display(),
+                root.display(),
+                what
+            );
+        }
+        if root.starts_with(path) {
+            bail!(
+                "{} holds {} ({}); adopt material inside it instead",
+                path.display(),
+                root.display(),
+                what
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Refuse material a Git repository tracks: moving it would delete files
+/// from that repository's checkout.
+fn refuse_tracked(source: &Source) -> Result<()> {
+    let (probe, spec) = if source.is_dir {
+        (source.path.clone(), ".".to_string())
+    } else {
+        (
+            source
+                .path
+                .parent()
+                .context("adopted material has a parent")?
+                .to_path_buf(),
+            source.name.to_string_lossy().to_string(),
+        )
+    };
+    let Ok(toplevel) = crate::gitio::git(&probe, &["rev-parse", "--show-toplevel"]) else {
+        return Ok(());
+    };
+    let tracked = crate::gitio::git(&probe, &["ls-files", "-z", "--", &spec])?;
+    if !tracked.is_empty() {
+        bail!(
+            "{} is tracked by the Git repository at {toplevel}; adopt material no repository tracks",
+            source.path.display()
+        );
+    }
+    Ok(())
+}
+
+/// `path` with `.` and `..` resolved by name, without touching the
+/// filesystem.
+fn lexical(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved
+}
+
+/// Walk the material, refusing what a move would break or what a
+/// repository owns, and measure it.
+fn survey(source: &Source, in_place: bool) -> Result<Measure> {
+    if !source.is_dir {
+        let mut measure = Measure {
+            files: 1,
+            bytes: source.metadata.len(),
+            newest: None,
+        };
+        measure.touch(&source.metadata);
+        return Ok(measure);
+    }
+    let root = &source.path;
+    if !in_place && std::fs::symlink_metadata(root.join(INDEX)).is_ok() {
+        bail!(
+            "{} already holds {INDEX}, the index arc writes in every workbench; rename it before adopting",
+            root.display()
+        );
+    }
+    walk(root, |path, metadata| {
+        if path.file_name().is_some_and(|name| name == ".git") {
+            bail!(
+                "{} holds a Git repository at {}; adopt material no repository tracks",
+                root.display(),
+                path.display()
+            );
+        }
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(path)
+                .with_context(|| format!("cannot read link {}", path.display()))?;
+            let parent = path.parent().unwrap_or(root);
+            if target.is_relative() && !lexical(&parent.join(&target)).starts_with(root) {
+                bail!(
+                    "{} is a relative link leading out of {}, which would point elsewhere once moved",
+                    path.display(),
+                    root.display()
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
+/// A material name's slug and the date it carries, when it ends in a valid
+/// `-YYYYMMDD`.
+fn split_date(stem: &str) -> (&str, Option<&str>) {
+    if let Some((slug, date)) = stem.rsplit_once('-') {
+        if date.len() == 8
+            && date.bytes().all(|byte| byte.is_ascii_digit())
+            && chrono::NaiveDate::parse_from_str(date, "%Y%m%d").is_ok()
+        {
+            return (slug, Some(date));
+        }
+    }
+    (stem, None)
+}
+
+fn adopt(ctx: &Ctx, raw: &str, purpose: &str, slug: Option<&str>) -> Result<i32> {
+    let purpose = one_line(purpose, "--purpose")?;
+    if let Some(slug) = slug {
+        require_slug(slug)?;
+    }
+    let dir = resolve_dir(&ctx.cwd)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
+    let source = adoption_source(ctx, raw)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let events = read_events(&dir)?;
+    let recorded = recorded(&events);
+    let hot = std::fs::canonicalize(&dir)?;
+    let in_place = source.is_dir && source.path.parent() == Some(hot.join(DIR).as_path());
+    let material = source.name.to_string_lossy().to_string();
+    if in_place && recorded.iter().any(|workbench| workbench.name == material) {
+        bail!(
+            "{} is the workbench {material} already",
+            source.path.display()
+        );
+    }
+    refuse_arc_storage(&dir, &source, in_place)?;
+    refuse_tracked(&source)?;
+    let measure = survey(&source, in_place)?;
+    if !in_place {
+        refuse_other_filesystem(&source.path, &dir)?;
+    }
+    let workbenches = dir.join(DIR);
+    let stem = if source.is_dir {
+        material.as_str()
+    } else {
+        Path::new(&material)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&material)
+    };
+    let (default_slug, date) = split_date(stem);
+    let slug = slug.unwrap_or(default_slug);
+    if !valid_topic(slug) {
+        bail!("{material:?} is not a kebab-case name; name a slug with --slug");
+    }
+    refuse_open_slug(&recorded, slug)?;
+    let name = if in_place {
+        if !valid_topic(&material) {
+            bail!("{material:?} is not a kebab-case name; rename the directory before adopting it");
+        }
+        material.clone()
+    } else {
+        let date = date
+            .map(str::to_string)
+            .unwrap_or_else(|| Utc::now().format("%Y%m%d").to_string());
+        allocate_name(&dir, &recorded, &format!("{slug}-{date}"))?
+    };
+    let target = workbenches.join(&name);
+    if !in_place {
+        std::fs::create_dir_all(&workbenches)
+            .with_context(|| format!("cannot create {}", workbenches.display()))?;
+        if source.is_dir {
+            std::fs::rename(&source.path, &target)
+        } else {
+            std::fs::create_dir(&target).and_then(|()| {
+                std::fs::rename(&source.path, target.join(&source.name)).inspect_err(|_| {
+                    let _ = std::fs::remove_dir(&target);
+                })
+            })
+        }
+        .with_context(|| {
+            format!(
+                "cannot move {} to {}",
+                source.path.display(),
+                target.display()
+            )
+        })?;
+    }
+    let mut event = JournalEvent::base(ctx, Utc::now(), slug, "workbench-adopted");
+    event.workbench = Some(name.clone());
+    event.purpose = Some(purpose);
+    event.adopted_from = Some(source.path.display().to_string());
+    event.files = Some(measure.files);
+    event.bytes = Some(measure.bytes);
+    if let Err(error) = record(ctx, &dir, &events, event, &target) {
+        if !in_place {
+            let _ = std::fs::remove_file(target.join(INDEX));
+            if source.is_dir {
+                let _ = std::fs::rename(&target, &source.path);
+            } else {
+                let _ = std::fs::rename(target.join(&source.name), &source.path);
+                let _ = std::fs::remove_dir(&target);
+            }
+        }
+        return Err(error);
+    }
+    println!(
+        "adopted: {} as {name}, {} in {} {}",
+        source.path.display(),
+        crate::worktree_usage::human(measure.bytes),
+        measure.files,
+        if measure.files == 1 { "file" } else { "files" }
+    );
+    println!("{}", target.display());
+    Ok(0)
+}
+
 /// Report workbenches whose directories and records disagree: a recorded
 /// workbench with no directory, or in the other storage, and a directory
 /// under `workbench/` that no event records.
@@ -1119,7 +1498,7 @@ pub(super) fn inspect(
                 return Err(error).with_context(|| format!("cannot read {}", root.display()))
             }
         };
-        let mut unrecorded: Vec<(PathBuf, bool)> = Vec::new();
+        let mut unrecorded = Vec::new();
         for entry in entries {
             let entry = entry.with_context(|| format!("cannot read {}", root.display()))?;
             let name = entry.file_name().to_string_lossy().to_string();
@@ -1130,9 +1509,12 @@ pub(super) fn inspect(
         unrecorded.sort();
         for (path, is_dir) in unrecorded {
             let remedy = if !cold && is_dir {
-                "; remove it, or record it as a workbench"
+                format!(
+                    "; adopt it where it stands with `arc journal workbench adopt {} --purpose TEXT`, or remove it",
+                    path.display()
+                )
             } else {
-                ""
+                String::new()
             };
             problems.push(DoctorFinding {
                 code: "unrecorded-workbench",

@@ -1,4 +1,7 @@
 use super::common::*;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 fn journal_dir(repo: &Repo) -> PathBuf {
     PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim())
@@ -44,6 +47,46 @@ fn listed(repo: &Repo, all: bool) -> Vec<serde_json::Value> {
 fn refused(repo: &Repo, args: &[&str]) -> String {
     let output = repo.arc(&repo.root).args(args).assert().failure();
     String::from_utf8_lossy(&output.get_output().stderr).to_string()
+}
+
+fn adopt_refused(repo: &Repo, path: &Path) -> String {
+    refused(
+        repo,
+        &[
+            "journal",
+            "workbench",
+            "adopt",
+            path.to_str().unwrap(),
+            "--purpose",
+            "old material",
+        ],
+    )
+}
+
+/// Every file and link under `root` by relative path: a digest of a file's
+/// bytes with its mode, or a link's target. What a move must keep.
+fn digests(root: &Path) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().display().to_string();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                found.insert(format!("{relative}/"), format!("{:o}", metadata.mode()));
+                pending.push(path);
+            } else if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path).unwrap();
+                found.insert(relative, format!("link {}", target.display()));
+            } else {
+                let digest = hex::encode(Sha256::digest(fs::read(&path).unwrap()));
+                found.insert(relative, format!("{digest} {:o}", metadata.mode()));
+            }
+        }
+    }
+    found
 }
 
 /// Claim: `journal workbench <slug> --purpose` creates
@@ -432,6 +475,265 @@ fn an_open_workbench_untouched_past_the_threshold_is_stale() {
     assert!(!catchup.contains("(stale)"), "{catchup}");
 }
 
+/// A loose directory the way sessions leave them: nested files, binary and
+/// empty files, an executable, and a link inside it.
+fn loose_entry(root: &Path) {
+    fs::create_dir_all(root.join("lanes/a")).unwrap();
+    fs::write(root.join("lanes/a/index.json"), "{\"lane\":\"a\"}\n").unwrap();
+    fs::write(root.join("SHA256SUMS"), "abc  lanes/a/index.json\n").unwrap();
+    fs::write(
+        root.join("blob.bin"),
+        (0..=255u8).cycle().take(70_000).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    fs::write(root.join("empty"), "").unwrap();
+    fs::write(root.join("run.sh"), "#!/bin/sh\necho run\n").unwrap();
+    fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("lanes/a/index.json", root.join("current")).unwrap();
+}
+
+/// Claim: adopting a `loose/` entry renames the directory into
+/// `workbench/` keeping every file's bytes and mode and every link,
+/// adds only the index, keeps the date its name carries, and records a
+/// `workbench-adopted` event with where it was and its files and bytes.
+/// Rejects an adoption that copies and alters, drops or adds content, or
+/// leaves the source behind.
+#[test]
+fn adopting_a_loose_directory_preserves_every_byte() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("loose/attribution-repair-20261009");
+    loose_entry(&source);
+    let before = digests(&source);
+
+    let printed = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "adopt",
+        source.to_str().unwrap(),
+        "--purpose",
+        "attribution repair run",
+    ]));
+    let target = last_line(&printed);
+    assert_eq!(target, dir.join("workbench/attribution-repair-20261009"));
+    assert!(!source.exists(), "the source stayed behind");
+    let mut after = digests(&target);
+    assert!(after.remove("WORKBENCH.md").is_some(), "no index written");
+    assert_eq!(before, after);
+
+    let adopted = &workbench_events(&dir)[0];
+    assert_eq!(adopted["event"], "workbench-adopted");
+    assert_eq!(adopted["topic"], "attribution-repair");
+    assert_eq!(adopted["adopted_from"], source.to_str().unwrap());
+    assert_eq!(adopted["files"], 6);
+    assert_eq!(adopted["bytes"], 13 + 24 + 70_000 + 19);
+    let rows = listed(&repo, false);
+    assert_eq!(rows[0]["adopted_from"], source.to_str().unwrap());
+    assert_eq!(rows[0]["purpose"], "attribution repair run");
+}
+
+/// Claim: adopting a single file, such as a notebook kept outside any
+/// journal, moves it unchanged into a workbench directory of its own named
+/// after the file. Rejects an adoption that leaves the file in place or
+/// changes its bytes.
+#[test]
+fn adopting_a_file_moves_it_into_its_own_workbench() {
+    let repo = Repo::new();
+    let notebook = repo.home.join("walltime-notes.org");
+    fs::write(&notebook, "* TODO measure the gate\n** finding\n").unwrap();
+    let digest = hex::encode(Sha256::digest(fs::read(&notebook).unwrap()));
+
+    let target = last_line(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "adopt",
+        notebook.to_str().unwrap(),
+        "--purpose",
+        "walltime investigation notebook",
+    ])));
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    assert_eq!(
+        target.file_name().unwrap().to_str().unwrap(),
+        format!("walltime-notes-{today}")
+    );
+    assert!(!notebook.exists());
+    let moved = fs::read(target.join("walltime-notes.org")).unwrap();
+    assert_eq!(hex::encode(Sha256::digest(moved)), digest);
+    let adopted = &workbench_events(&journal_dir(&repo))[0];
+    assert_eq!(adopted["files"], 1);
+}
+
+/// Claim: adoption refuses material a Git repository tracks, a file or a
+/// directory, and moves nothing. Rejects an adoption that deletes files from
+/// a checkout.
+#[test]
+fn adopt_refuses_material_a_repository_tracks() {
+    let repo = Repo::new();
+    fs::create_dir(repo.root.join("notes")).unwrap();
+    repo.commit(&repo.root, "notes/plan.org", "* plan\n", "notes");
+    let stderr = adopt_refused(&repo, &repo.root.join("notes/plan.org"));
+    assert!(
+        stderr.contains("is tracked by the Git repository at"),
+        "{stderr}"
+    );
+    let stderr = adopt_refused(&repo, &repo.root.join("notes"));
+    assert!(
+        stderr.contains("is tracked by the Git repository at"),
+        "{stderr}"
+    );
+    assert!(repo.root.join("notes/plan.org").is_file());
+    assert!(workbench_events(&journal_dir(&repo)).is_empty());
+}
+
+/// Claim: adoption refuses a directory that holds a Git repository, and a
+/// path inside a `.git` directory. Rejects moving a repository, or a
+/// ledger, into the journal.
+#[test]
+fn adopt_refuses_a_repository_or_its_git_directory() {
+    let repo = Repo::new();
+    let material = repo.home.join("material");
+    fs::create_dir_all(material.join("clone")).unwrap();
+    git(&material.join("clone"), &["init", "-q"]);
+    let stderr = adopt_refused(&repo, &material);
+    assert!(stderr.contains("holds a Git repository at"), "{stderr}");
+    let stderr = adopt_refused(&repo, &repo.root.join(".git"));
+    assert!(stderr.contains("is inside a Git directory"), "{stderr}");
+    assert!(material.join("clone/.git").is_dir());
+}
+
+/// Claim: adoption refuses a symbolic link given as the path, and a
+/// directory holding a relative link that leads out of it, which the move
+/// would point elsewhere. Rejects an adoption that moves a link instead of
+/// material or silently breaks a link's meaning.
+#[test]
+fn adopt_refuses_links_a_move_would_break() {
+    let repo = Repo::new();
+    let real = repo.home.join("real");
+    fs::create_dir(&real).unwrap();
+    let link = repo.home.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let stderr = adopt_refused(&repo, &link);
+    assert!(stderr.contains("is a symbolic link"), "{stderr}");
+
+    let leaking = repo.home.join("leaking");
+    fs::create_dir(&leaking).unwrap();
+    std::os::unix::fs::symlink("../real", leaking.join("out")).unwrap();
+    let stderr = adopt_refused(&repo, &leaking);
+    assert!(
+        stderr.contains("is a relative link leading out of"),
+        "{stderr}"
+    );
+    assert!(leaking.join("out").exists());
+}
+
+/// Claim: adoption refuses a directory already holding `WORKBENCH.md`, the
+/// index arc writes. Rejects overwriting a file of the material.
+#[test]
+fn adopt_refuses_a_directory_holding_the_index_name() {
+    let repo = Repo::new();
+    let material = repo.home.join("material");
+    fs::create_dir(&material).unwrap();
+    fs::write(material.join("WORKBENCH.md"), "mine\n").unwrap();
+    let stderr = adopt_refused(&repo, &material);
+    assert!(stderr.contains("already holds WORKBENCH.md"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(material.join("WORKBENCH.md")).unwrap(),
+        "mine\n"
+    );
+}
+
+/// Claim: adoption refuses the journal's own records and anything holding
+/// the journal: its event log, an artifact, its lock directory, the journal
+/// itself and its archive. Rejects moving the only copy of journal history
+/// out from under its events.
+#[test]
+fn adopt_refuses_the_storage_arc_keeps() {
+    let repo = Repo::new();
+    let (dir, artifact) = journal_artifact(&repo, "kept", "note", "# Kept\n");
+    stdout(repo.arc(&repo.root).args(["journal", "archive", &artifact]));
+    for (path, refusal) in [
+        (dir.join("events.jsonl"), "is part of the journal arc keeps"),
+        (dir.join(".locks"), "is part of the journal arc keeps"),
+        (dir.clone(), "holds this journal"),
+        (repo.home.clone(), "holds this journal"),
+        (
+            PathBuf::from(format!("{}-archive", dir.display())),
+            "this journal's archive",
+        ),
+    ] {
+        let stderr = adopt_refused(&repo, &path);
+        assert!(stderr.contains(refusal), "{}: {stderr}", path.display());
+    }
+    let (_, live) = journal_artifact(&repo, "live", "note", "# Live\n");
+    let stderr = adopt_refused(&repo, &dir.join(&live));
+    assert!(
+        stderr.contains("is part of the journal arc keeps"),
+        "{stderr}"
+    );
+    assert!(dir.join(&live).is_file());
+    assert!(workbench_events(&dir).is_empty());
+}
+
+/// Claim: adoption refuses a path that does not exist and anything that is
+/// neither a regular file nor a directory. Rejects recording a workbench of
+/// nothing.
+#[test]
+fn adopt_refuses_a_missing_path_and_special_files() {
+    let repo = Repo::new();
+    let stderr = adopt_refused(&repo, &repo.home.join("absent"));
+    assert!(stderr.contains("does not exist"), "{stderr}");
+    let socket = repo.home.join("socket");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let stderr = adopt_refused(&repo, &socket);
+    assert!(
+        stderr.contains("is neither a regular file nor a directory"),
+        "{stderr}"
+    );
+}
+
+/// Claim: adoption refuses material on another filesystem than the
+/// journal, which no rename can move atomically, and leaves it in place.
+/// Rejects a copy-and-delete that could leave half the material in each
+/// place. The fixture journal and the build's scratch directory must sit on
+/// two filesystems for this test to exercise the refusal.
+#[test]
+fn adopt_refuses_material_on_another_filesystem() {
+    let repo = Repo::new();
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    fs::create_dir_all(&scratch).unwrap();
+    if fs::metadata(&scratch).unwrap().dev() == fs::metadata(&repo.home).unwrap().dev() {
+        eprintln!(
+            "coverage limit: {} and the fixture share a filesystem; the refusal is not exercised",
+            scratch.display()
+        );
+        return;
+    }
+    let holder = tempfile::tempdir_in(&scratch).unwrap();
+    let material = holder.path().join("elsewhere");
+    fs::create_dir(&material).unwrap();
+    fs::write(material.join("data"), "kept\n").unwrap();
+    let stderr = adopt_refused(&repo, &material);
+    assert!(stderr.contains("is on another filesystem than"), "{stderr}");
+    assert!(material.join("data").is_file());
+}
+
+/// Claim: adopting under a slug already open refuses. Rejects two open
+/// workbenches answering to one slug.
+#[test]
+fn adopt_refuses_a_slug_already_open() {
+    let repo = Repo::new();
+    open_workbench(&repo, "notes", "running notes");
+    let material = repo.home.join("notes");
+    fs::create_dir(&material).unwrap();
+    let stderr = adopt_refused(&repo, &material);
+    assert!(
+        stderr.contains("notes is already open as workbench"),
+        "{stderr}"
+    );
+    assert!(material.is_dir());
+}
+
 /// Claim: `journal archive <name>` refuses an open workbench, moves a closed
 /// one to the cold archive by rename and records it, and `journal unarchive
 /// <name>` brings it back. Rejects archiving work in progress and a move the
@@ -496,7 +798,8 @@ fn archive_moves_a_closed_workbench_and_refuses_an_open_one() {
 }
 
 /// Claim: `journal doctor` reports a directory under `workbench/` that no
-/// event records and a recorded workbench whose directory is gone. Rejects a
+/// event records and a recorded workbench whose directory is gone, and
+/// adopting the unrecorded directory where it stands records it. Rejects a
 /// journal whose workbenches and records disagree while doctor says clean.
 #[test]
 fn doctor_reports_workbenches_and_records_that_disagree() {
@@ -515,7 +818,15 @@ fn doctor_reports_workbenches_and_records_that_disagree() {
         .collect();
     assert_eq!(codes, ["unrecorded-workbench"], "{report}");
 
-    fs::remove_dir_all(&handmade).unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "adopt",
+        handmade.to_str().unwrap(),
+        "--purpose",
+        "notes made by hand",
+    ]));
+    assert!(handmade.join("notes.txt").is_file());
     repo.arc(&repo.root)
         .args(["journal", "doctor"])
         .assert()
