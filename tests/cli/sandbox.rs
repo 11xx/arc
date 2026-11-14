@@ -716,3 +716,106 @@ fn the_fixture_clears_every_session_store_override() {
         assert_eq!(seen, "unset", "{variable} reached the fixture");
     }
 }
+
+/// A source with one workbench holding a nested file, a link and a loose
+/// file beside it under `workbench/`. Returns the workbench's name.
+fn source_with_a_workbench(repo: &Repo) -> String {
+    let opened = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "workbench",
+        "sweep",
+        "--purpose",
+        "raw sweep output",
+    ]));
+    let path = PathBuf::from(opened.lines().last().unwrap());
+    fs::create_dir(path.join("raw")).unwrap();
+    fs::write(path.join("raw/run.csv"), vec![b'x'; 4096]).unwrap();
+    std::os::unix::fs::symlink("raw/run.csv", path.join("latest")).unwrap();
+    path.file_name().unwrap().to_str().unwrap().to_string()
+}
+
+/// Claim: a clone makes each workbench's directory with arc's index and
+/// leaves its content in the source, reporting what it left; with
+/// `--workbench-content` it copies the content whole, a link as the same
+/// link. Rejects a clone that silently copies a journal's working material,
+/// which can be gigabytes, and one that leaves records naming directories
+/// the copy lacks.
+#[test]
+fn a_clone_copies_workbench_content_only_when_asked() {
+    let repo = Repo::new();
+    let name = source_with_a_workbench(&repo);
+
+    let prefix = repo.home.join("boxed");
+    let report = json_stdout(repo.arc(&repo.root).args([
+        "sandbox",
+        "clone",
+        prefix.to_str().unwrap(),
+        "--json",
+    ]));
+    let journal = PathBuf::from(report["journal"].as_str().unwrap());
+    let copied = journal.join("workbench").join(&name);
+    assert!(copied.join("WORKBENCH.md").is_file());
+    assert!(!copied.join("raw").exists(), "content was copied");
+    assert!(fs::symlink_metadata(copied.join("latest")).is_err());
+    assert_eq!(report["schema"], "arc-sandbox-clone/2");
+    assert_eq!(report["workbenches"]["directories"], 1, "{report}");
+    assert_eq!(report["workbenches"]["content"], false, "{report}");
+    assert_eq!(report["workbenches"]["files"], 2, "{report}");
+    assert_eq!(report["workbenches"]["bytes"], 4096, "{report}");
+    let clone = PathBuf::from(report["repository"].as_str().unwrap());
+    let doctor = json_stdout(
+        repo.arc(&clone)
+            .env("ARC_SANDBOX", &prefix)
+            .args(["journal", "doctor", "--json"]),
+    );
+    assert!(
+        !doctor.to_string().contains("missing-workbench"),
+        "{doctor}"
+    );
+
+    let whole = repo.home.join("whole");
+    let text = stdout(repo.arc(&repo.root).args([
+        "sandbox",
+        "clone",
+        whole.to_str().unwrap(),
+        "--workbench-content",
+    ]));
+    assert!(
+        text.contains("workbenches: 1, copied whole (4K in 2 files)"),
+        "{text}"
+    );
+    let copied = whole
+        .join(".local/ai/journals")
+        .join(config_path_slug(&whole.join("repo")))
+        .join("workbench")
+        .join(&name);
+    assert_eq!(fs::read(copied.join("raw/run.csv")).unwrap().len(), 4096);
+    assert_eq!(
+        fs::read_link(copied.join("latest")).unwrap(),
+        PathBuf::from("raw/run.csv")
+    );
+    assert!(copied.join("WORKBENCH.md").is_file());
+}
+
+/// Claim: a clone refuses, before writing anything, a journal whose
+/// `workbench/` is a link. Rejects copying whatever the link leads to into
+/// the sandbox as if it were the journal's.
+#[test]
+fn a_clone_refuses_a_workbench_directory_that_is_a_link() {
+    let repo = Repo::new();
+    source_with_a_workbench(&repo);
+    let journal = PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    let elsewhere = repo.home.join("elsewhere");
+    fs::rename(journal.join("workbench"), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, journal.join("workbench")).unwrap();
+
+    let prefix = repo.home.join("boxed");
+    let output = repo
+        .arc(&repo.root)
+        .args(["sandbox", "clone", prefix.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(stderr.contains("is a link to"), "{stderr}");
+    assert!(!prefix.exists(), "the clone wrote {}", prefix.display());
+}

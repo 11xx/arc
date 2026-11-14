@@ -1786,6 +1786,136 @@ fn not_checked(from: &Path) -> String {
     )
 }
 
+/// What a sandbox clone took of a journal's workbenches.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct SandboxCopy {
+    /// Workbench directories made in the copy, each with arc's index.
+    pub(crate) directories: u64,
+    /// Whether the content was copied, or left in the source.
+    pub(crate) content: bool,
+    /// The content, every index excluded: what was copied, or what was left.
+    pub(crate) files: u64,
+    pub(crate) bytes: u64,
+}
+
+impl SandboxCopy {
+    fn count(&mut self, stat: &std::fs::Metadata) {
+        if !stat.is_dir() {
+            self.files += 1;
+            if stat.is_file() {
+                self.bytes += stat.len();
+            }
+        }
+    }
+}
+
+/// The name of the entry a journal copy leaves to [`copy_for_sandbox`].
+pub(crate) const HOLDING_DIR: &str = DIR;
+
+/// Refuse a journal whose `workbench/` is a link or a file, before a clone
+/// writes anything: copying through it would copy what it leads to.
+pub(crate) fn refuse_unreal_holding(journal: &Path) -> Result<()> {
+    let holding = journal.join(DIR);
+    match std::fs::symlink_metadata(&holding) {
+        Ok(metadata) if !metadata.is_dir() => bail!(
+            "{} {}, not a directory of the journal; `arc journal doctor` reports it",
+            holding.display(),
+            leads(&holding)
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Copy the workbenches of the journal at `source` into the journal copy at
+/// `destination`: every directory under `workbench/` with arc's index, and,
+/// when `content` is set, everything else in it. No link is followed: a link
+/// is copied as the link it is.
+pub(crate) fn copy_for_sandbox(
+    source: &Path,
+    destination: &Path,
+    content: bool,
+) -> Result<SandboxCopy> {
+    refuse_unreal_holding(source)?;
+    let mut copy = SandboxCopy {
+        content,
+        ..SandboxCopy::default()
+    };
+    let from = source.join(DIR);
+    if !from.is_dir() {
+        return Ok(copy);
+    }
+    let to = destination.join(DIR);
+    std::fs::create_dir_all(&to).with_context(|| format!("cannot create {}", to.display()))?;
+    for entry in
+        std::fs::read_dir(&from).with_context(|| format!("cannot read {}", from.display()))?
+    {
+        let entry = entry.with_context(|| format!("cannot read {}", from.display()))?;
+        let (path, target) = (entry.path(), to.join(entry.file_name()));
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        if !metadata.is_dir() {
+            // Not a workbench: material standing beside them.
+            if content {
+                copy_entry(&path, &target, &mut copy)?;
+            } else {
+                copy.count(&metadata);
+            }
+            continue;
+        }
+        copy.directories += 1;
+        std::fs::create_dir(&target)
+            .with_context(|| format!("cannot create {}", target.display()))?;
+        let opened = Dir::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        if is_arc_index(&opened) {
+            std::fs::copy(path.join(INDEX), target.join(INDEX))
+                .with_context(|| format!("cannot copy {}", path.join(INDEX).display()))?;
+        }
+        if !content {
+            let left = walk(&opened, &path, None, |_, _, _, _| Ok(()))?;
+            copy.files += left.files;
+            copy.bytes += left.bytes;
+            continue;
+        }
+        for inner in
+            std::fs::read_dir(&path).with_context(|| format!("cannot read {}", path.display()))?
+        {
+            let inner = inner.with_context(|| format!("cannot read {}", path.display()))?;
+            if inner.file_name() == INDEX && target.join(INDEX).exists() {
+                continue;
+            }
+            copy_entry(&inner.path(), &target.join(inner.file_name()), &mut copy)?;
+        }
+    }
+    Ok(copy)
+}
+
+/// Copy `from` to `to` without following a link, counting what it copies:
+/// a directory with everything in it, a file with its bytes and mode, a link
+/// as the same link. Anything else is counted and not copied.
+fn copy_entry(from: &Path, to: &Path, copy: &mut SandboxCopy) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(from)
+        .with_context(|| format!("cannot read {}", from.display()))?;
+    copy.count(&metadata);
+    let kind = metadata.file_type();
+    let copied = if kind.is_dir() {
+        std::fs::create_dir(to).and_then(|()| {
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                copy_entry(&entry.path(), &to.join(entry.file_name()), copy)
+                    .map_err(std::io::Error::other)?;
+            }
+            Ok(())
+        })
+    } else if kind.is_symlink() {
+        std::fs::read_link(from).and_then(|target| std::os::unix::fs::symlink(target, to))
+    } else if kind.is_file() {
+        std::fs::copy(from, to).map(|_| ())
+    } else {
+        Ok(())
+    };
+    copied.with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))
+}
+
 /// Report workbenches whose directories and records disagree: a recorded
 /// workbench with no directory, or in the other storage, and a directory
 /// under `workbench/` that no event records.

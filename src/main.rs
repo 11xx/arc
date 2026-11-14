@@ -4400,9 +4400,21 @@ enum SandboxCmd {
     /// Copy this project — repository with its ledger, journal, registry
     /// entry, and configuration — into the prefix, so the copy answers
     /// `arc catchup` the way the source does
+    ///
+    /// Each workbench of the journal is made in the copy as its directory
+    /// with arc's index, so its records and directories agree; its content,
+    /// which arc never reads, stays in the source unless
+    /// `--workbench-content` copies it, and the report says how much that is.
+    /// A copied workbench keeps every link as the link it is. A workbench in
+    /// the copy without its content lists the size and staleness of what the
+    /// copy holds. The cold archive is not copied. Versioned
+    /// `arc-sandbox-clone/2`.
     Clone {
         /// Absolute prefix to build the sandbox under
         prefix: String,
+        /// Copy each workbench's content too, not only its directory and index
+        #[arg(long)]
+        workbench_content: bool,
         /// Emit the report as structured JSON
         #[arg(long)]
         json: bool,
@@ -8661,9 +8673,11 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Ok(0)
         }
         Cmd::Sandbox { cmd } => match cmd {
-            SandboxCmd::Clone { prefix, json } => {
-                commands::sandbox::clone(&ctx, Path::new(&prefix), json)
-            }
+            SandboxCmd::Clone {
+                prefix,
+                workbench_content,
+                json,
+            } => commands::sandbox::clone(&ctx, Path::new(&prefix), workbench_content, json),
             SandboxCmd::Diff { prefix, json } => {
                 commands::sandbox::diff(&ctx, Path::new(&prefix), json)
             }

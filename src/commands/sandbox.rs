@@ -10,6 +10,11 @@
 //! repository, the ledger, the journal, and the configuration. The registry
 //! needs nothing of its own, being derived from the journal root.
 //!
+//! A workbench's content is none of those: arc records the acts on it and
+//! never reads what it holds, and one journal can keep gigabytes there. A
+//! clone makes every workbench directory with its index, so the copy's
+//! records and directories agree, and copies the content only when asked.
+//!
 //! Everything a clone writes is under the prefix. The source is read, never
 //! written, and the copy has no remote pointing back at it, so nothing done in
 //! a sandbox can travel home by accident. A copied ledger still states the
@@ -72,9 +77,10 @@ struct CloneReport {
     journal: String,
     config: String,
     revision: String,
+    workbenches: journal::WorkbenchSandboxCopy,
 }
 
-pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
+pub fn clone(ctx: &Ctx, prefix: &Path, workbench_content: bool, json: bool) -> Result<i32> {
     let prefix = absolute(prefix)?;
     // The source is resolved as a whole project, not as the checkout the
     // caller happens to stand in: a linked worktree holds one branch, while
@@ -83,6 +89,7 @@ pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
         .context("arc sandbox clone copies a project, so it runs inside a Git repository")?;
     let source_ledger = Store::resolve_root(&ctx.cwd)?;
     let source_journal = journal::resolve_dir(&ctx.cwd)?;
+    journal::refuse_unreal_workbench_holding(&source_journal)?;
 
     let name = source_repository
         .file_name()
@@ -101,10 +108,16 @@ pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
     clone_repository(&source_repository, &repository)?;
     let ledger = repository.join(".git").join("arc");
     if source_ledger.is_dir() {
-        copy_tree(&source_ledger, &ledger)?;
+        copy_tree(&source_ledger, &ledger, None)?;
     }
+    let mut workbenches = journal::WorkbenchSandboxCopy {
+        content: workbench_content,
+        ..Default::default()
+    };
     if source_journal.is_dir() {
-        copy_tree(&source_journal, &journal)?;
+        copy_tree(&source_journal, &journal, Some(journal::WORKBENCH_DIR))?;
+        workbenches =
+            journal::copy_workbenches_for_sandbox(&source_journal, &journal, workbench_content)?;
         // The copy is addressed by its own project's slugged path, and the
         // binding is what states which project that is. Left saying the
         // source, the copy would be read as the source's journal living in an
@@ -137,13 +150,14 @@ pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
     )?;
 
     let report = CloneReport {
-        schema: "arc-sandbox-clone/1",
+        schema: "arc-sandbox-clone/2",
         prefix: display(&prefix),
         repository: display(&repository),
         ledger: display(&ledger),
         journal: display(&journal),
         config: display(&config_path),
         revision,
+        workbenches,
     };
     if json {
         println!("{}", serde_json::to_string(&report)?);
@@ -153,6 +167,22 @@ pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
         println!("ledger: {}", report.ledger);
         println!("journal: {}", report.journal);
         println!("config: {}", report.config);
+        let held = &report.workbenches;
+        if held.directories > 0 || held.files > 0 {
+            let size = format!(
+                "{} in {} files",
+                crate::worktree_usage::human(held.bytes),
+                held.files
+            );
+            if held.content {
+                println!("workbenches: {}, copied whole ({size})", held.directories);
+            } else {
+                println!(
+                    "workbenches: {}, each with its index; their content ({size}) stays in the source, and --workbench-content copies it",
+                    held.directories
+                );
+            }
+        }
         println!(
             "work in it: ARC_SANDBOX={} arc catchup, from {}",
             report.prefix, report.repository
@@ -544,13 +574,18 @@ fn ensure_removable(ctx: &Ctx, prefix: &Path, marker: &Marker) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+/// Copy `source` into `destination`, leaving out the top-level entry named
+/// `except`.
+fn copy_tree(source: &Path, destination: &Path, except: Option<&str>) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("cannot create {}", destination.display()))?;
     for entry in
         fs::read_dir(source).with_context(|| format!("cannot read {}", source.display()))?
     {
         let entry = entry?;
+        if except.is_some_and(|name| entry.file_name() == name) {
+            continue;
+        }
         let from = entry.path();
         let to = destination.join(entry.file_name());
         // Follows what the entry points at rather than reproducing the link:
@@ -559,7 +594,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
             .with_context(|| format!("cannot stat {}", from.display()))?
             .file_type();
         if kind.is_dir() {
-            copy_tree(&from, &to)?;
+            copy_tree(&from, &to, None)?;
         } else if kind.is_file() {
             fs::copy(&from, &to)
                 .with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))?;

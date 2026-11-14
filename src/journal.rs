@@ -39,7 +39,11 @@ mod page;
 mod pins;
 mod private_text;
 mod workbench;
-pub(crate) use workbench::WorkbenchRow;
+pub(crate) use workbench::{
+    copy_for_sandbox as copy_workbenches_for_sandbox,
+    refuse_unreal_holding as refuse_unreal_workbench_holding, SandboxCopy as WorkbenchSandboxCopy,
+    WorkbenchRow, HOLDING_DIR as WORKBENCH_DIR,
+};
 
 pub(crate) use pins::{pin_rows, render_pin_row, PinRow};
 

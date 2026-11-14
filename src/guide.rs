@@ -627,8 +627,9 @@ SANDBOX (rehearse something destructive)
   The repository arc was pointed at is still read and written as a Git
   repository, which is why a rehearsal runs in a clone rather than beside the
   original. A clone carries committed state: uncommitted work is not copied,
-  and an open change's recorded checkout is the source's until one is made in
-  the sandbox. The prefix bounds recorded paths too: a checkout outside it is
+  nor a workbench's content unless `clone --workbench-content` asks, and an
+  open change's recorded checkout is the source's until one is made in the
+  sandbox. The prefix bounds recorded paths too: a checkout outside it is
   refused by name rather than run in, so gates and `rebase` say to make one
   inside with `git worktree add`.
 
@@ -6523,7 +6524,7 @@ SCHEMAS
     `arc-workspace-pins/1`           arc workspace pins --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json
     `arc-writability/1`              arc config --check-writable --json
-    `arc-sandbox-clone/1`            arc sandbox clone --json
+    `arc-sandbox-clone/2`            arc sandbox clone --json
     `arc-sandbox-diff/1`             arc sandbox diff --json
     `arc-replica-id/1`               arc replica id --json
     `arc-replica/2`                  arc replica status --json
