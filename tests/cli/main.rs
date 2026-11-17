@@ -70,6 +70,7 @@ mod gate_paths;
 mod gate_raises;
 mod gate_reports;
 mod gate_reuse;
+mod gate_suspension;
 mod gate_tiers;
 mod gate_together;
 mod gate_work;
