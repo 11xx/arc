@@ -360,6 +360,7 @@ fn reference_timing<'a>(event: &'a Event, identity: &Identity) -> Option<&'a Ver
         (gate == identity.gate
             && timing.work_identity.as_deref() == Some(identity)
             && !was_excused(timing)
+            && !crate::gate_suspension::was_suspended(timing)
             && !timing.work_copied
             && (identity.host.is_none()
                 || timing
@@ -614,12 +615,32 @@ pub fn validate_timing(
         .budget_at_run
         .as_ref()
         .is_some_and(|b| b.excuse.is_some());
+    if let Some(judgement) = &timing.budget_at_run {
+        ensure!(
+            (judgement.verdict == crate::gate_budget::BudgetVerdict::Suspended)
+                == judgement.suspension.is_some()
+                && judgement.suspension.as_ref().is_none_or(|suspension| {
+                    gate.is_some_and(|gate| suspension.covers(gate))
+                        && judgement.run_ms == timing.run_ms
+                        && judgement
+                            .run_ms
+                            .zip(judgement.budget_ms)
+                            .is_some_and(|(run, budget)| run > budget)
+                }),
+            "invalid recorded budget suspension"
+        );
+    }
     if timing.work_reference.is_some() || was_excused(timing) || has_excuse {
         let judgement = timing
             .budget_at_run
             .as_ref()
             .context("work reference has no recorded budget")?;
-        let expected = crate::gate_budget::judge(judgement.budget_ms, &judgement.sources, timing);
+        let expected = crate::gate_budget::judge(
+            judgement.budget_ms,
+            &judgement.sources,
+            judgement.suspension.as_deref(),
+            timing,
+        );
         ensure!(
             judgement.run_ms == timing.run_ms
                 && judgement.verdict == expected.verdict
@@ -704,6 +725,10 @@ pub fn validate_event(event: &Event) -> Result<()> {
                         .as_ref()
                         .is_none_or(|t| &t.tree == tree),
                     "publication work tree mismatch"
+                );
+                ensure!(
+                    !crate::gate_suspension::was_suspended(&receipt.timing),
+                    "publication receipt rests on a budget suspension"
                 );
                 validate(
                     Some(gate),

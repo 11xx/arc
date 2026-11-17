@@ -27,6 +27,7 @@ pub struct RequiredGate {
     pub timeout: Option<u64>,
     pub budget: Option<u64>,
     pub budget_sources: Vec<crate::gate_budget::BudgetSource>,
+    pub budget_suspension: Option<std::sync::Arc<crate::gate_suspension::Suspension>>,
     pub environment_probe: Option<String>,
     /// What the probe yielded. `None` for a gate declaring no probe, and for
     /// a probe that yielded no identity.
@@ -439,8 +440,12 @@ pub fn evidence_shortfall(
     if evaluation.result != VerifyResult::Pass {
         return Some(EvidenceShortfall::Failed);
     }
-    let judgement =
-        crate::gate_budget::judge(gate.budget, &gate.budget_sources, &evaluation.timing);
+    let judgement = crate::gate_budget::judge(
+        gate.budget,
+        &gate.budget_sources,
+        crate::gate_suspension::current(gate.budget_suspension.as_deref()),
+        &evaluation.timing,
+    );
     judgement
         .reason(&evaluation.timing, &evaluation.hostname)
         .map(|detail| EvidenceShortfall::Budget {

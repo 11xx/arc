@@ -2246,6 +2246,9 @@ impl Store {
         if crate::gate_work::payload_uses_work(payload) {
             self.stamp_format(Some(12))?;
         }
+        if crate::gate_suspension::payload_uses_suspension(payload) {
+            self.stamp_format(Some(13))?;
+        }
         if crate::gate_concurrency::payload_uses_concurrency(payload) {
             self.adopt_concurrency()?;
         }
@@ -2351,6 +2354,9 @@ impl Store {
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
         if value.is_some_and(has_work_semantics) {
             self.stamp_format(Some(12))?;
+        }
+        if value.is_some_and(has_suspension_semantics) {
+            self.stamp_format(Some(13))?;
         }
         if value.is_some_and(has_concurrent_semantics) {
             self.adopt_concurrency()?;
@@ -2711,6 +2717,8 @@ impl Store {
         let mut state =
             crate::state::reduce_following_with_repository(events, rewrites, repository_events)?;
         state.review_clearance = self.review_clearance;
+        state.budget_suspensions =
+            crate::gate_suspension::recorded(repository_events, &self.repository_id);
         state.privilege_scope = Some(Arc::clone(scope));
         if let Some(git_dir) = self
             .operator_policy_path
@@ -3543,6 +3551,14 @@ impl Store {
         {
             self.stamp_format_locked(12)?;
         }
+        if batch
+            .events
+            .iter()
+            .chain(&batch.repository_events)
+            .any(has_suspension_semantics)
+        {
+            self.stamp_format_locked(13)?;
+        }
         let dir = self.root.join("imports");
         create_private_dir_all(&dir).map_err(|error| crate::model::OperationFailure {
             published: false,
@@ -3689,6 +3705,22 @@ fn has_work_semantics(value: &serde_json::Value) -> bool {
                 || has_work_semantics(value)
         }),
         serde_json::Value::Array(values) => values.iter().any(has_work_semantics),
+        _ => false,
+    }
+}
+
+/// A suspension event, or a receipt whose recorded verdict rests on one.
+fn has_suspension_semantics(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            matches!(
+                map.get("event_type").and_then(|value| value.as_str()),
+                Some("gate-budgets-suspended" | "gate-budgets-resumed")
+            ) || map.iter().any(|(key, value)| {
+                (key == "verdict" && value == "suspended") || has_suspension_semantics(value)
+            })
+        }
+        serde_json::Value::Array(values) => values.iter().any(has_suspension_semantics),
         _ => false,
     }
 }

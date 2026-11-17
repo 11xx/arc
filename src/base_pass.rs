@@ -295,13 +295,9 @@ impl Baseline {
                     })
                 || execution.worktree_dirty != Some(false)
                 || crate::gate_work::was_excused(&execution.timing)
+                || crate::gate_suspension::was_suspended(&execution.timing)
                 || execution.timing.run_ms.is_none()
-                || matches!(
-                    crate::gate_budget::judge(entry.budget_ms, &[], &execution.timing).verdict,
-                    crate::gate_budget::BudgetVerdict::Excused
-                        | crate::gate_budget::BudgetVerdict::OverBudget
-                        | crate::gate_budget::BudgetVerdict::Unmeasured
-                )
+                || !crate::gate_budget::judge(entry.budget_ms, &[], None, &execution.timing).fits()
                 || !valid_digest(&execution.digest)
                 || !valid_digest(&run.digest)
             {
@@ -655,10 +651,10 @@ pub fn record(
             continue;
         };
         if crate::gate_work::was_excused(timing)
+            || crate::gate_suspension::was_suspended(timing)
             || declaration.as_deref() != Some(gates::declaration_identity(gate).as_str())
             || !crate::gate_concurrency::accepted_here(gate, timing.concurrent_batch.as_ref())
-            || !gate.budget_judgement(timing).accepted()
-            || gate.budget_judgement(timing).verdict == crate::gate_budget::BudgetVerdict::Excused
+            || !gate.budget_judgement(timing).fits()
         {
             continue;
         }

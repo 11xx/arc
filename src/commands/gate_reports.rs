@@ -21,6 +21,8 @@ pub(super) struct GateReport {
     integration_budget_sums_ms: BTreeMap<String, Option<u64>>,
     budget_errors: Vec<String>,
     budget_warning: Option<String>,
+    /// The budget suspensions in force on this ledger now.
+    budget_suspensions: Vec<crate::gate_suspension::Suspension>,
     pub(super) gates: Vec<GateRow>,
     pub(super) failures: Vec<ReadFailure>,
 }
@@ -50,6 +52,8 @@ pub(super) struct GateRow {
     last_over_budget: Option<OverRun>,
     excused_runs: usize,
     last_excused: Option<OverRun>,
+    suspended_runs: usize,
+    last_suspended: Option<OverRun>,
     history: History,
     diagnosis: crate::gate_diagnostics::Diagnosis,
     checks: crate::gate_diagnostics::Checks,
@@ -239,6 +243,8 @@ fn collect_declarations(
                 last_over_budget: None,
                 excused_runs: 0,
                 last_excused: None,
+                suspended_runs: 0,
+                last_suspended: None,
                 history: History::default(),
                 diagnosis: Default::default(),
                 checks: Default::default(),
@@ -331,16 +337,19 @@ fn collect_declarations(
                                 environment.as_ref().map(|e| e.identity.clone()),
                                 timing,
                             );
-                            if *result == VerifyResult::Pass
-                                && crate::gate_work::was_excused(timing)
-                            {
-                                row.excused_runs += 1;
-                                if row
-                                    .last_excused
-                                    .as_ref()
-                                    .is_none_or(|r| event.created_at > r.at)
-                                {
-                                    row.last_excused = Some(OverRun {
+                            let accepted_over = if *result != VerifyResult::Pass {
+                                None
+                            } else if crate::gate_work::was_excused(timing) {
+                                Some((&mut row.excused_runs, &mut row.last_excused))
+                            } else if crate::gate_suspension::was_suspended(timing) {
+                                Some((&mut row.suspended_runs, &mut row.last_suspended))
+                            } else {
+                                None
+                            };
+                            if let Some((runs, last)) = accepted_over {
+                                *runs += 1;
+                                if last.as_ref().is_none_or(|r| event.created_at > r.at) {
+                                    *last = Some(OverRun {
                                         change_id: id.clone(),
                                         event_id: event.event_id.clone(),
                                         at: event.created_at,
@@ -360,6 +369,7 @@ fn collect_declarations(
                                 if crate::gate_budget::judge(
                                     row.budget_ms,
                                     &row.budget_sources,
+                                    None,
                                     timing,
                                 )
                                 .verdict
@@ -448,6 +458,10 @@ fn collect_declarations(
         unclaimed_paths,
         budget_declared,
         budget_warning,
+        budget_suspensions: store
+            .map(crate::gate_suspension::in_force_on)
+            .transpose()?
+            .unwrap_or_default(),
         budget_rules,
         budget_errors,
         integration_budget_sum_ms,
@@ -507,6 +521,9 @@ pub(super) fn render(report: &GateReport) {
     if let Some(warning) = &report.budget_warning {
         println!("{warning}");
     }
+    for suspension in &report.budget_suspensions {
+        println!("{}", suspension.describe());
+    }
     for error in &report.budget_errors {
         println!("{error}");
     }
@@ -551,15 +568,20 @@ pub(super) fn render(report: &GateReport) {
                 );
             }
         }
-        println!("  excused runs: {}", gate.excused_runs);
-        if let Some(run) = &gate.last_excused {
-            println!(
-                "  last excused: {} {} ran {} on {}",
-                run.change_id,
-                run.event_id,
-                ms(Some(run.run_ms)),
-                run.hostname
-            );
+        for (label, runs, last) in [
+            ("excused", gate.excused_runs, &gate.last_excused),
+            ("suspended", gate.suspended_runs, &gate.last_suspended),
+        ] {
+            println!("  {label} runs: {runs}");
+            if let Some(run) = last {
+                println!(
+                    "  last {label}: {} {} ran {} on {}",
+                    run.change_id,
+                    run.event_id,
+                    ms(Some(run.run_ms)),
+                    run.hostname
+                );
+            }
         }
         let timing = &h.timing;
         let failure = h.last_failed_first.as_ref().map_or_else(

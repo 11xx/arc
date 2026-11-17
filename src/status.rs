@@ -660,6 +660,10 @@ impl Serialize for Readiness {
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
     pub budget_raises: Vec<crate::gate_raise::Applicability>,
+    /// The budget suspensions in force on this ledger when the report was
+    /// built; empty when none is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub budget_suspensions: Vec<crate::gate_suspension::Suspension>,
     pub budget_errors: Vec<String>,
     pub budget_rules: Option<crate::gate_budget::BudgetRules>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2303,6 +2307,7 @@ fn build_report(
         gates: gate_statuses,
         policy_sources: policy.sources.as_map(),
         budget_raises: gates.raises.clone(),
+        budget_suspensions: gates.budget_suspensions.clone(),
         budget_errors,
         budget_rules: gates.budget.clone(),
         declaration_notes: Vec::new(),

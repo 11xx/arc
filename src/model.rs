@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 pub const SCHEMA_VERSION: u32 = 7;
 
 /// The newest ledger format this build understands.
-pub const STORE_FORMAT: u32 = 12;
+pub const STORE_FORMAT: u32 = 13;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1802,6 +1802,18 @@ pub enum Payload {
     GateBudgetRaised {
         raise: crate::gate_raise::Raise,
     },
+    /// A bounded suspension of budget judgement on this ledger, in force from
+    /// the event's `created_at` until `until`. Empty `gates` covers every gate.
+    GateBudgetsSuspended {
+        until: DateTime<Utc>,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        gates: Vec<String>,
+    },
+    /// Ends the named suspensions before their recorded end.
+    GateBudgetsResumed {
+        suspension_event_ids: Vec<String>,
+    },
     VerificationRecorded {
         /// Identity of a scoped or confined declaration. Absence answers only
         /// unconfined declarations without coverage or concurrency settings.
@@ -3137,6 +3149,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::LandingPrepared { .. }
         | Payload::LandingCompleted { .. }
         | Payload::LandingAbandoned { .. }
+        | Payload::GateBudgetsSuspended { .. }
+        | Payload::GateBudgetsResumed { .. }
         | Payload::CheckpointRecorded { .. } => AppendPermission::AnyPhaseFact,
         | Payload::RunDispatched { .. }
         | Payload::RunBound { .. }

@@ -475,6 +475,7 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
             timeout: gate.timeout,
             budget: gate.budget,
             budget_sources: gate.budget_sources.clone(),
+            budget_suspension: gate.budget_suspension.clone(),
             environment_probe: gate.environment.clone(),
             environment: declared_environment(&environments, gate).map(str::to_string),
         })

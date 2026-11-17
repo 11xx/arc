@@ -24,7 +24,9 @@ mod forge_cmd;
 pub(crate) mod fork;
 mod gate_raise;
 mod gate_reports;
+mod gate_suspension;
 pub use gate_raise::raise_budget;
+pub use gate_suspension::{resume_budgets, suspend_budgets};
 mod gatekeeping;
 mod history;
 mod hooks;
@@ -841,7 +843,7 @@ impl Ctx {
 
     /// Build a local fact; publication assigns its identity and invocation
     /// under the ledger lock.
-    fn event_at(
+    pub(crate) fn event_at(
         &self,
         store: &Store,
         change_id: &str,
@@ -1670,6 +1672,7 @@ mod tests {
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
             budget_raises: Vec::new(),
+            budget_suspensions: Vec::new(),
             direct_executions: BTreeMap::new(),
             provisional_signature_successors: BTreeMap::new(),
             recovered_falsification_revisions: BTreeSet::new(),

@@ -302,6 +302,9 @@ struct BudgetConstraint {
     concurrent_acceptance: Option<crate::gate_concurrency::AcceptanceRef>,
     budget_ms: Option<u64>,
     sources: Vec<crate::gate_budget::BudgetSource>,
+    /// A condition of the moment of judgement, outside the pinned basis.
+    #[serde(skip)]
+    suspension: Option<std::sync::Arc<crate::gate_suspension::Suspension>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -933,6 +936,9 @@ fn plan(
                             concurrent_acceptance: gate.concurrent_acceptance.clone(),
                             budget_ms: gate.budget_ms,
                             sources: gate.budget_sources.clone(),
+                            suspension: gate_declarations
+                                .get(name)
+                                .and_then(|declared| declared.budget_suspension.clone()),
                         },
                     )
                 })
@@ -1248,8 +1254,12 @@ fn budget_refusal(
             });
             match receipt {
                 Some(receipt) => {
-                    let judgement =
-                        crate::gate_budget::judge(Some(budget), &gate.sources, &receipt.timing);
+                    let judgement = crate::gate_budget::judge(
+                        Some(budget),
+                        &gate.sources,
+                        crate::gate_suspension::current(gate.suspension.as_deref()),
+                        &receipt.timing,
+                    );
                     if let Some(reason) = judgement.reason(&receipt.timing, &receipt.hostname) {
                         return Some(BudgetRefusal::Observed(format!(
                             "{}: gate {name}: {reason}",

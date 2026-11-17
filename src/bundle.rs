@@ -258,6 +258,14 @@ impl Bundle {
                         .as_str()
                         .is_some_and(|id| cited_baselines.contains(id))
             })
+            // A budget suspension binds the ledger that recorded it and
+            // stays there.
+            .filter(|value| {
+                !matches!(
+                    value["event_type"].as_str(),
+                    Some("gate-budgets-suspended" | "gate-budgets-resumed")
+                )
+            })
             .filter(|value| {
                 value["event_type"] != "landing-prepared"
                     || value["attempt"]

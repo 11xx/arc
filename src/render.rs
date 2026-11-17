@@ -144,7 +144,7 @@ pub fn gate_line(gate: &GateStatus) -> String {
             )
         })
         .unwrap_or_default();
-    let work = crate::gate_budget::excuse_line(&gate.budget)
+    let work = crate::gate_budget::acceptance_line(&gate.budget)
         .map(|line| format!(" ({line})"))
         .unwrap_or_default();
     format!(
@@ -159,6 +159,9 @@ fn declaration_notes(report: &StatusReport) -> String {
     let mut out = String::new();
     for error in &report.budget_errors {
         let _ = writeln!(out, "{error}");
+    }
+    for suspension in &report.budget_suspensions {
+        let _ = writeln!(out, "{}", suspension.describe());
     }
     for entry in &report.budget_raises {
         let _ = writeln!(
@@ -1128,7 +1131,7 @@ pub fn markdown(
             {
                 if let Some(reason) = gate.budget.reason(&v.timing, &v.hostname) {
                     let _ = writeln!(w, "  - current budget applicability: {reason}");
-                } else if let Some(line) = crate::gate_budget::excuse_line(&gate.budget) {
+                } else if let Some(line) = crate::gate_budget::acceptance_line(&gate.budget) {
                     let _ = writeln!(w, "  - current budget applicability: {line}");
                 }
             }
@@ -2410,6 +2413,18 @@ pub(crate) fn kept_citations(cites: &[String]) -> String {
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::GateBudgetRaised { raise } => ("gate-budget-raised", format!("{}: {}", raise.head, raise.reason)),
+        Payload::GateBudgetsSuspended { until, reason, gates } => (
+            "gate-budgets-suspended",
+            format!(
+                "{} until {}: {}",
+                if gates.is_empty() { "every gate".to_string() } else { gates.join(", ") },
+                until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                one_line(reason)
+            ),
+        ),
+        Payload::GateBudgetsResumed { suspension_event_ids } => (
+            "gate-budgets-resumed", suspension_event_ids.join(", "),
+        ),
         Payload::GateBaselineRecorded { baseline } => ("gate-baseline-recorded", format!("{} at {}: {} executed gates", baseline.target, baseline.revision, baseline.gates.len())),
         Payload::VerificationBaseReused { gate, witness, .. } => ("verification-base-reused", format!("{gate}: base pass from {}", witness.baseline_event_id)),
         Payload::PublicationVerified { target, revision, result, .. } => (

@@ -73,6 +73,10 @@ pub(crate) fn for_change_at(
     };
     let target = &state.target_branch;
     let mut required = gates::load_at(cwd, &target_head)?;
+    required.suspend_budgets(crate::gate_suspension::in_force(
+        &state.budget_suspensions,
+        chrono::Utc::now(),
+    ));
     let mut notes = Vec::new();
     if let Some(change_head) = change_head {
         crate::gate_raise::apply(cwd, state, &target_head, &change_head, &mut required)?;

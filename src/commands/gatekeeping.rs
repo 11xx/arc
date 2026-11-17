@@ -104,7 +104,7 @@ struct VerificationInput {
     confine: Option<crate::confinement::Declaration>,
     timings: Option<String>,
     declaration: Option<String>,
-    budget: Option<crate::gate_budget::BudgetJudgement>,
+    budget: Option<crate::gate_budget::Declared>,
     exclusive: Option<crate::exclusive::Request>,
     preparation_ms: u64,
     run_id: Option<String>,
@@ -704,7 +704,7 @@ fn verify_with_landing(
                 VerificationInput {
                     confine: gate.confine.clone(),
                     timings: gate.timings.clone(),
-                    budget: Some(gate.budget_judgement(&Default::default())),
+                    budget: Some(gate.declared_budget()),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
@@ -1287,7 +1287,7 @@ fn verify_against(
             VerificationInput {
                 confine: gate.confine.clone(),
                 timings: gate.timings.clone(),
-                budget: Some(gate.budget_judgement(&Default::default())),
+                budget: Some(gate.declared_budget()),
                 exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: std::mem::take(&mut preparation_ms),
                 run_id: Some(run_id.clone()),
@@ -1420,7 +1420,7 @@ pub(crate) fn verify_landing_head(
             VerificationInput {
                 confine: gate.confine.clone(),
                 timings: gate.timings.clone(),
-                budget: Some(gate.budget_judgement(&Default::default())),
+                budget: Some(gate.declared_budget()),
                 exclusive: crate::exclusive::Request::for_gate(gate),
                 preparation_ms: 0,
                 run_id: Some(run_id.clone()),
@@ -2270,7 +2270,7 @@ fn verify_recorded(
                 VerificationInput {
                     confine: gate.confine.clone(),
                     timings: gate.timings.clone(),
-                    budget: Some(gate.budget_judgement(&Default::default())),
+                    budget: Some(gate.declared_budget()),
                     exclusive: crate::exclusive::Request::for_gate(gate),
                     preparation_ms: 0,
                     run_id: Some(run_id.clone()),
@@ -2680,7 +2680,7 @@ fn verify_all_parallel(
         .map(|(index, (name, gate))| VerificationInput {
             confine: gate.confine.clone(),
             timings: gate.timings.clone(),
-            budget: Some(gate.budget_judgement(&Default::default())),
+            budget: Some(gate.declared_budget()),
             exclusive: crate::exclusive::Request::for_gate(gate),
             preparation_ms: if index == 0 { preparation_ms } else { 0 },
             run_id: Some(run_id.to_owned()),
@@ -3054,6 +3054,7 @@ fn attach_work_reference(
             item.timing.budget_at_run = Some(Box::new(crate::gate_budget::judge(
                 budget.budget_ms,
                 &budget.sources,
+                budget.suspension.as_deref(),
                 &item.timing,
             )));
         }
@@ -3284,7 +3285,7 @@ fn execute_verification(
     }
     timing.budget_at_run = budget
         .filter(|b| b.budget_ms.is_some())
-        .map(|b| Box::new(crate::gate_budget::judge(b.budget_ms, &b.sources, &timing)));
+        .map(|b| Box::new(b.judge(&timing)));
     Ok(CompletedVerification {
         display_budget: None,
         declaration,
@@ -3386,8 +3387,8 @@ fn record_verifications(
                     crate::gate_budget::duration(budget.budget_ms.expect("declared budget"))
                 )
             }
-            Some(budget) if result == VerifyResult::Pass && budget.excuse.is_some() => {
-                crate::gate_budget::excuse_line(budget)
+            Some(budget) if result == VerifyResult::Pass => {
+                crate::gate_budget::acceptance_line(budget)
                     .map(|line| format!(" ({line})"))
                     .unwrap_or_default()
             }
@@ -6848,7 +6849,7 @@ struct DeclaredCheck {
     profiled_gate: Option<gates::Gate>,
     declaration: Option<String>,
     adopt_budget_format: bool,
-    budget: Option<crate::gate_budget::BudgetJudgement>,
+    budget: Option<crate::gate_budget::Declared>,
     command: String,
     timeout: Option<u64>,
     environment: Option<String>,
@@ -6881,7 +6882,7 @@ fn declared_check(
                 profiled_gate: declared.coverage.base_passes.then(|| declared.clone()),
                 declaration: gates::coverage_identity(declared),
                 adopt_budget_format: gates.has_budgets(),
-                budget: Some(declared.budget_judgement(&Default::default())),
+                budget: Some(declared.declared_budget()),
                 command: declared.command.clone(),
                 timeout: declared.timeout,
                 environment: declared.environment.clone(),

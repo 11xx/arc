@@ -1163,7 +1163,7 @@ fn raise_export_advertises_the_adopted_store_format() {
         .assert()
         .success();
     let value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert_eq!(value["store_format"], 12);
+    assert_eq!(value["store_format"], 13);
     let config: Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
     assert_eq!(

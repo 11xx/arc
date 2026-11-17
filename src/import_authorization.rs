@@ -158,6 +158,10 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         DirtyTreeWaived { .. } | VerificationBypassed { .. } | HoldReleased { .. } => {
             vec![vec![Waiver]]
         }
+        // A suspension binds only the store that recorded it; carrying one
+        // asks for the capability its acceptance would need there.
+        GateBudgetsSuspended { .. } => vec![vec![Waiver]],
+        GateBudgetsResumed { .. } => vec![vec![Facts]],
         DispositionRecorded { status, .. }
         | AuditDispositionRecorded { status, .. }
         | PostIntegrationDispositionRecorded { status, .. } => vec![disposition_roles(*status)],

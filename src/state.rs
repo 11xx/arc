@@ -1700,6 +1700,11 @@ impl SlotRecord {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
     pub budget_raises: Vec<crate::gate_raise::Record>,
+    /// The budget suspensions the reading store recorded and nobody resumed,
+    /// whatever the time: a fact of the ledger the projection was read from,
+    /// never of the change.
+    #[serde(skip)]
+    pub budget_suspensions: Vec<crate::gate_suspension::Suspension>,
     #[serde(skip)]
     pub direct_executions: BTreeMap<String, Option<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2469,6 +2474,7 @@ pub fn reduce_with_repository(
             } => (
                 ChangeState {
                     budget_raises: Vec::new(),
+                    budget_suspensions: Vec::new(),
                     direct_executions: BTreeMap::new(),
                     provisional_signature_successors: BTreeMap::new(),
                     recovered_falsification_revisions: BTreeSet::new(),
@@ -4311,6 +4317,8 @@ pub fn reduce_with_repository(
             | Payload::LandingCompleted { .. }
             | Payload::LandingAbandoned { .. }
             | Payload::CheckpointRecorded { .. }
+            | Payload::GateBudgetsSuspended { .. }
+            | Payload::GateBudgetsResumed { .. }
             | Payload::RunDispatched { .. }
             | Payload::RunBound { .. }
             | Payload::RunEnded { .. }

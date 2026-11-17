@@ -3510,7 +3510,7 @@ fn an_importing_replica_honours_withdrawals_and_pins_candidates() {
         .success();
     let delta: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     assert_eq!(delta["schema"], "arc-bundle/6");
-    assert_eq!(delta["store_format"], 12);
+    assert_eq!(delta["store_format"], 13);
     assert!(delta["repository_events"]
         .as_array()
         .unwrap()

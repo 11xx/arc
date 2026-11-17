@@ -1,5 +1,6 @@
 //! Cost judgements use command observations without changing evidence identity.
 
+use crate::gate_suspension::Suspension;
 use crate::gates::{Gate, GatesFile};
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -130,10 +131,24 @@ impl Gate {
         &self,
         timing: &crate::verification_timing::VerificationTiming,
     ) -> BudgetJudgement {
-        let mut judgement = judge(self.budget, &self.budget_sources, timing);
+        let mut judgement = judge(
+            self.budget,
+            &self.budget_sources,
+            crate::gate_suspension::current(self.budget_suspension.as_deref()),
+            timing,
+        );
         judgement.raise_allowance_ms = self.raise_allowance_ms;
         judgement.raise_budget_max_ms = self.raise_budget_max_ms;
         judgement
+    }
+
+    /// What a run started now is judged by once it ends.
+    pub fn declared_budget(&self) -> Declared {
+        Declared {
+            budget_ms: self.budget,
+            sources: self.budget_sources.clone(),
+            suspension: self.budget_suspension.clone(),
+        }
     }
 
     pub fn execution_limit(&self) -> Result<(Option<u64>, Option<String>)> {
@@ -255,13 +270,40 @@ pub enum BudgetVerdict {
     WithinBudget,
     OverBudget,
     Excused,
+    /// Over budget, accepted because a suspension covered the gate when judged.
+    Suspended,
     Unmeasured,
+}
+
+/// The budget, its provenance and any covering suspension, taken before a run.
+#[derive(Debug, Clone)]
+pub struct Declared {
+    pub budget_ms: Option<u64>,
+    pub sources: Vec<BudgetSource>,
+    pub suspension: Option<std::sync::Arc<Suspension>>,
+}
+
+impl Declared {
+    pub fn judge(
+        &self,
+        timing: &crate::verification_timing::VerificationTiming,
+    ) -> BudgetJudgement {
+        judge(
+            self.budget_ms,
+            &self.sources,
+            crate::gate_suspension::current(self.suspension.as_deref()),
+            timing,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetJudgement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excuse: Option<Box<crate::gate_work::Excuse>>,
+    /// The suspension a `suspended` verdict rests on, and present only with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspension: Option<Box<Suspension>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raise_allowance_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,9 +315,14 @@ pub struct BudgetJudgement {
     pub sources: Vec<BudgetSource>,
 }
 
+/// Decide whether a command time satisfies a budget. `suspension` is the one
+/// covering the gate at this moment, on the ledger being judged; it accepts
+/// an overrun nothing else does and changes no other verdict. A caller that
+/// passes none judges strictly.
 pub fn judge(
     budget_ms: Option<u64>,
     provenance: &[BudgetSource],
+    suspension: Option<&Suspension>,
     timing: &crate::verification_timing::VerificationTiming,
 ) -> BudgetJudgement {
     let run_ms = timing.run_ms;
@@ -284,6 +331,7 @@ pub fn judge(
         (None, _) => BudgetVerdict::Undeclared,
         (Some(_), None) => BudgetVerdict::Unmeasured,
         (Some(b), Some(r)) if r > b && excuse.is_some() => BudgetVerdict::Excused,
+        (Some(b), Some(r)) if r > b && suspension.is_some() => BudgetVerdict::Suspended,
         (Some(b), Some(r)) if r > b => BudgetVerdict::OverBudget,
         _ => BudgetVerdict::WithinBudget,
     };
@@ -293,6 +341,10 @@ pub fn judge(
         } else {
             None
         },
+        suspension: suspension
+            .filter(|_| verdict == BudgetVerdict::Suspended)
+            .cloned()
+            .map(Box::new),
         raise_allowance_ms: None,
         raise_budget_max_ms: None,
         verdict,
@@ -305,9 +357,19 @@ pub fn judge(
 
 impl BudgetJudgement {
     pub fn accepted(&self) -> bool {
+        self.fits()
+            || matches!(
+                self.verdict,
+                BudgetVerdict::Excused | BudgetVerdict::Suspended
+            )
+    }
+
+    /// No budget, or a command time inside it: the only runs later work may
+    /// be measured against or inherit.
+    pub fn fits(&self) -> bool {
         matches!(
             self.verdict,
-            BudgetVerdict::Undeclared | BudgetVerdict::WithinBudget | BudgetVerdict::Excused
+            BudgetVerdict::Undeclared | BudgetVerdict::WithinBudget
         )
     }
 
@@ -350,7 +412,20 @@ impl BudgetJudgement {
     }
 }
 
-pub fn excuse_line(judgement: &BudgetJudgement) -> Option<String> {
+/// Why an over-budget pass was accepted: the suspension or the busy host.
+pub fn acceptance_line(judgement: &BudgetJudgement) -> Option<String> {
+    if let Some(suspension) = &judgement.suspension {
+        return Some(format!(
+            "accepted over budget, ran {} of {}: budgets suspended until {} by suspension {}: {}",
+            duration(judgement.run_ms?),
+            duration(judgement.budget_ms?),
+            suspension
+                .until
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            suspension.event_id,
+            suspension.reason
+        ));
+    }
     let work = judgement.excuse.as_ref()?;
     Some(format!("accepted over budget: work {} instructions against reference {} ({} instructions); other processes {:.2}% of host CPU capacity",
         work.instructions, work.reference_event_id, work.reference_instructions, work.other_cpu_basis_points as f64 / 100.0))
@@ -441,6 +516,44 @@ mod tests {
         );
     }
 
+    /// Claim: a suspension accepts an overrun only while it is in force at
+    /// the judgement and changes no other verdict. Rejects a run that began
+    /// under a suspension being accepted after it ended, and a suspension
+    /// loosening an unmeasured run or labelling one that fits.
+    #[test]
+    fn a_suspension_accepts_only_an_overrun_judged_while_it_is_in_force() {
+        let now = chrono::Utc::now();
+        let declared = |until| Declared {
+            budget_ms: Some(1000),
+            sources: Vec::new(),
+            suspension: Some(std::sync::Arc::new(Suspension {
+                event_id: "01".into(),
+                actor: "operator".into(),
+                reason: "loaded host".into(),
+                since: now - chrono::Duration::hours(2),
+                until,
+                gates: Vec::new(),
+            })),
+        };
+        let ran = |ms| crate::verification_timing::VerificationTiming {
+            run_ms: Some(ms),
+            ..Default::default()
+        };
+        let live = declared(now + chrono::Duration::hours(1));
+        let over = live.judge(&ran(1001));
+        assert_eq!(over.verdict, BudgetVerdict::Suspended);
+        assert!(over.accepted() && !over.fits() && over.suspension.is_some());
+        let inside = live.judge(&ran(1000));
+        assert_eq!(inside.verdict, BudgetVerdict::WithinBudget);
+        assert!(inside.suspension.is_none());
+        assert_eq!(
+            live.judge(&Default::default()).verdict,
+            BudgetVerdict::Unmeasured
+        );
+        let ended = declared(now - chrono::Duration::hours(1));
+        assert_eq!(ended.judge(&ran(1001)).verdict, BudgetVerdict::OverBudget);
+    }
+
     /// Claim: equality passes, one millisecond over fails, missing timing is unmeasured,
     /// and load only changes diagnostics. Rejects tolerance and load-dependent acceptance.
     #[test]
@@ -451,13 +564,13 @@ mod tests {
                 ..Default::default()
             }
         }
-        assert!(judge(Some(10000), &[], &observed(10000)).accepted());
-        assert!(!judge(Some(10000), &[], &observed(10001)).accepted());
+        assert!(judge(Some(10000), &[], None, &observed(10000)).accepted());
+        assert!(!judge(Some(10000), &[], None, &observed(10001)).accepted());
         assert_eq!(
-            judge(Some(10000), &[], &Default::default()).verdict,
+            judge(Some(10000), &[], None, &Default::default()).verdict,
             BudgetVerdict::Unmeasured
         );
-        let b = judge(Some(10000), &[], &observed(11000));
+        let b = judge(Some(10000), &[], None, &observed(11000));
         let low = crate::verification_timing::VerificationTiming {
             load_average: Some([0., 0., 0.]),
             core_count: Some(2),

@@ -570,6 +570,7 @@ pub fn propose(
                 .run_ms
                 .context("budget raise needs observed run_ms")?;
             if crate::gate_work::was_excused(&entry.timing)
+                || crate::gate_suspension::was_suspended(&entry.timing)
                 || entry.result != VerifyResult::Pass
                 || entry.attested
                 || st.direct_executions.get(&entry.event_id) != Some(&Some(0))

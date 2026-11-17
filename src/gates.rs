@@ -54,6 +54,10 @@ pub struct GatesFile {
     pub budget: Option<crate::gate_budget::BudgetRules>,
     #[serde(skip)]
     pub landing_budget_ms: Option<u64>,
+    /// The budget suspensions in force for judgements made with these
+    /// declarations. Empty judges every budget strictly.
+    #[serde(skip)]
+    pub budget_suspensions: Vec<crate::gate_suspension::Suspension>,
     #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
     #[serde(skip)]
@@ -214,6 +218,10 @@ pub struct Gate {
     pub raise_allowance_ms: Option<u64>,
     #[serde(skip)]
     pub raise_budget_max_ms: Option<u64>,
+    /// The suspension covering this gate where its declarations were read
+    /// for a judgement on this ledger. Absent, the budget judges strictly.
+    #[serde(skip)]
+    pub budget_suspension: Option<std::sync::Arc<crate::gate_suspension::Suspension>>,
     /// A command whose output identifies the environment this gate's evidence
     /// applies to. The identity is a digest of the probe's stdout, and only a
     /// successful run that prints something yields one. `verify` records that
@@ -896,7 +904,24 @@ impl GatesFile {
         self.set_danger(self.dangerous.clone());
         self.refresh_coverage();
         self.refresh_concurrency();
+        self.refresh_suspensions();
         divergences
+    }
+
+    /// Judge these declarations under the suspensions in force on the ledger
+    /// the judgement is made on. An empty set judges every budget strictly.
+    pub fn suspend_budgets(&mut self, in_force: Vec<crate::gate_suspension::Suspension>) {
+        self.budget_suspensions = in_force;
+        self.refresh_suspensions();
+    }
+
+    fn refresh_suspensions(&mut self) {
+        for (name, gate) in &mut self.gates {
+            gate.budget_suspension =
+                crate::gate_suspension::covering(&self.budget_suspensions, name)
+                    .cloned()
+                    .map(std::sync::Arc::new);
+        }
     }
 
     pub fn ensure_unconflicted(&self) -> Result<()> {

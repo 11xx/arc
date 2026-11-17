@@ -34,6 +34,7 @@ mod gate_budget;
 mod gate_concurrency;
 mod gate_diagnostics;
 mod gate_raise;
+mod gate_suspension;
 mod gate_work;
 mod gates;
 mod git_health;
@@ -737,9 +738,9 @@ enum Cmd {
     /// Lists declarations (arc guide gates), with runs, exact-tree
     /// reuses and selector skips counted separately. Timings prefer run_ms; older
     /// duration_ms samples are identified and excluded from budget shares. Lists budgets,
-    /// totals, recent landing costs with the preparation they paid, arc's own
-    /// command time and landing time, the latest over-budget run and receipt
-    /// cost kinds
+    /// totals, budget suspensions in force, recent landing costs with the
+    /// preparation they paid, arc's own command time and landing time, the
+    /// latest over-budget run and receipt cost kinds
     /// (arc guide gate-costs). Reads record
     /// no events and do not require a parseable append policy. JSON: arc-gates/1.
     Gates {
@@ -4049,6 +4050,36 @@ enum GatesCmd {
         #[arg(long)]
         reason: String,
     },
+    /// Suspend budget judgement on this ledger for a bounded time
+    ///
+    /// While it is in force a passing run over its budget is accepted for
+    /// integration and labelled with the suspension. A failing gate still
+    /// fails, declaration errors still block and publication stays strict.
+    /// It lasts at most 24h and never leaves this ledger. Without GATE it
+    /// covers every gate. See arc guide gates.
+    Suspend {
+        /// How long from now, with ms, s, m or h units
+        #[arg(
+            long = "for",
+            value_name = "DURATION",
+            conflicts_with = "until",
+            required_unless_present = "until"
+        )]
+        duration: Option<String>,
+        /// The RFC 3339 instant it ends
+        #[arg(long, value_name = "RFC3339")]
+        until: Option<String>,
+        /// Why budgets are set aside
+        #[arg(long)]
+        reason: String,
+        /// Gates to cover; none covers every gate
+        #[arg(value_name = "GATE")]
+        gates: Vec<String>,
+    },
+    /// End every budget suspension in force on this ledger
+    ///
+    /// Judgement is strict again from the next reading. See arc guide gates.
+    Resume,
     /// List every tracked path with its affected gates and paths nobody names
     ///
     /// Uses path-policy globs, inert exclusions and dangerous-path overrides.
@@ -6245,6 +6276,10 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             } => Some(("replica provisional resolve", "lead")),
             Cmd::Debt { .. } => Some(("debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
+            Cmd::Gates {
+                cmd: Some(GatesCmd::Suspend { .. }),
+                ..
+            } => Some(("gates suspend", "lead")),
             _ => None,
         },
         ExecutionRole::Implementer => match command {
@@ -6268,6 +6303,10 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Replica {
                 cmd: ReplicaCmd::Provisional { .. },
             } => Some(("replica provisional resolve", "lead")),
+            Cmd::Gates {
+                cmd: Some(GatesCmd::Suspend { .. }),
+                ..
+            } => Some(("gates suspend", "lead")),
             _ => None,
         },
     }
@@ -7011,6 +7050,25 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 anyhow::ensure!(!json, "gates raise does not accept --json");
                 let reference = infer(None)?;
                 commands::raise_budget(&ctx, &reference, gate, total, &reason)
+            }
+            Some(GatesCmd::Suspend {
+                duration,
+                until,
+                reason,
+                gates,
+            }) => {
+                anyhow::ensure!(!json, "gates suspend does not accept --json");
+                commands::suspend_budgets(
+                    &ctx,
+                    duration.as_deref(),
+                    until.as_deref(),
+                    &reason,
+                    gates,
+                )
+            }
+            Some(GatesCmd::Resume) => {
+                anyhow::ensure!(!json, "gates resume does not accept --json");
+                commands::resume_budgets(&ctx)
             }
             Some(GatesCmd::Init { runs, publication }) => {
                 anyhow::ensure!(!json, "gates init does not accept --json");
@@ -9001,6 +9059,8 @@ mod tests {
             "external verdict",
             "publication",
             "gates raise",
+            "gates suspend",
+            "gates resume",
             "verify",
             "done",
             "rebase",

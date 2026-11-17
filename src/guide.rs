@@ -5276,7 +5276,7 @@ RULES THAT CHANGE WHAT YOU DO
     implementer may not record a verdict, an external verdict, `resolve`,
     `hold`, `release-hold`, `audit`, `debt`, `close`, or `integrate`. A
     reviewer may not run `debt`, `close`, or `integrate`. Recording a brief
-    is a lead's. An unset role is `lead`, with full access.
+    or a budget suspension (`arc gates suspend`) is a lead's. An unset role is `lead`, with full access.
 
 EXIT CODES
   forge observe exits 0 for admitted complete, truncated or failed reads and
@@ -5707,12 +5707,12 @@ GATES
 
   A command outcome remains pass in the ledger even when its run_ms exceeds
   the budget in force. Clock equality passes. An overrun passes only under
-  the busy-host rule of `arc guide gate-costs`. Ordinary
+  the busy-host rule of `arc guide gate-costs` or a budget suspension, below. Ordinary
   verify exits 1 for a budget refusal, including parallel preflight whose
   receipts retain unknown cleanliness. Status, check and show project current
   budget applicability beside the raw result. Show JSON adds gate_status beside
   raw verifications; status gate rows carry budget.verdict, budget_ms, run_ms,
-  excess_ms, sources and any busy-host excuse. budget_rules.total is milliseconds in JSON.
+  excess_ms, sources and any busy-host excuse or suspension. budget_rules.total is milliseconds in JSON.
   Missing run_ms is unmeasured
   and cannot satisfy a budget, including legacy local, imported and attested
   evidence. duration_ms never substitutes for run_ms. Explain labels historical
@@ -5746,6 +5746,31 @@ GATES
   A passing verify line names either its busy-host reference, work and other
   processes' share, or `Pass (over budget, ran ... of ...)` for a refusal;
   its recorded outcome remains a pass.
+
+  `arc gates suspend --for DURATION | --until RFC3339 --reason TEXT [GATE]...`
+  sets budget judgement aside on the operator's word. It records the actor,
+  reason, start, end and gates on this ledger; no GATE covers every gate. It
+  ends at most 24h after it starts: a suspension answers a loaded host, and a
+  longer one would stand in for the declared budget. `arc gates resume` ends
+  those in force.
+  While one covers a gate, a passing run over its budget is accepted
+  wherever integration evidence is judged, as of the moment of judgement: a
+  receipt recorded earlier counts, and once the suspension ends the same
+  receipt is refused again. Nothing else changes. A failing gate fails. A
+  missing budget, an excessive sum or a total over the operator ceiling
+  still blocks. Raises keep their rules. Publication judges strictly.
+  The verdict is `suspended`, with the suspension in budget.suspension on
+  status, check and show rows; the verify line reads `accepted over budget`
+  and names it. A run recorded under one keeps that verdict and, like an
+  excused run, never becomes a reference, raise evidence or a base-pass
+  seed. `arc gates` counts suspended runs and names the last. `arc gates`,
+  `arc status` (budget_suspensions) and `arc catchup` name each suspension
+  in force with its end and reason; one that ended says nothing.
+  A suspension binds the ledger that recorded it. Export leaves it behind,
+  and a copy reaching another ledger accepts nothing there: a store honours
+  only its own. Receipts travel with their recorded verdict and the receiver
+  judges them by its own budgets. Suspensions and runs recorded under them
+  adopt store format 13; readers through format 12 refuse it.
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
@@ -5996,7 +6021,8 @@ GATE COSTS
   Legitimate added work becomes its own reference after one clock-fitting pass
   on a quiet host. Lowering the budget retires an excuse whose reference
   stops fitting. Excused runs never become references, raise evidence or
-  base-pass seeds, including after a raise. Kernel instructions are
+  base-pass seeds, including after a raise; neither do runs recorded under
+  a suspension (`arc guide gates`). Kernel instructions are
   uncounted. Known limit: added waiting on an already busy host can fit the
   measured delay allowance; a quiet run exposes it. What the counters cannot
   follow is in `arc guide change-gates`.
@@ -6397,7 +6423,8 @@ GATE RAISES
 
   The newest direct execution of that gate at the exact head must pass, be
   observed clean and stable on that head's tree, match the destination check
-  and current environment, be unexcused, exceed the destination budget and fit the proposed
+  and current environment, be unexcused and recorded under no suspension
+  (`arc guide gates`), exceed the destination budget and fit the proposed
   one. Reuse, rewritten execution coordinates, attestation, bypass and measurement
   output cannot establish this need. Later evidence remains subject to ordinary
   newest-evidence judgement; a raise never masks a failure.
@@ -7051,6 +7078,7 @@ SCHEMAS
     store format 10                  base-pass baselines and reuse evidence
     store format 11                  measured batches and their authorization
     store format 12                  busy-host work references and excuses
+    store format 13                  budget suspensions and runs recorded under them
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization

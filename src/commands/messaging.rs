@@ -1186,6 +1186,11 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     let worktrees = store.as_ref().map(|_| {
         crate::worktree_usage::measure(&ctx.cwd, &states, &crate::commands::fork::checkouts(&forks))
     });
+    let budget_suspensions = store
+        .as_ref()
+        .map(crate::gate_suspension::in_force_on)
+        .transpose()?
+        .unwrap_or_default();
     let intake = intake.finish();
 
     if json {
@@ -1198,6 +1203,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
                 "journal": journal.as_ref().ok(),
                 "replica": replica,
                 "provisional_integrations": provisional_integrations,
+                "budget_suspensions": budget_suspensions,
                 "recent_sessions": recent_sessions,
                 "session_discovery_errors": session_discovery_errors,
                 "stale_filed_count": filed.as_ref().ok().map(|report| report.stale_count),
@@ -1234,6 +1240,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     match &store {
         Some(store) => println!("ledger: {}", store.root.display()),
         None => println!("ledger: none (journal project without Git)"),
+    }
+    for suspension in &budget_suspensions {
+        println!("{}", suspension.describe());
     }
     if !provisional_integrations.is_empty() {
         println!("Provisional integrations:");
