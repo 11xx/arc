@@ -2188,7 +2188,7 @@ STANDING REFERENCES (what a project keeps coming back to)
                          sections. No scripts and no referrer: raw HTML shows
                          as code, links keep http(s), mailto and in-page
                          anchors, images load only over https. Takes the
-                         addresses `show` takes.
+                         addresses and regular artifact files `show` takes.
                          A home-directory path, a path under a directory arc
                          knows is local (home, arc's data home, the journal,
                          the checkout), a private, shared or link-local

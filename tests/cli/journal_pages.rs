@@ -64,6 +64,38 @@ fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
     fs::canonicalize(root).unwrap()
 }
 
+/// Whole-artifact display and rendering require a regular body in hot or cold
+/// storage. A second name linked to a note must not become another artifact.
+#[test]
+fn whole_artifacts_require_regular_bodies_in_both_stores() {
+    let repo = Repo::new();
+    let file = note(&repo, &repo.root, "original", "# Original\n");
+    let hot = PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    fs::create_dir_all(&cold).unwrap();
+    let alias = file.replace("-original-", "-alias-");
+    let mut accepted = Vec::new();
+    for dir in [&hot, &cold] {
+        let link = dir.join(&alias);
+        std::os::unix::fs::symlink(hot.join(&file), &link).unwrap();
+        for command in ["show", "render"] {
+            let output = repo
+                .arc(&repo.root)
+                .args(["journal", command, &alias])
+                .output()
+                .unwrap();
+            if output.status.success() || !output.stdout.is_empty() {
+                accepted.push((dir.clone(), command));
+            }
+        }
+        fs::remove_file(link).unwrap();
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted linked artifact bodies: {accepted:?}"
+    );
+}
+
 /// Claim: a render is one static page carrying the corrected title, the
 /// body, each appended block under its title and anchored by its ID, and a
 /// contents list linking them. Rejects a page missing a block or its anchor.

@@ -466,6 +466,11 @@ fn open_root(dir: &Path, cold: bool, create: bool) -> Result<Dir> {
     }
 }
 
+/// Open an existing regular file under the journal or its physical archive.
+pub(super) fn open_journal_file(dir: &Path, cold: bool, name: &str) -> Result<std::fs::File> {
+    Ok(open_root(dir, cold, false)?.open_file(OsStr::new(name))?)
+}
+
 /// The directory that holds workbenches in the journal or its archive,
 /// made when absent, and refused unless it and the root above it are real
 /// directories, so nothing arc moves passes through a link.

@@ -1459,6 +1459,8 @@ pub enum JournalCmd {
     /// `cor-` or `ret-` followed by its ULID, and is never read as a topic.
     /// Each journal is read the same way: the hot journal first, then its
     /// cold archive, so an archived artifact reads as a live one does.
+    /// Whole artifacts are regular files. Their names and the cold archive
+    /// directory are opened without following symbolic links.
     /// `arc journal discussion <file.md>` reads an artifact's stances and
     /// open questions.
     ///
@@ -16548,13 +16550,27 @@ fn read_located_body(location: &ArtifactLocation) -> Result<String> {
 /// read.
 fn read_located_body_in(location: &ArtifactLocation, events: &[JournalEvent]) -> Result<String> {
     let (hot, filename) = (&location.hot, location.file.as_str());
+    if series::bare_artifact_kind(filename).is_none() {
+        bail!("{filename:?} is not a bare journal artifact filename");
+    }
     ensure_storage_settled(hot, events, filename)?;
-    for dir in [hot.clone(), archive_dir(hot)] {
-        let path = dir.join(filename);
-        if path.is_file() {
-            return std::fs::read_to_string(&path)
-                .with_context(|| format!("cannot read {}", path.display()));
-        }
+    for cold in [false, true] {
+        let result = match workbench::open_journal_file(hot, cold, filename) {
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue
+            }
+            opened => opened,
+        };
+        return result
+            .and_then(|file| Ok(std::io::read_to_string(file)?))
+            .with_context(|| {
+                let dir = if cold { archive_dir(hot) } else { hot.clone() };
+                format!("cannot read {}", dir.join(filename).display())
+            });
     }
     Err(missing_artifact(
         location,
