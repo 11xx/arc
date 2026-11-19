@@ -170,7 +170,14 @@ impl Drop for RunningWatch {
 /// loses later events, or rereads projects on unrelated notices.
 #[test]
 fn watch_discovers_a_registered_projects_first_ledger() {
-    for layout in ["default", "linked", "separate", "data-root", "exact"] {
+    for layout in [
+        "default",
+        "linked",
+        "separate",
+        "data-root",
+        "exact",
+        "journal-first",
+    ] {
         let repo = Repo::new();
         let mut cwd = repo.root.clone();
         let mut environment: Vec<(&str, &Path)> = Vec::new();
@@ -178,6 +185,11 @@ fn watch_discovers_a_registered_projects_first_ledger() {
         let store_alias = repo.home.join("store-alias");
         let store_path = store_alias.join("missing/ledgers");
         match layout {
+            "journal-first" => {
+                cwd = repo.home.join("journal-first");
+                std::fs::create_dir(&cwd).unwrap();
+                stdout(repo.arc(&cwd).args(["journal", "bind"]));
+            }
             "linked" => {
                 cwd = repo.home.join("linked");
                 git(
@@ -251,6 +263,22 @@ fn watch_discovers_a_registered_projects_first_ledger() {
         );
         assert_eq!(bare(initial.clone()), fresh());
 
+        if layout == "journal-first" {
+            git(&cwd, &["init", "-b", "master"]);
+            git(
+                &cwd,
+                &[
+                    "-c",
+                    "user.name=Tester",
+                    "-c",
+                    "user.email=tester@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "First",
+                ],
+            );
+        }
         let change = opened_change_id(&stdout(arc().args([
             "begin",
             "first-ledger",

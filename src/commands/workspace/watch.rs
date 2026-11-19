@@ -130,6 +130,9 @@ struct Watch<'a> {
     scope: ResolvedWorkspaceScope,
     listed: Listed,
     registered: Vec<crate::registry::Project>,
+    /// Absent Git markers at reachable journal-only anchors. A store creation
+    /// can be the first notice after one of these directories acquired Git.
+    pending_git: Vec<PathBuf>,
     /// Each registered project's ledger root, including roots without a store:
     /// the registered path and the journals reading it, by resolved root.
     ledgers: HashMap<PathBuf, (PathBuf, Vec<PathBuf>)>,
@@ -166,6 +169,7 @@ impl<'a> Watch<'a> {
                 retired: show_retired,
             },
             registered: Vec::new(),
+            pending_git: Vec::new(),
             ledgers: HashMap::new(),
             journals: HashMap::new(),
             rows: HashMap::new(),
@@ -183,6 +187,7 @@ impl<'a> Watch<'a> {
     fn read_registry(&mut self) -> Result<()> {
         let cfg = crate::config::load()?;
         self.registered = crate::registry::projects(&cfg)?;
+        self.pending_git.clear();
         self.ledgers.clear();
         self.journals.clear();
         for project in &self.registered {
@@ -190,6 +195,14 @@ impl<'a> Watch<'a> {
                 |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             self.journals
                 .insert(canonical(&project.journal_dir), project.journal_dir.clone());
+            if project.reachable && project.retired.is_none() && project.ledger.is_none() {
+                if let Some(anchor) = &project.anchor {
+                    let marker = anchor.join(".git");
+                    if !marker.exists() {
+                        self.pending_git.push(marker);
+                    }
+                }
+            }
             if let Some(root) = &project.ledger_root {
                 let absolute = std::path::absolute(root).unwrap_or_else(|_| root.clone());
                 self.ledgers
@@ -219,8 +232,16 @@ impl<'a> Watch<'a> {
             notice["dir"].as_str(),
         ) {
             (Some("ledger"), Some(path), _) => {
+                let path = Path::new(path);
+                if path.ends_with("config.json")
+                    && self.pending_git.iter().any(|marker| marker.exists())
+                    && self.read_registry().is_err()
+                {
+                    self.dirty.everything = true;
+                    return;
+                }
                 // A ledger no registered project reads is not in the report.
-                let Some(root) = self.ledger_of(Path::new(path)) else {
+                let Some(root) = self.ledger_of(path) else {
                     return;
                 };
                 let changes = self

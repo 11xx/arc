@@ -4392,8 +4392,9 @@ enum WorkspaceCmd {
     /// `--progress` each project whose series hold an item linked into a
     /// ledger they name, and emits the report when anything but its
     /// observation times changed. The first ledger write for an already
-    /// registered project is a notice too. Between notices the watch sleeps
-    /// on one inotify watch and holds no Git process.
+    /// registered project is a notice too, including a directory bound
+    /// to a journal before Git was initialized there. Between notices the
+    /// watch sleeps on one inotify watch and holds no Git process.
     ///
     /// Only arc's own writes reach the feed. A commit made outside arc, a
     /// moved branch, Git configuration change, or a vanished anchor shows at the next refresh, and
