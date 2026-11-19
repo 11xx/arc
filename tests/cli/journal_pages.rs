@@ -96,6 +96,98 @@ fn whole_artifacts_require_regular_bodies_in_both_stores() {
     );
 }
 
+/// A heading belongs to its author unless this artifact records the
+/// amendment. Its heading and text must survive even after an appended block.
+#[test]
+fn ordinary_amendment_headings_keep_their_text() {
+    let repo = Repo::new();
+    let file = note(
+        &repo,
+        &repo.root,
+        "draft",
+        "# Draft\n\n### Correction notes\n\nFirst paragraph.\n",
+    );
+    append(
+        &repo,
+        &repo.root,
+        &file,
+        "Updates",
+        "### Retraction notes\n\nSecond paragraph.\n",
+    );
+    let (output, page) = render(&repo, &repo.root, &file, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let html = fs::read_to_string(page).unwrap();
+    for text in [
+        "Correction notes",
+        "First paragraph.",
+        "Retraction notes",
+        "Second paragraph.",
+    ] {
+        assert!(html.contains(text), "missing authored text {text:?}");
+    }
+}
+
+/// Published destinations take the page's privacy mode. Refusal writes
+/// nothing, stripping keeps the citation as text, and keeping preserves the link.
+#[test]
+fn published_links_honor_the_page_privacy_mode() {
+    let repo = Repo::new();
+    let target = note(&repo, &repo.root, "target", "# Target\n");
+    let url = "https://journal.example.lan/copy";
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "published", &target, "--url", url]),
+    );
+    let file = note(
+        &repo,
+        &repo.root,
+        "citation",
+        &format!("# Citation\n\nSee {target} and `{target}`.\n"),
+    );
+    let (refused, path) = render(&repo, &repo.root, &file, &[]);
+    assert!(
+        !refused.status.success() && !path.exists(),
+        "accepted a private publication link"
+    );
+    for (flag, keep) in [("--strip-private", false), ("--keep-private", true)] {
+        let (output, page) = render(&repo, &repo.root, &file, &[flag]);
+        assert!(output.status.success(), "{output:?}");
+        let html = fs::read_to_string(page).unwrap();
+        assert!(html.contains(&target));
+        assert_eq!(html.contains("journal.example.lan"), keep);
+    }
+}
+
+/// A withdrawal notice uses the same privacy mode as the Markdown below it.
+/// Reading its reason back from the event must not restore stripped text.
+#[test]
+fn stripped_withdrawal_keeps_the_reason_private() {
+    let repo = Repo::new();
+    let file = note(&repo, &repo.root, "draft", "# Draft\n");
+    let block = append(&repo, &repo.root, &file, "Result", "A result.\n");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "retract",
+                &file,
+                "--target",
+                &block,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("See withdrawn.example.lan for the update.\n"),
+    );
+    let (output, page) = render(&repo, &repo.root, &file, &["--strip-private"]);
+    assert!(output.status.success(), "{output:?}");
+    let html = fs::read_to_string(page).unwrap();
+    assert!(html.contains("Withdrawn:") && html.contains("for the update."));
+    assert!(
+        !html.contains("withdrawn.example.lan"),
+        "notice restored the private host"
+    );
+}
+
 /// Claim: a render is one static page carrying the corrected title, the
 /// body, each appended block under its title and anchored by its ID, and a
 /// contents list linking them. Rejects a page missing a block or its anchor.

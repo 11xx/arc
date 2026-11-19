@@ -2183,21 +2183,24 @@ STANDING REFERENCES (what a project keeps coming back to)
                          body, each appended block under its title and
                          anchored by its ID, and a contents list (a rail on a
                          wide screen; folded on a narrow one past eight
-                         entries). Corrections
-                         and retractions show where they apply rather than as
-                         sections. No scripts and no referrer: raw HTML shows
+                         entries). Recorded corrections and retractions show
+                         where they apply. Other headings, such as
+                         “Correction notes”, retain their text. Raw HTML shows
                          as code, links keep http(s), mailto and in-page
-                         anchors, images load only over https. Takes the
+                         anchors, images load only over https. The page has
+                         no scripts and sends no referrer. Takes the
                          addresses and regular artifact files `show` takes.
                          A home-directory path, a path under a directory arc
                          knows is local (home, arc's data home, the journal,
                          the checkout), a private, shared or link-local
                          address, or a `.local`, `.lan`, `.home.arpa` or
                          `.ts.net` host refuses with each line and text;
-                         `--strip-private` replaces them in the page,
-                         `--keep-private` renders them for a page that stays
-                         on its owner's network, and `journal redact` removes
-                         them from the artifact.
+                         the check includes recorded withdrawal reasons and
+                         published destinations used as links. `--strip-private`
+                         replaces private text and leaves a private citation
+                         as unlinked text. `--keep-private` preserves those
+                         values for a page on its owner's network.
+                         `journal redact` removes private text from the body.
     arc journal render <address>... --json [--fragment]
                          Many pages in one run, each journal's log read once:
                          `arc-journal-render/1` carries the stylesheet, then

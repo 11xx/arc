@@ -1009,7 +1009,9 @@ pub enum JournalCmd {
     /// directory arc knows is local, a private, shared or link-local address,
     /// or a private host name refuses, naming each; `--strip-private`
     /// replaces them in the page and `--keep-private` renders them as
-    /// written. Reads the address forms `show` takes. Several addresses
+    /// written. This includes withdrawal reasons and published destinations.
+    /// Stripping a private destination leaves the citation as text.
+    /// Reads the address forms `show` takes. Several addresses
     /// render in one run with `--json`, which reads each journal's event log
     /// once; an address that fails is reported in its entry and the rest
     /// still render, exiting 16.

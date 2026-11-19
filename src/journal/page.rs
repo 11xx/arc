@@ -381,72 +381,38 @@ impl<'c> Run<'c> {
         let (label, scanner) = self.reader(&location.hot);
         let amendments = Amendments::collect(&events, &file);
         let pin = pins::current_pin(&events, &file);
-        let title = amendments.title().map(str::to_string);
-        let reason = pin.and_then(|pin| pin.note.clone());
-        let block_titles = block_titles(&events, &file, &amendments);
-
-        let mut findings: Vec<(String, Finding)> = scanner
-            .findings(&body)
-            .into_iter()
-            .map(|finding| (format!("line {}", finding.line), finding))
-            .collect();
-        let extras = [
-            ("title", title.as_deref()),
-            ("pin reason", reason.as_deref()),
-        ]
-        .into_iter()
-        .filter_map(|(name, value)| Some((name.to_string(), value?)))
-        .chain(
-            block_titles
-                .iter()
-                .map(|(id, title)| (format!("title of {id}"), title.as_str())),
-        );
-        for (name, value) in extras {
-            findings.extend(
-                scanner
-                    .findings(value)
-                    .into_iter()
-                    .map(|finding| (name.clone(), finding)),
-            );
-        }
-        if !findings.is_empty() && private == PrivateText::Refuse {
-            let listed = findings
-                .iter()
-                .map(|(place, finding)| {
-                    format!("  {place}: {} {}", finding.kind.label(), finding.text)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!(
-                "{file} holds text a published page must not carry:\n{listed}\n\
-                 pass --strip-private to replace each in the page, or remove it from the \
-                 artifact with `arc journal redact {file}`"
-            );
-        }
-        let clean = |text: &str| {
-            if private == PrivateText::Strip {
-                scanner.strip(text)
-            } else {
-                text.to_string()
-            }
+        let mut privacy = PagePrivacy {
+            mode: private,
+            scanner,
+            findings: Vec::new(),
         };
         let sha256 = hex::encode(Sha256::digest(body.as_bytes()));
         let bytes = body.len();
+        let body = privacy.text(None, &body);
         let published = published_url(&events, &file).map(str::to_string);
         let page = Page {
             file: &file,
-            title: title.map(|title| clean(&title)),
-            reason: reason.map(|reason| clean(&reason)),
-            block_titles: block_titles
+            title: amendments
+                .title()
+                .map(|title| privacy.text(Some("title"), title)),
+            reason: pin
+                .and_then(|pin| pin.note.as_deref())
+                .map(|reason| privacy.text(Some("pin reason"), reason)),
+            block_titles: block_titles(&events, &file, &amendments)
                 .into_iter()
-                .map(|(id, title)| (id, clean(&title)))
+                .map(|(id, title)| {
+                    let title = privacy.text(Some(&format!("title of {id}")), &title);
+                    (id, title)
+                })
                 .collect(),
-            label,
+            label: label.map(|label| privacy.text(Some("project"), &label)),
             events: &events,
             amendments: &amendments,
             links: Links::new(&location, &events, &mut self.reads),
+            privacy: &mut privacy,
         };
-        let drawn = page.html(&clean(&body), fragment)?;
+        let drawn = page.html(&body, fragment)?;
+        let findings = privacy.finish(&file)?;
         Ok(Rendered {
             hot: location.hot,
             file,
@@ -517,6 +483,15 @@ fn sections<'a>(body: &'a str, events: &[JournalEvent], file: &str) -> (&'a str,
         let Some((label, token, rest)) = block_heading(line) else {
             continue;
         };
+        if matches!(label, "Correction" | "Retraction")
+            && !events.iter().any(|event| {
+                event.known()
+                    && event.file.as_deref() == Some(file)
+                    && event.entry_identity() == Some((label, token))
+            })
+        {
+            continue;
+        }
         match open.take() {
             Some((label, token, rest, from)) => sections.push(Section {
                 label,
@@ -604,6 +579,54 @@ fn split_title(preamble: &str) -> (Option<&str>, &str) {
     }
 }
 
+struct PagePrivacy {
+    mode: PrivateText,
+    scanner: Rc<Scanner>,
+    findings: Vec<(String, Finding)>,
+}
+
+impl PagePrivacy {
+    /// Record every private stretch used by the page and say whether it needs stripping.
+    fn must_strip(&mut self, source: Option<&str>, value: &str) -> bool {
+        let findings = self.scanner.findings(value);
+        let strip = !findings.is_empty() && self.mode == PrivateText::Strip;
+        self.findings.extend(findings.into_iter().map(|finding| {
+            let place = source
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("line {}", finding.line));
+            (place, finding)
+        }));
+        strip
+    }
+
+    fn text(&mut self, source: Option<&str>, value: &str) -> String {
+        if self.must_strip(source, value) {
+            self.scanner.strip(value)
+        } else {
+            value.to_string()
+        }
+    }
+
+    fn finish(self, file: &str) -> Result<Vec<(String, Finding)>> {
+        if !self.findings.is_empty() && self.mode == PrivateText::Refuse {
+            let listed = self
+                .findings
+                .iter()
+                .map(|(place, finding)| {
+                    format!("  {place}: {} {}", finding.kind.label(), finding.text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "{file} holds text a published page must not carry:\n{listed}\n\
+                 pass --strip-private to replace each in the page, or remove it from the \
+                 artifact with `arc journal redact {file}`"
+            );
+        }
+        Ok(self.findings)
+    }
+}
+
 struct Page<'a> {
     file: &'a str,
     title: Option<String>,
@@ -613,6 +636,7 @@ struct Page<'a> {
     events: &'a [JournalEvent],
     amendments: &'a Amendments,
     links: Links<'a>,
+    privacy: &'a mut PagePrivacy,
 }
 
 struct TocEntry {
@@ -708,7 +732,7 @@ impl Page<'_> {
             if let Some(reason) = retraction {
                 main.push_str(&format!(
                     "<p class=\"block-retraction\">Withdrawn: {}</p>\n",
-                    escape(reason)
+                    escape(&self.privacy.text(Some("retraction reason"), reason))
                 ));
             }
             main.push_str("</header>\n");
@@ -785,7 +809,7 @@ impl Page<'_> {
 
     /// The title of a block its writer did not name: its kind, and for a
     /// position the stance it takes.
-    fn untitled(&self, section: &Section<'_>, id: Option<&str>) -> String {
+    fn untitled(&mut self, section: &Section<'_>, id: Option<&str>) -> String {
         if section.label != "Position" {
             return section.label.to_string();
         }
@@ -807,7 +831,7 @@ impl Page<'_> {
             .or(written)
             .filter(|stance| !stance.is_empty());
         match stance {
-            Some(stance) => format!("Position: {stance}"),
+            Some(stance) => format!("Position: {}", self.privacy.text(Some("stance"), stance)),
             None => "Position".to_string(),
         }
     }
@@ -946,10 +970,7 @@ impl Page<'_> {
                     if let Some((_, _, heading)) = heading.as_mut() {
                         heading.push_str(&code);
                     }
-                    match (!inside_link)
-                        .then(|| self.links.href(code.trim()))
-                        .flatten()
-                    {
+                    match (!inside_link).then(|| self.href(code.trim())).flatten() {
                         Some(href) => {
                             events.push(link_start(href));
                             events.push(Event::Code(code));
@@ -976,12 +997,17 @@ impl Page<'_> {
         html
     }
 
+    fn href(&mut self, token: &str) -> Option<String> {
+        let href = self.links.href(token)?;
+        (!self.privacy.must_strip(Some("published link"), &href)).then_some(href)
+    }
+
     /// Text with each artifact address that resolves to a published copy
     /// wrapped in a link to it.
     fn link_addresses<'t>(&mut self, text: &CowStr<'t>, events: &mut Vec<Event<'t>>) {
         let mut cursor = 0;
         for (start, token) in address_tokens(text) {
-            let Some(href) = self.links.href(token) else {
+            let Some(href) = self.href(token) else {
                 continue;
             };
             if start > cursor {
