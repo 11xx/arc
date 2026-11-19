@@ -130,8 +130,8 @@ struct Watch<'a> {
     scope: ResolvedWorkspaceScope,
     listed: Listed,
     registered: Vec<crate::registry::Project>,
-    /// Each registered ledger by canonical root: the root as registered, which
-    /// the store's reads are held under, and the journals reading it.
+    /// Each registered project's ledger root, including roots without a store:
+    /// the registered path and the journals reading it, by resolved root.
     ledgers: HashMap<PathBuf, (PathBuf, Vec<PathBuf>)>,
     /// Each registered journal directory by its canonical path.
     journals: HashMap<PathBuf, PathBuf>,
@@ -190,9 +190,10 @@ impl<'a> Watch<'a> {
                 |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             self.journals
                 .insert(canonical(&project.journal_dir), project.journal_dir.clone());
-            if let Some(root) = &project.ledger {
+            if let Some(root) = &project.ledger_root {
+                let absolute = std::path::absolute(root).unwrap_or_else(|_| root.clone());
                 self.ledgers
-                    .entry(canonical(root))
+                    .entry(crate::config::resolved(&absolute))
                     .or_insert_with(|| (root.clone(), Vec::new()))
                     .1
                     .push(project.journal_dir.clone());
@@ -256,13 +257,7 @@ impl<'a> Watch<'a> {
 
     /// The canonical root of the registered ledger holding `path`.
     fn ledger_of(&self, path: &Path) -> Option<PathBuf> {
-        let canonical = path
-            .canonicalize()
-            .or_else(|_| {
-                let parent = path.parent().unwrap_or(path).canonicalize()?;
-                Ok::<_, std::io::Error>(parent.join(path.file_name().unwrap_or_default()))
-            })
-            .unwrap_or_else(|_| path.to_path_buf());
+        let canonical = crate::config::resolved(path);
         canonical
             .ancestors()
             .find(|ancestor| self.ledgers.contains_key(*ancestor))
@@ -369,12 +364,16 @@ impl<'a> Watch<'a> {
         }
         // A series item linked into another project reads that project's
         // ledger, so a write there leaves every row linking into it stale.
-        let written: BTreeSet<&str> = self
-            .registered
-            .iter()
-            .filter(|project| stale.contains(&project.journal_dir))
-            .map(|project| project.slug.as_str())
-            .collect();
+        let mut written = BTreeSet::new();
+        for project in &mut self.registered {
+            if stale.contains(&project.journal_dir) {
+                // A write may be the first for a registered project's ledger.
+                if project.ledger.is_none() && !dirty.everything && !dirty.registry {
+                    project.refresh_ledger();
+                }
+                written.insert(project.slug.as_str());
+            }
+        }
         let linking: Vec<PathBuf> = self
             .rows
             .iter()

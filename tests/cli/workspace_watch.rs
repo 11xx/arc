@@ -3,6 +3,7 @@ use crate::common::{
 };
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -159,6 +160,169 @@ impl Drop for RunningWatch {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// Claim: a watch follows a registered project's first ledger write and later
+/// events across Git layouts and configured store paths. Unrelated ledger
+/// writes and comparison requests leave retained project reads alone.
+/// Rejects a watch that needs a binding notice or refresh to see a first ledger,
+/// loses later events, or rereads projects on unrelated notices.
+#[test]
+fn watch_discovers_a_registered_projects_first_ledger() {
+    for layout in ["default", "linked", "separate", "data-root", "exact"] {
+        let repo = Repo::new();
+        let mut cwd = repo.root.clone();
+        let mut environment: Vec<(&str, &Path)> = Vec::new();
+        let store_parent = repo.home.join("stores");
+        let store_alias = repo.home.join("store-alias");
+        let store_path = store_alias.join("missing/ledgers");
+        match layout {
+            "linked" => {
+                cwd = repo.home.join("linked");
+                git(
+                    &repo.root,
+                    &["worktree", "add", "--detach", cwd.to_str().unwrap()],
+                );
+            }
+            "separate" => git(
+                &repo.root,
+                &[
+                    "init",
+                    "--separate-git-dir",
+                    repo.home.join("git-admin").to_str().unwrap(),
+                ],
+            ),
+            "data-root" | "exact" => {
+                std::fs::create_dir(&store_parent).unwrap();
+                std::os::unix::fs::symlink(&store_parent, &store_alias).unwrap();
+                let setting = if layout == "exact" {
+                    "ARC_DATA_DIR"
+                } else {
+                    "ARC_DATA_ROOT"
+                };
+                environment.push((setting, &store_path));
+            }
+            _ => {}
+        }
+        let arc = || {
+            let mut command = repo.arc(&cwd);
+            command.envs(environment.iter().copied());
+            command
+        };
+        let fresh = || {
+            bare(json_stdout_any_status(arc().args([
+                "workspace",
+                "report",
+                "--json",
+            ])))
+        };
+        arc()
+            .args(["journal", "log", "registered", "Journal only"])
+            .assert()
+            .success();
+
+        let mut watch = RunningWatch(repo.spawn_arc_piped_with_env(
+            &cwd,
+            &["workspace", "watch"],
+            &environment,
+        ));
+        let (lines, reports) = mpsc::channel();
+        let output = BufReader::new(watch.0.stdout.take().unwrap());
+        let reader = std::thread::spawn(move || {
+            for line in output.lines() {
+                if lines.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let next = |what: &str| -> Value {
+            let line = reports
+                .recv_timeout(OWED)
+                .unwrap_or_else(|_| panic!("{layout}: the watch printed no report {what}"));
+            serde_json::from_str(&line).unwrap()
+        };
+        let initial = next("at start");
+        assert_eq!(initial["projects"].as_array().unwrap().len(), 1, "{layout}");
+        assert_eq!(
+            initial["sections"]["in_flight"],
+            serde_json::json!([]),
+            "{layout}"
+        );
+        assert_eq!(bare(initial.clone()), fresh());
+
+        let change = opened_change_id(&stdout(arc().args([
+            "begin",
+            "first-ledger",
+            "--no-worktree",
+            "--target",
+            "master",
+        ])));
+        let opened = fresh();
+        assert_eq!(
+            opened["sections"]["in_flight"][0]["change_id"], change,
+            "{layout}"
+        );
+        assert_eq!(
+            bare(next("after the first ledger write")),
+            opened,
+            "{layout}"
+        );
+
+        arc()
+            .args(["close", &change, "--abandoned"])
+            .assert()
+            .success();
+        let closed = bare(next("after closing the change"));
+        assert_eq!(
+            closed["sections"]["in_flight"],
+            serde_json::json!([]),
+            "{layout}"
+        );
+        assert_eq!(closed, fresh());
+
+        if layout == "default" {
+            let unrelated = Repo::new();
+            let other_change = opened_change_id(&stdout(unrelated.arc(&unrelated.root).args([
+                "begin",
+                "unregistered-here",
+                "--no-worktree",
+            ])));
+            let journal_dir = Path::new(initial["projects"][0]["journal_dir"].as_str().unwrap());
+            let silent_file = "20261101T000000Z-unannounced-todo.md";
+            std::fs::write(journal_dir.join(silent_file), "# Unannounced\n").unwrap();
+            repo.arc(&unrelated.root)
+                .args(["close", &other_change, "--abandoned"])
+                .assert()
+                .success();
+            assert!(
+                reports.recv_timeout(QUIET).is_err(),
+                "unrelated ledger invalidated the registered project"
+            );
+
+            let baseline = repo.home.join("initial.json");
+            std::fs::write(&baseline, initial.to_string()).unwrap();
+            let stdin = watch.0.stdin.as_mut().unwrap();
+            request(
+                stdin,
+                serde_json::json!({"schema": "arc-workspace-watch-request/1", "previous": baseline}),
+            );
+            let compared = next("after a comparison request");
+            assert_eq!(compared["previous"], initial["observation"]["finished_at"]);
+            assert_eq!(compared["sections"]["work"], serde_json::json!([]));
+            request(
+                stdin,
+                serde_json::json!({"schema": "arc-workspace-watch-request/1", "refresh": true}),
+            );
+            assert_eq!(
+                next("after a refresh")["sections"]["work"][0]["file"],
+                silent_file
+            );
+        }
+
+        drop(watch.0.stdin.take());
+        assert!(watch.0.wait().unwrap().success());
+        reader.join().unwrap();
     }
 }
 

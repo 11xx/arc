@@ -1149,17 +1149,21 @@ impl Store {
         let config = crate::config::load()?;
         let common = gitio::common_dir(cwd)
             .context("not inside a Git repository (and no path override is set)")?;
-        if let Some(data_root) = config.data_root {
+        Ok(Self::root_for_common_dir(&config, &common))
+    }
+
+    pub(crate) fn root_for_common_dir(config: &crate::config::Config, common: &Path) -> PathBuf {
+        if let Some(data_root) = &config.data_root {
             // Key by the main repository path (the common dir's parent),
             // never a worktree path: all worktrees share one ledger.
             let repo_path = if common.file_name().is_some_and(|n| n == ".git") {
-                common.parent().unwrap_or(&common).to_path_buf()
+                common.parent().unwrap_or(common)
             } else {
-                common.clone()
+                common
             };
-            return Ok(data_root.join(crate::config::path_slug(&repo_path)));
+            return data_root.join(crate::config::path_slug(repo_path));
         }
-        Ok(common.join("arc"))
+        common.join("arc")
     }
 
     fn changes_dir(&self) -> PathBuf {

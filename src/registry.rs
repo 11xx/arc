@@ -49,6 +49,9 @@ pub struct Project {
     pub reachable: bool,
     /// The project's ledger, when it has one.
     pub ledger: Option<PathBuf>,
+    /// Where this project's ledger belongs, even before the first write.
+    #[serde(skip)]
+    pub(crate) ledger_root: Option<PathBuf>,
     /// The retirement in force, when the registration was retired. A retired
     /// registration stays in the registry so it can be listed and restored,
     /// and workspace views leave it out of what they observe.
@@ -56,6 +59,23 @@ pub struct Project {
 }
 
 impl Project {
+    pub(crate) fn refresh_ledger(&mut self) {
+        self.ledger = self
+            .ledger_root
+            .as_deref()
+            .and_then(|root| match existing_ledger(root) {
+                Ok(found) => found,
+                // An unreadable store is not an absent one.
+                Err(error) => {
+                    eprintln!(
+                        "warning: cannot read the ledger for {}: {error:#}",
+                        self.slug
+                    );
+                    None
+                }
+            });
+    }
+
     /// A short label for output: the anchor's own name where one is known,
     /// falling back to the slug, which is at least unambiguous.
     pub fn label(&self) -> String {
@@ -163,18 +183,8 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
         else {
             continue;
         };
-        project.ledger = match ledger_at(cfg, path) {
-            Ok(found) => found,
-            // An unreadable store is not an absent one, and this whole
-            // feature exists so that work stops going unseen.
-            Err(error) => {
-                eprintln!(
-                    "warning: cannot read the ledger for {}: {error:#}",
-                    project.slug
-                );
-                None
-            }
-        };
+        project.ledger_root = ledger_root(cfg, path);
+        project.refresh_ledger();
     }
     Ok(projects)
 }
@@ -205,6 +215,7 @@ pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
             anchor_source,
             reachable,
             ledger: None,
+            ledger_root: None,
             retired,
         });
     }
@@ -246,32 +257,39 @@ fn configured_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>
 /// is not a Git repository has no ledger either, which is not an error — the
 /// journal is what registered it.
 pub(crate) fn ledger_at(cfg: &Config, anchor: &Path) -> Result<Option<PathBuf>> {
+    match ledger_root(cfg, anchor).as_deref() {
+        Some(root) => existing_ledger(root),
+        None => Ok(None),
+    }
+}
+
+fn ledger_root(cfg: &Config, anchor: &Path) -> Option<PathBuf> {
+    let common = crate::gitio::common_dir(anchor).ok();
     // `ARC_DATA_DIR` names one store for one repository, so it cannot stand for
     // every project in a sweep — but it is exactly right for the project the
     // caller is standing in, whose ledger would otherwise be reported missing
     // from its own workspace views.
-    if let Some(exact) = std::env::var_os("ARC_DATA_DIR") {
+    if let (Some(exact), Some(common)) = (std::env::var_os("ARC_DATA_DIR"), &common) {
         if std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::gitio::common_dir(&cwd).ok())
-            .and_then(|common| crate::gitio::common_dir(anchor).ok().map(|a| a == common))
-            .unwrap_or(false)
+            .as_ref()
+            == Some(common)
         {
-            let root = PathBuf::from(exact);
-            return Ok(Store::open_at(&root)?.map(|_| root));
+            return Some(PathBuf::from(exact));
         }
     }
-    let root = match &cfg.data_root {
-        Some(data_root) => data_root.join(crate::config::path_slug(anchor)),
-        None => match crate::gitio::common_dir(anchor) {
-            Ok(common) => common.join("arc"),
-            Err(_) => return Ok(None),
-        },
-    };
-    match Store::open_at(&root)? {
-        Some(_) => Ok(Some(root)),
-        None => Ok(None),
+    match common {
+        Some(common) => Some(Store::root_for_common_dir(cfg, &common)),
+        None => cfg
+            .data_root
+            .as_ref()
+            .map(|root| root.join(crate::config::path_slug(anchor))),
     }
+}
+
+fn existing_ledger(root: &Path) -> Result<Option<PathBuf>> {
+    Ok(Store::repository_id_at(root)?.map(|_| root.to_path_buf()))
 }
 
 /// Recover the path a slug was made from, by walking the filesystem.
