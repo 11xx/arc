@@ -162,6 +162,87 @@ impl Drop for RunningWatch {
     }
 }
 
+/// Claim: a report and its watch attach each library to its own journal,
+/// including a library-only update to one of two projects with the same label.
+/// Rejects either library being shared with or overwritten by its namesake.
+#[test]
+fn report_and_watch_keep_same_label_libraries_separate() {
+    let first = Repo::new();
+    let second = Repo::new();
+    let (first_dir, first_file) = journal_artifact(&first, "first", "conclusion", "# First\n");
+    let second_body = first.home.join("second.md");
+    std::fs::write(&second_body, "# Second\n").unwrap();
+    let second_path = stdout(first.arc(&second.root).args([
+        "journal",
+        "note",
+        "second",
+        "--kind",
+        "conclusion",
+        "--body-file",
+        second_body.to_str().unwrap(),
+    ]));
+    let second_path = std::path::Path::new(second_path.trim());
+    let second_file = second_path.file_name().unwrap().to_str().unwrap();
+    let fresh = || {
+        bare(json_stdout_any_status(first.arc(&first.root).args([
+            "workspace",
+            "report",
+            "--library",
+            "--json",
+        ])))
+    };
+    let check_libraries = |report: &Value, second_pinned: bool| {
+        let projects = report["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 2);
+        for (dir, file, pinned) in [
+            (first_dir.as_path(), first_file.as_str(), false),
+            (second_path.parent().unwrap(), second_file, second_pinned),
+        ] {
+            let project = projects
+                .iter()
+                .find(|project| project["journal_dir"] == dir.to_str().unwrap())
+                .unwrap();
+            assert_eq!(project["project"], "repo");
+            let library = project["library"].as_array().unwrap();
+            assert_eq!(library.len(), 1);
+            assert_eq!(library[0]["file"], file, "library for {}", dir.display());
+            assert_eq!(library[0]["path"], dir.join(file).to_str().unwrap());
+            assert_eq!(
+                library[0].get("pinned").and_then(Value::as_bool),
+                pinned.then_some(true)
+            );
+        }
+    };
+    let initial = fresh();
+    check_libraries(&initial, false);
+
+    let mut watch =
+        RunningWatch(first.spawn_arc_piped(&first.root, &["workspace", "watch", "--library"]));
+    let (lines, reports) = mpsc::channel();
+    let output = BufReader::new(watch.0.stdout.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        for line in output.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let next = || bare(serde_json::from_str(&reports.recv_timeout(OWED).unwrap()).unwrap());
+    assert_eq!(next(), initial);
+
+    first
+        .arc(&second.root)
+        .args(["journal", "pin", second_file])
+        .assert()
+        .success();
+    let pinned = next();
+    check_libraries(&pinned, true);
+    assert_eq!(pinned, fresh());
+    drop(watch.0.stdin.take());
+    assert!(watch.0.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
 /// Claim: --library emits a report for non-actionable filings and amendments,
 /// including repeated writes to a held journal, identical to a fresh library
 /// report apart from observation. Pinning and unpinning a consumed artifact

@@ -2896,7 +2896,7 @@ fn build_report(
         .backlog
         .projects
         .iter()
-        .filter_map(|project| Some((project.project.as_str(), project.library.as_ref()?)))
+        .filter_map(|project| Some((project.journal_dir.as_str(), project.library.as_ref()?)))
         .collect();
     report.attach_libraries(&libraries);
     report.attach_progress(
@@ -4675,8 +4675,10 @@ mod report {
 
         pub(super) fn attach_libraries(&mut self, libraries: &BTreeMap<&str, &super::Library>) {
             for project in &mut self.projects {
-                project.library = libraries
-                    .get(project.project.as_str())
+                project.library = project
+                    .journal_dir
+                    .as_deref()
+                    .and_then(|dir| libraries.get(dir))
                     .map(|library| (*library).clone());
             }
         }

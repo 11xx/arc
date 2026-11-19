@@ -243,7 +243,9 @@ FROM A WORKSPACE ROOT (outside a project)
                        `--help` lists every attention rule. Versioned
                        `arc-workspace-report/3`. With --library, each observed
                        project's `library` lists all hot and archived artifacts
-                       and recorded relocations, newest filename first. Rows
+                       and recorded relocations, newest filename first. The
+                       library belongs to the row's `journal_dir`; project
+                       labels can repeat. Rows
                        carry `project`, `file`, absolute `path`, corrected
                        `title`, `kind`, `topic`, filename `timestamp`, nullable
                        RFC 3339 `filed_at` and `changed_at`, and `storage`
