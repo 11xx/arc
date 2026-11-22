@@ -127,6 +127,37 @@ fn env_detects_codex_thread_and_prints_exports() {
         )));
 }
 
+/// A tool shell owns its conversation even when its parent exported a
+/// different harness session. Each write records the shell that issued it.
+#[test]
+fn antigravity_shell_attributes_the_conversation_that_owns_the_write() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    for (id, topic) in [
+        ("11111111-2222-4333-8444-000000000001", "first-shell"),
+        ("11111111-2222-4333-8444-000000000002", "second-shell"),
+    ] {
+        let chain = [
+            ("outer", "CODEX_THREAD_ID", "inherited"),
+            ("inner", "ANTIGRAVITY_CONVERSATION_ID", id),
+        ];
+        let env = nested_arc(&repo, &chain, &["env"]);
+        assert!(env.status.success(), "{env:?}");
+        let exports = String::from_utf8(env.stdout).unwrap();
+        assert!(
+            exports.contains(&format!("ARC_HARNESS='antigravity' ARC_SESSION='{id}'")),
+            "{exports}"
+        );
+        assert!(exports.contains("unset ARC_MODEL"), "{exports}");
+        let write = nested_arc(&repo, &chain, &["journal", "log", topic, "event"]);
+        assert!(write.status.success(), "{write:?}");
+        let event = recorded_journal_event(&repo);
+        assert_eq!(event["harness"], "antigravity");
+        assert_eq!(event["session"], id);
+        assert!(event["model"].is_null(), "{event}");
+    }
+}
+
 #[test]
 fn env_exports_only_a_well_formed_link_for_the_acting_claude_harness() {
     let repo = Repo::new();
@@ -967,6 +998,8 @@ fn fixture_arc(repo: &Repo, program: &Path) -> Command {
         .env_remove("ARC_DATA_ROOT")
         .env_remove("ARC_WORKTREES_DIR")
         .env_remove("AI_HOME")
+        .env_remove("T3CODE_HOME")
+        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CLAUDE_CODE_BRIDGE_SESSION_ID")
@@ -1160,7 +1193,7 @@ fn env_reports_ambiguity_when_no_ancestor_names_the_owner() {
         .assert()
         .code(1)
         .stdout(with_build_stamp(concat!(
-            "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
+            "# export ARC_HARNESS=<antigravity|claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
             "ARC_SESSION_LINK=<url>\n",
             "# ambiguous: CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); ",
             "set ARC_HARNESS and ARC_SESSION by hand\n",

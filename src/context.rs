@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 /// so which harness owns this process is a question for the process
 /// ancestry, and a tie it cannot break is reported as ambiguous rather than
 /// resolved here.
-const HARNESS_ENV: [(&str, &str); 5] = [
+const HARNESS_ENV: [(&str, &str); 6] = [
+    ("ANTIGRAVITY_CONVERSATION_ID", "antigravity"),
     ("CLAUDE_SESSION_ID", "claude"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
@@ -581,7 +582,7 @@ fn live_var(name: &str) -> Result<Option<String>, String> {
 }
 
 const EXPORT_TEMPLATE: &str = concat!(
-    "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id>",
+    "# export ARC_HARNESS=<antigravity|claude|codex|opencode|pi> ARC_SESSION=<session-id>",
     " ARC_SESSION_LINK=<url>"
 );
 

@@ -21,7 +21,7 @@ Run `arc guide` for indexed topics, `arc guide <topic>` for depth, or
 
 SAY WHO YOU ARE (before the first write)
   eval "$(arc env)"                    Detect harness, session, model, and session link.
-  export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
+  export ARC_ACTOR=<name> ARC_HARNESS=<antigravity|claude|codex|opencode|pi> \
          ARC_SESSION=<id> ARC_SESSION_LINK=<url>
 
   `arc env` prints a build comment naming the compiled commit and whether
@@ -137,7 +137,9 @@ SAY WHO YOU ARE (before the first write)
   a recorded link.
 
   `arc env` detects a harness by the session variable it exports; not every
-  harness exports one. A harness exports its session id into the processes it
+  harness exports one. Antigravity tool shells export the native conversation
+  in `ANTIGRAVITY_CONVERSATION_ID`. Its T3 recording store follows
+  `T3CODE_HOME` (default `~/.t3`). A harness exports its session id into the processes it
   starts, so when several harnesses' variables are present it is the nearest
   ancestor that exported one that owns this process: a pi run inside a Claude
   Code tool shell reports pi, not the shell's claude. Where the ancestry names

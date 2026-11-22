@@ -2489,6 +2489,7 @@ enum Cmd {
     /// `eval "$(arc env)"`.
     ///
     /// Detection reads the session variable a harness exports for itself —
+    /// `ANTIGRAVITY_CONVERSATION_ID`,
     /// `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
     /// `OPENCODE_SESSION`, or `PI_SESSION_ID` — and then that harness's own
     /// session store for the model, and the effort where the store records
@@ -2501,7 +2502,8 @@ enum Cmd {
     /// order; an ancestry that cannot be read, or that shows no exporter,
     /// says why beside the ambiguity. The store root is the harness's own override —
     /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, or
-    /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
+    /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. Antigravity
+    /// uses T3’s `T3CODE_HOME` (default `~/.t3`). The store's
     /// answer for the exact canonical session id is reported with the exports:
     /// an id the store does not hold is uncorroborated; an ambiguous or
     /// unreadable lookup, one that resolves to a recording under another id,

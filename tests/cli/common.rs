@@ -261,6 +261,7 @@ impl Repo {
             // The suite may itself run inside a harness. Whatever session
             // variable that harness exports must not reach the binary under
             // test, or `env` detects the runner instead of the fixture.
+            "ANTIGRAVITY_CONVERSATION_ID",
             "CLAUDE_SESSION_ID",
             "CLAUDE_CODE_SESSION_ID",
             "CLAUDE_CODE_BRIDGE_SESSION_ID",
@@ -274,6 +275,7 @@ impl Repo {
             // Session lookup honours each store override before `$HOME`, so a
             // host that exports one would otherwise have the fixture read its
             // real store. A test that needs one sets it explicitly.
+            "T3CODE_HOME",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "PI_CODING_AGENT_SESSION_DIR",
