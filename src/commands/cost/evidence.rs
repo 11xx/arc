@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA: &str = "tapes-attribution-evidence/1";
 
 /// The harness names tapes lists; a session reference names one of them.
-const HARNESSES: [&str; 4] = ["claude", "codex", "pi", "opencode"];
+const HARNESSES: [&str; 5] = ["antigravity", "claude", "codex", "pi", "opencode"];
 
 type Session = (String, String);
 

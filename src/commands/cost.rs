@@ -675,7 +675,14 @@ struct Assembled {
 
 /// Read the ledger and measure every session a query selects.
 fn assemble(ctx: &Ctx, query: &CostQuery, backends: &Backends) -> Result<Assembled> {
-    let prices = agent_tapes_core::pricing::lookup(query.prices.as_deref())?;
+    use agent_tapes_core::pricing;
+    let prices = if query.prices.is_some() || pricing::environment_table_path().is_some() {
+        pricing::lookup(query.prices.as_deref())?
+    } else {
+        // Arc's default price source is the configured table.
+        pricing::lookup_defaults(pricing::default_table_path().as_deref(), None)
+    }
+    .found;
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
@@ -5640,14 +5647,20 @@ impl<'a> Render<'a> {
 
 /// Which price table the view priced with, or why it has none.
 fn prices_json(prices: &agent_tapes_core::pricing::PriceLookup) -> Value {
-    use agent_tapes_core::pricing::PriceLookup;
+    use agent_tapes_core::pricing::{PriceLookup, PriceOrigin};
     let schema = agent_tapes_core::pricing::PRICE_TABLE_SCHEMA;
     match prices {
-        PriceLookup::Loaded(loaded) => json!({"status": "loaded", "schema": loaded.table.schema,
-            "origin": kebab(loaded.origin), "currency": loaded.table.currency,
-            "models": loaded.table.models.len()}),
+        PriceLookup::Loaded(loaded) => {
+            let origin = match loaded.origin {
+                PriceOrigin::Config => Some("default".to_string()),
+                origin => kebab(origin),
+            };
+            json!({"status": "loaded", "schema": loaded.table.schema,
+                "origin": origin, "currency": loaded.table.currency,
+                "models": loaded.table.models.len()})
+        }
         PriceLookup::Absent => json!({"status": "absent", "schema": schema}),
-        PriceLookup::DefaultInvalid { .. } => {
+        PriceLookup::ConfigInvalid { .. } => {
             json!({"status": "invalid", "schema": schema, "origin": "default"})
         }
     }
