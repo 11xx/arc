@@ -935,14 +935,17 @@ fn check_audit_subject(subject: &AuditSubject, st: &ChangeState) -> Result<()> {
 /// refused: arc cannot tell a whole id from part of one where it does not
 /// know the shape.
 fn full_native_session(harness: &str, session: &str) -> bool {
+    let full_uuid = || session.len() == 36 && crate::coordinate::is_session_id(session, None);
     match harness {
-        "claude" | "codex" | "pi" => {
-            let groups: Vec<&str> = session.split('-').collect();
-            groups.len() == 5
-                && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, len)| {
-                    group.len() == len && group.bytes().all(|b| b.is_ascii_hexdigit())
-                })
+        "antigravity" => {
+            full_uuid()
+                && session.as_bytes()[14] == b'4'
+                && matches!(
+                    session.as_bytes()[19],
+                    b'8' | b'9' | b'a' | b'b' | b'A' | b'B'
+                )
         }
+        "claude" | "codex" | "pi" => full_uuid(),
         "opencode" => session.strip_prefix("ses_").is_some_and(|rest| {
             rest.len() >= 16 && rest.bytes().all(|b| b.is_ascii_alphanumeric())
         }),
@@ -1614,6 +1617,14 @@ mod tests {
         ));
         assert!(full_native_session("opencode", "ses_6c1a2b3c4d5e6f7a8b9c"));
         assert!(!full_native_session("opencode", "ses_6c1a"));
+        let cascade = "a0000000-0000-4000-8000-000000000001";
+        assert!(full_native_session("antigravity", cascade));
+        assert!(!full_native_session("antigravity", &cascade[..8]));
+        assert!(!full_native_session("antigravity", uuid));
+        assert!(!full_native_session(
+            "antigravity",
+            "a0000000-0000-4000-1000-000000000001"
+        ));
         assert!(!full_native_session("hermes", uuid));
     }
 }

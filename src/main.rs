@@ -2144,7 +2144,8 @@ enum Cmd {
     /// carries them, and refuses the whole receipt, writing nothing, for an
     /// unreadable file, a
     /// wrong schema, a missing `issued_at`, mixed kinds, or a reviewer whose
-    /// session is not a full native id (claude, codex and pi ids are UUIDs,
+    /// session is not a full native id (Antigravity conversation ids are UUIDv4,
+    /// claude, codex and pi ids are UUIDs,
     /// opencode ids start `ses_`; a prefix, a delegate handle or another
     /// harness is refused) or whose model names no effort. Each item is then
     /// recorded or refused on its own, under the change's locks: an item
