@@ -3366,6 +3366,100 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         .failure()
         .stderr(predicates::str::contains("already landed as i5"));
 
+    // Retargeting to a local same-journal series must also refuse rather than
+    // duplicating i5 locally.
+    let local_retarget = start(&repo, &repo.root, "local-retarget", &["Local"]);
+    repo.arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &local_retarget,
+            "--reason",
+            "try switching to local mid-transfer",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already landed as i5"));
+    assert_eq!(
+        series(
+            &report(&repo, &repo.root, &[&local_retarget]),
+            &local_retarget
+        )["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // If a registered journal holding the pending destination becomes unreadable,
+    // retargeting to a third project or local series must fail closed rather than
+    // duplicating the pending transfer key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let third = sibling_project(&repo, "third-xfer");
+        let third_dest = start(&repo, &third, "third-dest", &["Third"]);
+        let other_events_path = other_dir.join("events.jsonl");
+        let saved_mode = fs::metadata(&other_events_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        fs::set_permissions(&other_events_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let retarget_third = repo
+            .arc(&repo.root)
+            .args([
+                "progress",
+                "transfer",
+                &relocated_src,
+                "i1",
+                "--to",
+                &format!("third-xfer::{third_dest}"),
+                "--reason",
+                "retarget while dest unreadable",
+            ])
+            .output()
+            .unwrap();
+        let retarget_local = repo
+            .arc(&repo.root)
+            .args([
+                "progress",
+                "transfer",
+                &relocated_src,
+                "i1",
+                "--to",
+                &local_retarget,
+                "--reason",
+                "local retarget while dest unreadable",
+            ])
+            .output()
+            .unwrap();
+        fs::set_permissions(&other_events_path, fs::Permissions::from_mode(saved_mode)).unwrap();
+        assert!(
+            !retarget_third.status.success(),
+            "retarget to third project succeeded while dest journal was unreadable"
+        );
+        assert!(
+            String::from_utf8_lossy(&retarget_third.stderr)
+                .contains("cannot inspect registered journal"),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&retarget_third.stderr)
+        );
+        assert!(
+            !retarget_local.status.success(),
+            "local retarget succeeded while dest journal was unreadable"
+        );
+        assert_eq!(
+            series(&report(&repo, &third, &[&third_dest]), &third_dest)["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     // Retrying the original destination after relocating the source journal
     // reuses i5 without creating i6 and retires the source against i5.
     let reloc_retry = progress(

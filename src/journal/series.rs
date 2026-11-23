@@ -105,6 +105,11 @@ pub(crate) struct SeriesFields {
     /// relocations and slug renames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transfer_key: Option<String>,
+    /// Intended cross-project destination recorded on `item-transfer-pending`
+    /// so retargeting fails closed if that destination is no longer registered
+    /// or inspectable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer_target: Option<RelatedSeries>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
@@ -326,7 +331,8 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         && fields.related.is_none();
     let no_transfer = fields.transferred_to.is_none()
         && fields.transferred_from.is_none()
-        && fields.transfer_key.is_none();
+        && fields.transfer_key.is_none()
+        && fields.transfer_target.is_none();
     let bare = no_link_or_wait
         && no_wave_or_dep
         && no_transfer
@@ -361,6 +367,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                     .transfer_key
                     .as_deref()
                     .is_none_or(|key| fields.transferred_from.is_some() && single_line(key))
+                && fields.transfer_target.is_none()
         }
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
@@ -376,6 +383,10 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.transferred_to.is_none()
                 && fields.transferred_from.is_none()
                 && fields.transfer_key.as_deref().is_some_and(single_line)
+                && fields
+                    .transfer_target
+                    .as_ref()
+                    .is_none_or(|t| single_line(&t.project) && is_series_file(&t.file))
         }
         "item-transferred" => {
             names_item
@@ -387,6 +398,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.resolved_by.is_none()
                 && fields.transferred_from.is_none()
                 && fields.transfer_key.is_none()
+                && fields.transfer_target.is_none()
                 && fields.transferred_to.as_ref().is_some_and(valid_item_ref)
         }
         "item-done" => {
@@ -745,6 +757,8 @@ pub(crate) struct Item {
     /// Durable transfer key recorded on an in-flight cross-project transfer
     /// before destination creation so retries match across journal relocations.
     pub(crate) pending_transfer_key: Option<String>,
+    /// Intended cross-project destination of an in-flight transfer.
+    pub(crate) pending_transfer_target: Option<RelatedSeries>,
     initial: bool,
 }
 
@@ -997,6 +1011,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     transferred_from: fields.transferred_from.clone(),
                     transfer_key: fields.transfer_key.clone(),
                     pending_transfer_key: None,
+                    pending_transfer_target: None,
                     initial: fields.initial,
                 };
                 place(
@@ -1060,6 +1075,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             transferred_from: None,
                             transfer_key: None,
                             pending_transfer_key: None,
+                            pending_transfer_target: None,
                             initial: false,
                         },
                     );
@@ -1105,11 +1121,13 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     }
                     "item-transfer-pending" => {
                         item.pending_transfer_key = fields.transfer_key.clone();
+                        item.pending_transfer_target = fields.transfer_target.clone();
                     }
                     "item-transferred" => {
                         item.state = ItemState::Transferred;
                         item.transferred_to = fields.transferred_to.clone();
                         item.pending_transfer_key = None;
+                        item.pending_transfer_target = None;
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
@@ -2631,105 +2649,25 @@ pub(crate) fn transfer(
         item: item_id.to_string(),
     };
 
-    let new_id = if target_project.is_none() {
-        // Local same-journal transfer: publish destination creation, optional
-        // active change link, and source retirement in one recoverable write.
-        let new_id = format!("i{}", target_series.next_id());
-        let mut records = Vec::with_capacity(3);
-        let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
-        add_event.file = Some(target_series.file.clone());
-        add_event.title = Some(source_item.title.clone());
-        add_event.series.item = Some(new_id.clone());
-        add_event.series.wave = dest_wave.clone();
-        add_event.series.item_source = carried_source;
-        add_event.series.transferred_from = Some(provenance);
-        records.push(add_event);
-
-        if let Some(link) = carried_link {
-            let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
-            link_event.file = Some(target_series.file.clone());
-            link_event.series.item = Some(new_id.clone());
-            link_event.series.change = Some(link.change);
-            link_event.series.change_project = link.project;
-            records.push(link_event);
-        }
-
-        let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
-        xfer_event.file = Some(source_file.clone());
-        xfer_event.note = Some(reason);
-        xfer_event.series.item = Some(item_id.to_string());
-        xfer_event.series.transferred_to = Some(ItemRef {
-            project: None,
-            series: target_series.file.clone(),
-            item: new_id.clone(),
-        });
-        records.push(xfer_event);
-
-        super::append_events(ctx, &here, &records)?;
-        new_id
-    } else {
-        // Cross-project transfer: persist a unique `transfer_key` on the source
-        // journal via `item-transfer-pending` before touching the destination so
-        // retries match the committed half-transfer even if the source journal is
-        // relocated on disk or a slug is later reused by another producer.
-        let pending_key = source_item.pending_transfer_key.as_deref();
-        let exact_retry = pending_key.and_then(|key| {
-            target_series
-                .items
-                .iter()
-                .find(|item| item.transfer_key.as_deref() == Some(key))
-        });
-        let new_id = if let Some(existing) = exact_retry {
-            if let Some(link) = carried_link {
-                if existing.link().as_ref() != Some(&link) {
-                    let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
-                    link_event.file = Some(target_series.file.clone());
-                    link_event.series.item = Some(existing.id.clone());
-                    link_event.series.change = Some(link.change);
-                    link_event.series.change_project = link.project;
-                    append_event(ctx, &target_dir, &link_event)?;
-                }
+    let new_id = match &target_project {
+        None => {
+            // Local same-journal transfer: refuse to retarget if an interrupted
+            // cross-project transfer already committed (or cannot be verified).
+            if let Some(pending_key) = source_item.pending_transfer_key.as_deref() {
+                let cfg = crate::config::load()?;
+                let known = crate::registry::known_journals(&cfg)?;
+                verify_no_committed_pending_transfer(
+                    &known,
+                    item_id,
+                    pending_key,
+                    source_item.pending_transfer_target.as_ref(),
+                    None,
+                )?;
             }
-            existing.id.clone()
-        } else {
-            if let Some(key) = pending_key {
-                if let Some((other_slug, other_file, other_item)) =
-                    find_transfer_key_in_known(&known_journals, key)
-                {
-                    bail!(
-                        "item {item_id} already landed as {other_item} in \
-                         {other_slug}::{other_file} under a pending transfer; finish that \
-                         transfer before moving {item_id} elsewhere"
-                    );
-                }
-            }
-            if let Some(legacy) = target_series.items.iter().find(|item| {
-                item.transferred_from.as_ref() == Some(&provenance) && item.transfer_key.is_none()
-            }) {
-                bail!(
-                    "destination {} already holds item {} with matching transferred_from {} \
-                     but no durable transfer_key; refusing to assume it originated from this \
-                     source item before retiring {item_id}",
-                    target_series.file,
-                    legacy.id,
-                    provenance
-                );
-            }
-            let expected_key = match pending_key {
-                Some(key) => key.to_string(),
-                None => {
-                    let key = crate::ids::new_identifier();
-                    let mut pending_event =
-                        JournalEvent::base(ctx, now, &source_topic, "item-transfer-pending");
-                    pending_event.file = Some(source_file.clone());
-                    pending_event.series.item = Some(item_id.to_string());
-                    pending_event.series.transfer_key = Some(key.clone());
-                    append_event(ctx, &here, &pending_event)?;
-                    key
-                }
-            };
+            // Publish destination creation, optional active change link, and source
+            // retirement in one recoverable write.
             let new_id = format!("i{}", target_series.next_id());
-            let mut dest_records = Vec::with_capacity(2);
+            let mut records = Vec::with_capacity(3);
             let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
             add_event.file = Some(target_series.file.clone());
             add_event.title = Some(source_item.title.clone());
@@ -2737,8 +2675,7 @@ pub(crate) fn transfer(
             add_event.series.wave = dest_wave.clone();
             add_event.series.item_source = carried_source;
             add_event.series.transferred_from = Some(provenance);
-            add_event.series.transfer_key = Some(expected_key);
-            dest_records.push(add_event);
+            records.push(add_event);
 
             if let Some(link) = carried_link {
                 let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
@@ -2746,23 +2683,141 @@ pub(crate) fn transfer(
                 link_event.series.item = Some(new_id.clone());
                 link_event.series.change = Some(link.change);
                 link_event.series.change_project = link.project;
-                dest_records.push(link_event);
+                records.push(link_event);
             }
-            super::append_events(ctx, &target_dir, &dest_records)?;
-            new_id
-        };
 
-        let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
-        xfer_event.file = Some(source_file.clone());
-        xfer_event.note = Some(reason);
-        xfer_event.series.item = Some(item_id.to_string());
-        xfer_event.series.transferred_to = Some(ItemRef {
-            project: target_project.as_ref().map(|p| p.slug.clone()),
-            series: target_series.file.clone(),
-            item: new_id.clone(),
-        });
-        append_event(ctx, &here, &xfer_event)?;
-        new_id
+            let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
+            xfer_event.file = Some(source_file.clone());
+            xfer_event.note = Some(reason);
+            xfer_event.series.item = Some(item_id.to_string());
+            xfer_event.series.transferred_to = Some(ItemRef {
+                project: None,
+                series: target_series.file.clone(),
+                item: new_id.clone(),
+            });
+            records.push(xfer_event);
+
+            super::append_events(ctx, &here, &records)?;
+            new_id
+        }
+        Some(target_proj) => {
+            // Cross-project transfer: persist a unique `transfer_key` on the source
+            // journal via `item-transfer-pending` before touching the destination so
+            // retries match the committed half-transfer even if the source journal is
+            // relocated on disk or a slug is later reused by another producer.
+            let target_proj_slug = target_proj.slug.as_str();
+            let current_target = RelatedSeries {
+                project: target_proj_slug.to_string(),
+                file: target_series.file.clone(),
+            };
+            let pending_key = source_item.pending_transfer_key.as_deref();
+            let exact_retry = pending_key.and_then(|key| {
+                target_series
+                    .items
+                    .iter()
+                    .find(|item| item.transfer_key.as_deref() == Some(key))
+            });
+            let new_id = if let Some(existing) = exact_retry {
+                if let Some(link) = carried_link {
+                    if existing.link().as_ref() != Some(&link) {
+                        let mut link_event =
+                            JournalEvent::base(ctx, now, &target_topic, "item-linked");
+                        link_event.file = Some(target_series.file.clone());
+                        link_event.series.item = Some(existing.id.clone());
+                        link_event.series.change = Some(link.change);
+                        link_event.series.change_project = link.project;
+                        append_event(ctx, &target_dir, &link_event)?;
+                    }
+                }
+                existing.id.clone()
+            } else {
+                if let Some(key) = pending_key {
+                    verify_no_committed_pending_transfer(
+                        &known_journals,
+                        item_id,
+                        key,
+                        source_item.pending_transfer_target.as_ref(),
+                        Some((target_proj_slug, target_series.file.as_str())),
+                    )?;
+                }
+                if let Some(legacy) = target_series.items.iter().find(|item| {
+                    item.transferred_from.as_ref() == Some(&provenance)
+                        && item.transfer_key.is_none()
+                }) {
+                    bail!(
+                        "destination {} already holds item {} with matching transferred_from {} \
+                         but no durable transfer_key; refusing to assume it originated from this \
+                         source item before retiring {item_id}",
+                        target_series.file,
+                        legacy.id,
+                        provenance
+                    );
+                }
+                let expected_key = match pending_key {
+                    Some(key) => {
+                        if source_item.pending_transfer_target.as_ref() != Some(&current_target) {
+                            let mut pending_event = JournalEvent::base(
+                                ctx,
+                                now,
+                                &source_topic,
+                                "item-transfer-pending",
+                            );
+                            pending_event.file = Some(source_file.clone());
+                            pending_event.series.item = Some(item_id.to_string());
+                            pending_event.series.transfer_key = Some(key.to_string());
+                            pending_event.series.transfer_target = Some(current_target);
+                            append_event(ctx, &here, &pending_event)?;
+                        }
+                        key.to_string()
+                    }
+                    None => {
+                        let key = crate::ids::new_identifier();
+                        let mut pending_event =
+                            JournalEvent::base(ctx, now, &source_topic, "item-transfer-pending");
+                        pending_event.file = Some(source_file.clone());
+                        pending_event.series.item = Some(item_id.to_string());
+                        pending_event.series.transfer_key = Some(key.clone());
+                        pending_event.series.transfer_target = Some(current_target);
+                        append_event(ctx, &here, &pending_event)?;
+                        key
+                    }
+                };
+                let new_id = format!("i{}", target_series.next_id());
+                let mut dest_records = Vec::with_capacity(2);
+                let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
+                add_event.file = Some(target_series.file.clone());
+                add_event.title = Some(source_item.title.clone());
+                add_event.series.item = Some(new_id.clone());
+                add_event.series.wave = dest_wave.clone();
+                add_event.series.item_source = carried_source;
+                add_event.series.transferred_from = Some(provenance);
+                add_event.series.transfer_key = Some(expected_key);
+                dest_records.push(add_event);
+
+                if let Some(link) = carried_link {
+                    let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
+                    link_event.file = Some(target_series.file.clone());
+                    link_event.series.item = Some(new_id.clone());
+                    link_event.series.change = Some(link.change);
+                    link_event.series.change_project = link.project;
+                    dest_records.push(link_event);
+                }
+                super::append_events(ctx, &target_dir, &dest_records)?;
+                new_id
+            };
+
+            let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
+            xfer_event.file = Some(source_file.clone());
+            xfer_event.note = Some(reason);
+            xfer_event.series.item = Some(item_id.to_string());
+            xfer_event.series.transferred_to = Some(ItemRef {
+                project: Some(target_proj.slug.clone()),
+                series: target_series.file.clone(),
+                item: new_id.clone(),
+            });
+            append_event(ctx, &here, &xfer_event)?;
+            new_id
+        }
     };
 
     Ok(TransferOutcome {
@@ -2775,22 +2830,91 @@ pub(crate) fn transfer(
     })
 }
 
-/// Search registered journals for any series item already carrying `key` so a
-/// retried transfer with a pending key cannot retarget onto a second series
-/// while a committed half-transfer already exists elsewhere.
+/// Fail closed before retargeting an item with a pending cross-project transfer
+/// key: refuse if the key already landed in any registered journal, if any
+/// registered journal cannot be inspected, or if the previously recorded
+/// destination journal is no longer registered or inspectable.
+fn verify_no_committed_pending_transfer(
+    known: &[(String, std::path::PathBuf)],
+    item_id: &str,
+    pending_key: &str,
+    pending_target: Option<&RelatedSeries>,
+    current_target: Option<(&str, &str)>,
+) -> Result<()> {
+    if let Some((other_slug, other_file, other_item)) =
+        find_transfer_key_in_known(known, pending_key)?
+    {
+        bail!(
+            "item {item_id} already landed as {other_item} in \
+             {other_slug}::{other_file} under a pending transfer; finish that \
+             transfer before moving {item_id} elsewhere"
+        );
+    }
+    if let Some(target) = pending_target {
+        let same_target = current_target == Some((target.project.as_str(), target.file.as_str()));
+        if !same_target {
+            let target_dirs: Vec<&std::path::PathBuf> = known
+                .iter()
+                .filter(|(slug, _)| slug == &target.project)
+                .map(|(_, dir)| dir)
+                .collect();
+            if target_dirs.is_empty() {
+                bail!(
+                    "item {item_id} has a pending transfer to {}::{} whose journal is no \
+                     longer registered; restore it to verify or finish that transfer before \
+                     moving {item_id} elsewhere",
+                    target.project,
+                    target.file
+                );
+            }
+            for dir in target_dirs {
+                std::fs::metadata(dir).with_context(|| {
+                    format!(
+                        "item {item_id} has a pending transfer to {}::{} whose journal \
+                         directory ({}) cannot be inspected",
+                        target.project,
+                        target.file,
+                        dir.display()
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Search registered journals for any series item already carrying `key`.
+/// Unreadable registered journals return an error rather than being skipped so
+/// retargeting fails closed instead of duplicating a committed half-transfer.
 fn find_transfer_key_in_known(
     known: &[(String, std::path::PathBuf)],
     key: &str,
-) -> Option<(String, String, String)> {
+) -> Result<Option<(String, String, String)>> {
     let mut seen_dirs = std::collections::HashSet::new();
     for (slug, dir) in known {
         let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         if !seen_dirs.insert(canon) {
             continue;
         }
-        let Ok(events) = super::read_events(dir) else {
-            continue;
-        };
+        let jsonl = dir.join("events.jsonl");
+        match std::fs::metadata(&jsonl) {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "cannot inspect registered journal {slug:?} ({}) while verifying pending transfer key",
+                        jsonl.display()
+                    )
+                });
+            }
+        }
+        let events = super::read_events(dir).with_context(|| {
+            format!(
+                "cannot inspect registered journal {slug:?} ({}) while verifying pending transfer key",
+                jsonl.display()
+            )
+        })?;
         for file in series_files(&events) {
             let Some(series) = replay(&events, &file) else {
                 continue;
@@ -2800,11 +2924,11 @@ fn find_transfer_key_in_known(
                 .iter()
                 .find(|item| item.transfer_key.as_deref() == Some(key))
             {
-                return Some((slug.clone(), file, item.id.clone()));
+                return Ok(Some((slug.clone(), file, item.id.clone())));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Record that a series relates to one in another project.
