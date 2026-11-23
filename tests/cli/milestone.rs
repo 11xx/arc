@@ -281,7 +281,39 @@ fn milestone_lifecycle_replays_through_exchange() {
     );
     arc(&recipient, &["journal", "import", bundle]);
     arc(&recipient, &["journal", "doctor"]);
-    assert_eq!(report(&recipient, &file), expected);
+    let imported = report(&recipient, &file);
+    for field in [
+        "file",
+        "title",
+        "follows",
+        "advisory_waves",
+        "checkpoints",
+        "closure",
+    ] {
+        assert_eq!(imported[field], expected[field], "mismatch on {field}");
+    }
+    assert_eq!(
+        imported["waves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (&w["id"], &w["title"], &w["gated"]))
+            .collect::<Vec<_>>(),
+        expected["waves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (&w["id"], &w["title"], &w["gated"]))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(imported["tracks"][0]["file"], expected["tracks"][0]["file"]);
+    assert_eq!(
+        imported["tracks"][0]["project"],
+        expected["tracks"][0]["project"]
+    );
+    assert_eq!(imported["tracks"][0]["role"], expected["tracks"][0]["role"]);
+    // Recipient does not have sibling repo `other` registered, so its track degrades cleanly.
+    assert!(imported["tracks"][0]["unavailable"].is_string());
 }
 
 /// Milestones can be pulled by name without entering the actionable queues.
@@ -407,4 +439,429 @@ fn invalid_start_and_track_references_do_not_append() {
         "no regular artifact",
     );
     assert_eq!(report(&repo, file)["tracks"], serde_json::json!([]));
+}
+
+#[test]
+fn milestone_matrix_separates_critical_from_sideband_and_enforces_wave_barriers() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+
+    // Local critical track (`core`) with waves w0, w1, w2.
+    let core = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "core",
+        "--title",
+        "Core track",
+        "--wave",
+        "w0=Baseline",
+        "--wave",
+        "w1=Cut",
+        "--wave",
+        "w2=Polish",
+        "--item",
+        "Core baseline",
+        "--item",
+        "Core cut",
+        "--item",
+        "Core polish",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w1",
+        "--item-wave",
+        "i3=w2",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    // Cross-project critical track (`other::ui`) with waves w0, w1.
+    let ui = stdout(repo.arc(&other).args([
+        "progress",
+        "start",
+        "ui",
+        "--title",
+        "UI track",
+        "--wave",
+        "w0=Baseline",
+        "--wave",
+        "w1=Cut",
+        "--item",
+        "UI baseline",
+        "--item",
+        "UI cut",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w1",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    // Local sideband track (`cleanup`) with an incomplete w0 item — must NOT
+    // count toward milestone critical % or block critical w1 items.
+    let sideband = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "cleanup",
+        "--title",
+        "Sideband cleanup",
+        "--wave",
+        "w0=Baseline",
+        "--item",
+        "Opportunistic refactor",
+        "--item-wave",
+        "i1=w0",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let ms = arc(
+        &repo,
+        &[
+            "milestone",
+            "start",
+            "rc3",
+            "--title",
+            "Release Candidate 3",
+            "--wave",
+            "w0=Baseline",
+            "--wave",
+            "w1=Parallel Cuts",
+        ],
+    )
+    .trim()
+    .to_string();
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "wave",
+            "add",
+            &ms,
+            "w2",
+            "--title",
+            "Polish",
+            "--soft",
+        ],
+    );
+    arc(
+        &repo,
+        &["milestone", "track", "add", &ms, &core, "--label", "core"],
+    );
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &ms,
+            &format!("other::{ui}"),
+            "--label",
+            "ui",
+        ],
+    );
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &ms,
+            &sideband,
+            "--role",
+            "sideband",
+            "--label",
+            "cleanup",
+        ],
+    );
+
+    let doc = json_stdout(repo.arc(&repo.root).args(["milestone", &ms, "--json"]));
+    assert_eq!(doc["schema"], "arc-milestone/1");
+    let m = &doc["milestones"][0];
+
+    // Critical counts exclude sideband (3 core + 2 ui = 5 critical, 1 sideband).
+    assert_eq!(m["counts"]["critical"]["items"], 5);
+    assert_eq!(m["counts"]["critical"]["complete"], 0);
+    assert_eq!(m["counts"]["critical"]["percent"], 0);
+    assert_eq!(m["counts"]["sideband"]["items"], 1);
+    assert_eq!(m["counts"]["sideband"]["complete"], 0);
+
+    // w1 is gated: both core:i2 and ui:i2 are blocked on w0 critical items.
+    // w2 is --soft: core:i3 is NOT blocked by milestone wave barriers!
+    assert_eq!(m["tracks"][0]["items"][0]["readiness"], "ready"); // core:i1 (w0)
+    assert_eq!(m["tracks"][0]["items"][1]["readiness"], "blocked"); // core:i2 (w1 gated)
+    assert_eq!(m["tracks"][0]["items"][2]["readiness"], "ready"); // core:i3 (w2 soft)
+    assert_eq!(m["tracks"][1]["items"][0]["readiness"], "ready"); // ui:i1 (w0)
+    assert_eq!(m["tracks"][1]["items"][1]["readiness"], "blocked"); // ui:i2 (w1 gated)
+    assert_eq!(m["tracks"][2]["items"][0]["readiness"], "ready"); // sideband:i1
+
+    // Finish core:i1 — ui:i1 in w0 is still open, so cross-track barrier still holds core:i2!
+    arc(&repo, &["progress", "done", &core, "i1"]);
+    let mid = report(&repo, &ms);
+    assert_eq!(mid["counts"]["critical"]["complete"], 1);
+    assert_eq!(mid["counts"]["critical"]["percent"], 20);
+    assert_eq!(mid["tracks"][0]["items"][1]["readiness"], "blocked");
+    assert_eq!(mid["tracks"][0]["items"][1]["blocked_by"][0]["wave"], "w0");
+    assert_eq!(mid["tracks"][0]["items"][1]["blocked_by"][0]["series"], ui);
+
+    // `--ignore-waves` unblocks w1 items at read time.
+    let ignored = json_stdout(repo.arc(&repo.root).args([
+        "milestone",
+        &ms,
+        "--ready",
+        "--ignore-waves",
+        "--json",
+    ]));
+    let ready_ids: Vec<(&str, &str)> = ignored["milestones"][0]["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["track_label"].as_str().unwrap(),
+                r["item"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(ready_ids.contains(&("core", "i2")));
+    assert!(ready_ids.contains(&("ui", "i2")));
+
+    // Finish ui:i1 in `other` — even though sideband w0 is STILL open, both critical w1 items unblock!
+    stdout(repo.arc(&other).args(["progress", "done", &ui, "i1"]));
+    let after = report(&repo, &ms);
+    assert_eq!(after["counts"]["critical"]["complete"], 2);
+    assert_eq!(after["counts"]["critical"]["percent"], 40);
+    assert_eq!(after["tracks"][0]["items"][1]["readiness"], "ready");
+    assert_eq!(after["tracks"][1]["items"][1]["readiness"], "ready");
+
+    // Compact matrix output shows critical/sideband summary and wave columns.
+    let compact = arc(&repo, &["milestone", &ms]);
+    assert!(
+        compact.contains("Critical: 2 of 5 complete (40%)"),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("Sideband: 0 of 1 complete (0%)"),
+        "{compact}"
+    );
+    assert!(compact.contains("core [critical]"), "{compact}");
+    assert!(compact.contains("cleanup [sideband]"), "{compact}");
+}
+
+#[test]
+fn milestone_degrades_gracefully_when_foreign_track_is_unreadable() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    let local = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "local",
+        "--title",
+        "Local",
+        "--wave",
+        "w0",
+        "--wave",
+        "w1",
+        "--item",
+        "Done w0",
+        "--item",
+        "Gated w1",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w1",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+    arc(&repo, &["progress", "done", &local, "i1"]);
+    let remote = start_series(&repo, &other, "remote");
+
+    let ms = arc(
+        &repo,
+        &[
+            "milestone",
+            "start",
+            "degrade",
+            "--title",
+            "Graceful degradation",
+            "--wave",
+            "w0",
+            "--wave",
+            "w1",
+        ],
+    )
+    .trim()
+    .to_string();
+    arc(&repo, &["milestone", "track", "add", &ms, &local]);
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &ms,
+            &format!("other::{remote}"),
+        ],
+    );
+
+    // Corrupt foreign journal events.jsonl so reading `other` fails.
+    let other_dir = stdout(repo.arc(&other).args(["journal", "dir"]));
+    fs::write(
+        Path::new(other_dir.trim()).join("events.jsonl"),
+        "not-json\n",
+    )
+    .unwrap();
+
+    // Milestone read succeeds, marks foreign track unavailable, and holds gated w1 conservatively.
+    let m = report(&repo, &ms);
+    assert_eq!(m["counts"]["unavailable_tracks"], 1);
+    assert!(m["tracks"][1]["unavailable"].is_string());
+    assert_eq!(m["tracks"][0]["items"][1]["readiness"], "blocked");
+    assert_eq!(
+        m["tracks"][0]["items"][1]["blocked_by"][0]["stage"],
+        "unknown"
+    );
+}
+
+#[test]
+fn milestone_defer_transfers_slice_across_milestones_and_preserves_provenance() {
+    let repo = Repo::new();
+    let rc2_core = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "rc2-core",
+        "--title",
+        "RC2 Core",
+        "--wave",
+        "w0",
+        "--wave",
+        "w1",
+        "--item",
+        "Ship now",
+        "--item",
+        "Defer me",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w1",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+    let rc3_core = stdout(repo.arc(&repo.root).args([
+        "progress", "start", "rc3-core", "--title", "RC3 Core", "--wave", "w0", "--wave", "w1",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let rc2 = arc(
+        &repo,
+        &[
+            "milestone",
+            "start",
+            "rc2",
+            "--title",
+            "RC2",
+            "--wave",
+            "w0",
+            "--wave",
+            "w1",
+        ],
+    )
+    .trim()
+    .to_string();
+    let rc3 = arc(
+        &repo,
+        &[
+            "milestone",
+            "start",
+            "rc3",
+            "--title",
+            "RC3",
+            "--wave",
+            "w0",
+            "--wave",
+            "w1",
+        ],
+    )
+    .trim()
+    .to_string();
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &rc2,
+            &rc2_core,
+            "--label",
+            "core",
+        ],
+    );
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &rc3,
+            &rc3_core,
+            "--label",
+            "core",
+        ],
+    );
+
+    let out = arc(
+        &repo,
+        &[
+            "milestone",
+            "defer",
+            "rc2",
+            "core:i2",
+            "--to",
+            "rc3",
+            "--wave",
+            "w0",
+            "--reason",
+            "moved to rc3 wave 0",
+        ],
+    );
+    assert!(out.contains("core:i2 ->"), "{out}");
+    assert!(out.contains("core:i1 (wave w0)"), "{out}");
+
+    let r2 = report(&repo, &rc2);
+    let r3 = report(&repo, &rc3);
+    assert_eq!(r2["counts"]["critical"]["items"], 1);
+    assert_eq!(r2["tracks"][0]["items"][1]["stage"], "transferred");
+    assert_eq!(
+        r2["tracks"][0]["items"][1]["transferred_to"]["series"],
+        rc3_core
+    );
+    assert_eq!(r3["counts"]["critical"]["items"], 1);
+    assert_eq!(r3["tracks"][0]["items"][0]["title"], "Defer me");
+    assert_eq!(r3["tracks"][0]["items"][0]["wave"], "w0");
+    assert_eq!(
+        r3["tracks"][0]["items"][0]["transferred_from"]["series"],
+        rc2_core
+    );
+
+    arc(&repo, &["journal", "doctor"]);
 }

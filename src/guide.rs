@@ -6948,6 +6948,53 @@ PROGRESS
   each project read alone, so no relation's `mutual` is filled there; a
   series that cannot be read is a failed `progress` component there.
 
+MILESTONES
+  `arc milestone` composes local and cross-project `arc progress` series into a
+  two-dimensional wave-by-track matrix, closed by a checkpoint and/or conclusion.
+  Like `arc progress`, milestones are strictly pull-only: read on request
+  (`arc milestone [SLUG] [--ready] [--ignore-waves] [--plain|--json]`) and never
+  pushed into `status`, `check`, `catchup`, `journal open`, or hooks.
+
+  A milestone is a journal artifact of kind `milestone`, started with:
+    arc milestone start <topic> --title T [--follows <plan>] [--wave ID[=TITLE]]... [--advisory-waves]
+  Edits are append-only journal events on `<milestone>` (by filename or topic):
+    wave add <id> [--title T] [--before|--after W] [--soft|--gated]
+    wave rename <id> <title>                wave move <id> --before|--after W
+    wave remove <id>
+    track add [<project>::]<series> [--role critical|sideband] [--label L] [--before|--after T]
+    track role <track> critical|sideband    track move <track> --before|--after T
+    track remove <track>
+    defer <track>:<item> --to <target-milestone>[:<track>] [--wave W] --reason R
+    checkpoint <name>
+    close [--checkpoint <name>] [--by <conclusion>] [--note N]
+  On `track add`, `--role` selects the track role (`critical` or `sideband`);
+  pass the execution role via `ARC_ROLE`, `--execution-role`, or before
+  `milestone` (`arc --role ROLE milestone track add ...`). A closed milestone
+  leaves the default listing, remains readable by name, and refuses writes.
+
+  Tracks, waves, and readiness. A milestone owns no parallel item store: slices
+  live in each attached `arc progress` series. Every track is `critical`
+  (default) or `sideband`. Milestone completion counts and percentage cover
+  `critical` tracks only; `sideband` counts print separately and never distort
+  milestone progress or hold wave barriers. Declared milestone waves are gated
+  across `critical` tracks by default unless the milestone started with
+  `--advisory-waves` or the wave was declared `--soft` (overridable per wave
+  with `--gated`). A gated wave blocks open items on `critical` tracks until
+  every standing item in earlier declared waves across all `critical` tracks is
+  `integrated` or `done`; an unreadable critical track holds later gated waves
+  conservatively as `unknown`. `--ignore-waves` bypasses wave barriers at read
+  time while keeping explicit item prerequisites. `--ready` narrows the output
+  to currently claimable items while preserving full counts.
+
+  Deferral. `arc milestone defer` resolves the source and destination tracks in
+  two open milestones and delegates to `arc progress transfer`, preserving the
+  item's title, `--from` source, active change link, matching wave, provenance,
+  and transitive prerequisite resolution.
+
+  Bounded reads. Reading a milestone opens each referenced project's journal
+  events and ledger at most once. An unregistered or unreadable foreign track
+  degrades to `unavailable` in `arc-milestone/1` without failing the report.
+
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
   change takes one new version per release, counted from the last release:
@@ -7024,6 +7071,7 @@ SCHEMAS
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-pins/1`           arc workspace pins --json
     `arc-progress/1`                 arc progress --json
+    `arc-milestone/1`                arc milestone --json
     `arc-workspace-progress/1`       arc workspace progress --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json
     `arc-writability/1`              arc config --check-writable --json
@@ -7397,7 +7445,7 @@ KEEP WHAT YOU LEARN
   arc journal memory             project facts; --global for operator practices
   arc journal workbench <slug>   working material a later session or lane reads;
                                  a cache directory holds only what can be rebuilt
-  arc progress                   where each series of work stands, on request
+  arc progress, arc milestone    series and multi-track milestones, on request
 
 END A SESSION
   arc journal handoff <topic> --derive   for unfinished work
@@ -7416,7 +7464,7 @@ GO DEEPER
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files
-  gates gates-together base-passes slots progress schemas boundaries
+  gates gates-together base-passes slots progress milestones schemas boundaries
 "#;
 
 pub fn print() {
@@ -7579,6 +7627,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "base-passes", family: "base-passes", title: "Project adoption, baseline proofs and publication audits", start: "BASE PASSES" },
     Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },
     Section { name: "progress", family: "progress", title: "Where a series of work stands, read on request", start: "PROGRESS" },
+    Section { name: "milestones", family: "milestones", title: "Tracks, waves, readiness and deferral above progress series", start: "MILESTONES" },
     Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
     Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },
 ];

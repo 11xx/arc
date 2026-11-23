@@ -9182,6 +9182,7 @@ mod tests {
             "milestone track role",
             "milestone track move",
             "milestone track remove",
+            "milestone defer",
             "milestone checkpoint",
             "milestone close",
             "journal bind",

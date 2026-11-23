@@ -2426,21 +2426,48 @@ pub(crate) fn transfer(
     wave: Option<&str>,
     reason: &str,
 ) -> Result<TransferOutcome> {
+    let here = resolve_dir(&ctx.cwd)?;
+    transfer_from_journal(
+        ctx,
+        &here,
+        Some(&ctx.cwd),
+        source_name,
+        item_id,
+        target_spec,
+        wave,
+        reason,
+    )
+}
+
+/// Transfer an item starting from an explicit source journal directory and
+/// optional repository anchor.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn transfer_from_journal(
+    ctx: &Ctx,
+    source_dir: &Path,
+    here_anchor: Option<&Path>,
+    source_name: &str,
+    item_id: &str,
+    target_spec: &str,
+    wave: Option<&str>,
+    reason: &str,
+) -> Result<TransferOutcome> {
     use crate::commands::progress::reader::Ledger;
     use crate::model::Closure;
     use crate::store::Store;
 
     let reason = one_line("--reason", reason)?;
-    let here = resolve_dir(&ctx.cwd)?;
+    let here = source_dir.to_path_buf();
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     let (target_project, target_series_name) =
         if let Some((prefix, series_name)) = target_spec.split_once(super::REFERENCE_SEPARATOR) {
             let project = super::registered_project(prefix)?;
             if canonical(&project.journal_dir) == canonical(&here) {
-                bail!("{prefix} is this project; name {series_name} without a project");
+                (None, series_name)
+            } else {
+                (Some(project), series_name)
             }
-            (Some(project), series_name)
         } else {
             (None, target_spec)
         };
@@ -2487,7 +2514,8 @@ pub(crate) fn transfer(
         None => None,
         Some(link) => {
             let state = match &link.project {
-                None => Store::discover_existing_for_reading(&ctx.cwd)?
+                None => here_anchor
+                    .and_then(|anchor| Store::discover_existing_for_reading(anchor).ok().flatten())
                     .and_then(|store| store.state(&link.change).ok()),
                 Some(slug) => super::registered_project(slug).ok().and_then(|project| {
                     project

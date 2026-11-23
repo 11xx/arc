@@ -489,10 +489,6 @@ pub(crate) fn named_in(events: &[JournalEvent], dir: &Path, name: &str) -> Resul
     Ok(found)
 }
 
-pub(crate) fn named_milestone(dir: &Path, name: &str) -> Result<Milestone> {
-    named_in(&super::read_events(dir)?, dir, name)
-}
-
 fn require_body(dir: &Path, file: &str) -> Result<()> {
     artifact_body_path(dir, file).with_context(|| {
         format!(
