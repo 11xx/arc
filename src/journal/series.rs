@@ -2877,9 +2877,10 @@ pub(crate) fn transfer(
 }
 
 /// Compute a durable digest identifying one destination series instance
-/// (canonical destination journal directory, series filename, and immutable
-/// `note` start event) so rebinding the destination slug to another journal
-/// carrying the same series filename cannot satisfy a pending transfer retry.
+/// (canonical destination journal directory native bytes and Unix `(dev, ino)`,
+/// series filename, and immutable `note` start event) so rebinding or swapping
+/// the destination onto another journal cannot satisfy an uncommitted pending
+/// transfer retry.
 fn destination_series_digest(
     target_dir: &Path,
     target_events: &[JournalEvent],
@@ -2887,19 +2888,27 @@ fn destination_series_digest(
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
+    let mut feed = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
     let canon = target_dir
         .canonicalize()
         .unwrap_or_else(|_| target_dir.to_path_buf());
-    hasher.update(canon.to_string_lossy().as_bytes());
-    hasher.update([0u8]);
-    hasher.update(target_file.as_bytes());
-    hasher.update([0u8]);
+    feed(canon.as_os_str().as_encoded_bytes());
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(&canon) {
+        use std::os::unix::fs::MetadataExt;
+        feed(&meta.dev().to_le_bytes());
+        feed(&meta.ino().to_le_bytes());
+    }
+    feed(target_file.as_bytes());
     if let Some(start_note) = target_events
         .iter()
         .find(|e| e.event == "note" && e.file.as_deref() == Some(target_file))
     {
         if let Ok(json) = serde_json::to_vec(start_note) {
-            hasher.update(json);
+            feed(&json);
         }
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
@@ -3013,4 +3022,26 @@ fn waits_on_person(question: &super::OpenQuestion) -> bool {
         .settle_by
         .as_deref()
         .is_none_or(|by| by == "person")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::destination_series_digest;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn destination_series_digest_distinguishes_raw_non_utf8_from_replacement_char() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw_parent = tmp.path().join(OsStr::from_bytes(b"dir-\xe9"));
+        let ufffd_parent = tmp.path().join("dir-\u{FFFD}");
+        std::fs::create_dir_all(&raw_parent).unwrap();
+        std::fs::create_dir_all(&ufffd_parent).unwrap();
+        let file = "20260103T000000Z-work-progress.md";
+        let d1 = destination_series_digest(&raw_parent, &[], file);
+        let d2 = destination_series_digest(&ufffd_parent, &[], file);
+        assert_ne!(d1, d2);
+        // Same canonical directory produces identical digest.
+        assert_eq!(d1, destination_series_digest(&raw_parent, &[], file));
+    }
 }
