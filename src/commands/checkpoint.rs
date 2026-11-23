@@ -264,18 +264,31 @@ pub fn record_checkpoint(
 
     if let Some(ms_file) = bound_milestone.as_deref().filter(|_| milestone_was_open) {
         if let Err(error) = milestone::bind_checkpoint(ctx, ms_file, &name) {
-            let closed_concurrently = journal::resolve_dir(&ctx.cwd)
+            let replayed = journal::resolve_dir(&ctx.cwd)
                 .ok()
                 .and_then(|dir| journal::read_events(&dir).ok())
-                .and_then(|events| milestone::replay(&events, ms_file))
-                .is_some_and(|ms| ms.closure.is_some());
-            if closed_concurrently {
-                bail!(
-                    "checkpoint {name} was committed at {revision} (event {}), \
-                     but milestone {ms_file} closed concurrently; the checkpoint retains a \
-                     final one-sided snapshot binding because closed milestones are read-only",
-                    event.event_id
-                );
+                .and_then(|events| milestone::replay(&events, ms_file));
+            if let Some(ms) = replayed {
+                let already_bound = ms.checkpoints.iter().any(|cp| {
+                    cp.name == name && cp.revision == revision && cp.event_id == event.event_id
+                }) || ms
+                    .closure
+                    .as_ref()
+                    .and_then(|c| c.checkpoint.as_ref())
+                    .is_some_and(|cp| {
+                        cp.name == name && cp.revision == revision && cp.event_id == event.event_id
+                    });
+                if already_bound {
+                    return Ok(());
+                }
+                if ms.closure.is_some() {
+                    bail!(
+                        "checkpoint {name} was committed at {revision} (event {}), \
+                         but milestone {ms_file} closed concurrently; the checkpoint retains a \
+                         final one-sided snapshot binding because closed milestones are read-only",
+                        event.event_id
+                    );
+                }
             }
             bail!(
                 "checkpoint {name} was committed at {revision} (event {}), \
