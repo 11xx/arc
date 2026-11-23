@@ -13,7 +13,7 @@ use std::path::Path;
 
 pub(crate) mod matrix;
 mod view;
-pub(crate) use matrix::{milestones_link_into, project_milestones};
+pub(crate) use matrix::project_milestones;
 use matrix::{MatrixCounts, MilestoneReport};
 
 /// The schema `arc workspace milestones --json` prints.

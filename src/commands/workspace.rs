@@ -1102,6 +1102,11 @@ struct ProjectBacklog {
     /// the project has any.
     #[serde(skip)]
     milestones: Option<serde_json::Value>,
+    /// Foreign project slugs read while projecting `milestones` (attached
+    /// tracks, change links, prerequisites, source artifacts, and transfer
+    /// hops), used by `arc workspace watch --milestones` for invalidation.
+    #[serde(skip)]
+    milestone_deps: BTreeSet<String>,
     project: String,
     anchor: String,
     /// The journal directory this project's questions and items were read
@@ -1773,8 +1778,10 @@ fn project_row(
     anchor: &Path,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
     journal: JournalRead,
+    shared_registry: Option<&super::progress::reader::Registry>,
 ) -> ProjectBacklog {
     let mut failures: Vec<ComponentFailure> = Vec::new();
+    let shared = shared_registry.map(|registry| (registry, project.slug.as_str()));
 
     // The journal and the fork inventory read nothing of the ledger, so they
     // are read beside it.
@@ -1791,6 +1798,7 @@ fn project_row(
                         super::progress::project_series(
                             &project.journal_dir,
                             Some(anchor),
+                            shared,
                             chrono::Utc::now(),
                         )
                     }),
@@ -1798,7 +1806,7 @@ fn project_row(
                         super::milestone::project_milestones(
                             &project.journal_dir,
                             Some(anchor),
-                            None,
+                            shared,
                             chrono::Utc::now(),
                         )
                     }),
@@ -1961,8 +1969,12 @@ fn project_row(
             None
         })
     });
+    let mut milestone_deps = BTreeSet::new();
     let milestones = milestones.and_then(|read| {
         let items = read.and_then(|milestones| {
+            for ms in &milestones {
+                milestone_deps.extend(ms.referenced_projects.iter().cloned());
+            }
             Ok((!milestones.is_empty())
                 .then(|| serde_json::to_value(milestones))
                 .transpose()?)
@@ -1979,6 +1991,7 @@ fn project_row(
         library,
         progress,
         milestones,
+        milestone_deps,
         project: project.label(),
         anchor: anchor.display().to_string(),
         journal_dir: project.journal_dir.display().to_string(),
@@ -2078,7 +2091,7 @@ fn collect_backlog(
         },
         |index, project, anchor| {
             rows.remove(&index)
-                .unwrap_or_else(|| project_row(ctx, project, anchor, cutoff, journal))
+                .unwrap_or_else(|| project_row(ctx, project, anchor, cutoff, journal, None))
         },
     ))
 }
@@ -3320,8 +3333,17 @@ fn observe_rows(
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
     journal: JournalRead,
 ) -> BTreeMap<usize, ProjectBacklog> {
+    let shared_registry = (journal.progress || journal.milestones)
+        .then(|| super::progress::reader::Registry::of_slice(registered));
     observe_projects(registered, observe, |project, anchor| {
-        project_row(ctx, project, anchor, cutoff, journal)
+        project_row(
+            ctx,
+            project,
+            anchor,
+            cutoff,
+            journal,
+            shared_registry.as_ref(),
+        )
     })
 }
 

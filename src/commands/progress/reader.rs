@@ -15,9 +15,10 @@ use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// The schema `arc progress --json` prints.
 const PROGRESS_SCHEMA: &str = "arc-progress/1";
@@ -412,7 +413,7 @@ pub(crate) struct ProgressFailure {
 
 /// Opens one project's ledger without creating anything; `None` when the
 /// project has none.
-type Opener = Box<dyn Fn() -> Result<Option<Store>>>;
+type Opener = Box<dyn Fn() -> Result<Option<Store>> + Send + Sync>;
 
 /// One project's ledger as a report reads it: opened only when an item is
 /// linked into it, and then read one linked change at a time. A stage is what
@@ -421,10 +422,10 @@ type Opener = Box<dyn Fn() -> Result<Option<Store>>>;
 pub(crate) struct Ledger {
     label: String,
     opener: Opener,
-    store: OnceCell<std::result::Result<Option<Store>, String>>,
+    store: OnceLock<std::result::Result<Option<Store>, String>>,
     /// Each change's newest dispatch with no recorded end, gathered once
     /// from the repository events the change's reduction already read.
-    dispatches: OnceCell<BTreeMap<String, Dispatch>>,
+    dispatches: OnceLock<BTreeMap<String, Dispatch>>,
 }
 
 impl Ledger {
@@ -460,12 +461,15 @@ impl Ledger {
         Self::new(place, || Ok(None))
     }
 
-    fn new(place: &Path, opener: impl Fn() -> Result<Option<Store>> + 'static) -> Self {
+    fn new(
+        place: &Path,
+        opener: impl Fn() -> Result<Option<Store>> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             label: place.display().to_string(),
             opener: Box::new(opener),
-            store: OnceCell::new(),
-            dispatches: OnceCell::new(),
+            store: OnceLock::new(),
+            dispatches: OnceLock::new(),
         }
     }
 
@@ -596,7 +600,7 @@ pub(crate) struct Registered {
     pub(crate) ledger: Ledger,
     /// Journal events, loaded once on first access (or seeded when the caller
     /// already read this journal).
-    events: OnceCell<std::result::Result<Vec<JournalEvent>, String>>,
+    events: OnceLock<std::result::Result<Vec<JournalEvent>, String>>,
 }
 
 impl Registered {
@@ -622,16 +626,18 @@ impl Registered {
 /// The registered projects one report reads through: loaded at most once, and
 /// when constructed via [`Registry::lazy`] only on the first actual foreign
 /// traversal. Each project's journal events and ledger open lazily once per
-/// report.
+/// report, and can be shared across worker threads.
 #[derive(Default)]
 pub(crate) struct Registry {
-    projects: OnceCell<Vec<Registered>>,
+    projects: OnceLock<Vec<Registered>>,
     lazy: bool,
-    seed: OnceCell<(PathBuf, Vec<JournalEvent>)>,
+    seed: OnceLock<(PathBuf, Vec<JournalEvent>)>,
 }
 
 impl Registry {
-    fn convert(projects: Vec<crate::registry::Project>) -> Vec<Registered> {
+    fn convert<'a>(
+        projects: impl IntoIterator<Item = &'a crate::registry::Project>,
+    ) -> Vec<Registered> {
         projects
             .into_iter()
             .map(|project| Registered {
@@ -640,20 +646,24 @@ impl Registry {
                     Some(anchor) => Ledger::at(anchor),
                     None => Ledger::none(&project.journal_dir),
                 },
-                slug: project.slug,
-                journal_dir: project.journal_dir,
-                events: OnceCell::new(),
+                slug: project.slug.clone(),
+                journal_dir: project.journal_dir.clone(),
+                events: OnceLock::new(),
             })
             .collect()
     }
 
     pub(crate) fn of(projects: Vec<crate::registry::Project>) -> Self {
-        let cell = OnceCell::new();
-        let _ = cell.set(Self::convert(projects));
+        Self::of_slice(&projects)
+    }
+
+    pub(crate) fn of_slice(projects: &[crate::registry::Project]) -> Self {
+        let cell = OnceLock::new();
+        let _ = cell.set(Self::convert(projects.iter()));
         Self {
             projects: cell,
             lazy: false,
-            seed: OnceCell::new(),
+            seed: OnceLock::new(),
         }
     }
 
@@ -662,9 +672,9 @@ impl Registry {
     /// resolves identically regardless of which series was requested.
     pub(crate) fn lazy() -> Self {
         Self {
-            projects: OnceCell::new(),
+            projects: OnceLock::new(),
             lazy: true,
-            seed: OnceCell::new(),
+            seed: OnceLock::new(),
         }
     }
 
@@ -686,7 +696,7 @@ impl Registry {
                 .ok()
                 .and_then(|cfg| crate::registry::journal_projects(&cfg).ok())
                 .unwrap_or_default();
-            let list = Self::convert(loaded);
+            let list = Self::convert(loaded.iter());
             if let Some((dir, events)) = self.seed.get() {
                 if let Some(project) = list.iter().find(|p| same_dir(&p.journal_dir, dir)) {
                     project.seed_events(events.clone());
@@ -809,6 +819,7 @@ pub(crate) struct Reader<'a> {
     pub(crate) questions: &'a PersonQuestions<'a>,
     pub(crate) now: DateTime<Utc>,
     live_lanes: OnceCell<Vec<crate::journal::LaneEntry>>,
+    touched_projects: RefCell<BTreeSet<String>>,
 }
 
 impl<'a> Reader<'a> {
@@ -831,7 +842,19 @@ impl<'a> Reader<'a> {
             questions,
             now,
             live_lanes: OnceCell::new(),
+            touched_projects: RefCell::new(BTreeSet::new()),
         }
+    }
+
+    /// Take and clear the set of foreign project slugs accessed while reading
+    /// items through this reader (covering change links, source artifacts,
+    /// prerequisites, and transfer hops).
+    pub(crate) fn take_touched_projects(&self) -> BTreeSet<String> {
+        std::mem::take(&mut *self.touched_projects.borrow_mut())
+    }
+
+    fn touch_project(&self, slug: &str) {
+        self.touched_projects.borrow_mut().insert(slug.to_string());
     }
 
     fn home_slug(&self) -> Option<&str> {
@@ -845,7 +868,12 @@ impl<'a> Reader<'a> {
 
     fn foreign_slug<'b>(&self, slug: Option<&'b str>) -> Option<&'b str> {
         let slug = slug?;
-        (Some(slug) != self.home_slug()).then_some(slug)
+        if Some(slug) != self.home_slug() {
+            self.touch_project(slug);
+            Some(slug)
+        } else {
+            None
+        }
     }
 
     fn live_lanes(&self) -> &[crate::journal::LaneEntry] {
@@ -1319,7 +1347,14 @@ impl<'a> Reader<'a> {
         item: &series::Item,
     ) -> &'static str {
         let foreign = match home_slug {
-            Some(home_slug) => item.project.as_deref().filter(|slug| *slug != home_slug),
+            Some(home_slug) => item.project.as_deref().filter(|slug| {
+                if *slug != home_slug {
+                    self.touch_project(slug);
+                    true
+                } else {
+                    false
+                }
+            }),
             None => self.foreign_slug(item.project.as_deref()),
         };
         match foreign {
@@ -1645,9 +1680,10 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>, ready_only: bool) -> Result<P
 pub(crate) fn project_series(
     journal_dir: &Path,
     anchor: Option<&Path>,
+    shared: Option<(&Registry, &str)>,
     now: DateTime<Utc>,
 ) -> Result<Vec<SeriesReport>> {
-    series_of(journal_dir, anchor, None, now)
+    series_of(journal_dir, anchor, shared, now)
 }
 
 /// [`project_series`] through `shared`, the registry the caller already
@@ -1801,7 +1837,7 @@ mod tests {
             label: slug.to_string(),
             ledger: Ledger::none(&dir),
             journal_dir: dir,
-            events: OnceCell::new(),
+            events: OnceLock::new(),
         }
     }
 
@@ -1835,9 +1871,9 @@ mod tests {
 
         // Seeding events for a nonexistent directory likewise avoids disk I/O.
         let seeded = Registry {
-            projects: OnceCell::from(vec![registered_for("beta", dir.path().join("absent"))]),
+            projects: OnceLock::from(vec![registered_for("beta", dir.path().join("absent"))]),
             lazy: false,
-            seed: OnceCell::new(),
+            seed: OnceLock::new(),
         };
         seeded.seed_events(&dir.path().join("absent"), first.to_vec());
         assert_eq!(seeded.get("beta").unwrap().events().unwrap().len(), 1);
@@ -1868,12 +1904,12 @@ mod tests {
         write_series(&beta_dir, "beta", "Beta");
 
         let registry = Registry {
-            projects: OnceCell::from(vec![
+            projects: OnceLock::from(vec![
                 registered_for("shared", alpha_dir.clone()),
                 registered_for("shared", beta_dir.clone()),
             ]),
             lazy: false,
-            seed: OnceCell::new(),
+            seed: OnceLock::new(),
         };
         // Ambiguous slug lookup returns None rather than aliasing.
         assert!(registry.get("shared").is_none());

@@ -697,3 +697,134 @@ fn watch_progress_follows_an_item_linked_into_another_project() {
     drop(watch);
     reader.join().unwrap();
 }
+
+/// Claim: `arc workspace watch --milestones` invalidates a milestone owner's
+/// row when a foreign project referenced only through an item's `depends_on`
+/// prerequisite completes that prerequisite, so the milestone's derived
+/// readiness updates without needing a write in the owner project.
+#[test]
+fn watch_milestones_invalidates_on_foreign_prerequisite_completion() {
+    let repo = Repo::new();
+    let other = repo.root.parent().unwrap().join("other-ms");
+    std::fs::create_dir_all(&other).unwrap();
+    for args in [
+        &["init", "-b", "master"][..],
+        &["config", "user.name", "Tester"],
+        &["config", "user.email", "tester@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+    ] {
+        git(&other, args);
+    }
+    repo.commit(&other, "README.md", "other\n", "init");
+    let other = std::fs::canonicalize(other).unwrap();
+
+    let remote_series = stdout(repo.arc(&other).args([
+        "progress",
+        "start",
+        "upstream",
+        "--title",
+        "Upstream",
+        "--item",
+        "Upstream blocker",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let local_series = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "downstream",
+        "--title",
+        "Downstream",
+        "--wave",
+        "w0",
+        "--item",
+        "Waits on upstream",
+        "--item-wave",
+        "i1=w0",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    // Local track item depends on a foreign series item; the milestone itself
+    // attaches ONLY the local track.
+    repo.arc(&repo.root)
+        .args([
+            "progress",
+            "depend",
+            &local_series,
+            "i1",
+            "--on",
+            &format!("other-ms::{remote_series}:i1"),
+        ])
+        .assert()
+        .success();
+
+    let ms = stdout(repo.arc(&repo.root).args([
+        "milestone",
+        "start",
+        "dep-watch",
+        "--title",
+        "Dependency Watch",
+        "--wave",
+        "w0",
+    ]))
+    .trim()
+    .to_string();
+    repo.arc(&repo.root)
+        .args(["milestone", "track", "add", &ms, &local_series])
+        .assert()
+        .success();
+
+    let mut watch =
+        RunningWatch(repo.spawn_arc_piped(&repo.root, &["workspace", "watch", "--milestones"]));
+    let stdin = watch.0.stdin.take().unwrap();
+    let (lines, reports) = mpsc::channel::<String>();
+    let output = BufReader::new(watch.0.stdout.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        for line in output.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let next = |what: &str| -> Value {
+        let line = reports
+            .recv_timeout(OWED)
+            .unwrap_or_else(|_| panic!("the milestone watch printed no report {what}"));
+        bare(serde_json::from_str(&line).expect("one JSON report per line"))
+    };
+    let readiness = |report: &Value| -> String {
+        report["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("milestones").and_then(|m| m.as_array()))
+            .flatten()
+            .find(|m| m["file"] == ms)
+            .and_then(|m| m["tracks"][0]["items"][0]["readiness"].as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("no milestone {ms} in {report}"))
+    };
+
+    assert_eq!(readiness(&next("at start")), "blocked");
+
+    // Completing the foreign prerequisite in `other-ms` must invalidate the
+    // owner project's milestone row and emit a fresh report with readiness=ready.
+    repo.arc(&other)
+        .args(["progress", "done", &remote_series, "i1"])
+        .assert()
+        .success();
+    let updated = next("after foreign prerequisite completed");
+    assert_eq!(readiness(&updated), "ready");
+
+    drop(stdin);
+    drop(watch);
+    reader.join().unwrap();
+}

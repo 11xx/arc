@@ -407,9 +407,10 @@ impl<'a> Watch<'a> {
                 row.progress
                     .as_ref()
                     .is_some_and(|series| super::super::progress::links_into(series, &written))
-                    || row.milestones.as_ref().is_some_and(|milestones| {
-                        super::super::milestone::milestones_link_into(milestones, &written)
-                    })
+                    || row
+                        .milestone_deps
+                        .iter()
+                        .any(|slug| written.contains(slug.as_str()))
             })
             .map(|(dir, _)| dir.clone())
             .collect();
@@ -456,7 +457,7 @@ impl<'a> Watch<'a> {
             },
             |_, project, anchor| {
                 rows.remove(&project.journal_dir)
-                    .unwrap_or_else(|| project_row(ctx, project, anchor, None, self.journal))
+                    .unwrap_or_else(|| project_row(ctx, project, anchor, None, self.journal, None))
             },
         );
         let facts = &mut self.facts;

@@ -608,6 +608,7 @@ mod tests {
             }],
             checkpoints: Vec::new(),
             closure: None,
+            referenced_projects: std::collections::BTreeSet::new(),
         }
     }
 

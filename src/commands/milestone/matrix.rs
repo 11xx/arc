@@ -197,6 +197,11 @@ pub(crate) struct MilestoneReport {
     pub(crate) ready: Vec<ReadyItem>,
     pub(crate) checkpoints: Vec<MilestoneCheckpoint>,
     pub(crate) closure: Option<Closure>,
+    /// Foreign project slugs touched while building this matrix (tracks, change
+    /// links, prerequisites, source artifacts, and transfer hops), retained for
+    /// `arc workspace watch --milestones` invalidation.
+    #[serde(skip)]
+    pub(crate) referenced_projects: BTreeSet<String>,
 }
 
 #[derive(Serialize)]
@@ -407,6 +412,7 @@ struct ReadTrack {
     retired: Option<series::Retirement>,
     unavailable: Option<String>,
     rows: Vec<ItemRow>,
+    touched_projects: BTreeSet<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -423,8 +429,9 @@ fn build_one(
 ) -> MilestoneReport {
     // 1. Read every attached track once, degrading unreadable tracks gracefully.
     let mut tracks: Vec<ReadTrack> = Vec::with_capacity(ms.tracks.len());
+    let mut referenced_projects = BTreeSet::new();
     for track in &ms.tracks {
-        tracks.push(read_track(
+        let read = read_track(
             track,
             home_dir,
             local_events,
@@ -432,7 +439,9 @@ fn build_one(
             registry,
             own_slug,
             now,
-        ));
+        );
+        referenced_projects.extend(read.touched_projects.iter().cloned());
+        tracks.push(read);
     }
 
     // 2. When `--ignore-waves` is passed, drop series-level wave barriers too
@@ -725,6 +734,7 @@ fn build_one(
         ready: ready_items,
         checkpoints: ms.checkpoints.clone(),
         closure: ms.closure.clone(),
+        referenced_projects,
     }
 }
 
@@ -756,27 +766,35 @@ fn read_track(
                 retired: None,
                 unavailable: Some(format!("no series {}", track.reference.file)),
                 rows: Vec::new(),
+                touched_projects: BTreeSet::new(),
             },
-            Some(series) => match local_reader.rows(&series) {
-                Ok(rows) => ReadTrack {
-                    meta: track.clone(),
-                    project_label: None,
-                    title: Some(series.title),
-                    retired: series.retired,
-                    unavailable: None,
-                    rows,
-                },
-                Err(error) => ReadTrack {
-                    meta: track.clone(),
-                    project_label: None,
-                    title: Some(series.title),
-                    retired: series.retired,
-                    unavailable: Some(format!("{error:#}").replace(['\n', '\r'], " ")),
-                    rows: Vec::new(),
-                },
-            },
+            Some(series) => {
+                let result = local_reader.rows(&series);
+                let touched_projects = local_reader.take_touched_projects();
+                match result {
+                    Ok(rows) => ReadTrack {
+                        meta: track.clone(),
+                        project_label: None,
+                        title: Some(series.title),
+                        retired: series.retired,
+                        unavailable: None,
+                        rows,
+                        touched_projects,
+                    },
+                    Err(error) => ReadTrack {
+                        meta: track.clone(),
+                        project_label: None,
+                        title: Some(series.title),
+                        retired: series.retired,
+                        unavailable: Some(format!("{error:#}").replace(['\n', '\r'], " ")),
+                        rows: Vec::new(),
+                        touched_projects,
+                    },
+                }
+            }
         },
         Some(slug) => {
+            let mut touched_projects = BTreeSet::from([slug.to_string()]);
             let label = Some(registry.label(slug));
             let Some(project) = registry.get(slug) else {
                 return ReadTrack {
@@ -786,6 +804,7 @@ fn read_track(
                     retired: None,
                     unavailable: Some(format!("no journal is registered as {slug}")),
                     rows: Vec::new(),
+                    touched_projects,
                 };
             };
             let events = match project.events() {
@@ -798,6 +817,7 @@ fn read_track(
                         retired: None,
                         unavailable: Some(reason.to_string()),
                         rows: Vec::new(),
+                        touched_projects,
                     };
                 }
             };
@@ -809,6 +829,7 @@ fn read_track(
                     retired: None,
                     unavailable: Some(format!("{slug} holds no series {}", track.reference.file)),
                     rows: Vec::new(),
+                    touched_projects,
                 };
             };
             let questions = PersonQuestions::new(&project.journal_dir, events);
@@ -821,7 +842,9 @@ fn read_track(
                 &questions,
                 now,
             );
-            match reader.rows(&series) {
+            let result = reader.rows(&series);
+            touched_projects.extend(reader.take_touched_projects());
+            match result {
                 Ok(rows) => ReadTrack {
                     meta: track.clone(),
                     project_label: label,
@@ -829,6 +852,7 @@ fn read_track(
                     retired: series.retired,
                     unavailable: None,
                     rows,
+                    touched_projects,
                 },
                 Err(error) => ReadTrack {
                     meta: track.clone(),
@@ -837,6 +861,7 @@ fn read_track(
                     retired: series.retired,
                     unavailable: Some(format!("{error:#}").replace(['\n', '\r'], " ")),
                     rows: Vec::new(),
+                    touched_projects,
                 },
             }
         }
