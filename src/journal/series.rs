@@ -2651,18 +2651,21 @@ pub(crate) fn transfer(
 
     let new_id = match &target_project {
         None => {
-            // Local same-journal transfer: refuse to retarget if an interrupted
-            // cross-project transfer already committed (or cannot be verified).
+            // Never silently retarget an in-doubt cross-project transfer onto a
+            // local series: complete the pending cross-project transfer first.
             if let Some(pending_key) = source_item.pending_transfer_key.as_deref() {
-                let cfg = crate::config::load()?;
-                let known = crate::registry::known_journals(&cfg)?;
-                verify_no_committed_pending_transfer(
-                    &known,
-                    item_id,
-                    pending_key,
-                    source_item.pending_transfer_target.as_ref(),
-                    None,
-                )?;
+                match source_item.pending_transfer_target.as_ref() {
+                    Some(target) => bail!(
+                        "item {item_id} has a pending cross-project transfer to {}::{}; finish \
+                         that transfer before moving {item_id} locally",
+                        target.project,
+                        target.file
+                    ),
+                    None => bail!(
+                        "item {item_id} has a pending cross-project transfer ({pending_key}); \
+                         finish that transfer before moving {item_id} locally"
+                    ),
+                }
             }
             // Publish destination creation, optional active change link, and source
             // retirement in one recoverable write.
@@ -2732,13 +2735,39 @@ pub(crate) fn transfer(
                 existing.id.clone()
             } else {
                 if let Some(key) = pending_key {
-                    verify_no_committed_pending_transfer(
-                        &known_journals,
-                        item_id,
-                        key,
-                        source_item.pending_transfer_target.as_ref(),
-                        Some((target_proj_slug, target_series.file.as_str())),
-                    )?;
+                    // An in-doubt pending transfer may only complete against the
+                    // destination that already holds `key` (matched above) or retry
+                    // the exact originally targeted `(project, series)` when nothing
+                    // was written yet. Silently retargeting to another destination is
+                    // always refused because an unreachable, moved, or rebound target
+                    // may already hold the committed half-transfer.
+                    match source_item.pending_transfer_target.as_ref() {
+                        Some(target) if target == &current_target => {}
+                        Some(target) => bail!(
+                            "item {item_id} has a pending cross-project transfer to {}::{}; \
+                             retry that destination to finish it instead of transferring to {}::{}",
+                            target.project,
+                            target.file,
+                            current_target.project,
+                            current_target.file
+                        ),
+                        None => bail!(
+                            "item {item_id} has a pending cross-project transfer ({key}) whose \
+                             destination does not match {}::{}; finish that transfer at its \
+                             original destination first",
+                            current_target.project,
+                            current_target.file
+                        ),
+                    }
+                    if let Some((other_slug, other_file, other_item)) =
+                        find_transfer_key_in_known(&known_journals, key)?
+                    {
+                        bail!(
+                            "item {item_id} already landed as {other_item} in \
+                             {other_slug}::{other_file} under a pending transfer; finish that \
+                             transfer before moving {item_id} elsewhere"
+                        );
+                    }
                 }
                 if let Some(legacy) = target_series.items.iter().find(|item| {
                     item.transferred_from.as_ref() == Some(&provenance)
@@ -2754,22 +2783,7 @@ pub(crate) fn transfer(
                     );
                 }
                 let expected_key = match pending_key {
-                    Some(key) => {
-                        if source_item.pending_transfer_target.as_ref() != Some(&current_target) {
-                            let mut pending_event = JournalEvent::base(
-                                ctx,
-                                now,
-                                &source_topic,
-                                "item-transfer-pending",
-                            );
-                            pending_event.file = Some(source_file.clone());
-                            pending_event.series.item = Some(item_id.to_string());
-                            pending_event.series.transfer_key = Some(key.to_string());
-                            pending_event.series.transfer_target = Some(current_target);
-                            append_event(ctx, &here, &pending_event)?;
-                        }
-                        key.to_string()
-                    }
+                    Some(key) => key.to_string(),
                     None => {
                         let key = crate::ids::new_identifier();
                         let mut pending_event =
@@ -2830,62 +2844,9 @@ pub(crate) fn transfer(
     })
 }
 
-/// Fail closed before retargeting an item with a pending cross-project transfer
-/// key: refuse if the key already landed in any registered journal, if any
-/// registered journal cannot be inspected, or if the previously recorded
-/// destination journal is no longer registered or inspectable.
-fn verify_no_committed_pending_transfer(
-    known: &[(String, std::path::PathBuf)],
-    item_id: &str,
-    pending_key: &str,
-    pending_target: Option<&RelatedSeries>,
-    current_target: Option<(&str, &str)>,
-) -> Result<()> {
-    if let Some((other_slug, other_file, other_item)) =
-        find_transfer_key_in_known(known, pending_key)?
-    {
-        bail!(
-            "item {item_id} already landed as {other_item} in \
-             {other_slug}::{other_file} under a pending transfer; finish that \
-             transfer before moving {item_id} elsewhere"
-        );
-    }
-    if let Some(target) = pending_target {
-        let same_target = current_target == Some((target.project.as_str(), target.file.as_str()));
-        if !same_target {
-            let target_dirs: Vec<&std::path::PathBuf> = known
-                .iter()
-                .filter(|(slug, _)| slug == &target.project)
-                .map(|(_, dir)| dir)
-                .collect();
-            if target_dirs.is_empty() {
-                bail!(
-                    "item {item_id} has a pending transfer to {}::{} whose journal is no \
-                     longer registered; restore it to verify or finish that transfer before \
-                     moving {item_id} elsewhere",
-                    target.project,
-                    target.file
-                );
-            }
-            for dir in target_dirs {
-                std::fs::metadata(dir).with_context(|| {
-                    format!(
-                        "item {item_id} has a pending transfer to {}::{} whose journal \
-                         directory ({}) cannot be inspected",
-                        target.project,
-                        target.file,
-                        dir.display()
-                    )
-                })?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Search registered journals for any series item already carrying `key`.
 /// Unreadable registered journals return an error rather than being skipped so
-/// retargeting fails closed instead of duplicating a committed half-transfer.
+/// retries fail closed instead of duplicating a committed half-transfer.
 fn find_transfer_key_in_known(
     known: &[(String, std::path::PathBuf)],
     key: &str,

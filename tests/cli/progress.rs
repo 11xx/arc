@@ -3364,7 +3364,7 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("already landed as i5"));
+        .stderr(predicates::str::contains("pending cross-project transfer"));
 
     // Retargeting to a local same-journal series must also refuse rather than
     // duplicating i5 locally.
@@ -3382,7 +3382,7 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("already landed as i5"));
+        .stderr(predicates::str::contains("pending cross-project transfer"));
     assert_eq!(
         series(
             &report(&repo, &repo.root, &[&local_retarget]),
@@ -3394,15 +3394,83 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         1
     );
 
-    // If a registered journal holding the pending destination becomes unreadable,
-    // retargeting to a third project or local series must fail closed rather than
-    // duplicating the pending transfer key.
+    // Retargeting to a third project must stay refused even when the original
+    // destination journal's events.jsonl is moved aside, made unreadable, or
+    // its slug is rebound to an unrelated journal directory.
+    let third = sibling_project(&repo, "third-xfer");
+    let third_dest = start(&repo, &third, "third-dest", &["Third"]);
+    let other_events_path = other_dir.join("events.jsonl");
+    let moved_aside_events = other_dir.join("events.jsonl.aside");
+    fs::rename(&other_events_path, &moved_aside_events).unwrap();
+    let retarget_aside = repo
+        .arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &format!("third-xfer::{third_dest}"),
+            "--reason",
+            "retarget while dest events moved aside",
+        ])
+        .output()
+        .unwrap();
+    fs::rename(&moved_aside_events, &other_events_path).unwrap();
+    assert!(
+        !retarget_aside.status.success(),
+        "retarget succeeded when original dest events.jsonl was moved aside"
+    );
+    assert!(
+        String::from_utf8_lossy(&retarget_aside.stderr).contains("pending cross-project transfer"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&retarget_aside.stderr)
+    );
+
+    let decoy_dir = repo.home.join("decoy-journals").join("other-xfer");
+    fs::create_dir_all(&decoy_dir).unwrap();
+    let config_path = cfg_dir.join("config.toml");
+    let saved_config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            "[journals.dirs]\n\"{}\" = \"{}\"\n\"{}\" = \"{}\"\n",
+            repo.root.display(),
+            moved_dir.display(),
+            other.display(),
+            decoy_dir.display(),
+        ),
+    )
+    .unwrap();
+    let retarget_rebound = repo
+        .arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &format!("third-xfer::{third_dest}"),
+            "--reason",
+            "retarget while dest slug rebound",
+        ])
+        .output()
+        .unwrap();
+    fs::write(&config_path, &saved_config).unwrap();
+    assert!(
+        !retarget_rebound.status.success(),
+        "retarget succeeded when original dest slug was rebound to an unrelated journal"
+    );
+    assert!(
+        String::from_utf8_lossy(&retarget_rebound.stderr)
+            .contains("pending cross-project transfer"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&retarget_rebound.stderr)
+    );
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let third = sibling_project(&repo, "third-xfer");
-        let third_dest = start(&repo, &third, "third-dest", &["Third"]);
-        let other_events_path = other_dir.join("events.jsonl");
         let saved_mode = fs::metadata(&other_events_path)
             .unwrap()
             .permissions()
@@ -3440,12 +3508,6 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         assert!(
             !retarget_third.status.success(),
             "retarget to third project succeeded while dest journal was unreadable"
-        );
-        assert!(
-            String::from_utf8_lossy(&retarget_third.stderr)
-                .contains("cannot inspect registered journal"),
-            "unexpected stderr: {}",
-            String::from_utf8_lossy(&retarget_third.stderr)
         );
         assert!(
             !retarget_local.status.success(),
