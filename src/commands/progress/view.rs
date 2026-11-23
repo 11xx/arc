@@ -701,8 +701,8 @@ ship-it · 1 added since the start
         assert_eq!(view.age("2026-01-02T11:59:59Z"), "just now");
     }
 
-    fn waiting(heading: Option<&str>) -> Option<super::super::Waiting> {
-        Some(super::super::Waiting {
+    fn waiting(heading: Option<&str>) -> Option<super::super::reader::Waiting> {
+        Some(super::super::reader::Waiting {
             file: "20260102T000000Z-store-discussion.md".to_string(),
             question: "q1".to_string(),
             heading: heading.map(str::to_string),
@@ -727,7 +727,7 @@ ship-it · 1 added since the start
         remote.project = Some("tapes".to_string());
         remote.project_slug = Some("home-tapes".to_string());
         remote.waiting = waiting(None);
-        remote.dispatch = Some(super::super::Dispatch {
+        remote.dispatch = Some(super::super::reader::Dispatch {
             to: "codex:gpt-5#high".to_string(),
             route: "gpt-5#high via codex".to_string(),
             at: "2026-01-02T11:00:00Z".to_string(),
@@ -735,7 +735,7 @@ ship-it · 1 added since the start
         });
         let mut bound = row("i3", "Local slice", "opened");
         bound.change = Some("local-def456".to_string());
-        bound.dispatch = Some(super::super::Dispatch {
+        bound.dispatch = Some(super::super::reader::Dispatch {
             to: "gpt-5#high via codex".to_string(),
             route: "gpt-5#high via codex".to_string(),
             at: "2026-01-02T09:00:00Z".to_string(),
