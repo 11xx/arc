@@ -702,3 +702,97 @@ fn checkpoint_binds_milestone_series_and_diffs_items_and_review_debt() {
     let text_after = stdout(repo.arc(&wt).args(["checkpoint", "show", "rc3-handover"]));
     assert!(text_after.contains("discharged since"), "{text_after}");
 }
+
+#[test]
+fn checkpoint_distinguishes_unavailable_baseline_from_empty_and_deduplicates_foreign_series() {
+    let repo = Repo::new();
+    let other = super::progress::sibling_project(&repo, "remote-cp");
+    let wt = repo.root.clone();
+
+    let remote_series = stdout(repo.arc(&other).args([
+        "progress",
+        "start",
+        "ext-track",
+        "--title",
+        "External Track",
+        "--item",
+        "Pre-existing item",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let ms = stdout(repo.arc(&wt).args([
+        "milestone",
+        "start",
+        "cp-baseline",
+        "--title",
+        "Baseline test",
+    ]))
+    .trim()
+    .to_string();
+    stdout(repo.arc(&wt).args([
+        "milestone",
+        "track",
+        "add",
+        &ms,
+        &format!("remote-cp::{remote_series}"),
+        "--label",
+        "ext",
+    ]));
+
+    // Temporarily move the foreign journal aside so the track is unavailable
+    // when the checkpoint is recorded.
+    let other_journal = PathBuf::from(
+        json_stdout(repo.arc(&other).args(["progress", "--json"]))["journal_dir"]
+            .as_str()
+            .unwrap(),
+    );
+    let parked = other_journal.with_extension("parked");
+    fs::rename(&other_journal, &parked).unwrap();
+
+    stdout(repo.arc(&wt).args([
+        "checkpoint",
+        "record",
+        "while-unavailable",
+        "--milestone",
+        &ms,
+    ]));
+
+    // Restore the foreign journal. Showing the checkpoint must preserve
+    // `unavailable_then` and NOT fabricate `added-since` for pre-existing items.
+    fs::rename(&parked, &other_journal).unwrap();
+    let view = show(&repo, "while-unavailable");
+    let diff = &view["series"][0];
+    assert!(diff["unavailable"].is_null(), "{diff}");
+    assert!(diff["unavailable_then"].is_string(), "{diff}");
+    assert_eq!(diff["added_since"].as_array().unwrap().len(), 0);
+    assert_eq!(diff["items"][0]["id"], "i1");
+    assert_eq!(diff["items"][0]["change"], "baseline-unavailable");
+
+    let text = stdout(
+        repo.arc(&wt)
+            .args(["checkpoint", "show", "while-unavailable"]),
+    );
+    assert!(
+        text.contains("baseline unavailable at checkpoint"),
+        "{text}"
+    );
+
+    // Passing the same foreign `--series` twice shares one read and deduplicates.
+    let spec = format!("remote-cp::{remote_series}");
+    let rec = stdout(repo.arc(&wt).args([
+        "checkpoint",
+        "record",
+        "dedup-foreign",
+        "--series",
+        &spec,
+        "--series",
+        &spec,
+    ]));
+    assert!(rec.contains("bound series: 1"), "{rec}");
+    let dedup_view = show(&repo, "dedup-foreign");
+    assert_eq!(dedup_view["series"].as_array().unwrap().len(), 1);
+}

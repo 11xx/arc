@@ -242,10 +242,6 @@ pub fn record_checkpoint(
     }
     drop(_repository_events);
 
-    if let Some(ms_file) = bound_milestone.as_deref().filter(|_| milestone_was_open) {
-        milestone::bind_checkpoint(ctx, ms_file, &name)?;
-    }
-
     println!("checkpoint: {name}");
     println!("revision: {revision}");
     println!("tree: {tree}");
@@ -265,6 +261,18 @@ pub fn record_checkpoint(
     println!("open todos: {todo_count}");
     println!("open debts: {debt_count}");
     println!("event: {}", event.event_id);
+
+    if let Some(ms_file) = bound_milestone.as_deref().filter(|_| milestone_was_open) {
+        if let Err(error) = milestone::bind_checkpoint(ctx, ms_file, &name) {
+            bail!(
+                "checkpoint {name} was committed at {revision} (event {}), \
+                 but binding it to milestone {ms_file} failed: {error:#}\n\
+                 Do not re-run `arc checkpoint record {name}`; \
+                 bind it later if the milestone is open with: arc milestone checkpoint {ms_file} {name}",
+                event.event_id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -276,14 +284,30 @@ fn snapshot_bindings(
     if milestone_name.is_none() && series_specs.is_empty() {
         return Ok((None, false, None));
     }
+    let now = Utc::now();
+    let here = journal::resolve_dir(&ctx.cwd)?;
+    let local_events = journal::read_events(&here)?;
+    let local_ledger = Ledger::local(ctx);
+    let registry = Registry::lazy();
+    registry.seed_events(&here, local_events.clone());
+
     let mut bound_milestone = None;
     let mut milestone_was_open = false;
     let mut snapshots: Vec<CheckpointSeries> = Vec::new();
     let mut seen: BTreeSet<(Option<String>, String)> = BTreeSet::new();
 
     if let Some(ms_name) = milestone_name {
-        let doc = milestone_matrix::build(ctx, Some(ms_name), false, false)?;
-        let Some(ms) = doc.milestones.into_iter().next() else {
+        let milestones = milestone_matrix::build_with_registry(
+            &here,
+            &local_events,
+            &local_ledger,
+            &registry,
+            Some(ms_name),
+            false,
+            false,
+            now,
+        )?;
+        let Some(ms) = milestones.into_iter().next() else {
             bail!("no milestone named {ms_name:?}");
         };
         milestone_was_open = ms.closure.is_none();
@@ -302,49 +326,71 @@ fn snapshot_bindings(
     }
 
     if !series_specs.is_empty() {
-        let now = Utc::now();
-        let here = journal::resolve_dir(&ctx.cwd)?;
-        let local_events = journal::read_events(&here)?;
-        let local_ledger = Ledger::local(ctx);
-        let registry = Registry::read()?;
-        let own = registry.slug_of(&here).map(str::to_string);
         let local_questions = PersonQuestions::new(&here, &local_events);
         let local_reader = Reader::new(
             &local_ledger,
-            own.as_deref(),
+            &here,
+            None,
             &local_events,
             &registry,
             &local_questions,
             now,
         );
+        let mut seen_specs: BTreeSet<&str> = BTreeSet::new();
 
         for spec in series_specs {
+            if !seen_specs.insert(spec.as_str()) {
+                continue;
+            }
             if let Some((prefix, remote_name)) = spec.split_once(journal::REFERENCE_SEPARATOR) {
-                let project = journal::registered_project(prefix)?;
-                let remote_events = journal::read_events(&project.journal_dir)?;
-                let s = series::named_in(&remote_events, &project.journal_dir, remote_name)
-                    .with_context(|| {
-                        format!("cannot read series {remote_name:?} in {}", project.label())
-                    })?;
-                if !seen.insert((Some(project.slug.clone()), s.file.clone())) {
+                let registered = match registry.resolve(prefix) {
+                    Some(project) => project,
+                    None => {
+                        let looked_up = journal::registered_project(prefix)?;
+                        registry
+                            .by_dir(&looked_up.journal_dir)
+                            .with_context(|| format!("no journal is registered for {prefix}"))?
+                    }
+                };
+                if super::progress::reader::same_dir(&registered.journal_dir, &here) {
+                    let s = series::named_in(&local_events, &here, remote_name)?;
+                    if !seen.insert((None, s.file.clone())) {
+                        continue;
+                    }
+                    let rows = local_reader.rows(&s)?;
+                    snapshots.push(CheckpointSeries {
+                        project: None,
+                        file: s.file,
+                        title: Some(s.title),
+                        role: None,
+                        unavailable: None,
+                        items: rows.iter().map(snapshot_item).collect(),
+                    });
                     continue;
                 }
-                let questions = PersonQuestions::new(&project.journal_dir, &remote_events);
-                let ledger = match project.anchor.as_deref() {
-                    Some(anchor) => Ledger::at(anchor),
-                    None => Ledger::none(&project.journal_dir),
-                };
+                let remote_events = registered
+                    .events()
+                    .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+                let s = series::named_in(remote_events, &registered.journal_dir, remote_name)
+                    .with_context(|| {
+                        format!("cannot read series {remote_name:?} in {}", registered.label)
+                    })?;
+                if !seen.insert((Some(registered.slug.clone()), s.file.clone())) {
+                    continue;
+                }
+                let questions = PersonQuestions::new(&registered.journal_dir, remote_events);
                 let reader = Reader::new(
-                    &ledger,
-                    Some(&project.slug),
-                    &remote_events,
+                    &registered.ledger,
+                    &registered.journal_dir,
+                    Some(&registered.slug),
+                    remote_events,
                     &registry,
                     &questions,
                     now,
                 );
                 let rows = reader.rows(&s)?;
                 snapshots.push(CheckpointSeries {
-                    project: Some(project.slug),
+                    project: Some(registered.slug.clone()),
                     file: s.file,
                     title: Some(s.title),
                     role: None,
@@ -534,7 +580,8 @@ struct SeriesItemDiff {
     stage_then: Option<String>,
     stage_now: String,
     /// `completed-since`, `transferred-since`, `added-since`,
-    /// `dropped-since`, `split-since`, `changed`, or `unchanged`.
+    /// `dropped-since`, `split-since`, `changed`, `unchanged`, or
+    /// `baseline-unavailable`.
     change: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     wave: Option<String>,
@@ -553,6 +600,8 @@ struct SeriesDiffView {
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_then: Option<String>,
     items_then: usize,
     completed_since: Vec<SeriesItemDiff>,
     transferred_since: Vec<SeriesItemDiff>,
@@ -820,12 +869,13 @@ fn diff_bound_series(ctx: &Ctx, snapshots: &[CheckpointSeries]) -> Result<Vec<Se
     let here = journal::resolve_dir(&ctx.cwd)?;
     let local_events = journal::read_events(&here)?;
     let local_ledger = Ledger::local(ctx);
-    let registry = Registry::read()?;
-    let own = registry.slug_of(&here).map(str::to_string);
+    let registry = Registry::lazy();
+    registry.seed_events(&here, local_events.clone());
     let local_questions = PersonQuestions::new(&here, &local_events);
     let local_reader = Reader::new(
         &local_ledger,
-        own.as_deref(),
+        &here,
+        None,
         &local_events,
         &registry,
         &local_questions,
@@ -834,43 +884,46 @@ fn diff_bound_series(ctx: &Ctx, snapshots: &[CheckpointSeries]) -> Result<Vec<Se
 
     let mut out = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
-        let current_rows: std::result::Result<(Option<String>, Vec<ItemRow>), String> = match snap
-            .project
-            .as_deref()
-            .filter(|slug| Some(*slug) != own.as_deref())
-        {
-            None => match series::replay(&local_events, &snap.file) {
-                None => Err(format!("no series {}", snap.file)),
-                Some(s) => local_reader
-                    .rows(&s)
-                    .map(|rows| (Some(s.title), rows))
-                    .map_err(|e| format!("{e:#}").replace(['\n', '\r'], " ")),
-            },
-            Some(slug) => match registry.get(slug) {
-                None => Err(format!("no journal is registered as {slug}")),
-                Some(project) => match project.events() {
-                    Err(reason) => Err(reason.to_string()),
-                    Ok(events) => match series::replay(events, &snap.file) {
-                        None => Err(format!("{slug} holds no series {}", snap.file)),
-                        Some(s) => {
-                            let questions = PersonQuestions::new(&project.journal_dir, events);
-                            let reader = Reader::new(
-                                &project.ledger,
-                                Some(slug),
-                                events,
-                                &registry,
-                                &questions,
-                                now,
-                            );
-                            reader
-                                .rows(&s)
-                                .map(|rows| (Some(s.title), rows))
-                                .map_err(|e| format!("{e:#}").replace(['\n', '\r'], " "))
-                        }
+        let foreign_slug = snap.project.as_deref().filter(|slug| {
+            !registry
+                .by_dir(&here)
+                .is_some_and(|project| project.slug == *slug)
+        });
+        let current_rows: std::result::Result<(Option<String>, Vec<ItemRow>), String> =
+            match foreign_slug {
+                None => match series::replay(&local_events, &snap.file) {
+                    None => Err(format!("no series {}", snap.file)),
+                    Some(s) => local_reader
+                        .rows(&s)
+                        .map(|rows| (Some(s.title), rows))
+                        .map_err(|e| format!("{e:#}").replace(['\n', '\r'], " ")),
+                },
+                Some(slug) => match registry.get(slug) {
+                    None => Err(format!("no journal is registered as {slug}")),
+                    Some(project) => match project.events() {
+                        Err(reason) => Err(reason.to_string()),
+                        Ok(events) => match series::replay(events, &snap.file) {
+                            None => Err(format!("{slug} holds no series {}", snap.file)),
+                            Some(s) => {
+                                let questions = PersonQuestions::new(&project.journal_dir, events);
+                                let reader = Reader::new(
+                                    &project.ledger,
+                                    &project.journal_dir,
+                                    Some(slug),
+                                    events,
+                                    &registry,
+                                    &questions,
+                                    now,
+                                );
+                                reader
+                                    .rows(&s)
+                                    .map(|rows| (Some(s.title), rows))
+                                    .map_err(|e| format!("{e:#}").replace(['\n', '\r'], " "))
+                            }
+                        },
                     },
                 },
-            },
-        };
+            };
 
         match current_rows {
             Err(reason) => out.push(SeriesDiffView {
@@ -879,12 +932,43 @@ fn diff_bound_series(ctx: &Ctx, snapshots: &[CheckpointSeries]) -> Result<Vec<Se
                 title: snap.title.clone(),
                 role: snap.role.clone(),
                 unavailable: Some(reason),
+                unavailable_then: snap.unavailable.clone(),
                 items_then: snap.items.len(),
                 completed_since: Vec::new(),
                 transferred_since: Vec::new(),
                 added_since: Vec::new(),
                 items: Vec::new(),
             }),
+            Ok((title, rows)) if snap.unavailable.is_some() => {
+                // Baseline was unavailable at checkpoint recording time, not
+                // observed-empty; report current items without fabricating
+                // `added-since` deltas.
+                let items = rows
+                    .iter()
+                    .map(|row| SeriesItemDiff {
+                        id: row.id.clone(),
+                        title: row.title.clone(),
+                        stage_then: None,
+                        stage_now: row.stage.to_string(),
+                        change: "baseline-unavailable",
+                        wave: row.wave.clone(),
+                        transferred_to: row.transferred_to.as_ref().map(ToString::to_string),
+                    })
+                    .collect();
+                out.push(SeriesDiffView {
+                    project: snap.project.clone(),
+                    file: snap.file.clone(),
+                    title: title.or_else(|| snap.title.clone()),
+                    role: snap.role.clone(),
+                    unavailable: None,
+                    unavailable_then: snap.unavailable.clone(),
+                    items_then: 0,
+                    completed_since: Vec::new(),
+                    transferred_since: Vec::new(),
+                    added_since: Vec::new(),
+                    items,
+                });
+            }
             Ok((title, rows)) => {
                 let then_map: BTreeMap<&str, &CheckpointSeriesItem> = snap
                     .items
@@ -954,6 +1038,7 @@ fn diff_bound_series(ctx: &Ctx, snapshots: &[CheckpointSeries]) -> Result<Vec<Se
                     title: title.or_else(|| snap.title.clone()),
                     role: snap.role.clone(),
                     unavailable: None,
+                    unavailable_then: None,
                     items_then: snap.items.len(),
                     completed_since,
                     transferred_since,
@@ -1096,6 +1181,13 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
                 .unwrap_or_default();
             if let Some(reason) = &s.unavailable {
                 println!("  {name}{role}: unavailable ({reason})");
+                continue;
+            }
+            if let Some(then_reason) = &s.unavailable_then {
+                println!(
+                    "  {name}{role}: baseline unavailable at checkpoint ({then_reason}); current items: {}",
+                    s.items.len()
+                );
                 continue;
             }
             println!(

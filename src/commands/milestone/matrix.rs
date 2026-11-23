@@ -238,6 +238,52 @@ pub(crate) fn build(
     })
 }
 
+/// Build milestone reports using a caller-supplied shared [`Registry`],
+/// already-read local journal events, and local [`Ledger`] so callers such as
+/// `arc checkpoint record` share caches across milestone tracks and explicit
+/// `--series` bindings without reopening foreign journals or ledgers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_with_registry(
+    dir: &Path,
+    raw_events: &[JournalEvent],
+    local_ledger: &Ledger,
+    registry: &Registry,
+    name: Option<&str>,
+    ready_only: bool,
+    ignore_waves: bool,
+    now: DateTime<Utc>,
+) -> Result<Vec<MilestoneReport>> {
+    let chosen = match name {
+        Some(name) => vec![milestone::named_in(raw_events, dir, name)?],
+        None => milestone::active_in(raw_events),
+    };
+    let local_questions = PersonQuestions::new(dir, raw_events);
+    let local_reader = Reader::new(
+        local_ledger,
+        dir,
+        None,
+        raw_events,
+        registry,
+        &local_questions,
+        now,
+    );
+    let mut reports = Vec::with_capacity(chosen.len());
+    for ms in &chosen {
+        reports.push(build_one(
+            ms,
+            dir,
+            raw_events,
+            &local_reader,
+            registry,
+            None,
+            ready_only,
+            ignore_waves,
+            now,
+        ));
+    }
+    Ok(reports)
+}
+
 fn build_in(
     dir: &Path,
     raw_events: Vec<JournalEvent>,

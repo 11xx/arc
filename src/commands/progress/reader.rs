@@ -737,6 +737,19 @@ impl Registry {
         }
     }
 
+    /// Look up one registered project by unique slug or unique label.
+    pub(crate) fn resolve(&self, name: &str) -> Option<&Registered> {
+        if let Some(by_slug) = self.get(name) {
+            return Some(by_slug);
+        }
+        let mut by_label = self
+            .projects()
+            .iter()
+            .filter(|project| project.label == name);
+        let first = by_label.next()?;
+        by_label.next().is_none().then_some(first)
+    }
+
     pub(crate) fn label(&self, slug: &str) -> String {
         self.get(slug)
             .map_or_else(|| slug.to_string(), |project| project.label.clone())
