@@ -2469,20 +2469,34 @@ pub(crate) fn transfer(
             .cloned(),
     };
 
-    // For cross-project transfers, establish this journal's registered slug so
-    // the destination can record provenance and re-scope local references.
+    // For cross-project transfers, establish this journal's unique registered
+    // slug so the destination can record unambiguous provenance and re-scope
+    // local references without colliding with another same-basename journal.
     let here_slug: Option<String> = if target_project.is_some() {
         let cfg = crate::config::load()?;
-        let found = crate::registry::known_journals(&cfg)?
-            .into_iter()
-            .find(|(_, journal)| canonical(journal) == canonical(&here))
-            .map(|(slug, _)| slug);
+        let known = crate::registry::known_journals(&cfg)?;
+        let here_canon = canonical(&here);
+        let found = known
+            .iter()
+            .find(|(_, journal)| canonical(journal) == here_canon)
+            .map(|(slug, _)| slug.clone());
         let Some(slug) = found else {
             bail!(
                 "this project's journal is not registered; bind or record a journal entry \
                  before transferring items to another project"
             );
         };
+        let same_slug_count = known
+            .iter()
+            .filter(|(other_slug, _)| *other_slug == slug)
+            .count();
+        if same_slug_count > 1 {
+            bail!(
+                "this project's journal slug {slug:?} is ambiguous across {same_slug_count} \
+                 registered journals; give each journal a unique directory name before \
+                 transferring items across projects"
+            );
+        }
         Some(slug)
     } else {
         None
