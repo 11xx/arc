@@ -47,13 +47,18 @@ pub fn begin(
         item.as_ref().and_then(|target| target.source_spec()),
     ) {
         (Some(explicit), Some(item_source)) => {
-            if let Some(item_ref) = super::progress::item_source_journal_ref(item_source)? {
-                if !crate::journal::same_artifact_reference(ctx, &explicit, &item_ref)? {
-                    bail!(
-                        "--from-journal {explicit} differs from progress item source {item_source}; \
-                         pass the matching artifact or update the item's source with `arc progress source`"
-                    );
-                }
+            let Some(item_ref) = super::progress::item_source_journal_ref(item_source)? else {
+                bail!(
+                    "progress item records source {item_source}, whose project is not \
+                     registered; refusing --from-journal {explicit} because source identity \
+                     cannot be verified"
+                );
+            };
+            if !crate::journal::same_artifact_reference(ctx, &explicit, &item_ref)? {
+                bail!(
+                    "--from-journal {explicit} differs from progress item source {item_source}; \
+                     pass the matching artifact or update the item's source with `arc progress source`"
+                );
             }
             Some(explicit)
         }
@@ -76,6 +81,12 @@ pub fn begin(
         .as_deref()
         .map(|reference| crate::journal::lock_reference_transition(ctx, reference))
         .transpose()?;
+    // Revalidate the progress item's recorded link and source once the journal
+    // transition lock is held so a concurrent `progress source` edit cannot
+    // cause `begin` to promote one artifact and attach to another.
+    if let Some(target) = &item {
+        super::progress::revalidate_begin_item(ctx, target)?;
+    }
     // Validate the journal source before writing anything: a bad
     // --from-journal must fail cleanly with no branch, worktree, or event.
     let journal_kind = from_journal

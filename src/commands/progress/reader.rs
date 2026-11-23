@@ -660,6 +660,7 @@ impl<'a> PersonQuestions<'a> {
 /// its own journal.
 pub(crate) struct Reader<'a> {
     pub(crate) home: &'a Ledger,
+    pub(crate) home_dir: &'a Path,
     pub(crate) home_slug: Option<&'a str>,
     pub(crate) home_events: &'a [JournalEvent],
     pub(crate) registry: &'a Registry,
@@ -671,6 +672,7 @@ pub(crate) struct Reader<'a> {
 impl<'a> Reader<'a> {
     pub(crate) fn new(
         home: &'a Ledger,
+        home_dir: &'a Path,
         home_slug: Option<&'a str>,
         home_events: &'a [JournalEvent],
         registry: &'a Registry,
@@ -679,6 +681,7 @@ impl<'a> Reader<'a> {
     ) -> Self {
         Self {
             home,
+            home_dir,
             home_slug,
             home_events,
             registry,
@@ -702,19 +705,23 @@ impl<'a> Reader<'a> {
             .project
             .as_deref()
             .filter(|slug| Some(*slug) != self.home_slug);
-        let events: Option<&[JournalEvent]> = match foreign {
-            None => Some(self.home_events),
-            Some(slug) => self
-                .registry
-                .get(slug)
-                .and_then(|project| project.events().ok()),
+        let resolved: Option<(&[JournalEvent], &Path)> = match foreign {
+            None => Some((self.home_events, self.home_dir)),
+            Some(slug) => self.registry.get(slug).and_then(|project| {
+                project
+                    .events()
+                    .ok()
+                    .map(|events| (events, project.journal_dir.as_path()))
+            }),
         };
-        let (status, claim) = match events {
+        let (status, claim) = match resolved {
             None => ("unknown", None),
-            Some(events) => {
+            Some((events, journal_dir)) => {
                 if crate::journal::is_consumed(events, &source.file) {
                     ("consumed", None)
-                } else {
+                } else if std::fs::symlink_metadata(journal_dir.join(&source.file))
+                    .is_ok_and(|meta| meta.is_file())
+                {
                     let claim =
                         crate::journal::active_artifact_claim(events, &source.file, self.now).map(
                             |active| PreChangeClaim {
@@ -725,6 +732,14 @@ impl<'a> Reader<'a> {
                             },
                         );
                     ("open", claim)
+                } else if std::fs::symlink_metadata(
+                    crate::journal::archive_dir(journal_dir).join(&source.file),
+                )
+                .is_ok_and(|meta| meta.is_file())
+                {
+                    ("archived", None)
+                } else {
+                    ("absent", None)
                 }
             }
         };
@@ -998,7 +1013,15 @@ fn related_report(
                 .and_then(|project| project.events().ok())
                 .unwrap_or(&[]);
             let questions = PersonQuestions::new(&dir, events);
-            let reader = Reader::new(home, Some(&report.slug), events, registry, &questions, now);
+            let reader = Reader::new(
+                home,
+                &dir,
+                Some(&report.slug),
+                events,
+                registry,
+                &questions,
+                now,
+            );
             // A related series is read on the way, never relied on: a ledger
             // that cannot be read makes it unavailable, not the report.
             let rows = match reader.rows(&series) {
@@ -1047,7 +1070,15 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
         &local_events
     };
     let questions = PersonQuestions::new(&dir, events);
-    let reader = Reader::new(&ledger, own.as_deref(), events, &registry, &questions, now);
+    let reader = Reader::new(
+        &ledger,
+        &dir,
+        own.as_deref(),
+        events,
+        &registry,
+        &questions,
+        now,
+    );
     let mut reads: Vec<(RelatedSeries, RelatedRead, Vec<String>)> = Vec::new();
     let mut reports = Vec::new();
     for series in &chosen {
@@ -1168,6 +1199,7 @@ pub(crate) fn series_of(
     let questions = PersonQuestions::new(journal_dir, events);
     let reader = Reader::new(
         home,
+        journal_dir,
         home_slug.as_deref(),
         events,
         registry,

@@ -1209,6 +1209,7 @@ pub(crate) fn link(
     id: &str,
     link: &ItemLink,
     expected: Option<&ItemLink>,
+    expected_source: Option<Option<&ItemSource>>,
     replaceable: bool,
 ) -> Result<()> {
     let open = open_for_write(ctx, name)?;
@@ -1221,6 +1222,16 @@ pub(crate) fn link(
                 .as_ref()
                 .map_or_else(|| "nothing".to_string(), ToString::to_string)
         );
+    }
+    if let Some(expected_source) = expected_source {
+        if item.source.as_ref() != expected_source {
+            bail!(
+                "item {id} changed its source to {} since this command read it; read the series again",
+                item.source
+                    .as_ref()
+                    .map_or_else(|| "nothing".to_string(), ToString::to_string)
+            );
+        }
     }
     if item.state == ItemState::Done {
         bail!("item {id} is done; reopen it before linking a change");

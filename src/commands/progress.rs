@@ -400,6 +400,7 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
                 &target.item,
                 &link,
                 target.expected.as_ref(),
+                None,
                 target.replaceable,
             )?;
             println!("linked {item} to {shown}");
@@ -585,6 +586,27 @@ pub(crate) fn preflight_begin_item(ctx: &Ctx, spec: &str) -> Result<ItemTarget> 
     Ok(target)
 }
 
+/// Revalidate that the item's recorded link and source still match `target`
+/// (called under the journal transition lock before promoting a source).
+pub(crate) fn revalidate_begin_item(ctx: &Ctx, target: &ItemTarget) -> Result<()> {
+    let (_, current_link, current_source) = series::linkable(ctx, &target.series, &target.item)?;
+    if current_link != target.expected {
+        bail!(
+            "item {} of {} changed its link since preflight; retry `arc begin`",
+            target.item,
+            target.series
+        );
+    }
+    if current_source != target.source {
+        bail!(
+            "item {} of {} changed its source since preflight; retry `arc begin`",
+            target.item,
+            target.series
+        );
+    }
+    Ok(())
+}
+
 /// Link the item a `begin --item` named to the change it opened.
 pub(crate) fn link_opened(ctx: &Ctx, target: &ItemTarget, change_id: &str) -> Result<()> {
     let link = ItemLink {
@@ -597,6 +619,7 @@ pub(crate) fn link_opened(ctx: &Ctx, target: &ItemTarget, change_id: &str) -> Re
         &target.item,
         &link,
         target.expected.as_ref(),
+        Some(target.source.as_ref()),
         target.replaceable,
     )?;
     println!("item: {}:{}", target.series, target.item);

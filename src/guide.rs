@@ -6786,9 +6786,9 @@ PROGRESS
   journal artifact (`todo`, `feature-request`, `plan`, or `handoff`), either a
   bare filename in this journal or `<project>::<file>` in another registered
   project; `unsource` removes it. The report derives whether that source is
-  `open`, `consumed`, or `unknown` (unreadable foreign journal) and flags
-  drift when a `done` or `integrated` item's non-plan source filing remains
-  open.
+  `open`, `consumed`, `archived`, `absent`, or `unknown` (unreadable foreign
+  journal) and flags drift only when a `done` or `integrated` item's non-plan
+  source filing remains live and `open`.
   `arc begin <slug> --item <series>:<item>` links when the change
   opens, checking the item before anything is written; `start` ends by
   naming that call. When that item carries a `--from` source that is still

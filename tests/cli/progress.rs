@@ -2457,3 +2457,59 @@ fn pre_change_claims_surface_from_source_claim_and_live_lane() {
     assert_eq!(i1["stage"], "opened");
     assert!(i1["claimed"].is_null());
 }
+
+#[test]
+fn archived_source_has_no_drift_and_unregistered_foreign_source_refuses_explicit_from_journal() {
+    let repo = Repo::new();
+
+    // 1. A shelved (cold-archived, unconsumed) todo reports status=archived and drift=false when done.
+    let (_, todo) = journal_artifact(&repo, "shelved-work", "todo", "# Shelved work\n");
+    let file = start(&repo, &repo.root, "archive-drift", &["Shelved item"]);
+    progress(&repo, &repo.root, &["source", &file, "i1", &todo]);
+    let dir = journal_dir(&repo, &repo.root);
+    let mut cold = dir.as_os_str().to_os_string();
+    cold.push("-archive");
+    let archive_dir = std::path::PathBuf::from(cold);
+    fs::create_dir_all(&archive_dir).unwrap();
+    fs::rename(dir.join(&todo), archive_dir.join(&todo)).unwrap();
+    progress(&repo, &repo.root, &["done", &file, "i1"]);
+    let row = stage(&repo, &file, "i1");
+    assert_eq!(row["source"]["status"], "archived");
+    assert_ne!(row["source"]["drift"], true);
+
+    // 2. When an item records a foreign source whose project is no longer
+    // registered, `begin --item ... --from-journal <unrelated>` refuses rather
+    // than consuming the unrelated artifact.
+    let (_, local_todo) = journal_artifact(&repo, "unrelated", "todo", "# Unrelated\n");
+    let series2 = start(&repo, &repo.root, "foreign-src", &["Foreign item"]);
+    let fake_sourced = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": "2026-01-02T00:00:00Z",
+        "topic": "foreign-src",
+        "event": "item-sourced",
+        "file": series2,
+        "item": "i1",
+        "item_source": {
+            "project": "vanished-project",
+            "file": "20260101T000000Z-ghost-todo.md"
+        }
+    });
+    let mut events_text = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    events_text.push_str(&format!("{fake_sourced}\n"));
+    fs::write(dir.join("events.jsonl"), events_text).unwrap();
+
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "mismatch",
+            "--item",
+            &format!("{series2}:i1"),
+            "--from-journal",
+            &local_todo,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not registered"));
+    // Unrelated local todo remains live and unconsumed.
+    assert!(dir.join(&local_todo).is_file());
+}
