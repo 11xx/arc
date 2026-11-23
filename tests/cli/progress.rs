@@ -2806,3 +2806,109 @@ fn watch_series_item_ready_and_wave_done() {
     assert_eq!(reached["wave"], "w0");
     assert_eq!(reached["file"], file);
 }
+
+#[test]
+fn ready_excludes_unknown_links_split_cycles_refused_and_watch_wakes_on_claim_expiry() {
+    let repo = Repo::new();
+
+    // 1. A linked item whose change is missing/unknown is blocked, never ready.
+    let file = start(&repo, &repo.root, "ready-guard", &["Linked ghost", "Free"]);
+    let dir = journal_dir(&repo, &repo.root);
+    let ghost_link = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": "2026-01-02T00:00:00Z",
+        "topic": "ready-guard",
+        "event": "item-linked",
+        "file": file,
+        "item": "i1",
+        "change": "ghost-change-abcdef",
+        "change_project": "vanished-ledger"
+    });
+    let mut events_text = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    events_text.push_str(&format!("{ghost_link}\n"));
+    fs::write(dir.join("events.jsonl"), events_text).unwrap();
+
+    let ready_json: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["progress", &file, "--ready", "--json"]),
+    ))
+    .unwrap();
+    let ready_ids: Vec<&str> = ready_json["series"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ready_ids, vec!["i2"]);
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["stage"], "unknown");
+    assert_eq!(i1["readiness"], "blocked");
+    assert_eq!(i1["blocked_by"][0]["kind"], "link");
+
+    // 2. Splitting i2 into i3/i4 and adding i3 --on i2 is refused as a cycle.
+    progress(
+        &repo,
+        &repo.root,
+        &[
+            "split",
+            &file,
+            "i2",
+            "--into",
+            "Part A",
+            "--into",
+            "Part B",
+            "--reason",
+            "two pieces",
+        ],
+    );
+    repo.arc(&repo.root)
+        .args(["progress", "depend", &file, "i3", "--on", "i2"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cycle"));
+
+    // 3. `watch --until item-ready` wakes when a live lane claim expires
+    // without any feed traffic.
+    let exp_file = start(&repo, &repo.root, "claim-expiry", &["Short lane"]);
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "lane",
+        "open",
+        "short-lane",
+        "--item",
+        &format!("{exp_file}:i1"),
+        "--ttl",
+        "2s",
+        "--actor",
+        "worker-a",
+        "--harness",
+        "claude",
+    ]));
+    assert_eq!(stage(&repo, &exp_file, "i1")["readiness"], "claimed");
+
+    let (mut child, evaluated) = spawn_watch(
+        &repo,
+        &repo.root,
+        &[
+            "watch",
+            "claim-expiry",
+            "--until",
+            "item-ready",
+            "--timeout",
+            "8",
+            "--json",
+        ],
+    );
+    await_watch_evaluation(&mut child, &evaluated);
+
+    // Zero writes while waiting: expiry alone wakes the watch.
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reached: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reached["condition"], "item-ready");
+    assert_eq!(reached["items"], serde_json::json!(["i1"]));
+}

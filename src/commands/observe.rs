@@ -642,9 +642,29 @@ fn watch_series(
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break None;
         }
+        // When watching for `item-ready`, also wake when the earliest live
+        // pre-change claim expires so a quiet watch notices claim expiry
+        // without needing any feed traffic.
+        let claim_expiry = if until.iter().any(|c| matches!(c, WatchUntil::ItemReady)) {
+            series
+                .items
+                .iter()
+                .filter(|row| {
+                    row.readiness == "claimed"
+                        && wave.is_none_or(|w| row.wave.as_deref() == Some(w))
+                })
+                .filter_map(|row| row.claimed.as_ref().and_then(|c| c.expires_at))
+                .min()
+        } else {
+            None
+        };
+        let due = earlier(
+            deadline,
+            claim_expiry.map(|at| clock_deadline(at) + Duration::from_millis(25)),
+        );
         // Wake on any workspace feed notice (journal or ledger write in this
-        // or a referenced project) and re-evaluate.
-        let _ = follower.wait(deadline, |line| !line.trim_ascii().is_empty())?;
+        // or a referenced project) or when the earliest claim expires.
+        let _ = follower.wait(due, |line| !line.trim_ascii().is_empty())?;
     };
     let Some(value) = reached else {
         report_timeout(until, json)?;

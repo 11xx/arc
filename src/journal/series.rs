@@ -1105,6 +1105,14 @@ struct Open {
 fn open_for_write(ctx: &Ctx, name: &str) -> Result<Open> {
     let dir = resolve_dir(&ctx.cwd)?;
     let lock = lock_journal_transition(&dir)?;
+    open_under_lock(dir, lock, name)
+}
+
+fn open_under_lock(
+    dir: std::path::PathBuf,
+    lock: super::JournalTransitionLock,
+    name: &str,
+) -> Result<Open> {
     let events = super::read_events(&dir)?;
     let file = resolve_name(&events, name, &dir)?;
     let series = replay(&events, &file).with_context(|| format!("{file} was never started"))?;
@@ -1140,6 +1148,10 @@ impl Open {
 
     fn append(&self, ctx: &Ctx, event: &JournalEvent) -> Result<()> {
         append_event(ctx, &self.dir, event)
+    }
+
+    fn append_batch(&self, ctx: &Ctx, events: &[JournalEvent]) -> Result<()> {
+        super::append_events(ctx, &self.dir, events)
     }
 
     /// An item that still stands, for a write that only makes sense on one.
@@ -1489,12 +1501,14 @@ pub(crate) fn add(
     event.series.item_source = source;
     event.series.wave = wave.map(str::to_string);
     placement.apply(&open.series, &mut event, None)?;
-    open.append(ctx, &event)?;
+    let mut records = Vec::with_capacity(1 + prereqs.len());
+    records.push(event);
     for prereq in prereqs {
         let mut dep = open.event(ctx, "item-depended", Some(&id));
         dep.series.depends_on = Some(prereq);
-        open.append(ctx, &dep)?;
+        records.push(dep);
     }
+    open.append_batch(ctx, &records)?;
     Ok(id)
 }
 
@@ -2007,10 +2021,14 @@ fn resolve_prereq(
 
 /// Check whether adding `source -> target` creates a cycle in the reachable
 /// prerequisite graph across this journal and any readable registered project.
+/// Split items expand to their children just as readiness derivation does, so
+/// depending on an ancestor item after a split is rejected as a cycle.
+#[allow(clippy::too_many_arguments)]
 fn check_no_cycle(
     dir: &Path,
     local_events: &[JournalEvent],
     local_slug: Option<&str>,
+    locked_foreign: Option<(&str, &[JournalEvent])>,
     source_series: &str,
     source_item: &str,
     target: &ItemPrereq,
@@ -2048,14 +2066,19 @@ fn check_no_cycle(
         let (proj, series_file, item_id) = &node;
         let events_slice: Option<&[JournalEvent]> = match proj {
             None => Some(local_events),
-            Some(slug) => cache
-                .entry(Some(slug.clone()))
-                .or_insert_with(|| {
-                    super::registered_project(slug)
-                        .ok()
-                        .and_then(|p| super::read_events(&p.journal_dir).ok())
-                })
-                .as_deref(),
+            Some(slug) => match locked_foreign {
+                Some((locked_slug, locked_events)) if locked_slug == slug.as_str() => {
+                    Some(locked_events)
+                }
+                _ => cache
+                    .entry(Some(slug.clone()))
+                    .or_insert_with(|| {
+                        super::registered_project(slug)
+                            .ok()
+                            .and_then(|p| super::read_events(&p.journal_dir).ok())
+                    })
+                    .as_deref(),
+            },
         };
         let Some(events_slice) = events_slice else {
             continue;
@@ -2066,6 +2089,11 @@ fn check_no_cycle(
         let Some(item) = series.item(item_id) else {
             continue;
         };
+        if item.state == ItemState::Split {
+            for part_id in &item.split_into {
+                stack.push((proj.clone(), series_file.clone(), part_id.clone()));
+            }
+        }
         for dep in &item.depends_on {
             let next_proj = match &dep.project {
                 Some(slug) => normalize_project(Some(slug.as_str())),
@@ -2080,8 +2108,40 @@ fn check_no_cycle(
 }
 
 /// Record a prerequisite edge on a standing item, refusing cycles.
+///
+/// Cross-project edges acquire both journals' transition locks in canonical
+/// path order so concurrent reciprocal inserts serialize rather than each
+/// observing the other's pre-insert graph.
 pub(crate) fn depend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPrereq> {
-    let open = open_for_write(ctx, name)?;
+    let (open, _foreign_lock, foreign_locked_events) =
+        if let Some((prefix, _rest)) = on.split_once(super::REFERENCE_SEPARATOR) {
+            let local_dir = resolve_dir(&ctx.cwd)?;
+            let project = super::registered_project(prefix)?;
+            let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            let local_key = canonical(&local_dir);
+            let foreign_key = canonical(&project.journal_dir);
+            if local_key == foreign_key {
+                bail!("{prefix} is this project; name the prerequisite without a project");
+            }
+            let (local_lock, foreign_lock) = if local_key < foreign_key {
+                let first = lock_journal_transition(&local_dir)?;
+                let second = lock_journal_transition(&project.journal_dir)?;
+                (first, second)
+            } else {
+                let first = lock_journal_transition(&project.journal_dir)?;
+                let second = lock_journal_transition(&local_dir)?;
+                (second, first)
+            };
+            let open = open_under_lock(local_dir, local_lock, name)?;
+            let foreign_events = super::read_events(&project.journal_dir)?;
+            (
+                open,
+                Some(foreign_lock),
+                Some((project.slug, foreign_events)),
+            )
+        } else {
+            (open_for_write(ctx, name)?, None, None)
+        };
     let item = open.standing(id)?;
     let prereq = resolve_prereq(&open.dir, &open.events, &open.series, on)?;
     if item.depends_on.contains(&prereq) {
@@ -2102,6 +2162,9 @@ pub(crate) fn depend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPr
         &open.dir,
         &open.events,
         local_slug.as_deref(),
+        foreign_locked_events
+            .as_ref()
+            .map(|(slug, ev)| (slug.as_str(), ev.as_slice())),
         &open.series.file,
         id,
         &prereq,

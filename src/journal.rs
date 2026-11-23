@@ -9451,6 +9451,7 @@ impl std::fmt::Display for LaneItem {
 pub(crate) struct ActiveArtifactClaim {
     pub(crate) owner: String,
     pub(crate) at: String,
+    pub(crate) expires_at: DateTime<Utc>,
 }
 
 /// A change opened in one project from an artifact another project's journal
@@ -10759,10 +10760,19 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
 }
 
 fn append_event(ctx: &Ctx, dir: &Path, event: &JournalEvent) -> Result<()> {
+    append_events(ctx, dir, std::slice::from_ref(event))
+}
+
+/// Append several journal events atomically as one recoverable journal
+/// transaction under `dir`'s event log lock.
+fn append_events(ctx: &Ctx, dir: &Path, records: &[JournalEvent]) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
     if let Err(error) = ensure_bound(ctx, dir) {
         eprintln!("warning: could not record this journal's project binding: {error:#}");
     }
-    write_event(dir, event)
+    write_events(dir, records)
 }
 
 /// Register this project, so that opening a change is enough to make it
@@ -10781,12 +10791,18 @@ pub(crate) fn register_project(ctx: &Ctx) -> Result<()> {
 }
 
 fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
+    write_events(dir, std::slice::from_ref(event))
+}
+
+fn write_events(dir: &Path, records: &[JournalEvent]) -> Result<()> {
     let _events = lock_journal_events(dir)?;
     let basis = event_log_bytes(dir)?;
     check_event_tail(dir, basis.as_bytes())?;
     let mut events = basis.clone();
-    events.push_str(&serde_json::to_string(event)?);
-    events.push('\n');
+    for event in records {
+        events.push_str(&serde_json::to_string(event)?);
+        events.push('\n');
+    }
     let pending = ExchangeTransaction {
         bodies: Vec::new(),
         body_bases: Some(Vec::new()),
@@ -11653,16 +11669,19 @@ pub(crate) fn active_artifact_claim(
     open_artifact_claims(events, file)
         .into_iter()
         .rev()
-        .find(|claim| state::claim_timing_at(&claim.state, now).active)
-        .map(|claim| ActiveArtifactClaim {
-            owner: format!(
-                "{} via {}",
-                claim.state.owner.actor, claim.state.owner.harness
-            ),
-            at: claim
-                .state
-                .claimed_at
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        .find_map(|claim| {
+            let timing = state::claim_timing_at(&claim.state, now);
+            timing.active.then(|| ActiveArtifactClaim {
+                owner: format!(
+                    "{} via {}",
+                    claim.state.owner.actor, claim.state.owner.harness
+                ),
+                at: claim
+                    .state
+                    .claimed_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+                expires_at: timing.expires_at,
+            })
         })
 }
 
@@ -12362,6 +12381,13 @@ pub(crate) struct LaneEntry {
     opened_time: DateTime<Utc>,
     #[serde(skip)]
     last_activity_time: DateTime<Utc>,
+}
+
+impl LaneEntry {
+    /// Instant at which this lane becomes stale without renewed activity.
+    pub(crate) fn expires_at(&self) -> DateTime<Utc> {
+        self.last_activity_time + chrono::Duration::seconds(self.ttl_seconds as i64)
+    }
 }
 
 /// Live lanes currently open in `events` at `now`.

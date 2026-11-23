@@ -115,7 +115,7 @@ pub(crate) struct ItemRow {
 /// One unsatisfied prerequisite or wave barrier blocking an item.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Blocker {
-    /// `prereq`, `wave`, or `cycle`.
+    /// `prereq`, `wave`, `cycle`, or `link`.
     pub(crate) kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) project: Option<String>,
@@ -190,6 +190,8 @@ pub(crate) struct PreChangeClaim {
     pub(crate) at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lane: Option<String>,
+    #[serde(skip)]
+    pub(crate) expires_at: Option<DateTime<Utc>>,
 }
 
 /// A run dispatched against a linked change, as the ledger records it: no
@@ -812,6 +814,7 @@ impl<'a> Reader<'a> {
                                 owner: active.owner,
                                 at: active.at,
                                 lane: None,
+                                expires_at: Some(active.expires_at),
                             },
                         );
                     ("open", claim)
@@ -894,6 +897,7 @@ impl<'a> Reader<'a> {
                         owner: lane.owner.to_string(),
                         at: lane.opened_at.clone(),
                         lane: Some(lane.topic.clone()),
+                        expires_at: Some(lane.expires_at()),
                     });
                 row.claimed = lane_claim.or(source_claim);
             }
@@ -991,6 +995,26 @@ impl<'a> Reader<'a> {
                     }
                 }
             }
+            // 3. A linked item whose change is closed without integrating or
+            // missing/unreadable from its ledger is never ready to claim.
+            if let Some(change) = &item.change {
+                let reason = match row.stage {
+                    "closed" => format!("linked change {change} closed without integrating"),
+                    _ => {
+                        format!("linked change {change} is unavailable or missing from its ledger")
+                    }
+                };
+                blockers.push(Blocker {
+                    kind: "link",
+                    project: row.project.clone(),
+                    project_slug: row.project_slug.clone(),
+                    series: None,
+                    item: None,
+                    wave: None,
+                    stage: row.stage,
+                    reason: Some(reason),
+                });
+            }
             row.blocked_by = blockers;
             row.readiness = if !row.blocked_by.is_empty() {
                 "blocked"
@@ -998,8 +1022,10 @@ impl<'a> Reader<'a> {
                 "waiting"
             } else if row.claimed.is_some() {
                 "claimed"
-            } else {
+            } else if row.stage == "open" && item.change.is_none() {
                 "ready"
+            } else {
+                "blocked"
             };
         }
     }

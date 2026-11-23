@@ -882,6 +882,7 @@ ship-it · 1 added since the start
             owner: "codex sess-1".to_string(),
             at: "2026-01-02T11:30:00Z".to_string(),
             lane: Some("startup-probe".to_string()),
+            expires_at: None,
         });
         let mut resolved = row("i2", "Audit cache", "done");
         resolved.resolved_by = Some(crate::journal::series::ResolvedBy {
