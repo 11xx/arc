@@ -355,6 +355,7 @@ pub struct WatchArgs<'a> {
     pub tags: &'a [String],
     pub quorum: Option<WatchQuorum>,
     pub until: &'a [WatchUntil],
+    pub wave: Option<&'a str>,
     pub timeout_secs: Option<u64>,
     pub exec_command: Option<&'a str>,
     pub json: bool,
@@ -365,12 +366,30 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
         tags,
         quorum,
         until,
+        wave,
         timeout_secs,
         exec_command,
         json,
     } = args;
     // Follow before selection reads either the ledger or the journal.
     let mut follower = Follower::open();
+    let asks_series = until
+        .iter()
+        .any(|c| matches!(c, WatchUntil::ItemReady | WatchUntil::WaveDone));
+    if asks_series || wave.is_some() {
+        return watch_series(
+            ctx,
+            reference,
+            tags,
+            quorum,
+            until,
+            wave,
+            timeout_secs,
+            exec_command,
+            json,
+            &mut follower,
+        );
+    }
     if let Some(file) = reference
         .map(|reference| crate::journal::artifact_subject(&ctx.cwd, reference))
         .transpose()?
@@ -499,6 +518,151 @@ fn watch_artifact(
         println!("{}", serde_json::to_string(&value)?);
     } else {
         println!("reached: {} ({file})", WatchUntil::Stalled.label());
+    }
+    if let Some(command) = exec_command {
+        let mut diagnostic = serde_json::to_vec(&value)?;
+        diagnostic.push(b'\n');
+        run_hook(command, &diagnostic, &value);
+    }
+    Ok(0)
+}
+
+/// Wait until a progress series has a ready item (`item-ready`) or a completed
+/// wave (`wave-done`), following the workspace feed.
+#[allow(clippy::too_many_arguments)]
+fn watch_series(
+    ctx: &Ctx,
+    reference: Option<&str>,
+    tags: &[String],
+    quorum: Option<WatchQuorum>,
+    until: &[WatchUntil],
+    wave: Option<&str>,
+    timeout_secs: Option<u64>,
+    exec_command: Option<&str>,
+    json: bool,
+    follower: &mut Follower,
+) -> Result<i32> {
+    if !tags.is_empty() || quorum.is_some() {
+        bail!("--tag, --any, and --all select changes, not a progress series");
+    }
+    let Some(series_name) = reference else {
+        bail!("--until item-ready and wave-done require a progress <SERIES> argument");
+    };
+    if let Some(other) = until
+        .iter()
+        .find(|c| !matches!(c, WatchUntil::ItemReady | WatchUntil::WaveDone))
+    {
+        bail!(
+            "--until {} asks about a change or claim; a progress series answers only `item-ready` and `wave-done`",
+            other.label()
+        );
+    }
+    if until.is_empty() {
+        bail!("watch requires --until");
+    }
+    // Validate the series (and optional wave) before entering the wait loop.
+    let initial = super::progress::reader::build(ctx, Some(series_name), false)?;
+    let first = initial
+        .series
+        .first()
+        .context("series report returned no series")?;
+    if let Some(wave_id) = wave {
+        if !first.waves.iter().any(|w| w.id == wave_id) {
+            bail!("series {} has no declared wave {wave_id:?}", first.file);
+        }
+    }
+    let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
+    let mut marked = false;
+    let reached = loop {
+        let report = super::progress::reader::build(ctx, Some(series_name), false)?;
+        let Some(series) = report.series.first() else {
+            bail!("series {series_name:?} disappeared");
+        };
+        let mut hit: Option<serde_json::Value> = None;
+        for &cond in until {
+            match cond {
+                WatchUntil::ItemReady => {
+                    let ready: Vec<&str> = series
+                        .items
+                        .iter()
+                        .filter(|row| {
+                            row.readiness == "ready"
+                                && wave.is_none_or(|w| row.wave.as_deref() == Some(w))
+                        })
+                        .map(|row| row.id.as_str())
+                        .collect();
+                    if !ready.is_empty() {
+                        hit = Some(serde_json::json!({
+                            "schema": WATCH_SCHEMA,
+                            "event_type": "watch-reached",
+                            "condition": WatchUntil::ItemReady.label(),
+                            "file": series.file,
+                            "wave": wave,
+                            "items": ready,
+                        }));
+                        break;
+                    }
+                }
+                WatchUntil::WaveDone => {
+                    let target_waves: Vec<&str> = match wave {
+                        Some(w) => vec![w],
+                        None => series.waves.iter().map(|w| w.id.as_str()).collect(),
+                    };
+                    let done_wave = target_waves.into_iter().find(|wave_id| {
+                        let members: Vec<_> = series
+                            .items
+                            .iter()
+                            .filter(|row| {
+                                row.readiness != "inactive" && row.wave.as_deref() == Some(*wave_id)
+                            })
+                            .collect();
+                        !members.is_empty() && members.iter().all(|row| row.readiness == "complete")
+                    });
+                    if let Some(wave_id) = done_wave {
+                        hit = Some(serde_json::json!({
+                            "schema": WATCH_SCHEMA,
+                            "event_type": "watch-reached",
+                            "condition": WatchUntil::WaveDone.label(),
+                            "file": series.file,
+                            "wave": wave_id,
+                        }));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(value) = hit {
+            break Some(value);
+        }
+        if !marked {
+            mark_evaluated_unreached();
+            marked = true;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break None;
+        }
+        // Wake on any workspace feed notice (journal or ledger write in this
+        // or a referenced project) and re-evaluate.
+        let _ = follower.wait(deadline, |line| !line.trim_ascii().is_empty())?;
+    };
+    let Some(value) = reached else {
+        report_timeout(until, json)?;
+        return Ok(2);
+    };
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        let cond = value["condition"].as_str().unwrap_or_default();
+        let file = value["file"].as_str().unwrap_or_default();
+        if let Some(items) = value["items"].as_array() {
+            let ids: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+            println!("reached: {cond} ({file}: {})", ids.join(", "));
+        } else if let Some(wave_id) = value["wave"].as_str() {
+            println!("reached: {cond} ({file} wave {wave_id})");
+        } else {
+            println!("reached: {cond} ({file})");
+        }
     }
     if let Some(command) = exec_command {
         let mut diagnostic = serde_json::to_vec(&value)?;
@@ -989,6 +1153,7 @@ fn watch_reached(
             provisional: None,
             stall: None,
         }),
+        WatchUntil::ItemReady | WatchUntil::WaveDone => None,
     })
 }
 

@@ -1366,6 +1366,10 @@ enum Cmd {
         /// still working from one that answered.
         #[arg(long, value_enum, value_delimiter = ',', required = true)]
         until: Vec<commands::WatchUntil>,
+        /// With `--until item-ready` or `wave-done`: restrict the watch to one
+        /// declared wave of the progress series
+        #[arg(long)]
+        wave: Option<String>,
         /// Fail with exit 2 after this many seconds. Each Git probe a check
         /// runs, and any other child it waits for without a timeout of its
         /// own, shares this deadline with its pipe cleanup: the child's
@@ -7389,6 +7393,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             any,
             all,
             until,
+            wave,
             timeout,
             exec_command,
             json,
@@ -7405,6 +7410,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     tags: &tag,
                     quorum,
                     until: &until,
+                    wave: wave.as_deref(),
                     timeout_secs: timeout,
                     exec_command: exec_command.as_deref(),
                     json,
@@ -9134,6 +9140,14 @@ mod tests {
             "progress unlink",
             "progress source",
             "progress unsource",
+            "progress waves add",
+            "progress waves rename",
+            "progress waves move",
+            "progress waves remove",
+            "progress wave",
+            "progress unwave",
+            "progress depend",
+            "progress undepend",
             "progress wait",
             "progress unwait",
             "progress split",

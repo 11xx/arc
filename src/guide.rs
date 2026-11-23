@@ -6765,13 +6765,16 @@ PROGRESS
   journal events on it, one per edit, each with its time; nothing is
   rewritten. Items have short ids (`i1`, `i2`, ...) that survive renames.
   Edits, each one call on `<series>`, named by filename or topic:
-    add <title> [--before|--after <item>] [--from [<project>::]<file>]
+    add <title> [--before|--after <item>] [--from [<project>::]<file>] [--wave W] [--on REF]...
     rename <item> <title>                   move <item> --before|--after <item>
     drop <item> --reason R                  done <item> [--by <artifact|cp>] [--note N]
     reopen <item> [--note N]                link <item> [<project>::]<change>
     unlink <item>                           source <item> [<project>::]<file>
-    unsource <item>                         wait <item> <discussion> --question Q
-    unwait <item>                           split <item> --into T --into T... --reason R
+    unsource <item>                         waves add|rename|move|remove ...
+    wave <item> <wave>                      unwave <item>
+    depend <item> --on <ref>                undepend <item> --on <ref>
+    wait <item> <discussion> --question Q   unwait <item>
+    split <item> --into T --into T... --reason R [--wave W]
   Items take no generic correction; each edit has its reversal. `reopen`
   undoes `drop` and `done` alike, for any item; a reopened linked item reads
   its derived stage again. A rename is undone by another rename, a move by
@@ -6847,6 +6850,24 @@ PROGRESS
   the start and how many were added, dropped and split since. The waiting
   count overlaps the others: an item that waits is also counted under its
   stage.
+
+  Waves, prerequisites and readiness. A series may declare ordered waves
+  (`start --wave <id>[=<title>]`, `waves add|rename|move|remove`) and assign
+  items (`add --wave`, `wave <item> <wave>`, `unwave <item>`; `split` inherits
+  its item's wave unless given `--wave`). Waves are advisory by default unless
+  declared `--gated` (or the series starts with `--gated-waves`): a gated wave
+  blocks its open items until every standing item in earlier declared waves is
+  `integrated` or `done`. Explicit prerequisites (`depend <item> --on <ref>`,
+  `undepend`) accept `<item>`, `<series>:<item>`, or
+  `<project>::<series>:<item>` and refuse cycles at write time; a split
+  prerequisite expands to its standing parts, a dropped prerequisite stays
+  unsatisfied until removed, and an unreadable foreign journal degrades that
+  prerequisite to `unknown` without failing the report. Each row derives
+  `readiness` (`ready`, `claimed`, `blocked`, `waiting`, `in-flight`,
+  `complete`, or `inactive`) and `blocked_by`. `arc progress [series] --ready`
+  prints only currently ready items (excluding claimed, blocked and waiting
+  items), and `arc watch <series> --until item-ready|wave-done [--wave W]`
+  waits on the workspace feed until a ready item or completed wave appears.
 
   `arc progress` prints every series of this project that is not retired, in
   full, one block per series; `arc progress <series>` narrows to one and

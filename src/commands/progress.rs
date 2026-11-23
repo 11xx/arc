@@ -44,6 +44,10 @@ pub struct ProgressArgs {
     /// Emit structured JSON (arc-progress/1) instead of text
     #[arg(long)]
     json: bool,
+    /// Show only currently ready items (unlinked, unblocked, unclaimed, and
+    /// not waiting on a person)
+    #[arg(long)]
+    ready: bool,
 }
 
 /// The form a report is printed in.
@@ -94,6 +98,18 @@ pub enum ProgressCmd {
         /// item is declared; cross-project as `<project>::<file>`)
         #[arg(long = "from")]
         from: Vec<String>,
+        /// Declare waves as barriers by default (earlier waves must finish
+        /// before items in later waves become ready)
+        #[arg(long)]
+        gated_waves: bool,
+        /// Declare a wave in order (`<id>` or `<id>=<title>`, append `:gated`
+        /// or `:advisory` on the id to override `--gated-waves`); repeatable
+        #[arg(long = "wave")]
+        waves: Vec<String>,
+        /// Assign a declared item to a declared wave (`<item>=<wave>`, such as
+        /// `i1=w0`); repeatable
+        #[arg(long = "item-wave")]
+        item_waves: Vec<String>,
     },
     /// Add an item, at the end unless placed; prints its id
     Add {
@@ -111,6 +127,13 @@ pub enum ProgressCmd {
         /// `handoff`), bare filename in this journal or `<project>::<file>`
         #[arg(long)]
         from: Option<String>,
+        /// Assign the new item to a declared wave
+        #[arg(long)]
+        wave: Option<String>,
+        /// Prerequisite item (`<item>`, `<series>:<item>`, or
+        /// `<project>::<series>:<item>`); repeatable
+        #[arg(long = "on")]
+        depends_on: Vec<String>,
     },
     /// Rename an item; its id stays
     Rename {
@@ -217,6 +240,48 @@ pub enum ProgressCmd {
         /// Item id, such as i3
         item: String,
     },
+    /// Manage declared waves on a series (add, rename, move, remove)
+    Waves {
+        #[command(subcommand)]
+        command: WavesCmd,
+    },
+    /// Assign a standing item to a declared wave
+    Wave {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+        /// Declared wave id, such as w0
+        wave: String,
+    },
+    /// Remove an item's wave assignment
+    Unwave {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+    },
+    /// Record an explicit prerequisite on a standing item (refuses cycles)
+    Depend {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+        /// Prerequisite item (`<item>`, `<series>:<item>`, or
+        /// `<project>::<series>:<item>`)
+        #[arg(long = "on")]
+        on: String,
+    },
+    /// Remove a recorded prerequisite from an item
+    Undepend {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+        /// Prerequisite item reference to remove
+        #[arg(long = "on")]
+        on: String,
+    },
     /// Say an item waits on a question of this journal
     ///
     /// The item shows the wait while the question is open and waits on a
@@ -253,6 +318,10 @@ pub enum ProgressCmd {
         /// Why the item is split, one line
         #[arg(long)]
         reason: String,
+        /// Assign the split parts to a declared wave (defaults to the original
+        /// item's wave)
+        #[arg(long)]
+        wave: Option<String>,
     },
     /// Relate a series to a series in another project
     ///
@@ -294,6 +363,61 @@ pub enum ProgressCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum WavesCmd {
+    /// Declare a wave on a series
+    Add {
+        /// Series filename or topic
+        series: String,
+        /// Wave identifier, such as w0 or phase-1
+        id: String,
+        /// Optional human title, one line
+        #[arg(long)]
+        title: Option<String>,
+        /// Place directly before another declared wave
+        #[arg(long, conflicts_with = "after")]
+        before: Option<String>,
+        /// Place directly after another declared wave
+        #[arg(long)]
+        after: Option<String>,
+        /// Gate items in this wave until all standing items in earlier waves complete
+        #[arg(long, conflicts_with = "advisory")]
+        gated: bool,
+        /// Mark this wave advisory (visual grouping only, overrides --gated-waves)
+        #[arg(long)]
+        advisory: bool,
+    },
+    /// Rename a declared wave's title
+    Rename {
+        /// Series filename or topic
+        series: String,
+        /// Wave identifier
+        id: String,
+        /// New title, one line
+        title: String,
+    },
+    /// Move a declared wave before or after another wave
+    Move {
+        /// Series filename or topic
+        series: String,
+        /// Wave identifier
+        id: String,
+        /// Place directly before another declared wave
+        #[arg(long, conflicts_with = "after", required_unless_present = "after")]
+        before: Option<String>,
+        /// Place directly after another declared wave
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// Remove a declared wave (refused while standing items belong to it)
+    Remove {
+        /// Series filename or topic
+        series: String,
+        /// Wave identifier
+        id: String,
+    },
+}
+
 fn placement<'a>(before: &'a Option<String>, after: &'a Option<String>) -> Placement<'a> {
     match (before.as_deref(), after.as_deref()) {
         (Some(item), _) => Placement::Before(item),
@@ -304,7 +428,12 @@ fn placement<'a>(before: &'a Option<String>, after: &'a Option<String>) -> Place
 
 pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
     let Some(command) = args.command else {
-        return report(ctx, args.series.as_deref(), Form::of(args.plain, args.json));
+        return report(
+            ctx,
+            args.series.as_deref(),
+            args.ready,
+            Form::of(args.plain, args.json),
+        );
     };
     match command {
         ProgressCmd::Start {
@@ -313,9 +442,24 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             follows,
             items,
             from,
+            gated_waves,
+            waves,
+            item_waves,
         } => {
             let sources = parse_start_sources(&from, items.len())?;
-            let file = series::start(ctx, &topic, &title, follows.as_deref(), &items, &sources)?;
+            let wave_specs = parse_start_waves(&waves)?;
+            let mapped_waves = parse_item_waves(&item_waves, items.len())?;
+            let file = series::start(
+                ctx,
+                &topic,
+                &title,
+                follows.as_deref(),
+                &items,
+                &sources,
+                gated_waves,
+                &wave_specs,
+                &mapped_waves,
+            )?;
             println!("{file}");
             for (index, item) in items.iter().enumerate() {
                 println!("  i{}  {}", index + 1, item.trim());
@@ -328,6 +472,8 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             before,
             after,
             from,
+            wave,
+            depends_on,
         } => {
             let id = series::add(
                 ctx,
@@ -335,6 +481,8 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
                 &title,
                 placement(&before, &after),
                 from.as_deref(),
+                wave.as_deref(),
+                &depends_on,
             )?;
             println!("added {id}: {}", title.trim());
         }
@@ -421,6 +569,82 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             let source = series::clear_source(ctx, &name, &item)?;
             println!("unsourced {item} from {source}");
         }
+        ProgressCmd::Waves { command } => match command {
+            WavesCmd::Add {
+                series: name,
+                id,
+                title,
+                before,
+                after,
+                gated,
+                advisory,
+            } => {
+                let policy = match (gated, advisory) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    (false, false) => None,
+                };
+                series::wave_declare(
+                    ctx,
+                    &name,
+                    &id,
+                    title.as_deref(),
+                    before.as_deref(),
+                    after.as_deref(),
+                    policy,
+                )?;
+                println!("declared wave {id}");
+            }
+            WavesCmd::Rename {
+                series: name,
+                id,
+                title,
+            } => {
+                series::wave_rename(ctx, &name, &id, &title)?;
+                println!("renamed wave {id}: {}", title.trim());
+            }
+            WavesCmd::Move {
+                series: name,
+                id,
+                before,
+                after,
+            } => {
+                series::wave_move(ctx, &name, &id, before.as_deref(), after.as_deref())?;
+                println!("moved wave {id}");
+            }
+            WavesCmd::Remove { series: name, id } => {
+                series::wave_remove(ctx, &name, &id)?;
+                println!("removed wave {id}");
+            }
+        },
+        ProgressCmd::Wave {
+            series: name,
+            item,
+            wave,
+        } => {
+            series::set_wave(ctx, &name, &item, &wave)?;
+            println!("assigned {item} to wave {wave}");
+        }
+        ProgressCmd::Unwave { series: name, item } => {
+            let wave = series::clear_wave(ctx, &name, &item)?;
+            println!("removed {item} from wave {wave}");
+        }
+        ProgressCmd::Depend {
+            series: name,
+            item,
+            on,
+        } => {
+            let prereq = series::depend(ctx, &name, &item, &on)?;
+            println!("{item} depends on {prereq}");
+        }
+        ProgressCmd::Undepend {
+            series: name,
+            item,
+            on,
+        } => {
+            let prereq = series::undepend(ctx, &name, &item, &on)?;
+            println!("{item} no longer depends on {prereq}");
+        }
         ProgressCmd::Wait {
             series: name,
             item,
@@ -442,8 +666,9 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             item,
             into,
             reason,
+            wave,
         } => {
-            let parts = series::split(ctx, &name, &item, &into, &reason)?;
+            let parts = series::split(ctx, &name, &item, &into, &reason, wave.as_deref())?;
             println!("split {item} into {}", parts.join(", "));
         }
         ProgressCmd::Relate {
@@ -464,6 +689,51 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+fn parse_start_waves(specs: &[String]) -> Result<Vec<series::WaveSpec>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let (raw_id, title) = match spec.split_once('=') {
+                Some((id, title)) => (id, Some(title.to_string())),
+                None => (spec.as_str(), None),
+            };
+            let (id, gated) = if let Some(id) = raw_id.strip_suffix(":gated") {
+                (id, Some(true))
+            } else if let Some(id) = raw_id.strip_suffix(":advisory") {
+                (id, Some(false))
+            } else {
+                (raw_id, None)
+            };
+            Ok(series::WaveSpec {
+                id: id.to_string(),
+                title,
+                gated,
+            })
+        })
+        .collect()
+}
+
+fn parse_item_waves(specs: &[String], item_count: usize) -> Result<BTreeMap<usize, String>> {
+    let mut mapped = BTreeMap::new();
+    for spec in specs {
+        let Some((id, wave)) = spec.split_once('=') else {
+            bail!("--item-wave takes <item>=<wave> (such as i1=w0); got {spec:?}");
+        };
+        let number: usize = id
+            .strip_prefix('i')
+            .and_then(|digits| digits.parse().ok())
+            .filter(|&n| n >= 1)
+            .with_context(|| format!("--item-wave takes <item>=<wave>; got {spec:?}"))?;
+        if number > item_count {
+            bail!("--item-wave names item i{number}, but start declared only {item_count} item(s)");
+        }
+        if mapped.insert(number - 1, wave.to_string()).is_some() {
+            bail!("--item-wave names item i{number} more than once");
+        }
+    }
+    Ok(mapped)
 }
 
 fn parse_start_sources(specs: &[String], item_count: usize) -> Result<BTreeMap<usize, String>> {
@@ -762,8 +1032,8 @@ fn recorded_relation(ctx: &Ctx, name: &str, target: &str) -> Result<RelatedSerie
 
 // --- Reporting -----------------------------------------------------------
 
-fn report(ctx: &Ctx, name: Option<&str>, form: Form) -> Result<i32> {
-    let report = build(ctx, name)?;
+fn report(ctx: &Ctx, name: Option<&str>, ready_only: bool, form: Form) -> Result<i32> {
+    let report = build(ctx, name, ready_only)?;
     match form {
         Form::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         Form::Plain => render_report(&report),
@@ -831,6 +1101,23 @@ fn render_series(series: &SeriesReport) {
     }
     if let Some(plan) = &series.follows {
         println!("follows: {plan}");
+    }
+    if !series.waves.is_empty() {
+        let named: Vec<String> = series
+            .waves
+            .iter()
+            .map(|wave| {
+                let mut label = wave.id.clone();
+                if let Some(title) = &wave.title {
+                    label.push_str(&format!(" ({title})"));
+                }
+                if wave.gated {
+                    label.push_str(" [gated]");
+                }
+                label
+            })
+            .collect();
+        println!("waves: {}", named.join(", "));
     }
     if let Some(retired) = &series.retired {
         println!(
@@ -947,6 +1234,20 @@ fn render_row(row: &ItemRow, width: usize) {
         };
         detail.push(format!("from {named} ({}{drift})", source.status));
     }
+    if let Some(wave) = &row.wave {
+        detail.push(format!("wave {wave}"));
+    }
+    if !row.depends_on.is_empty() {
+        detail.push(format!("depends on {}", row.depends_on.join(", ")));
+    }
+    if !row.blocked_by.is_empty() {
+        let blockers: Vec<String> = row
+            .blocked_by
+            .iter()
+            .map(reader::Blocker::display_short)
+            .collect();
+        detail.push(format!("blocked by {}", blockers.join(", ")));
+    }
     if !row.split_into.is_empty() {
         detail.push(format!("into {}", row.split_into.join(", ")));
     }
@@ -976,10 +1277,16 @@ fn render_counts(counts: &Counts, since: bool) {
     if counts.claimed > 0 {
         line.push_str(&format!("; {} claimed", counts.claimed));
     }
+    if counts.blocked > 0 {
+        line.push_str(&format!("; {} blocked", counts.blocked));
+    }
     if counts.waiting > 0 {
         line.push_str(&format!("; {} waiting", counts.waiting));
     }
     line.push_str(&format!("; {} open", counts.open));
+    if counts.blocked > 0 && counts.ready > 0 {
+        line.push_str(&format!(" ({} ready)", counts.ready));
+    }
     if counts.closed > 0 {
         line.push_str(&format!("; {} closed without integrating", counts.closed));
     }

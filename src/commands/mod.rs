@@ -323,6 +323,8 @@ pub enum WatchUntil {
     BriefRecorded,
     Integrated,
     Closed,
+    ItemReady,
+    WaveDone,
 }
 
 impl WatchUntil {
@@ -338,6 +340,8 @@ impl WatchUntil {
             WatchUntil::BriefRecorded => "brief-recorded",
             WatchUntil::Integrated => "integrated",
             WatchUntil::Closed => "closed",
+            WatchUntil::ItemReady => "item-ready",
+            WatchUntil::WaveDone => "wave-done",
         }
     }
 }

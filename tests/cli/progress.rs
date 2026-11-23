@@ -2513,3 +2513,296 @@ fn archived_source_has_no_drift_and_unregistered_foreign_source_refuses_explicit
     // Unrelated local todo remains live and unconsumed.
     assert!(dir.join(&local_todo).is_file());
 }
+
+/// Waves declared on a series order items across phases, inherit across splits,
+/// refuse removal while populated, and when gated block later-wave open items
+/// until every standing item in earlier waves completes. `--ready` returns
+/// only unblocked, unclaimed, non-waiting open items.
+#[test]
+fn waves_and_gated_wave_barriers_derive_readiness() {
+    let repo = Repo::new();
+    let file = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "wave-work",
+        "--title",
+        "Wave work",
+        "--gated-waves",
+        "--wave",
+        "w0=Baseline",
+        "--wave",
+        "w1=Parallel cuts",
+        "--item",
+        "Capture baseline",
+        "--item",
+        "Cut A",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w1",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .to_string();
+
+    progress(
+        &repo,
+        &repo.root,
+        &[
+            "waves",
+            "add",
+            &file,
+            "w2",
+            "--title",
+            "Polish",
+            "--after",
+            "w1",
+            "--advisory",
+        ],
+    );
+    progress(
+        &repo,
+        &repo.root,
+        &["add", &file, "Polish notes", "--wave", "w2"],
+    );
+
+    let bad_remove = repo
+        .arc(&repo.root)
+        .args(["progress", "waves", "remove", &file, "w0"])
+        .output()
+        .unwrap();
+    assert!(!bad_remove.status.success());
+
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["wave"], "w0");
+    assert_eq!(i1["readiness"], "ready");
+    let i2 = stage(&repo, &file, "i2");
+    assert_eq!(i2["wave"], "w1");
+    assert_eq!(i2["readiness"], "blocked");
+    assert_eq!(i2["blocked_by"][0]["kind"], "wave");
+    assert_eq!(i2["blocked_by"][0]["wave"], "w0");
+    assert_eq!(i2["blocked_by"][0]["item"], "i1");
+    let i3 = stage(&repo, &file, "i3");
+    assert_eq!(i3["readiness"], "ready");
+
+    let ready_json = report(&repo, &repo.root, &[&file, "--ready"]);
+    let ready_ids: Vec<&str> = series(&ready_json, &file)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ready_ids, vec!["i1", "i3"]);
+
+    progress(
+        &repo,
+        &repo.root,
+        &[
+            "split",
+            &file,
+            "i2",
+            "--into",
+            "Cut A1",
+            "--into",
+            "Cut A2",
+            "--reason",
+            "two parts",
+        ],
+    );
+    assert_eq!(stage(&repo, &file, "i4")["wave"], "w1");
+    assert_eq!(stage(&repo, &file, "i4")["readiness"], "blocked");
+
+    progress(&repo, &repo.root, &["done", &file, "i1"]);
+    assert_eq!(stage(&repo, &file, "i4")["readiness"], "ready");
+    assert_eq!(stage(&repo, &file, "i5")["readiness"], "ready");
+
+    progress(
+        &repo,
+        &repo.root,
+        &["waves", "rename", &file, "w2", "Final polish"],
+    );
+    progress(&repo, &repo.root, &["unwave", &file, "i3"]);
+    progress(&repo, &repo.root, &["waves", "remove", &file, "w2"]);
+    let rep = report(&repo, &repo.root, &[&file]);
+    let waves: Vec<&str> = series(&rep, &file)["waves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(waves, vec!["w0", "w1"]);
+
+    let doctor = repo
+        .arc(&repo.root)
+        .args(["journal", "doctor"])
+        .output()
+        .unwrap();
+    assert!(
+        doctor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+}
+
+/// Prerequisites work within a series, across local series, and across
+/// registered projects; cycles are refused at write time; split prerequisites
+/// expand to their standing parts; dropped prerequisites stay unsatisfied
+/// until removed.
+#[test]
+fn prerequisites_cross_series_cross_project_cycles_and_split_drop() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    let remote = start(&repo, &other, "remote", &["Remote prereq"]);
+    let alpha = start(&repo, &repo.root, "alpha", &["First", "Second", "Third"]);
+    let beta = start(&repo, &repo.root, "beta", &["Local dep"]);
+
+    progress(&repo, &repo.root, &["depend", &alpha, "i2", "--on", "i1"]);
+    progress(
+        &repo,
+        &repo.root,
+        &["depend", &alpha, "i2", "--on", "beta:i1"],
+    );
+    progress(
+        &repo,
+        &repo.root,
+        &["depend", &alpha, "i3", "--on", "other::remote:i1"],
+    );
+
+    for (item, target) in [("i1", "i1"), ("i1", "i2")] {
+        let out = repo
+            .arc(&repo.root)
+            .args(["progress", "depend", &alpha, item, "--on", target])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "expected cycle refusal for {item} -> {target}"
+        );
+    }
+    let cross_cycle = repo
+        .arc(&repo.root)
+        .args(["progress", "depend", &beta, "i1", "--on", "alpha:i2"])
+        .output()
+        .unwrap();
+    assert!(!cross_cycle.status.success());
+
+    let i2 = stage(&repo, &alpha, "i2");
+    assert_eq!(i2["readiness"], "blocked");
+    assert_eq!(i2["blocked_by"].as_array().unwrap().len(), 2);
+    let i3 = stage(&repo, &alpha, "i3");
+    assert_eq!(i3["readiness"], "blocked");
+    assert_eq!(i3["blocked_by"][0]["project"], "other");
+    assert_eq!(i3["blocked_by"][0]["item"], "i1");
+
+    progress(
+        &repo,
+        &repo.root,
+        &[
+            "split", &alpha, "i1", "--into", "Part 1", "--into", "Part 2", "--reason", "split",
+        ],
+    );
+    progress(&repo, &repo.root, &["done", &beta, "i1"]);
+    let i2 = stage(&repo, &alpha, "i2");
+    let blocker_items: Vec<&str> = i2["blocked_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["item"].as_str().unwrap())
+        .collect();
+    assert_eq!(blocker_items, vec!["i4", "i5"]);
+
+    progress(&repo, &repo.root, &["done", &alpha, "i5"]);
+    progress(
+        &repo,
+        &repo.root,
+        &["drop", &alpha, "i4", "--reason", "not needed"],
+    );
+    let i2 = stage(&repo, &alpha, "i2");
+    assert_eq!(i2["readiness"], "blocked");
+    assert_eq!(i2["blocked_by"][0]["stage"], "dropped");
+    assert_eq!(i2["blocked_by"][0]["reason"], "prerequisite dropped");
+
+    progress(&repo, &repo.root, &["undepend", &alpha, "i2", "--on", "i1"]);
+    assert_eq!(stage(&repo, &alpha, "i2")["readiness"], "ready");
+
+    progress(&repo, &other, &["done", &remote, "i1"]);
+    assert_eq!(stage(&repo, &alpha, "i3")["readiness"], "ready");
+}
+
+/// `arc watch <series> --until item-ready` and `--until wave-done` fire
+/// deterministically when already reached and reactively via the workspace
+/// feed when a blocking item completes.
+#[test]
+fn watch_series_item_ready_and_wave_done() {
+    let repo = Repo::new();
+    let file = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "watch-waves",
+        "--title",
+        "Watch waves",
+        "--gated-waves",
+        "--wave",
+        "w0",
+        "--wave",
+        "w1",
+        "--item",
+        "First",
+        "--item",
+        "Second",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w1",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .to_string();
+
+    let immediate = json_stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-waves",
+        "--until",
+        "item-ready",
+        "--wave",
+        "w0",
+        "--timeout",
+        "5",
+        "--json",
+    ]));
+    assert_eq!(immediate["schema"], "arc-watch/1");
+    assert_eq!(immediate["event_type"], "watch-reached");
+    assert_eq!(immediate["condition"], "item-ready");
+    assert_eq!(immediate["items"], serde_json::json!(["i1"]));
+
+    let (mut child, evaluated) = spawn_watch(
+        &repo,
+        &repo.root,
+        &[
+            "watch",
+            "watch-waves",
+            "--until",
+            "wave-done",
+            "--wave",
+            "w0",
+            "--timeout",
+            "10",
+            "--json",
+        ],
+    );
+    await_watch_evaluation(&mut child, &evaluated);
+
+    progress(&repo, &repo.root, &["done", &file, "i1"]);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reached: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reached["condition"], "wave-done");
+    assert_eq!(reached["wave"], "w0");
+    assert_eq!(reached["file"], file);
+}

@@ -249,6 +249,9 @@ impl View {
                     .paint(CYAN, &format!("{} claimed", counts.claimed)),
             );
         }
+        if counts.blocked > 0 {
+            rest.push(self.dim(&format!("{} blocked", counts.blocked)));
+        }
         if counts.waiting > 0 {
             rest.push(
                 self.look
@@ -414,6 +417,17 @@ impl View {
                     self.age(&claim.at)
                 )));
             }
+            if !row.blocked_by.is_empty() {
+                let blockers: Vec<String> = row
+                    .blocked_by
+                    .iter()
+                    .map(super::reader::Blocker::display_short)
+                    .collect();
+                parts.push(self.dim(&format!("blocked by {}", blockers.join(", "))));
+            }
+        }
+        if let Some(wave) = &row.wave {
+            parts.push(self.dim(&format!("wave {wave}")));
         }
         if row.waiting.is_some() && row.stage != "open" {
             parts.push(self.look.paint(YELLOW, "waiting"));
@@ -472,11 +486,13 @@ fn topic(file: &str) -> String {
 }
 
 /// The stage an item's line shows: `waiting` for an open item that waits on
-/// a question, `claimed` for an unlinked open item held by an advisory lane
-/// or source-artifact claim, else its stage.
+/// a question, `blocked` when prerequisites or wave barriers hold it,
+/// `claimed` for an unlinked open item held by an advisory lane or source
+/// claim, else its stage.
 fn shown(row: &ItemRow) -> &'static str {
     match row.stage {
         "open" if row.waiting.is_some() => "waiting",
+        "open" if !row.blocked_by.is_empty() => "blocked",
         "open" if row.claimed.is_some() => "claimed",
         stage => stage,
     }
@@ -487,6 +503,7 @@ fn shown(row: &ItemRow) -> &'static str {
 fn mark(stage: &str) -> (&'static str, &'static str) {
     match stage {
         "waiting" => ("?", YELLOW),
+        "blocked" => ("⊘", DIM),
         "claimed" => ("◈", CYAN),
         "integrated" | "done" => ("✓", GREEN),
         "opened" => ("◔", YELLOW),
@@ -557,6 +574,15 @@ mod tests {
             source: None,
             resolved_by: None,
             claimed: None,
+            wave: None,
+            depends_on: Vec::new(),
+            readiness: match stage {
+                "integrated" | "done" => "complete",
+                "dropped" | "split" => "inactive",
+                "opened" | "snapshotted" | "verified" | "reviewed" => "in-flight",
+                _ => "ready",
+            },
+            blocked_by: Vec::new(),
             note: None,
             split_into: Vec::new(),
         }
@@ -578,6 +604,8 @@ mod tests {
             follows: None,
             started_at: None,
             retired: None,
+            gated_waves: false,
+            waves: Vec::new(),
             related: Vec::new(),
             counts: Counts {
                 items: total,
@@ -586,6 +614,11 @@ mod tests {
                 done: count(&["done"]),
                 in_flight: count(&["opened", "snapshotted", "verified", "reviewed"]),
                 open: count(&["open"]),
+                ready: items.iter().filter(|row| row.readiness == "ready").count(),
+                blocked: items
+                    .iter()
+                    .filter(|row| row.readiness == "blocked")
+                    .count(),
                 claimed: items.iter().filter(|row| row.claimed.is_some()).count(),
                 closed: count(&["closed"]),
                 waiting: items.iter().filter(|row| row.waiting.is_some()).count(),

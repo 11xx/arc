@@ -93,11 +93,73 @@ pub(crate) struct ItemRow {
     /// its `--from` source artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) claimed: Option<PreChangeClaim>,
+    /// Optional declared wave id this item belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wave: Option<String>,
+    /// Explicit prerequisite item references recorded on this item.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) depends_on: Vec<String>,
+    /// Derived readiness: `ready`, `claimed`, `blocked`, `waiting`,
+    /// `in-flight`, `complete`, or `inactive`.
+    pub(crate) readiness: &'static str,
+    /// Unsatisfied prerequisites or gated wave barriers blocking this item.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) blocked_by: Vec<Blocker>,
     /// The reason or note recorded with a done, dropped, split or reopened item.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) split_into: Vec<String>,
+}
+
+/// One unsatisfied prerequisite or wave barrier blocking an item.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Blocker {
+    /// `prereq`, `wave`, or `cycle`.
+    pub(crate) kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) series: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) item: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wave: Option<String>,
+    pub(crate) stage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+}
+
+impl Blocker {
+    pub(crate) fn display_short(&self) -> String {
+        let mut target = match (&self.project, &self.series, &self.item) {
+            (Some(project), Some(series), Some(item)) => {
+                let topic = crate::journal::parse_artifact_name(series)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_else(|| series.clone());
+                format!("{project}::{topic}:{item}")
+            }
+            (None, Some(series), Some(item)) => {
+                let topic = crate::journal::parse_artifact_name(series)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_else(|| series.clone());
+                format!("{topic}:{item}")
+            }
+            (_, _, Some(item)) => item.clone(),
+            _ => self.wave.clone().unwrap_or_else(|| self.kind.to_string()),
+        };
+        if self.kind == "wave" {
+            if let Some(wave) = &self.wave {
+                target = format!("wave {wave} ({target})");
+            }
+        }
+        match &self.reason {
+            Some(reason) => format!("{target} ({}, {reason})", self.stage),
+            None => format!("{target} ({})", self.stage),
+        }
+    }
 }
 
 /// Originating journal artifact linked to an item, with derived open/consumed
@@ -181,6 +243,14 @@ impl ItemRow {
             source: None,
             resolved_by: item.resolved_by.clone(),
             claimed: None,
+            wave: item.wave.clone(),
+            depends_on: item.depends_on.iter().map(ToString::to_string).collect(),
+            readiness: match item.state {
+                ItemState::Open => "ready",
+                ItemState::Done => "complete",
+                ItemState::Dropped | ItemState::Split => "inactive",
+            },
+            blocked_by: Vec::new(),
             note: item.note.clone(),
             split_into: item.split_into.clone(),
         }
@@ -207,6 +277,13 @@ pub(crate) struct Counts {
     pub(crate) in_flight: usize,
     /// Standing items no change carries and nobody marked done.
     pub(crate) open: usize,
+    /// Standing items claimable now: open/unlinked, unblocked, unclaimed, and
+    /// not waiting on a person.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) ready: usize,
+    /// Standing items blocked by an unsatisfied prerequisite or gated wave.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) blocked: usize,
     /// Standing unlinked open items held by a live pre-change lane or source
     /// artifact claim, also counted under `open`.
     #[serde(skip_serializing_if = "is_zero")]
@@ -254,6 +331,10 @@ pub(crate) struct SeriesReport {
     pub(crate) started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) retired: Option<series::Retirement>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) gated_waves: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) waves: Vec<series::Wave>,
     pub(crate) related: Vec<Relation>,
     pub(crate) items: Vec<ItemRow>,
     pub(crate) counts: Counts,
@@ -600,7 +681,8 @@ impl Registry {
 }
 
 /// Whether reading `series` needs the registry: an item linked into another
-/// project, a cross-project source artifact, or a relation to another project.
+/// project, a cross-project source or prerequisite, or a relation to another
+/// project.
 pub(crate) fn needs_registry(series: &[Series]) -> bool {
     series.iter().any(|series| {
         !series.related.is_empty()
@@ -610,6 +692,7 @@ pub(crate) fn needs_registry(series: &[Series]) -> bool {
                         .source
                         .as_ref()
                         .is_some_and(|source| source.project.is_some())
+                    || item.depends_on.iter().any(|dep| dep.project.is_some())
             })
     })
 }
@@ -819,11 +902,355 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn rows(&self, series: &Series) -> Result<Vec<ItemRow>> {
-        series
+        let mut rows: Vec<ItemRow> = series
             .items
             .iter()
             .map(|item| self.row(&series.file, item))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        self.apply_readiness(series, &mut rows);
+        Ok(rows)
+    }
+
+    /// Derive `blocked_by` and `readiness` for every row of `series` from
+    /// explicit `depends_on` edges and gated wave barriers.
+    fn apply_readiness(&self, series: &Series, rows: &mut [ItemRow]) {
+        // Snapshot the current series' own item stages so same-series prereqs
+        // and wave barriers need zero extra reads.
+        let own_stages: BTreeMap<String, &'static str> =
+            rows.iter().map(|row| (row.id.clone(), row.stage)).collect();
+        let own_items: BTreeMap<String, &series::Item> = series
+            .items
+            .iter()
+            .map(|item| (item.id.clone(), item))
+            .collect();
+        let wave_index: BTreeMap<&str, usize> = series
+            .waves
+            .iter()
+            .enumerate()
+            .map(|(idx, wave)| (wave.id.as_str(), idx))
+            .collect();
+
+        for (item, row) in series.items.iter().zip(rows.iter_mut()) {
+            if !item.stands() {
+                row.readiness = "inactive";
+                continue;
+            }
+            if matches!(row.stage, "integrated" | "done") {
+                row.readiness = "complete";
+                continue;
+            }
+            if row.in_flight() {
+                row.readiness = "in-flight";
+                continue;
+            }
+            let mut blockers = Vec::new();
+            // 1. Explicit prerequisite edges.
+            for prereq in &item.depends_on {
+                let mut visiting = BTreeSet::new();
+                visiting.insert((
+                    self.home_slug.map(str::to_string),
+                    series.file.clone(),
+                    item.id.clone(),
+                ));
+                self.collect_prereq_blockers(
+                    series,
+                    &own_stages,
+                    &own_items,
+                    prereq,
+                    &mut visiting,
+                    &mut blockers,
+                );
+            }
+            // 2. Gated wave barrier: an item in a gated wave waits on every
+            // standing item in earlier declared waves that is not yet complete.
+            if let Some(wave_id) = item.wave.as_deref() {
+                if let Some(&idx) = wave_index.get(wave_id) {
+                    if series.waves[idx].gated {
+                        for earlier in &series.waves[..idx] {
+                            for other in &series.items {
+                                if !other.stands()
+                                    || other.wave.as_deref() != Some(earlier.id.as_str())
+                                {
+                                    continue;
+                                }
+                                let stage = own_stages.get(&other.id).copied().unwrap_or("unknown");
+                                if !matches!(stage, "integrated" | "done") {
+                                    blockers.push(Blocker {
+                                        kind: "wave",
+                                        project: None,
+                                        project_slug: None,
+                                        series: None,
+                                        item: Some(other.id.clone()),
+                                        wave: Some(earlier.id.clone()),
+                                        stage,
+                                        reason: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            row.blocked_by = blockers;
+            row.readiness = if !row.blocked_by.is_empty() {
+                "blocked"
+            } else if row.waiting.is_some() {
+                "waiting"
+            } else if row.claimed.is_some() {
+                "claimed"
+            } else {
+                "ready"
+            };
+        }
+    }
+
+    fn collect_prereq_blockers(
+        &self,
+        current_series: &Series,
+        own_stages: &BTreeMap<String, &'static str>,
+        own_items: &BTreeMap<String, &series::Item>,
+        prereq: &series::ItemPrereq,
+        visiting: &mut BTreeSet<(Option<String>, String, String)>,
+        out: &mut Vec<Blocker>,
+    ) {
+        let foreign_slug = prereq
+            .project
+            .as_deref()
+            .filter(|slug| Some(*slug) != self.home_slug);
+        let target_project_key = foreign_slug
+            .map(str::to_string)
+            .or_else(|| self.home_slug.map(str::to_string));
+        let target_series_file = prereq
+            .series
+            .clone()
+            .unwrap_or_else(|| current_series.file.clone());
+        let node = (
+            target_project_key.clone(),
+            target_series_file.clone(),
+            prereq.item.clone(),
+        );
+        if !visiting.insert(node.clone()) {
+            out.push(Blocker {
+                kind: "cycle",
+                project: foreign_slug.map(|slug| self.registry.label(slug)),
+                project_slug: foreign_slug.map(str::to_string),
+                series: prereq.series.clone(),
+                item: Some(prereq.item.clone()),
+                wave: None,
+                stage: "unknown",
+                reason: Some("dependency cycle".to_string()),
+            });
+            return;
+        }
+
+        // Fast path: same series in this journal.
+        if foreign_slug.is_none() && target_series_file == current_series.file {
+            match (
+                own_items.get(&prereq.item).copied(),
+                own_stages.get(&prereq.item).copied(),
+            ) {
+                (Some(target_item), Some(stage)) => {
+                    self.judge_target(
+                        current_series,
+                        own_stages,
+                        own_items,
+                        None,
+                        None,
+                        target_item,
+                        stage,
+                        visiting,
+                        out,
+                    );
+                }
+                _ => {
+                    out.push(Blocker {
+                        kind: "prereq",
+                        project: None,
+                        project_slug: None,
+                        series: None,
+                        item: Some(prereq.item.clone()),
+                        wave: None,
+                        stage: "unknown",
+                        reason: Some("item not found".to_string()),
+                    });
+                }
+            }
+            visiting.remove(&node);
+            return;
+        }
+
+        // Another series in this journal or another registered project.
+        let (events, ledger, label) = match foreign_slug {
+            None => (Some(self.home_events), self.home, None),
+            Some(slug) => match self.registry.get(slug) {
+                Some(project) => (
+                    project.events().ok(),
+                    &project.ledger,
+                    Some(project.label.clone()),
+                ),
+                None => {
+                    out.push(Blocker {
+                        kind: "prereq",
+                        project: Some(self.registry.label(slug)),
+                        project_slug: Some(slug.to_string()),
+                        series: Some(target_series_file),
+                        item: Some(prereq.item.clone()),
+                        wave: None,
+                        stage: "unknown",
+                        reason: Some("project not registered".to_string()),
+                    });
+                    visiting.remove(&node);
+                    return;
+                }
+            },
+        };
+        let Some(events) = events else {
+            out.push(Blocker {
+                kind: "prereq",
+                project: label,
+                project_slug: foreign_slug.map(str::to_string),
+                series: Some(target_series_file),
+                item: Some(prereq.item.clone()),
+                wave: None,
+                stage: "unknown",
+                reason: Some("journal unreadable".to_string()),
+            });
+            visiting.remove(&node);
+            return;
+        };
+        let Some(target_series) = series::replay(events, &target_series_file) else {
+            out.push(Blocker {
+                kind: "prereq",
+                project: label,
+                project_slug: foreign_slug.map(str::to_string),
+                series: Some(target_series_file),
+                item: Some(prereq.item.clone()),
+                wave: None,
+                stage: "unknown",
+                reason: Some("series not found".to_string()),
+            });
+            visiting.remove(&node);
+            return;
+        };
+        let Some(target_item) = target_series.item(&prereq.item) else {
+            out.push(Blocker {
+                kind: "prereq",
+                project: label,
+                project_slug: foreign_slug.map(str::to_string),
+                series: Some(target_series_file),
+                item: Some(prereq.item.clone()),
+                wave: None,
+                stage: "unknown",
+                reason: Some("item not found".to_string()),
+            });
+            visiting.remove(&node);
+            return;
+        };
+        let stage = self.item_stage_in(ledger, foreign_slug.or(self.home_slug), target_item);
+        if target_item.state == ItemState::Split && !target_item.split_into.is_empty() {
+            for part_id in &target_item.split_into {
+                let child = series::ItemPrereq {
+                    project: foreign_slug.map(str::to_string),
+                    series: Some(target_series_file.clone()),
+                    item: part_id.clone(),
+                };
+                self.collect_prereq_blockers(
+                    current_series,
+                    own_stages,
+                    own_items,
+                    &child,
+                    visiting,
+                    out,
+                );
+            }
+        } else if !matches!(stage, "integrated" | "done") {
+            let reason = (stage == "dropped").then(|| "prerequisite dropped".to_string());
+            out.push(Blocker {
+                kind: "prereq",
+                project: label,
+                project_slug: foreign_slug.map(str::to_string),
+                series: Some(target_series_file),
+                item: Some(prereq.item.clone()),
+                wave: None,
+                stage,
+                reason,
+            });
+        }
+        visiting.remove(&node);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn judge_target(
+        &self,
+        current_series: &Series,
+        own_stages: &BTreeMap<String, &'static str>,
+        own_items: &BTreeMap<String, &series::Item>,
+        foreign_slug: Option<&str>,
+        series_file: Option<String>,
+        target_item: &series::Item,
+        stage: &'static str,
+        visiting: &mut BTreeSet<(Option<String>, String, String)>,
+        out: &mut Vec<Blocker>,
+    ) {
+        if matches!(stage, "integrated" | "done") {
+            return;
+        }
+        if target_item.state == ItemState::Split && !target_item.split_into.is_empty() {
+            for part_id in &target_item.split_into {
+                let child = series::ItemPrereq {
+                    project: foreign_slug.map(str::to_string),
+                    series: series_file.clone(),
+                    item: part_id.clone(),
+                };
+                self.collect_prereq_blockers(
+                    current_series,
+                    own_stages,
+                    own_items,
+                    &child,
+                    visiting,
+                    out,
+                );
+            }
+            return;
+        }
+        let reason = (stage == "dropped").then(|| "prerequisite dropped".to_string());
+        out.push(Blocker {
+            kind: "prereq",
+            project: foreign_slug.map(|slug| self.registry.label(slug)),
+            project_slug: foreign_slug.map(str::to_string),
+            series: series_file,
+            item: Some(target_item.id.clone()),
+            wave: None,
+            stage,
+            reason,
+        });
+    }
+
+    fn item_stage_in(
+        &self,
+        home: &Ledger,
+        home_slug: Option<&str>,
+        item: &series::Item,
+    ) -> &'static str {
+        let foreign = item
+            .project
+            .as_deref()
+            .filter(|slug| Some(*slug) != home_slug);
+        match foreign {
+            None => match home.row(item, self.now) {
+                Ok(row) => row.stage,
+                Err(_) => "unknown",
+            },
+            Some(slug) => match self
+                .registry
+                .get(slug)
+                .map(|project| project.ledger.row(item, self.now))
+            {
+                Some(Ok(row)) => row.stage,
+                _ if item.stands() => "unknown",
+                _ => ItemRow::of(item).stage,
+            },
+        }
     }
 }
 
@@ -910,6 +1337,11 @@ pub(crate) fn counts(series: &Series, rows: &[ItemRow]) -> Counts {
         if row.claimed.is_some() {
             counts.claimed += 1;
         }
+        if row.readiness == "ready" {
+            counts.ready += 1;
+        } else if row.readiness == "blocked" {
+            counts.blocked += 1;
+        }
         match row.stage {
             "integrated" => counts.integrated += 1,
             "done" => counts.done += 1,
@@ -948,6 +1380,8 @@ pub(crate) fn series_report(
         follows: series.follows.clone(),
         started_at: series.started_at.clone(),
         retired: series.retired.clone(),
+        gated_waves: series.gated_waves,
+        waves: series.waves.clone(),
         related: relations,
         counts: counts(series, &rows),
         last_integration: last_integration(&rows),
@@ -1042,8 +1476,9 @@ fn related_report(
 }
 
 /// Build the report for this project: one series by name, or every active
-/// one, with the related series they name.
-pub(crate) fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
+/// one, with the related series they name. When `ready_only` is true, each
+/// series keeps only its currently `ready` items while preserving full counts.
+pub(crate) fn build(ctx: &Ctx, name: Option<&str>, ready_only: bool) -> Result<ProgressReport> {
     let now = Utc::now();
     let dir = crate::journal::resolve_dir(&ctx.cwd)?;
     let events = crate::journal::read_events(&dir)?;
@@ -1112,7 +1547,11 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
                 mutual,
             });
         }
-        reports.push(series_report(series, &reader, relations)?);
+        let mut series_rep = series_report(series, &reader, relations)?;
+        if ready_only {
+            series_rep.items.retain(|row| row.readiness == "ready");
+        }
+        reports.push(series_rep);
     }
     let related = reads
         .into_iter()

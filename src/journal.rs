@@ -10131,7 +10131,9 @@ impl JournalEvent {
             | "workbench-unarchived" => workbench::well_formed(self),
             "item-added" | "item-renamed" | "item-moved" | "item-dropped" | "item-done"
             | "item-reopened" | "item-linked" | "item-unlinked" | "item-sourced"
-            | "item-unsourced" | "item-split" | "item-waiting" | "item-unwaited"
+            | "item-unsourced" | "item-waved" | "item-unwaved" | "item-depended"
+            | "item-undepended" | "item-split" | "item-waiting" | "item-unwaited"
+            | "wave-declared" | "wave-renamed" | "wave-moved" | "wave-removed"
             | "series-related" | "series-unrelated" => series::well_formed(self),
             _ => false,
         }
@@ -11203,7 +11205,10 @@ fn event_message(event: &JournalEvent) -> String {
                 .unwrap_or_default()
         ),
         kind if kind.starts_with("workbench-") => workbench::event_message(event),
-        kind if kind.starts_with("item-") || kind.starts_with("series-") => {
+        kind if kind.starts_with("item-")
+            || kind.starts_with("series-")
+            || kind.starts_with("wave-") =>
+        {
             series::event_message(event)
         }
         _ => String::new(),

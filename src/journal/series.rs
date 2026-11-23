@@ -20,7 +20,7 @@ use crate::commands::Ctx;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The artifact kind a series is filed under.
@@ -71,9 +71,64 @@ pub(crate) struct SeriesFields {
     /// The durable artifact recorded as resolving an unlinked `done` item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_by: Option<ResolvedBy>,
+    /// On the `note` event that started a series: whether declared waves act
+    /// as readiness barriers by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    gated_waves: bool,
+    /// Wave identifier on `wave-*`, `item-added`, `item-waved`, or `item-split`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wave: Option<String>,
+    /// Optional human title of a wave on `wave-declared` or `wave-renamed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wave_title: Option<String>,
+    /// Wave placement anchor on `wave-declared` or `wave-moved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wave_before: Option<String>,
+    /// Wave placement anchor on `wave-declared` or `wave-moved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wave_after: Option<String>,
+    /// Explicit barrier setting on `wave-declared`; `None` inherits `gated_waves`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wave_gated: Option<bool>,
+    /// Prerequisite item on `item-depended` or `item-undepended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depends_on: Option<ItemPrereq>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
+}
+
+/// One declared wave on a progress series.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct Wave {
+    pub(crate) id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) gated: bool,
+}
+
+/// An explicit prerequisite edge from an item to another item: same series
+/// (`series: None, project: None`), another local series (`series: Some(_)`),
+/// or another registered project's series (`project: Some(_), series: Some(_)`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ItemPrereq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) series: Option<String>,
+    pub(crate) item: String,
+}
+
+impl std::fmt::Display for ItemPrereq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.project, &self.series) {
+            (Some(project), Some(series)) => write!(f, "{project}::{series}:{}", self.item),
+            (None, Some(series)) => write!(f, "{series}:{}", self.item),
+            (Some(project), None) => write!(f, "{project}::{}", self.item),
+            (None, None) => f.write_str(&self.item),
+        }
+    }
 }
 
 /// One item a split produced.
@@ -159,6 +214,29 @@ pub(crate) fn valid_item_id(value: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// A wave identifier: lowercase ASCII `[a-z0-9]` with optional internal `-`
+/// or `_`, 1..=32 characters, never starting or ending with a separator.
+pub(crate) fn valid_wave_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes[0].is_ascii_lowercase() | bytes[0].is_ascii_digit()
+        && bytes[bytes.len() - 1].is_ascii_lowercase() | bytes[bytes.len() - 1].is_ascii_digit()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+}
+
+fn valid_prereq(prereq: &ItemPrereq) -> bool {
+    valid_item_id(&prereq.item)
+        && prereq.project.as_deref().is_none_or(single_line)
+        && match (&prereq.project, &prereq.series) {
+            (Some(_), None) => false,
+            (_, Some(file)) => is_series_file(file),
+            (None, None) => true,
+        }
+}
+
 fn valid_item_source(source: &ItemSource) -> bool {
     source.project.as_deref().is_none_or(single_line)
         && bare_artifact_kind(&source.file)
@@ -198,15 +276,29 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         .flatten()
         .collect::<Vec<_>>();
     let placed = placements.iter().all(|anchor| valid_item_id(anchor));
+    let no_wave_or_dep = fields.wave.is_none()
+        && fields.wave_title.is_none()
+        && fields.wave_before.is_none()
+        && fields.wave_after.is_none()
+        && fields.wave_gated.is_none()
+        && fields.depends_on.is_none();
     let no_link_or_wait = fields.parts.is_empty()
         && fields.change.is_none()
         && fields.change_project.is_none()
         && fields.waits_on.is_none()
         && fields.related.is_none();
-    let bare = no_link_or_wait && fields.item_source.is_none() && fields.resolved_by.is_none();
+    let bare = no_link_or_wait
+        && no_wave_or_dep
+        && fields.item_source.is_none()
+        && fields.resolved_by.is_none();
     if !on_series {
         return false;
     }
+    let wave_placements = [&fields.wave_before, &fields.wave_after]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let wave_placed = wave_placements.iter().all(|anchor| valid_wave_id(anchor));
     match event.event.as_str() {
         "item-added" => {
             names_item
@@ -215,6 +307,12 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && placed
                 && no_link_or_wait
                 && fields.resolved_by.is_none()
+                && fields.wave_title.is_none()
+                && fields.wave_before.is_none()
+                && fields.wave_after.is_none()
+                && fields.wave_gated.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_none_or(valid_wave_id)
                 && fields.item_source.as_ref().is_none_or(valid_item_source)
         }
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
@@ -225,10 +323,11 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && event.note.as_deref().is_none_or(single_line)
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_wave_or_dep
                 && fields.item_source.is_none()
                 && fields.resolved_by.as_ref().is_none_or(valid_resolved_by)
         }
-        "item-reopened" | "item-unlinked" | "item-unwaited" | "item-unsourced" => {
+        "item-reopened" | "item-unlinked" | "item-unwaited" | "item-unsourced" | "item-unwaved" => {
             names_item
                 && event.note.as_deref().is_none_or(single_line)
                 && placements.is_empty()
@@ -239,8 +338,86 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && event.note.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_wave_or_dep
                 && fields.resolved_by.is_none()
                 && fields.item_source.as_ref().is_some_and(valid_item_source)
+        }
+        "item-waved" => {
+            names_item
+                && event.note.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.wave_title.is_none()
+                && fields.wave_before.is_none()
+                && fields.wave_after.is_none()
+                && fields.wave_gated.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_some_and(valid_wave_id)
+        }
+        "item-depended" | "item-undepended" => {
+            names_item
+                && event.note.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.wave.is_none()
+                && fields.wave_title.is_none()
+                && fields.wave_before.is_none()
+                && fields.wave_after.is_none()
+                && fields.wave_gated.is_none()
+                && fields.depends_on.as_ref().is_some_and(valid_prereq)
+        }
+        "wave-declared" => {
+            fields.item.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_some_and(valid_wave_id)
+                && fields.wave_title.as_deref().is_none_or(single_line)
+                && wave_placements.len() <= 1
+                && wave_placed
+        }
+        "wave-renamed" => {
+            fields.item.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_some_and(valid_wave_id)
+                && line(&fields.wave_title)
+                && wave_placements.is_empty()
+                && fields.wave_gated.is_none()
+        }
+        "wave-moved" => {
+            fields.item.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_some_and(valid_wave_id)
+                && fields.wave_title.is_none()
+                && wave_placements.len() == 1
+                && wave_placed
+                && fields.wave_gated.is_none()
+        }
+        "wave-removed" => {
+            fields.item.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_some_and(valid_wave_id)
+                && fields.wave_title.is_none()
+                && wave_placements.is_empty()
+                && fields.wave_gated.is_none()
         }
         "item-linked" => {
             names_item
@@ -251,6 +428,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.waits_on.is_none()
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
+                && no_wave_or_dep
                 && fields.related.is_none()
         }
         "item-waiting" => {
@@ -262,6 +440,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.change_project.is_none()
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
+                && no_wave_or_dep
                 && fields.related.is_none()
                 && fields.waits_on.as_ref().is_some_and(|wait| {
                     bare_artifact_kind(&wait.file).is_some() && single_line(&wait.question)
@@ -281,6 +460,12 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.waits_on.is_none()
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
+                && fields.wave_title.is_none()
+                && fields.wave_before.is_none()
+                && fields.wave_after.is_none()
+                && fields.wave_gated.is_none()
+                && fields.depends_on.is_none()
+                && fields.wave.as_deref().is_none_or(valid_wave_id)
                 && fields.related.is_none()
         }
         "series-related" | "series-unrelated" => {
@@ -292,6 +477,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.waits_on.is_none()
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
+                && no_wave_or_dep
                 && fields.related.as_ref().is_some_and(|related| {
                     single_line(&related.project) && is_series_file(&related.file)
                 })
@@ -325,6 +511,47 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
                 .map_or_else(String::new, ToString::to_string)
         ),
         "item-unsourced" => format!("removed source link from item {item} of {file}"),
+        "item-waved" => format!(
+            "assigned item {item} of {file} to wave {}",
+            fields.wave.as_deref().unwrap_or_default()
+        ),
+        "item-unwaved" => format!("removed wave assignment from item {item} of {file}"),
+        "item-depended" => format!(
+            "item {item} of {file} depends on {}",
+            fields
+                .depends_on
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string)
+        ),
+        "item-undepended" => format!(
+            "removed prerequisite {} from item {item} of {file}",
+            fields
+                .depends_on
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string)
+        ),
+        "wave-declared" => format!(
+            "declared wave {} on {file}{}",
+            fields.wave.as_deref().unwrap_or_default(),
+            fields
+                .wave_title
+                .as_deref()
+                .map(|title| format!(": {title}"))
+                .unwrap_or_default()
+        ),
+        "wave-renamed" => format!(
+            "renamed wave {} of {file}: {}",
+            fields.wave.as_deref().unwrap_or_default(),
+            fields.wave_title.as_deref().unwrap_or_default()
+        ),
+        "wave-moved" => format!(
+            "moved wave {} of {file}",
+            fields.wave.as_deref().unwrap_or_default()
+        ),
+        "wave-removed" => format!(
+            "removed wave {} from {file}",
+            fields.wave.as_deref().unwrap_or_default()
+        ),
         "item-linked" => format!(
             "linked item {item} of {file} to change {}{}",
             fields
@@ -407,6 +634,10 @@ pub(crate) struct Item {
     pub(crate) source: Option<ItemSource>,
     /// The durable artifact recorded as resolving an unlinked `done` item.
     pub(crate) resolved_by: Option<ResolvedBy>,
+    /// Optional wave id this item is assigned to.
+    pub(crate) wave: Option<String>,
+    /// Explicit prerequisite items that must complete before this item is ready.
+    pub(crate) depends_on: Vec<ItemPrereq>,
     /// The reason or note recorded with the item's latest state.
     pub(crate) note: Option<String>,
     /// When the item reached its latest state.
@@ -447,6 +678,10 @@ pub(crate) struct Series {
     pub(crate) follows: Option<String>,
     pub(crate) started_at: Option<String>,
     pub(crate) retired: Option<Retirement>,
+    /// Whether waves declared on this series act as barriers by default.
+    pub(crate) gated_waves: bool,
+    /// Ordered waves declared on this series.
+    pub(crate) waves: Vec<Wave>,
     pub(crate) items: Vec<Item>,
     pub(crate) related: Vec<RelatedSeries>,
     /// Items added after the start, counted from the events rather than from
@@ -481,8 +716,21 @@ impl Series {
         since
     }
 
-    fn item(&self, id: &str) -> Option<&Item> {
+    pub(crate) fn item(&self, id: &str) -> Option<&Item> {
         self.items.iter().find(|item| item.id == id)
+    }
+
+    pub(crate) fn wave(&self, id: &str) -> Option<&Wave> {
+        self.waves.iter().find(|wave| wave.id == id)
+    }
+
+    fn require_wave(&self, id: &str) -> Result<&Wave> {
+        self.wave(id).with_context(|| {
+            format!(
+                "{} has no declared wave {id:?}; declare one with `arc progress waves add {} {id}`",
+                self.file, self.file
+            )
+        })
     }
 
     fn require_item(&self, id: &str) -> Result<&Item> {
@@ -516,6 +764,22 @@ fn place(items: &mut Vec<Item>, item: Item, before: Option<&str>, after: Option<
     }
 }
 
+fn place_wave(waves: &mut Vec<Wave>, wave: Wave, before: Option<&str>, after: Option<&str>) {
+    let anchor = before
+        .map(|id| (id, 0))
+        .or_else(|| after.map(|id| (id, 1)))
+        .and_then(|(id, offset)| {
+            waves
+                .iter()
+                .position(|candidate| candidate.id == id)
+                .map(|at| at + offset)
+        });
+    match anchor {
+        Some(at) => waves.insert(at, wave),
+        None => waves.push(wave),
+    }
+}
+
 /// Replay one series from the journal's events. `None` when no event ever
 /// started it.
 pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
@@ -533,6 +797,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                 follows: event.series.follows.clone(),
                 started_at: Some(event.ts.clone()),
                 retired: None,
+                gated_waves: event.series.gated_waves,
+                waves: Vec::new(),
                 items: Vec::new(),
                 related: Vec::new(),
                 added: 0,
@@ -546,6 +812,58 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
         let id = fields.item.as_deref().unwrap_or_default();
         let at = Some(event.ts.clone());
         match event.event.as_str() {
+            "wave-declared" => {
+                let Some(wave_id) = fields.wave.as_deref() else {
+                    continue;
+                };
+                if current.wave(wave_id).is_some() {
+                    continue;
+                }
+                let wave = Wave {
+                    id: wave_id.to_string(),
+                    title: fields.wave_title.clone(),
+                    gated: fields.wave_gated.unwrap_or(current.gated_waves),
+                };
+                place_wave(
+                    &mut current.waves,
+                    wave,
+                    fields.wave_before.as_deref(),
+                    fields.wave_after.as_deref(),
+                );
+            }
+            "wave-renamed" => {
+                if let Some(wave_id) = fields.wave.as_deref() {
+                    if let Some(wave) = current.waves.iter_mut().find(|w| w.id == wave_id) {
+                        wave.title = fields.wave_title.clone();
+                    }
+                }
+            }
+            "wave-moved" => {
+                let Some(wave_id) = fields.wave.as_deref() else {
+                    continue;
+                };
+                let anchor = fields
+                    .wave_before
+                    .as_deref()
+                    .or(fields.wave_after.as_deref());
+                if anchor == Some(wave_id) || anchor.is_none_or(|a| current.wave(a).is_none()) {
+                    continue;
+                }
+                if let Some(index) = current.waves.iter().position(|w| w.id == wave_id) {
+                    let wave = current.waves.remove(index);
+                    place_wave(
+                        &mut current.waves,
+                        wave,
+                        fields.wave_before.as_deref(),
+                        fields.wave_after.as_deref(),
+                    );
+                }
+            }
+            "wave-removed" => {
+                if let Some(wave_id) = fields.wave.as_deref() {
+                    current.waves.retain(|w| w.id != wave_id);
+                }
+            }
             "item-added" if current.item(id).is_none() => {
                 if !fields.initial {
                     added += 1;
@@ -559,6 +877,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     waits_on: None,
                     source: fields.item_source.clone(),
                     resolved_by: None,
+                    wave: fields.wave.clone(),
+                    depends_on: Vec::new(),
                     note: None,
                     state_at: at,
                     split_into: Vec::new(),
@@ -599,6 +919,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     .filter(|part| current.item(&part.item).is_none())
                     .collect();
                 let original = &mut current.items[index];
+                let inherited_wave = fields.wave.clone().or_else(|| original.wave.clone());
                 original.state = ItemState::Split;
                 original.note = event.note.clone();
                 original.state_at = at.clone();
@@ -615,6 +936,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             waits_on: None,
                             source: None,
                             resolved_by: None,
+                            wave: inherited_wave.clone(),
+                            depends_on: Vec::new(),
                             note: None,
                             state_at: at.clone(),
                             split_into: Vec::new(),
@@ -671,6 +994,20 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     }
                     "item-sourced" => item.source = fields.item_source.clone(),
                     "item-unsourced" => item.source = None,
+                    "item-waved" => item.wave = fields.wave.clone(),
+                    "item-unwaved" => item.wave = None,
+                    "item-depended" => {
+                        if let Some(prereq) = &fields.depends_on {
+                            if !item.depends_on.contains(prereq) {
+                                item.depends_on.push(prereq.clone());
+                            }
+                        }
+                    }
+                    "item-undepended" => {
+                        if let Some(prereq) = &fields.depends_on {
+                            item.depends_on.retain(|known| known != prereq);
+                        }
+                    }
                     "item-waiting" => item.waits_on = fields.waits_on.clone(),
                     "item-unwaited" => item.waits_on = None,
                     _ => {}
@@ -1007,7 +1344,15 @@ pub(crate) fn resolve_lane_item(
     })
 }
 
+/// A wave declaration passed to `start`.
+pub(crate) struct WaveSpec {
+    pub(crate) id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) gated: Option<bool>,
+}
+
 /// Start a series: write its artifact and declare its first items.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start(
     ctx: &Ctx,
     topic: &str,
@@ -1015,6 +1360,9 @@ pub(crate) fn start(
     follows: Option<&str>,
     items: &[String],
     sources: &BTreeMap<usize, String>,
+    gated_waves: bool,
+    waves: &[WaveSpec],
+    item_waves: &BTreeMap<usize, String>,
 ) -> Result<String> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
@@ -1024,6 +1372,39 @@ pub(crate) fn start(
         .iter()
         .map(|item| one_line("--item", item))
         .collect::<Result<Vec<_>>>()?;
+    let mut seen_waves = BTreeSet::new();
+    let mut validated_waves = Vec::with_capacity(waves.len());
+    for spec in waves {
+        if !valid_wave_id(&spec.id) {
+            bail!(
+                "wave id {:?} must be 1..=32 lowercase ASCII letters/digits with internal `-` or `_`",
+                spec.id
+            );
+        }
+        if !seen_waves.insert(spec.id.clone()) {
+            bail!("wave {:?} declared more than once", spec.id);
+        }
+        let wave_title = spec
+            .title
+            .as_deref()
+            .map(|t| one_line("--wave title", t))
+            .transpose()?;
+        validated_waves.push((spec.id.clone(), wave_title, spec.gated));
+    }
+    for (&index, wave_id) in item_waves {
+        if index >= items.len() {
+            bail!(
+                "--item-wave names item i{}, but start declared only {} item(s)",
+                index + 1,
+                items.len()
+            );
+        }
+        if !seen_waves.contains(wave_id) {
+            bail!(
+                "--item-wave names undeclared wave {wave_id:?}; declare it with --wave {wave_id}"
+            );
+        }
+    }
     let dir = resolve_dir(&ctx.cwd)?;
     if let Some(plan) = follows {
         named_artifact(&dir, plan, "plan", "--follows")?;
@@ -1055,7 +1436,16 @@ pub(crate) fn start(
     note.file = Some(filename.clone());
     note.title = Some(title);
     note.series.follows = follows.map(str::to_string);
+    note.series.gated_waves = gated_waves;
     append_event(ctx, &dir, &note)?;
+    for (wave_id, wave_title, wave_gated) in validated_waves {
+        let mut event = JournalEvent::base(ctx, now, topic, "wave-declared");
+        event.file = Some(filename.clone());
+        event.series.wave = Some(wave_id);
+        event.series.wave_title = wave_title;
+        event.series.wave_gated = wave_gated;
+        append_event(ctx, &dir, &event)?;
+    }
     for (index, item) in items.iter().enumerate() {
         let mut event = JournalEvent::base(ctx, now, topic, "item-added");
         event.file = Some(filename.clone());
@@ -1063,6 +1453,7 @@ pub(crate) fn start(
         event.series.item = Some(format!("i{}", index + 1));
         event.series.initial = true;
         event.series.item_source = resolved_sources.get(&index).cloned();
+        event.series.wave = item_waves.get(&index).cloned();
         append_event(ctx, &dir, &event)?;
     }
     Ok(filename)
@@ -1075,17 +1466,35 @@ pub(crate) fn add(
     title: &str,
     placement: Placement,
     from: Option<&str>,
+    wave: Option<&str>,
+    depends_on: &[String],
 ) -> Result<String> {
     let open = open_for_write(ctx, name)?;
     let source = from
         .map(|spec| resolve_source(&open.dir, spec, "--from"))
         .transpose()?;
+    if let Some(wave_id) = wave {
+        open.series.require_wave(wave_id)?;
+    }
+    let mut prereqs = Vec::new();
+    for spec in depends_on {
+        let prereq = resolve_prereq(&open.dir, &open.events, &open.series, spec)?;
+        if !prereqs.contains(&prereq) {
+            prereqs.push(prereq);
+        }
+    }
     let id = format!("i{}", open.series.next_id());
     let mut event = open.event(ctx, "item-added", Some(&id));
     event.title = Some(one_line("the title", title)?);
     event.series.item_source = source;
+    event.series.wave = wave.map(str::to_string);
     placement.apply(&open.series, &mut event, None)?;
     open.append(ctx, &event)?;
+    for prereq in prereqs {
+        let mut dep = open.event(ctx, "item-depended", Some(&id));
+        dep.series.depends_on = Some(prereq);
+        open.append(ctx, &dep)?;
+    }
     Ok(id)
 }
 
@@ -1394,11 +1803,15 @@ pub(crate) fn split(
     id: &str,
     titles: &[String],
     reason: &str,
+    wave: Option<&str>,
 ) -> Result<Vec<String>> {
     let open = open_for_write(ctx, name)?;
     let item = open.standing(id)?;
     if let Some(change) = &item.change {
         bail!("item {id} follows change {change}; unlink it before splitting it");
+    }
+    if let Some(wave_id) = wave {
+        open.series.require_wave(wave_id)?;
     }
     if titles.len() < 2 {
         bail!("a split names at least two items with --into");
@@ -1416,9 +1829,345 @@ pub(crate) fn split(
         .collect::<Result<Vec<_>>>()?;
     let mut event = open.event(ctx, "item-split", Some(id));
     event.note = Some(one_line("--reason", reason)?);
+    event.series.wave = wave.map(str::to_string);
     event.series.parts = parts.clone();
     open.append(ctx, &event)?;
     Ok(parts.into_iter().map(|part| part.item).collect())
+}
+
+/// Declare a wave on a series.
+pub(crate) fn wave_declare(
+    ctx: &Ctx,
+    name: &str,
+    id: &str,
+    title: Option<&str>,
+    before: Option<&str>,
+    after: Option<&str>,
+    gated: Option<bool>,
+) -> Result<()> {
+    if !valid_wave_id(id) {
+        bail!(
+            "wave id {id:?} must be 1..=32 lowercase ASCII letters/digits with internal `-` or `_`"
+        );
+    }
+    let open = open_for_write(ctx, name)?;
+    if open.series.wave(id).is_some() {
+        bail!("{} already declares wave {id:?}", open.series.file);
+    }
+    if let Some(anchor) = before.or(after) {
+        open.series.require_wave(anchor)?;
+    }
+    let mut event = open.event(ctx, "wave-declared", None);
+    event.series.wave = Some(id.to_string());
+    event.series.wave_title = title.map(|t| one_line("--title", t)).transpose()?;
+    event.series.wave_before = before.map(str::to_string);
+    event.series.wave_after = after.map(str::to_string);
+    event.series.wave_gated = gated;
+    open.append(ctx, &event)
+}
+
+/// Rename a declared wave's title.
+pub(crate) fn wave_rename(ctx: &Ctx, name: &str, id: &str, title: &str) -> Result<()> {
+    let open = open_for_write(ctx, name)?;
+    let wave = open.series.require_wave(id)?;
+    let title = one_line("the title", title)?;
+    if wave.title.as_deref() == Some(title.as_str()) {
+        bail!("wave {id:?} is already titled {title:?}");
+    }
+    let mut event = open.event(ctx, "wave-renamed", None);
+    event.series.wave = Some(id.to_string());
+    event.series.wave_title = Some(title);
+    open.append(ctx, &event)
+}
+
+/// Move a declared wave before or after another wave.
+pub(crate) fn wave_move(
+    ctx: &Ctx,
+    name: &str,
+    id: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<()> {
+    let open = open_for_write(ctx, name)?;
+    open.series.require_wave(id)?;
+    let Some(anchor) = before.or(after) else {
+        bail!("say where the wave goes: --before or --after another wave");
+    };
+    open.series.require_wave(anchor)?;
+    if anchor == id {
+        bail!("a wave cannot be placed relative to itself");
+    }
+    let mut event = open.event(ctx, "wave-moved", None);
+    event.series.wave = Some(id.to_string());
+    event.series.wave_before = before.map(str::to_string);
+    event.series.wave_after = after.map(str::to_string);
+    open.append(ctx, &event)
+}
+
+/// Remove a declared wave; refused while any standing item is assigned to it.
+pub(crate) fn wave_remove(ctx: &Ctx, name: &str, id: &str) -> Result<()> {
+    let open = open_for_write(ctx, name)?;
+    open.series.require_wave(id)?;
+    let assigned: Vec<&str> = open
+        .series
+        .items
+        .iter()
+        .filter(|item| item.stands() && item.wave.as_deref() == Some(id))
+        .map(|item| item.id.as_str())
+        .collect();
+    if !assigned.is_empty() {
+        bail!(
+            "wave {id:?} still holds standing item(s) {}; move or unwave them first",
+            assigned.join(", ")
+        );
+    }
+    let mut event = open.event(ctx, "wave-removed", None);
+    event.series.wave = Some(id.to_string());
+    open.append(ctx, &event)
+}
+
+/// Assign a standing item to a declared wave.
+pub(crate) fn set_wave(ctx: &Ctx, name: &str, id: &str, wave_id: &str) -> Result<()> {
+    let open = open_for_write(ctx, name)?;
+    let item = open.standing(id)?;
+    open.series.require_wave(wave_id)?;
+    if item.wave.as_deref() == Some(wave_id) {
+        bail!("item {id} is already in wave {wave_id:?}");
+    }
+    let mut event = open.event(ctx, "item-waved", Some(id));
+    event.series.wave = Some(wave_id.to_string());
+    open.append(ctx, &event)
+}
+
+/// Remove an item's wave assignment; returns the removed wave id.
+pub(crate) fn clear_wave(ctx: &Ctx, name: &str, id: &str) -> Result<String> {
+    let open = open_for_write(ctx, name)?;
+    let Some(wave_id) = open.series.require_item(id)?.wave.clone() else {
+        bail!("item {id} is not assigned to a wave");
+    };
+    open.append(ctx, &open.event(ctx, "item-unwaved", Some(id)))?;
+    Ok(wave_id)
+}
+
+/// Resolve a prerequisite reference: `i1` (same series), `<series>:i2` (same
+/// journal), or `<project>::<series>:i3` (another registered project).
+fn resolve_prereq(
+    dir: &Path,
+    events: &[JournalEvent],
+    current: &Series,
+    spec: &str,
+) -> Result<ItemPrereq> {
+    if let Some((prefix, rest)) = spec.split_once(super::REFERENCE_SEPARATOR) {
+        let Some((series_name, item_id)) = rest.rsplit_once(':') else {
+            bail!("cross-project prerequisite takes <project>::<series>:<item>; got {spec:?}");
+        };
+        let project = super::registered_project(prefix)?;
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if canonical(&project.journal_dir) == canonical(dir) {
+            bail!("{prefix} is this project; name {series_name}:{item_id} without a project");
+        }
+        let remote = named_series(&project.journal_dir, series_name).with_context(|| {
+            format!("cannot read series {series_name:?} in {}", project.label())
+        })?;
+        remote.require_item(item_id)?;
+        return Ok(ItemPrereq {
+            project: Some(project.slug),
+            series: Some(remote.file),
+            item: item_id.to_string(),
+        });
+    }
+    if let Some((series_name, item_id)) = spec.rsplit_once(':') {
+        let target = named_in(events, dir, series_name)?;
+        target.require_item(item_id)?;
+        if target.file == current.file {
+            return Ok(ItemPrereq {
+                project: None,
+                series: None,
+                item: item_id.to_string(),
+            });
+        }
+        return Ok(ItemPrereq {
+            project: None,
+            series: Some(target.file),
+            item: item_id.to_string(),
+        });
+    }
+    if !valid_item_id(spec) {
+        bail!(
+            "prerequisite takes <item>, <series>:<item>, or <project>::<series>:<item>; got {spec:?}"
+        );
+    }
+    current.require_item(spec)?;
+    Ok(ItemPrereq {
+        project: None,
+        series: None,
+        item: spec.to_string(),
+    })
+}
+
+/// Check whether adding `source -> target` creates a cycle in the reachable
+/// prerequisite graph across this journal and any readable registered project.
+fn check_no_cycle(
+    dir: &Path,
+    local_events: &[JournalEvent],
+    local_slug: Option<&str>,
+    source_series: &str,
+    source_item: &str,
+    target: &ItemPrereq,
+) -> Result<()> {
+    type Node = (Option<String>, String, String);
+    let normalize_project = |project: Option<&str>| -> Option<String> {
+        project
+            .filter(|slug| Some(*slug) != local_slug)
+            .map(str::to_string)
+    };
+    let origin: Node = (None, source_series.to_string(), source_item.to_string());
+    let start: Node = (
+        normalize_project(target.project.as_deref()),
+        target
+            .series
+            .clone()
+            .unwrap_or_else(|| source_series.to_string()),
+        target.item.clone(),
+    );
+    if start == origin {
+        bail!("item {source_item} cannot depend on itself");
+    }
+    let mut cache: BTreeMap<Option<String>, Option<Vec<JournalEvent>>> = BTreeMap::new();
+    let mut visited: BTreeSet<Node> = BTreeSet::new();
+    let mut stack: Vec<Node> = vec![start];
+    while let Some(node) = stack.pop() {
+        if node == origin {
+            bail!(
+                "adding prerequisite {target} on {source_item} would introduce a dependency cycle"
+            );
+        }
+        if !visited.insert(node.clone()) {
+            continue;
+        }
+        let (proj, series_file, item_id) = &node;
+        let events_slice: Option<&[JournalEvent]> = match proj {
+            None => Some(local_events),
+            Some(slug) => cache
+                .entry(Some(slug.clone()))
+                .or_insert_with(|| {
+                    super::registered_project(slug)
+                        .ok()
+                        .and_then(|p| super::read_events(&p.journal_dir).ok())
+                })
+                .as_deref(),
+        };
+        let Some(events_slice) = events_slice else {
+            continue;
+        };
+        let Some(series) = replay(events_slice, series_file) else {
+            continue;
+        };
+        let Some(item) = series.item(item_id) else {
+            continue;
+        };
+        for dep in &item.depends_on {
+            let next_proj = match &dep.project {
+                Some(slug) => normalize_project(Some(slug.as_str())),
+                None => proj.clone(),
+            };
+            let next_series = dep.series.clone().unwrap_or_else(|| series_file.clone());
+            stack.push((next_proj, next_series, dep.item.clone()));
+        }
+    }
+    let _ = dir;
+    Ok(())
+}
+
+/// Record a prerequisite edge on a standing item, refusing cycles.
+pub(crate) fn depend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPrereq> {
+    let open = open_for_write(ctx, name)?;
+    let item = open.standing(id)?;
+    let prereq = resolve_prereq(&open.dir, &open.events, &open.series, on)?;
+    if item.depends_on.contains(&prereq) {
+        bail!("item {id} already depends on {prereq}");
+    }
+    let cfg = crate::config::load().ok();
+    let local_slug = cfg.as_ref().and_then(|cfg| {
+        crate::registry::known_journals(cfg)
+            .ok()?
+            .into_iter()
+            .find(|(_, journal)| {
+                let c = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                c(journal) == c(&open.dir)
+            })
+            .map(|(slug, _)| slug)
+    });
+    check_no_cycle(
+        &open.dir,
+        &open.events,
+        local_slug.as_deref(),
+        &open.series.file,
+        id,
+        &prereq,
+    )?;
+    let mut event = open.event(ctx, "item-depended", Some(id));
+    event.series.depends_on = Some(prereq.clone());
+    open.append(ctx, &event)?;
+    Ok(prereq)
+}
+
+/// Remove a recorded prerequisite edge from an item.
+pub(crate) fn undepend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPrereq> {
+    let open = open_for_write(ctx, name)?;
+    let item = open.series.require_item(id)?;
+    // Match against recorded prereqs directly first (so a deleted foreign
+    // project or series can still be unlinked), then resolve by name.
+    let matched = if let Some(found) = item
+        .depends_on
+        .iter()
+        .find(|dep| dep.to_string() == on)
+        .cloned()
+    {
+        found
+    } else if let Ok(resolved) = resolve_prereq(&open.dir, &open.events, &open.series, on) {
+        if item.depends_on.contains(&resolved) {
+            resolved
+        } else {
+            bail!("item {id} does not depend on {on}");
+        }
+    } else {
+        // Also allow matching by `<series-topic>:<item>` or `<project-label>::<series-topic>:<item>`.
+        let mut candidates: Vec<&ItemPrereq> = item
+            .depends_on
+            .iter()
+            .filter(|dep| {
+                let series_matches = |target: &str| {
+                    dep.series.as_deref().is_some_and(|file| {
+                        file == target
+                            || parse_artifact_name(file)
+                                .is_some_and(|(_, topic, _)| topic == target)
+                    })
+                };
+                if let Some((proj, rest)) = on.split_once(super::REFERENCE_SEPARATOR) {
+                    if let Some((s, it)) = rest.rsplit_once(':') {
+                        let proj_ok = dep.project.as_deref() == Some(proj)
+                            || super::registered_project(proj)
+                                .ok()
+                                .is_some_and(|p| dep.project.as_deref() == Some(p.slug.as_str()));
+                        return proj_ok && series_matches(s) && dep.item == it;
+                    }
+                } else if let Some((s, it)) = on.rsplit_once(':') {
+                    return dep.project.is_none() && series_matches(s) && dep.item == it;
+                }
+                false
+            })
+            .collect();
+        match candidates.len() {
+            1 => candidates.remove(0).clone(),
+            0 => bail!("item {id} does not depend on {on}"),
+            _ => bail!("{on} matches several prerequisites of {id}; name the series by file"),
+        }
+    };
+    let mut event = open.event(ctx, "item-undepended", Some(id));
+    event.series.depends_on = Some(matched.clone());
+    open.append(ctx, &event)?;
+    Ok(matched)
 }
 
 /// Record that a series relates to one in another project.
