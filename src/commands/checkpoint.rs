@@ -264,11 +264,24 @@ pub fn record_checkpoint(
 
     if let Some(ms_file) = bound_milestone.as_deref().filter(|_| milestone_was_open) {
         if let Err(error) = milestone::bind_checkpoint(ctx, ms_file, &name) {
+            let closed_concurrently = journal::resolve_dir(&ctx.cwd)
+                .ok()
+                .and_then(|dir| journal::read_events(&dir).ok())
+                .and_then(|events| milestone::replay(&events, ms_file))
+                .is_some_and(|ms| ms.closure.is_some());
+            if closed_concurrently {
+                bail!(
+                    "checkpoint {name} was committed at {revision} (event {}), \
+                     but milestone {ms_file} closed concurrently; the checkpoint retains a \
+                     final one-sided snapshot binding because closed milestones are read-only",
+                    event.event_id
+                );
+            }
             bail!(
                 "checkpoint {name} was committed at {revision} (event {}), \
                  but binding it to milestone {ms_file} failed: {error:#}\n\
                  Do not re-run `arc checkpoint record {name}`; \
-                 bind it later if the milestone is open with: arc milestone checkpoint {ms_file} {name}",
+                 bind it later with: arc milestone checkpoint {ms_file} {name}",
                 event.event_id
             );
         }
@@ -884,11 +897,10 @@ fn diff_bound_series(ctx: &Ctx, snapshots: &[CheckpointSeries]) -> Result<Vec<Se
 
     let mut out = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
-        let foreign_slug = snap.project.as_deref().filter(|slug| {
-            !registry
-                .by_dir(&here)
-                .is_some_and(|project| project.slug == *slug)
-        });
+        let foreign_slug = snap
+            .project
+            .as_deref()
+            .filter(|slug| registry.slug_of(&here) != Some(*slug));
         let current_rows: std::result::Result<(Option<String>, Vec<ItemRow>), String> =
             match foreign_slug {
                 None => match series::replay(&local_events, &snap.file) {

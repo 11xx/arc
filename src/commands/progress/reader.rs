@@ -737,17 +737,16 @@ impl Registry {
         }
     }
 
-    /// Look up one registered project by unique slug or unique label.
+    /// Look up one registered project matching `name` across the union of slug
+    /// and label, returning `Some` only when that match is unique across both
+    /// namespaces so a slug/label collision is never resolved silently.
     pub(crate) fn resolve(&self, name: &str) -> Option<&Registered> {
-        if let Some(by_slug) = self.get(name) {
-            return Some(by_slug);
-        }
-        let mut by_label = self
+        let mut matches = self
             .projects()
             .iter()
-            .filter(|project| project.label == name);
-        let first = by_label.next()?;
-        by_label.next().is_none().then_some(first)
+            .filter(|project| project.slug == name || project.label == name);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
     pub(crate) fn label(&self, slug: &str) -> String {
