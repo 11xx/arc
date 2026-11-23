@@ -129,6 +129,87 @@ pub(crate) fn lock_reference_transition(
     lock_journal_transition(&locate_artifact(ctx, reference)?.hot)
 }
 
+/// Transition locks held by `arc begin` across source promotion and item
+/// linking. When `--from-journal` and `--item` live in different journals,
+/// both transition locks are acquired in canonical path order and kept until
+/// both consumption and item linking finish so a concurrent `progress source`
+/// edit cannot split promotion from attachment.
+pub(crate) struct BeginTransitionLocks {
+    source: Option<JournalTransitionLock>,
+    item: Option<JournalTransitionLock>,
+    same_journal: bool,
+}
+
+impl BeginTransitionLocks {
+    pub(crate) fn source_lock(&self) -> Option<&JournalTransitionLock> {
+        self.source.as_ref()
+    }
+
+    pub(crate) fn item_lock(&self) -> Option<&JournalTransitionLock> {
+        if self.same_journal {
+            self.source.as_ref()
+        } else {
+            self.item.as_ref()
+        }
+    }
+}
+
+pub(crate) fn lock_begin_transitions(
+    ctx: &Ctx,
+    from_journal: Option<&str>,
+    has_item: bool,
+) -> Result<BeginTransitionLocks> {
+    let source_dir = from_journal
+        .map(|reference| locate_artifact(ctx, reference).map(|loc| loc.hot))
+        .transpose()?;
+    let item_dir = has_item.then(|| resolve_dir(&ctx.cwd)).transpose()?;
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    match (source_dir, item_dir) {
+        (None, None) => Ok(BeginTransitionLocks {
+            source: None,
+            item: None,
+            same_journal: false,
+        }),
+        (Some(src), None) => Ok(BeginTransitionLocks {
+            source: Some(lock_journal_transition(&src)?),
+            item: None,
+            same_journal: false,
+        }),
+        (None, Some(itm)) => Ok(BeginTransitionLocks {
+            source: None,
+            item: Some(lock_journal_transition(&itm)?),
+            same_journal: false,
+        }),
+        (Some(src), Some(itm)) => {
+            let src_key = canonical(&src);
+            let itm_key = canonical(&itm);
+            if src_key == itm_key {
+                Ok(BeginTransitionLocks {
+                    source: Some(lock_journal_transition(&src)?),
+                    item: None,
+                    same_journal: true,
+                })
+            } else if src_key < itm_key {
+                let source = lock_journal_transition(&src)?;
+                let item = lock_journal_transition(&itm)?;
+                Ok(BeginTransitionLocks {
+                    source: Some(source),
+                    item: Some(item),
+                    same_journal: false,
+                })
+            } else {
+                let item = lock_journal_transition(&itm)?;
+                let source = lock_journal_transition(&src)?;
+                Ok(BeginTransitionLocks {
+                    source: Some(source),
+                    item: Some(item),
+                    same_journal: false,
+                })
+            }
+        }
+    }
+}
+
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
 /// parse time, before anything is written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

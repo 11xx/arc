@@ -74,15 +74,14 @@ pub fn begin(
         },
         (explicit, None) => explicit,
     };
-    // Promotion is one journal transition from the open preflight through the
-    // superseding consume event. Holding the same guard across the Git and
-    // ledger work prevents two callers from both passing the advisory source.
-    let journal_transition = from_journal
-        .as_deref()
-        .map(|reference| crate::journal::lock_reference_transition(ctx, reference))
-        .transpose()?;
-    // Revalidate the progress item's recorded link and source once the journal
-    // transition lock is held so a concurrent `progress source` edit cannot
+    // Promotion and item linking share one continuous transition lock set:
+    // when `--from-journal` and `--item` live in different journals, both
+    // transition locks are acquired in canonical path order and held through
+    // revalidation, consumption, and item attachment.
+    let transition_locks =
+        crate::journal::lock_begin_transitions(ctx, from_journal.as_deref(), item.is_some())?;
+    // Revalidate the progress item's recorded link and source once both
+    // transition locks are held so a concurrent `progress source` edit cannot
     // cause `begin` to promote one artifact and attach to another.
     if let Some(target) = &item {
         super::progress::revalidate_begin_item(ctx, target)?;
@@ -535,9 +534,9 @@ pub fn begin(
             filename,
             &change_id,
             promotion.as_ref(),
-            journal_transition
-                .as_ref()
-                .expect("from-journal promotion holds the journal transition"),
+            transition_locks
+                .source_lock()
+                .expect("from-journal promotion holds the source journal transition"),
         ) {
             eprintln!("warning: could not mark {filename} consumed: {error:#}");
         }
@@ -575,12 +574,19 @@ pub fn begin(
             }
         }
     }
-    drop(journal_transition);
     if let Some(item) = &item {
-        if let Err(error) = super::progress::link_opened(ctx, item, &change_id) {
+        if let Err(error) = super::progress::link_opened(
+            ctx,
+            item,
+            &change_id,
+            transition_locks
+                .item_lock()
+                .expect("begin --item holds the item journal transition"),
+        ) {
             eprintln!("warning: could not link the change to its progress item: {error:#}");
         }
     }
+    drop(transition_locks);
     crate::journal::auto_log(ctx, slug, &format!("opened change {change_id}"));
     // Opening a change is the moment a directory provably becomes an arc
     // project, and the journal root is what makes projects enumerable. Record

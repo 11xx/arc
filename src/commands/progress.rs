@@ -607,13 +607,19 @@ pub(crate) fn revalidate_begin_item(ctx: &Ctx, target: &ItemTarget) -> Result<()
     Ok(())
 }
 
-/// Link the item a `begin --item` named to the change it opened.
-pub(crate) fn link_opened(ctx: &Ctx, target: &ItemTarget, change_id: &str) -> Result<()> {
+/// Link the item a `begin --item` named to the change it opened, using the
+/// item journal transition lock already held by `begin`.
+pub(crate) fn link_opened(
+    ctx: &Ctx,
+    target: &ItemTarget,
+    change_id: &str,
+    item_lock: &crate::journal::JournalTransitionLock,
+) -> Result<()> {
     let link = ItemLink {
         project: None,
         change: change_id.to_string(),
     };
-    series::link(
+    series::link_with_held_lock(
         ctx,
         &target.series,
         &target.item,
@@ -621,6 +627,7 @@ pub(crate) fn link_opened(ctx: &Ctx, target: &ItemTarget, change_id: &str) -> Re
         target.expected.as_ref(),
         Some(target.source.as_ref()),
         target.replaceable,
+        item_lock,
     )?;
     println!("item: {}:{}", target.series, target.item);
     Ok(())

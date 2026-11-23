@@ -1213,7 +1213,83 @@ pub(crate) fn link(
     replaceable: bool,
 ) -> Result<()> {
     let open = open_for_write(ctx, name)?;
-    let item = open.standing(id)?;
+    link_in_open(
+        ctx,
+        &open.dir,
+        &open.series,
+        &open.topic,
+        id,
+        link,
+        expected,
+        expected_source,
+        replaceable,
+    )
+}
+
+/// Link an item to a change while the caller already holds the item journal's
+/// transition lock (used by `arc begin --item` so validation, source promotion,
+/// and attachment execute under one continuous lock).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn link_with_held_lock(
+    ctx: &Ctx,
+    name: &str,
+    id: &str,
+    link: &ItemLink,
+    expected: Option<&ItemLink>,
+    expected_source: Option<Option<&ItemSource>>,
+    replaceable: bool,
+    _held: &super::JournalTransitionLock,
+) -> Result<()> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let events = super::read_events(&dir)?;
+    let file = resolve_name(&events, name, &dir)?;
+    let series = replay(&events, &file).with_context(|| format!("{file} was never started"))?;
+    if let Some(retired) = &series.retired {
+        bail!(
+            "{file} was retired{}; it is read-only",
+            retired
+                .by
+                .as_deref()
+                .map(|by| format!(" by {by}"))
+                .unwrap_or_default()
+        );
+    }
+    let topic = parse_artifact_name(&file)
+        .map(|(_, topic, _)| topic)
+        .unwrap_or_default();
+    link_in_open(
+        ctx,
+        &dir,
+        &series,
+        &topic,
+        id,
+        link,
+        expected,
+        expected_source,
+        replaceable,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn link_in_open(
+    ctx: &Ctx,
+    dir: &Path,
+    series: &Series,
+    topic: &str,
+    id: &str,
+    link: &ItemLink,
+    expected: Option<&ItemLink>,
+    expected_source: Option<Option<&ItemSource>>,
+    replaceable: bool,
+) -> Result<()> {
+    let item = series.require_item(id)?;
+    if !item.stands() {
+        bail!(
+            "item {id} of {} is {}; it no longer stands in the list",
+            series.file,
+            state_word(item.state)
+        );
+    }
     let current = item.link();
     if current.as_ref() != expected {
         bail!(
@@ -1244,10 +1320,12 @@ pub(crate) fn link(
         ),
         _ => {}
     }
-    let mut event = open.event(ctx, "item-linked", Some(id));
+    let mut event = JournalEvent::base(ctx, Utc::now(), topic, "item-linked");
+    event.file = Some(series.file.clone());
+    event.series.item = Some(id.to_string());
     event.series.change = Some(link.change.clone());
     event.series.change_project = link.project.clone();
-    open.append(ctx, &event)
+    append_event(ctx, dir, &event)
 }
 
 pub(crate) fn unlink(ctx: &Ctx, name: &str, id: &str) -> Result<ItemLink> {
