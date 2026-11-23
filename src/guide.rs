@@ -6765,12 +6765,13 @@ PROGRESS
   journal events on it, one per edit, each with its time; nothing is
   rewritten. Items have short ids (`i1`, `i2`, ...) that survive renames.
   Edits, each one call on `<series>`, named by filename or topic:
-    add <title> [--before|--after <item>]   rename <item> <title>
-    move <item> --before|--after <item>     drop <item> --reason R
-    done <item> [--note N]                  reopen <item> [--note N]
-    link <item> [<project>::]<change>       unlink <item>
-    wait <item> <discussion> --question Q   unwait <item>
-    split <item> --into T --into T... --reason R
+    add <title> [--before|--after <item>] [--from [<project>::]<file>]
+    rename <item> <title>                   move <item> --before|--after <item>
+    drop <item> --reason R                  done <item> [--by <artifact|cp>] [--note N]
+    reopen <item> [--note N]                link <item> [<project>::]<change>
+    unlink <item>                           source <item> [<project>::]<file>
+    unsource <item>                         wait <item> <discussion> --question Q
+    unwait <item>                           split <item> --into T --into T... --reason R
   Items take no generic correction; each edit has its reversal. `reopen`
   undoes `drop` and `done` alike, for any item; a reopened linked item reads
   its derived stage again. A rename is undone by another rename, a move by
@@ -6778,9 +6779,27 @@ PROGRESS
   their own. A dropped or split item stays visible and leaves the count.
 
   `done` is for an item no change carries; a linked item's stage is the
-  ledger's. `arc begin <slug> --item <series>:<item>` links when the change
+  ledger's. Optional `--by <target>` on `done` cites the resolving bare
+  `conclusion` or `decision` filename of this journal, or a recorded
+  checkpoint name of this repository's ledger.
+  `source` (and `--from` on `add` or `start`) binds an item to its originating
+  journal artifact (`todo`, `feature-request`, `plan`, or `handoff`), either a
+  bare filename in this journal or `<project>::<file>` in another registered
+  project; `unsource` removes it. The report derives whether that source is
+  `open`, `consumed`, or `unknown` (unreadable foreign journal) and flags
+  drift when a `done` or `integrated` item's non-plan source filing remains
+  open.
+  `arc begin <slug> --item <series>:<item>` links when the change
   opens, checking the item before anything is written; `start` ends by
-  naming that call. `link` names a change of this project, or
+  naming that call. When that item carries a `--from` source that is still
+  open and actionable, `begin` propagates it as `--from-journal` if none was
+  passed, or refuses if an explicit `--from-journal` names a different
+  artifact.
+  On an unlinked `open` item, the report surfaces live advisory pre-change
+  ownership (`claimed`, with `◈` in the terminal view) when either a live
+  `arc journal lane open --item <series>:<item>` targets the item or an active
+  `arc claim` holds its `--from` source artifact; the `claimed` count overlaps
+  `open`. `link` names a change of this project, or
   `<project>::<change>` one of another registered project by slug or label;
   the link records that project's slug, and the item then reads that
   project's ledger exactly as a local link reads this one's, the row naming

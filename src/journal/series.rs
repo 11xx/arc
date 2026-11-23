@@ -20,10 +20,14 @@ use crate::commands::Ctx;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The artifact kind a series is filed under.
 pub(crate) const KIND: &str = "progress";
+
+/// Artifact kinds an item may record as its originating source (`--from`).
+pub(crate) const SOURCE_KINDS: [&str; 4] = ["todo", "feature-request", "plan", "handoff"];
 
 /// Fields only progress-series events carry, flattened into the journal
 /// event. Every one is optional, so every event written without them remains
@@ -59,6 +63,14 @@ pub(crate) struct SeriesFields {
     /// The journal question an `item-waiting` event says the item waits on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     waits_on: Option<ItemWait>,
+    /// The journal artifact an item originated from (`--from` / `source`).
+    /// Named `item_source` rather than `source` because `JournalEvent` already
+    /// carries `source` for filing provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item_source: Option<ItemSource>,
+    /// The durable artifact recorded as resolving an unlinked `done` item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_by: Option<ResolvedBy>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
@@ -77,6 +89,39 @@ pub(crate) struct SplitPart {
 pub(crate) struct ItemWait {
     pub(crate) file: String,
     pub(crate) question: String,
+}
+
+/// A journal artifact an item originated from: a bare filename in this
+/// journal, or `<project>::<file>` in another registered project's journal.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ItemSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<String>,
+    pub(crate) file: String,
+}
+
+impl std::fmt::Display for ItemSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.project {
+            Some(project) => write!(f, "{project}::{}", self.file),
+            None => f.write_str(&self.file),
+        }
+    }
+}
+
+/// A durable artifact cited as resolving an unlinked `done` item: a bare
+/// `conclusion` or `decision` filename of this journal, or a recorded
+/// repository `checkpoint` name.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ResolvedBy {
+    pub(crate) kind: String,
+    pub(crate) target: String,
+}
+
+impl std::fmt::Display for ResolvedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.kind, self.target)
+    }
 }
 
 /// The change an item follows: one of this project's ledger, or of the
@@ -108,10 +153,31 @@ fn single_line(value: &str) -> bool {
     !value.trim().is_empty() && !value.contains(['\n', '\r'])
 }
 
-fn valid_item_id(value: &str) -> bool {
+pub(crate) fn valid_item_id(value: &str) -> bool {
     value
         .strip_prefix('i')
         .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn valid_item_source(source: &ItemSource) -> bool {
+    source.project.as_deref().is_none_or(single_line)
+        && bare_artifact_kind(&source.file)
+            .is_some_and(|kind| SOURCE_KINDS.contains(&kind.as_str()))
+}
+
+fn valid_resolved_by(resolved: &ResolvedBy) -> bool {
+    match resolved.kind.as_str() {
+        "conclusion" | "decision" => {
+            bare_artifact_kind(&resolved.target).as_deref() == Some(resolved.kind.as_str())
+        }
+        "checkpoint" => {
+            single_line(&resolved.target)
+                && !resolved.target.contains(['/', '\\', '\0'])
+                && !resolved.target.contains(super::REFERENCE_SEPARATOR)
+                && !resolved.target.starts_with('.')
+        }
+        _ => false,
+    }
 }
 
 /// Whether `file` names a series artifact.
@@ -132,24 +198,49 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         .flatten()
         .collect::<Vec<_>>();
     let placed = placements.iter().all(|anchor| valid_item_id(anchor));
-    let bare = fields.parts.is_empty()
+    let no_link_or_wait = fields.parts.is_empty()
         && fields.change.is_none()
         && fields.change_project.is_none()
         && fields.waits_on.is_none()
         && fields.related.is_none();
+    let bare = no_link_or_wait && fields.item_source.is_none() && fields.resolved_by.is_none();
     if !on_series {
         return false;
     }
     match event.event.as_str() {
-        "item-added" => names_item && line(&event.title) && placements.len() <= 1 && placed && bare,
+        "item-added" => {
+            names_item
+                && line(&event.title)
+                && placements.len() <= 1
+                && placed
+                && no_link_or_wait
+                && fields.resolved_by.is_none()
+                && fields.item_source.as_ref().is_none_or(valid_item_source)
+        }
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
         "item-dropped" => names_item && line(&event.note) && placements.is_empty() && bare,
-        "item-done" | "item-reopened" | "item-unlinked" | "item-unwaited" => {
+        "item-done" => {
+            names_item
+                && event.note.as_deref().is_none_or(single_line)
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.item_source.is_none()
+                && fields.resolved_by.as_ref().is_none_or(valid_resolved_by)
+        }
+        "item-reopened" | "item-unlinked" | "item-unwaited" | "item-unsourced" => {
             names_item
                 && event.note.as_deref().is_none_or(single_line)
                 && placements.is_empty()
                 && bare
+        }
+        "item-sourced" => {
+            names_item
+                && event.note.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && fields.resolved_by.is_none()
+                && fields.item_source.as_ref().is_some_and(valid_item_source)
         }
         "item-linked" => {
             names_item
@@ -158,6 +249,8 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && placements.is_empty()
                 && fields.parts.is_empty()
                 && fields.waits_on.is_none()
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
                 && fields.related.is_none()
         }
         "item-waiting" => {
@@ -167,6 +260,8 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.parts.is_empty()
                 && fields.change.is_none()
                 && fields.change_project.is_none()
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
                 && fields.related.is_none()
                 && fields.waits_on.as_ref().is_some_and(|wait| {
                     bare_artifact_kind(&wait.file).is_some() && single_line(&wait.question)
@@ -184,6 +279,8 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.change.is_none()
                 && fields.change_project.is_none()
                 && fields.waits_on.is_none()
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
                 && fields.related.is_none()
         }
         "series-related" | "series-unrelated" => {
@@ -193,6 +290,8 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.change.is_none()
                 && fields.change_project.is_none()
                 && fields.waits_on.is_none()
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
                 && fields.related.as_ref().is_some_and(|related| {
                     single_line(&related.project) && is_series_file(&related.file)
                 })
@@ -213,8 +312,19 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
         "item-renamed" => format!("renamed item {item} of {file}: {title}"),
         "item-moved" => format!("moved item {item} of {file}"),
         "item-dropped" => format!("dropped item {item} of {file}: {note}"),
-        "item-done" => format!("marked item {item} of {file} done"),
+        "item-done" => match &fields.resolved_by {
+            Some(by) => format!("marked item {item} of {file} done by {by}"),
+            None => format!("marked item {item} of {file} done"),
+        },
         "item-reopened" => format!("reopened item {item} of {file}"),
+        "item-sourced" => format!(
+            "linked item {item} of {file} to source {}",
+            fields
+                .item_source
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string)
+        ),
+        "item-unsourced" => format!("removed source link from item {item} of {file}"),
         "item-linked" => format!(
             "linked item {item} of {file} to change {}{}",
             fields
@@ -293,6 +403,10 @@ pub(crate) struct Item {
     /// The journal question the item was last said to wait on. Whether it
     /// still waits is the question's to say: only while it is open.
     pub(crate) waits_on: Option<ItemWait>,
+    /// The journal artifact the item originated from, when recorded.
+    pub(crate) source: Option<ItemSource>,
+    /// The durable artifact recorded as resolving an unlinked `done` item.
+    pub(crate) resolved_by: Option<ResolvedBy>,
     /// The reason or note recorded with the item's latest state.
     pub(crate) note: Option<String>,
     /// When the item reached its latest state.
@@ -443,6 +557,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     change: None,
                     project: None,
                     waits_on: None,
+                    source: fields.item_source.clone(),
+                    resolved_by: None,
                     note: None,
                     state_at: at,
                     split_into: Vec::new(),
@@ -497,6 +613,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             change: None,
                             project: None,
                             waits_on: None,
+                            source: None,
+                            resolved_by: None,
                             note: None,
                             state_at: at.clone(),
                             split_into: Vec::new(),
@@ -535,6 +653,11 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             "item-done" => ItemState::Done,
                             _ => ItemState::Open,
                         };
+                        item.resolved_by = if kind == "item-done" {
+                            fields.resolved_by.clone()
+                        } else {
+                            None
+                        };
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
@@ -546,6 +669,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                         item.change = None;
                         item.project = None;
                     }
+                    "item-sourced" => item.source = fields.item_source.clone(),
+                    "item-unsourced" => item.source = None,
                     "item-waiting" => item.waits_on = fields.waits_on.clone(),
                     "item-unwaited" => item.waits_on = None,
                     _ => {}
@@ -776,6 +901,112 @@ impl Placement<'_> {
     }
 }
 
+/// Validate a source artifact reference (`<file>` in `dir`, or
+/// `<project>::<file>` in another registered project's journal) without
+/// following symlinks or paths outside the journal.
+pub(crate) fn resolve_source(dir: &Path, spec: &str, flag: &str) -> Result<ItemSource> {
+    let accepted = SOURCE_KINDS.join("|");
+    let check_in = |target_dir: &Path, file: &str| -> Result<()> {
+        let Some(kind) = bare_artifact_kind(file) else {
+            bail!(
+                "{flag} takes a bare artifact filename (<timestamp>-<topic>-<{accepted}>.md) \
+                 or <project>::<file>, not a path"
+            );
+        };
+        if !SOURCE_KINDS.contains(&kind.as_str()) {
+            bail!("{flag} takes a {accepted} artifact; {file} is a {kind}");
+        }
+        super::artifact_body_path(target_dir, file).with_context(|| {
+            format!(
+                "no {kind} {file} as a regular file in {} or its cold archive",
+                target_dir.display()
+            )
+        })?;
+        Ok(())
+    };
+    let Some((prefix, file)) = spec.split_once(super::REFERENCE_SEPARATOR) else {
+        check_in(dir, spec)?;
+        return Ok(ItemSource {
+            project: None,
+            file: spec.to_string(),
+        });
+    };
+    let project = super::registered_project(prefix)?;
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if canonical(&project.journal_dir) == canonical(dir) {
+        bail!("{prefix} is this project; name {file} without a project");
+    }
+    check_in(&project.journal_dir, file)?;
+    Ok(ItemSource {
+        project: Some(project.slug),
+        file: file.to_string(),
+    })
+}
+
+/// Validate a `--by` journal artifact (`conclusion` or `decision`) in this
+/// journal. Returns `Ok(None)` when `target` is not a bare journal filename
+/// (so the caller can resolve it as a checkpoint name), refusing paths,
+/// foreign qualifiers, or disallowed journal kinds by spelling.
+pub(crate) fn resolve_journal_resolution(
+    dir: &Path,
+    target: &str,
+    flag: &str,
+) -> Result<Option<ResolvedBy>> {
+    if target.contains(['/', '\\', '\0'])
+        || target.contains(super::REFERENCE_SEPARATOR)
+        || target.starts_with('.')
+    {
+        bail!(
+            "{flag} takes a bare conclusion or decision filename of this journal, \
+             or a checkpoint name, not a path or another journal's reference"
+        );
+    }
+    let Some(kind) = bare_artifact_kind(target) else {
+        return Ok(None);
+    };
+    if !matches!(kind.as_str(), "conclusion" | "decision") {
+        bail!("{flag} takes a conclusion, decision, or checkpoint; {target} is a {kind}");
+    }
+    super::artifact_body_path(dir, target).with_context(|| {
+        format!(
+            "no {kind} {target} as a regular file in {} or its cold archive",
+            dir.display()
+        )
+    })?;
+    Ok(Some(ResolvedBy {
+        kind,
+        target: target.to_string(),
+    }))
+}
+
+/// Resolve `<series>:<item>` against `events` of the journal at `dir` for a
+/// live lane claim.
+pub(crate) fn resolve_lane_item(
+    dir: &Path,
+    events: &[JournalEvent],
+    spec: &str,
+) -> Result<super::LaneItem> {
+    let Some((series_name, item_id)) = spec.rsplit_once(':') else {
+        bail!("--item takes <series>:<item>, such as my-series:i3; got {spec:?}");
+    };
+    let series = named_in(events, dir, series_name)?;
+    if series.retired.is_some() {
+        bail!("{} was retired; cannot target it with a lane", series.file);
+    }
+    let item = series.require_item(item_id)?;
+    if !item.stands() {
+        bail!(
+            "item {item_id} of {} is {}; it no longer stands in the list",
+            series.file,
+            state_word(item.state)
+        );
+    }
+    Ok(super::LaneItem {
+        file: series.file,
+        item: item_id.to_string(),
+    })
+}
+
 /// Start a series: write its artifact and declare its first items.
 pub(crate) fn start(
     ctx: &Ctx,
@@ -783,6 +1014,7 @@ pub(crate) fn start(
     title: &str,
     follows: Option<&str>,
     items: &[String],
+    sources: &BTreeMap<usize, String>,
 ) -> Result<String> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
@@ -795,6 +1027,17 @@ pub(crate) fn start(
     let dir = resolve_dir(&ctx.cwd)?;
     if let Some(plan) = follows {
         named_artifact(&dir, plan, "plan", "--follows")?;
+    }
+    let mut resolved_sources: BTreeMap<usize, ItemSource> = BTreeMap::new();
+    for (&index, spec) in sources {
+        if index >= items.len() {
+            bail!(
+                "--from names item i{}, but start declared only {} item(s)",
+                index + 1,
+                items.len()
+            );
+        }
+        resolved_sources.insert(index, resolve_source(&dir, spec, "--from")?);
     }
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -819,17 +1062,28 @@ pub(crate) fn start(
         event.title = Some(item.clone());
         event.series.item = Some(format!("i{}", index + 1));
         event.series.initial = true;
+        event.series.item_source = resolved_sources.get(&index).cloned();
         append_event(ctx, &dir, &event)?;
     }
     Ok(filename)
 }
 
 /// Add an item; returns its id.
-pub(crate) fn add(ctx: &Ctx, name: &str, title: &str, placement: Placement) -> Result<String> {
+pub(crate) fn add(
+    ctx: &Ctx,
+    name: &str,
+    title: &str,
+    placement: Placement,
+    from: Option<&str>,
+) -> Result<String> {
     let open = open_for_write(ctx, name)?;
+    let source = from
+        .map(|spec| resolve_source(&open.dir, spec, "--from"))
+        .transpose()?;
     let id = format!("i{}", open.series.next_id());
     let mut event = open.event(ctx, "item-added", Some(&id));
     event.title = Some(one_line("the title", title)?);
+    event.series.item_source = source;
     placement.apply(&open.series, &mut event, None)?;
     open.append(ctx, &event)?;
     Ok(id)
@@ -865,7 +1119,13 @@ pub(crate) fn drop_item(ctx: &Ctx, name: &str, id: &str, reason: &str) -> Result
     open.append(ctx, &event)
 }
 
-pub(crate) fn done(ctx: &Ctx, name: &str, id: &str, note: Option<&str>) -> Result<()> {
+pub(crate) fn done(
+    ctx: &Ctx,
+    name: &str,
+    id: &str,
+    resolved_by: Option<ResolvedBy>,
+    note: Option<&str>,
+) -> Result<()> {
     let open = open_for_write(ctx, name)?;
     let item = open.standing(id)?;
     if let Some(change) = &item.change {
@@ -875,8 +1135,34 @@ pub(crate) fn done(ctx: &Ctx, name: &str, id: &str, note: Option<&str>) -> Resul
         bail!("item {id} is already done");
     }
     let mut event = open.event(ctx, "item-done", Some(id));
+    event.series.resolved_by = resolved_by;
     event.note = note.map(|note| one_line("--note", note)).transpose()?;
     open.append(ctx, &event)
+}
+
+/// Bind an item to its originating journal artifact (`todo`, `feature-request`,
+/// `plan`, or `handoff`), replacing any earlier source link.
+pub(crate) fn set_source(ctx: &Ctx, name: &str, id: &str, spec: &str) -> Result<ItemSource> {
+    let open = open_for_write(ctx, name)?;
+    let item = open.standing(id)?;
+    let source = resolve_source(&open.dir, spec, "source")?;
+    if item.source.as_ref() == Some(&source) {
+        bail!("item {id} already links source {source}");
+    }
+    let mut event = open.event(ctx, "item-sourced", Some(id));
+    event.series.item_source = Some(source.clone());
+    open.append(ctx, &event)?;
+    Ok(source)
+}
+
+/// Remove an item's originating source link; returns it.
+pub(crate) fn clear_source(ctx: &Ctx, name: &str, id: &str) -> Result<ItemSource> {
+    let open = open_for_write(ctx, name)?;
+    let Some(source) = open.series.require_item(id)?.source.clone() else {
+        bail!("item {id} has no source artifact link");
+    };
+    open.append(ctx, &open.event(ctx, "item-unsourced", Some(id)))?;
+    Ok(source)
 }
 
 pub(crate) fn reopen(ctx: &Ctx, name: &str, id: &str, note: Option<&str>) -> Result<()> {
@@ -894,7 +1180,11 @@ pub(crate) fn reopen(ctx: &Ctx, name: &str, id: &str, note: Option<&str>) -> Res
 }
 
 /// The item a link would act on, for a caller that checks the ledger first.
-pub(crate) fn linkable(ctx: &Ctx, name: &str, id: &str) -> Result<(String, Option<ItemLink>)> {
+pub(crate) fn linkable(
+    ctx: &Ctx,
+    name: &str,
+    id: &str,
+) -> Result<(String, Option<ItemLink>, Option<ItemSource>)> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = super::read_events(&dir)?;
     let file = resolve_name(&events, name, &dir)?;
@@ -906,7 +1196,7 @@ pub(crate) fn linkable(ctx: &Ctx, name: &str, id: &str) -> Result<(String, Optio
     if !item.stands() || item.state == ItemState::Done {
         bail!("item {id} of {file} is {}", state_word(item.state));
     }
-    Ok((file, item.link()))
+    Ok((file, item.link(), item.source.clone()))
 }
 
 /// Link an item to a change. `expected` is the link the caller read before

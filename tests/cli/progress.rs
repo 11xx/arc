@@ -2075,3 +2075,385 @@ fn a_question_body_is_never_read_from_outside_its_journal() {
     assert_eq!(related["in_flight"][0]["waiting"]["question"], "q-forged2");
     assert!(related["in_flight"][0]["waiting"]["heading"].is_null());
 }
+
+fn write_journal_artifact(repo: &Repo, cwd: &Path, kind: &str, topic: &str, body: &str) -> String {
+    let body_path = repo
+        .root
+        .parent()
+        .unwrap()
+        .join(format!("body-{kind}-{topic}.md"));
+    fs::write(&body_path, body).unwrap();
+    let out = stdout(
+        repo.arc(cwd)
+            .args(["journal", kind, topic, "--body-file"])
+            .arg(&body_path),
+    );
+    Path::new(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// An item's `--from` / `source` link validates allowed artifact kinds (local
+/// or cross-project), derives open/consumed status, flags drift when a done or
+/// integrated item's non-plan source remains open, and clears drift once the
+/// source is consumed. Rejects unvalidated kinds/paths, missing drift signals,
+/// or false drift on plan sources.
+#[test]
+fn source_link_tracks_open_consumed_and_drift() {
+    let repo = Repo::new();
+    let todo = write_journal_artifact(&repo, &repo.root, "todo", "fix-cache", "# Fix cache\n");
+    let plan = write_journal_artifact(&repo, &repo.root, "plan", "cache-plan", "# Cache plan\n");
+    let note = write_journal_artifact(&repo, &repo.root, "note", "scratch", "# Scratch\n");
+
+    let file = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "cache-work",
+        "--title",
+        "Cache work",
+        "--item",
+        "Fix cache",
+        "--from",
+        &todo,
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .to_string();
+
+    let added = progress(
+        &repo,
+        &repo.root,
+        &["add", &file, "Plan slice", "--from", &plan],
+    );
+    assert!(added.contains("i2"), "{added}");
+
+    // Disallowed kind and path traversal are refused before writing.
+    let bad_kind = repo
+        .arc(&repo.root)
+        .args(["progress", "source", &file, "i1", &note])
+        .output()
+        .unwrap();
+    assert!(!bad_kind.status.success());
+    let bad_path = repo
+        .arc(&repo.root)
+        .args(["progress", "source", &file, "i1", "../outside-todo.md"])
+        .output()
+        .unwrap();
+    assert!(!bad_path.status.success());
+
+    // Open item shows source open, no drift.
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["source"]["file"], todo);
+    assert_eq!(i1["source"]["status"], "open");
+    assert!(i1["source"]["drift"].is_null());
+
+    // Marking i1 done while todo is open flags drift; marking i2 (plan) done does not.
+    progress(&repo, &repo.root, &["done", &file, "i1"]);
+    progress(&repo, &repo.root, &["done", &file, "i2"]);
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["source"]["status"], "open");
+    assert_eq!(i1["source"]["drift"], true);
+    let plain = progress(&repo, &repo.root, &[&file, "--plain"]);
+    assert!(plain.contains("drift: source still open"), "{plain}");
+    let view = progress(&repo, &repo.root, &[&file]);
+    assert!(
+        view.contains(&format!("source still open: {todo}")),
+        "{view}"
+    );
+    let i2 = stage(&repo, &file, "i2");
+    assert_eq!(i2["source"]["status"], "open");
+    assert!(i2["source"]["drift"].is_null());
+
+    // Consuming the todo clears drift.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "consume", &todo, "--outcome", "done"]),
+    );
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["source"]["status"], "consumed");
+    assert!(i1["source"]["drift"].is_null());
+
+    // Cross-project source artifact resolves through the registry, and unsource clears it.
+    let other = sibling_project(&repo, "other");
+    let remote_todo = write_journal_artifact(&repo, &other, "todo", "remote-fix", "# Remote\n");
+    progress(&repo, &repo.root, &["add", &file, "Remote slice"]);
+    progress(
+        &repo,
+        &repo.root,
+        &["source", &file, "i3", &format!("other::{remote_todo}")],
+    );
+    let i3 = stage(&repo, &file, "i3");
+    assert_eq!(i3["source"]["project"], "other");
+    assert_eq!(i3["source"]["file"], remote_todo);
+    assert_eq!(i3["source"]["status"], "open");
+
+    progress(&repo, &repo.root, &["unsource", &file, "i3"]);
+    let i3 = stage(&repo, &file, "i3");
+    assert!(i3["source"].is_null());
+
+    // Journal doctor accepts all new events cleanly.
+    let doctor = repo
+        .arc(&repo.root)
+        .args(["journal", "doctor"])
+        .output()
+        .unwrap();
+    assert!(
+        doctor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+}
+
+/// `arc progress done --by` validates bare conclusion/decision filenames and
+/// recorded checkpoint names, surfaces `resolved_by` in all views, refuses
+/// invalid targets, and clears `resolved_by` when reopened.
+#[test]
+fn done_by_validates_conclusion_decision_and_checkpoint() {
+    let repo = Repo::new();
+    let conclusion = write_journal_artifact(
+        &repo,
+        &repo.root,
+        "conclusion",
+        "bench-done",
+        "# Benchmark conclusion\n",
+    );
+    let decision = write_journal_artifact(
+        &repo,
+        &repo.root,
+        "decision",
+        "use-cache",
+        "# Cache decision\n",
+    );
+    let todo = write_journal_artifact(&repo, &repo.root, "todo", "not-a-resolution", "# Todo\n");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "record", "rc1-test"]),
+    );
+
+    let file = start(
+        &repo,
+        &repo.root,
+        "non-change",
+        &["Bench", "Decide", "Ship"],
+    );
+
+    // Rejects wrong journal kind, missing checkpoint, and path traversal.
+    for bad in [
+        todo.as_str(),
+        "no-such-checkpoint",
+        "../escape-conclusion.md",
+    ] {
+        let out = repo
+            .arc(&repo.root)
+            .args(["progress", "done", &file, "i1", "--by", bad])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "expected refusal for {bad}");
+    }
+
+    progress(
+        &repo,
+        &repo.root,
+        &["done", &file, "i1", "--by", &conclusion],
+    );
+    progress(&repo, &repo.root, &["done", &file, "i2", "--by", &decision]);
+    progress(
+        &repo,
+        &repo.root,
+        &["done", &file, "i3", "--by", "rc1-test"],
+    );
+
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["resolved_by"]["kind"], "conclusion");
+    assert_eq!(i1["resolved_by"]["target"], conclusion);
+    let i2 = stage(&repo, &file, "i2");
+    assert_eq!(i2["resolved_by"]["kind"], "decision");
+    assert_eq!(i2["resolved_by"]["target"], decision);
+    let i3 = stage(&repo, &file, "i3");
+    assert_eq!(i3["resolved_by"]["kind"], "checkpoint");
+    assert_eq!(i3["resolved_by"]["target"], "rc1-test");
+
+    let plain = progress(&repo, &repo.root, &[&file, "--plain"]);
+    assert!(
+        plain.contains(&format!("by conclusion {conclusion}")),
+        "{plain}"
+    );
+    assert!(plain.contains("by checkpoint rc1-test"), "{plain}");
+    let view = progress(&repo, &repo.root, &[&file]);
+    assert!(view.contains(&format!("by {conclusion}")), "{view}");
+    assert!(view.contains("by rc1-test"), "{view}");
+
+    // Reopening clears resolved_by.
+    progress(&repo, &repo.root, &["reopen", &file, "i1"]);
+    let reopened = stage(&repo, &file, "i1");
+    assert_eq!(reopened["stage"], "open");
+    assert!(reopened["resolved_by"].is_null());
+}
+
+/// `arc begin --item` propagates an item's open `--from` source into
+/// `--from-journal` (consuming it and seeding the brief), refuses an explicit
+/// `--from-journal` naming a different artifact, and succeeds without error
+/// when the item's source was already consumed.
+#[test]
+fn begin_item_propagates_and_crosschecks_item_source() {
+    let repo = Repo::new();
+    let todo_a = write_journal_artifact(&repo, &repo.root, "todo", "slice-a", "# Slice A\n");
+    let todo_b = write_journal_artifact(&repo, &repo.root, "todo", "slice-b", "# Slice B\n");
+    let file = start(&repo, &repo.root, "propagate", &["A", "B"]);
+    progress(&repo, &repo.root, &["source", &file, "i1", &todo_a]);
+    progress(&repo, &repo.root, &["source", &file, "i2", &todo_b]);
+
+    // Conflicting explicit --from-journal refuses before opening anything.
+    let conflict = repo
+        .arc(&repo.root)
+        .args([
+            "begin",
+            "conflict-slice",
+            "--no-worktree",
+            "--item",
+            "propagate:i1",
+            "--from-journal",
+            &todo_b,
+        ])
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success());
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("differs from progress item source"),
+        "{stderr}"
+    );
+
+    // Omitting --from-journal propagates todo_a automatically and consumes it.
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "slice-a", "--item", "propagate:i1"]),
+    );
+    assert!(out.contains(&todo_a), "{out}");
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["stage"], "opened");
+    assert_eq!(i1["source"]["status"], "consumed");
+
+    // Pre-consuming todo_b does not block begin --item; it simply skips auto-promotion.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "consume", &todo_b, "--outcome", "done"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "slice-b", "--item", "propagate:i2"]),
+    );
+    let i2 = stage(&repo, &file, "i2");
+    assert_eq!(i2["stage"], "opened");
+    assert_eq!(i2["source"]["status"], "consumed");
+}
+
+/// Pre-change advisory ownership surfaces on unlinked open items from either
+/// an active `arc claim` on the item's `--from` source or a live `arc journal
+/// lane open --item <series>:<item>` (with live lane taking precedence), counts
+/// in `claimed`, and clears once released/closed or once `arc begin` links a
+/// change.
+#[test]
+fn pre_change_claims_surface_from_source_claim_and_live_lane() {
+    let repo = Repo::new();
+    let todo = write_journal_artifact(&repo, &repo.root, "todo", "probe-work", "# Probe work\n");
+    let file = start(&repo, &repo.root, "prechange", &["Probe work", "Other"]);
+    progress(&repo, &repo.root, &["source", &file, "i1", &todo]);
+
+    // 1. Active `arc claim` on the source todo surfaces as artifact-claim.
+    stdout(repo.arc(&repo.root).args([
+        "claim",
+        &todo,
+        "--session",
+        "sess-claim",
+        "--harness",
+        "codex",
+    ]));
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["stage"], "open");
+    assert_eq!(i1["claimed"]["via"], "artifact-claim");
+    let full = report(&repo, &repo.root, &[&file]);
+    assert_eq!(series(&full, &file)["counts"]["claimed"], 1);
+    let view = progress(&repo, &repo.root, &[&file]);
+    assert!(view.contains("◈"), "{view}");
+    assert!(view.contains("claimed by"), "{view}");
+
+    // 2. Live lane targeting `prechange:i1` takes precedence over source claim.
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "lane",
+        "open",
+        "probe-lane",
+        "--item",
+        "prechange:i1",
+        "--session",
+        "sess-lane",
+        "--harness",
+        "claude",
+        "--status",
+        "profiling",
+    ]));
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["claimed"]["via"], "lane");
+    assert_eq!(i1["claimed"]["lane"], "probe-lane");
+    assert_eq!(i1["claimed"]["owner"], "claude sess-lane");
+
+    // `journal lane list --json` carries the canonical item target.
+    let lanes = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "lane", "list", "--json"]),
+    );
+    assert_eq!(lanes["lanes"][0]["item"]["file"], file);
+    assert_eq!(lanes["lanes"][0]["item"]["item"], "i1");
+
+    // 3. Closing the lane falls back to the active source claim.
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "lane",
+        "close",
+        "probe-lane",
+        "--session",
+        "sess-lane",
+        "--harness",
+        "claude",
+    ]));
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["claimed"]["via"], "artifact-claim");
+
+    // 4. Releasing the claim clears pre-change ownership.
+    stdout(repo.arc(&repo.root).args([
+        "release-claim",
+        &todo,
+        "--session",
+        "sess-claim",
+        "--harness",
+        "codex",
+    ]));
+    let i1 = stage(&repo, &file, "i1");
+    assert!(i1["claimed"].is_null());
+
+    // 5. Once linked to a change, a live lane targeting the item no longer
+    // renders a pre-change claim on top of the ledger-backed stage.
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "lane",
+        "open",
+        "probe-lane-2",
+        "--item",
+        "prechange:i1",
+        "--session",
+        "sess-lane-2",
+        "--harness",
+        "claude",
+    ]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "probe-change", "--item", "prechange:i1"]),
+    );
+    let i1 = stage(&repo, &file, "i1");
+    assert_eq!(i1["stage"], "opened");
+    assert!(i1["claimed"].is_null());
+}

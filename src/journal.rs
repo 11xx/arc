@@ -286,6 +286,10 @@ pub enum LaneCmd {
         /// Read the lane status from a file ('-' for stdin)
         #[arg(long, conflicts_with = "status")]
         status_file: Option<String>,
+        /// Progress series item this lane is working on (`<series>:<item>`),
+        /// surfaced as an advisory pre-change claim on `arc progress`
+        #[arg(long)]
+        item: Option<String>,
     },
     /// Renew a lane owned by this harness and session.
     /// Recorded renewal requires both owner coordinates and compares them verbatim.
@@ -9337,11 +9341,35 @@ pub(crate) struct JournalEvent {
     /// Where an adopted workbench's material lay before adoption moved it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopted_from: Option<String>,
+    /// Optional progress series item targeted by a `lane-opened` event, so
+    /// pre-change lanes appear on the item before `arc begin` runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lane_item: Option<LaneItem>,
     /// What a progress series' events carry: the plan a series follows, the
     /// item an `item-*` event acts on and where it goes, a split's parts, a
     /// linked change, and a related series.
     #[serde(flatten)]
     series: series::SeriesFields,
+}
+
+/// A progress series item claimed by an advisory work lane.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LaneItem {
+    pub(crate) file: String,
+    pub(crate) item: String,
+}
+
+impl std::fmt::Display for LaneItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file, self.item)
+    }
+}
+
+/// An active advisory claim held on a journal artifact via `arc claim`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ActiveArtifactClaim {
+    pub(crate) owner: String,
+    pub(crate) at: String,
 }
 
 /// A change opened in one project from an artifact another project's journal
@@ -9641,6 +9669,7 @@ impl JournalEvent {
             files: None,
             bytes: None,
             adopted_from: None,
+            lane_item: None,
             series: series::SeriesFields::default(),
         }
     }
@@ -9992,7 +10021,13 @@ impl JournalEvent {
                                 && targets.iter().all(|target| valid_checkpoint_id(target))
                         })
             }
-            "lane-opened" => self.ttl_seconds.is_some() && self.scope.is_some(),
+            "lane-opened" => {
+                self.ttl_seconds.is_some()
+                    && self.scope.is_some()
+                    && self.lane_item.as_ref().is_none_or(|target| {
+                        series::is_series_file(&target.file) && series::valid_item_id(&target.item)
+                    })
+            }
             "lane-renewed" => true,
             "lane-closed" => self
                 .outcome
@@ -10014,8 +10049,9 @@ impl JournalEvent {
             | "workbench-archived"
             | "workbench-unarchived" => workbench::well_formed(self),
             "item-added" | "item-renamed" | "item-moved" | "item-dropped" | "item-done"
-            | "item-reopened" | "item-linked" | "item-unlinked" | "item-split" | "item-waiting"
-            | "item-unwaited" | "series-related" | "series-unrelated" => series::well_formed(self),
+            | "item-reopened" | "item-linked" | "item-unlinked" | "item-sourced"
+            | "item-unsourced" | "item-split" | "item-waiting" | "item-unwaited"
+            | "series-related" | "series-unrelated" => series::well_formed(self),
             _ => false,
         }
     }
@@ -11045,13 +11081,18 @@ fn event_message(event: &JournalEvent) -> String {
             )
         }
         "lane-opened" => format!(
-            "lane opened [{}]{}{}",
+            "lane opened [{}]{}{}{}",
             format_age(event.ttl_seconds.unwrap_or(DEFAULT_LANE_TTL)),
             event
                 .scope
                 .as_deref()
                 .filter(|v| !v.is_empty())
                 .map(|v| format!(" scope={}", v.join(",")))
+                .unwrap_or_default(),
+            event
+                .lane_item
+                .as_ref()
+                .map(|item| format!(" item={item}"))
                 .unwrap_or_default(),
             event
                 .status
@@ -11512,6 +11553,31 @@ fn open_artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClai
         .into_iter()
         .filter(ArtifactClaim::is_open)
         .collect()
+}
+
+/// The active advisory claim on `file` at `now`, when one is live.
+pub(crate) fn active_artifact_claim(
+    events: &[JournalEvent],
+    file: &str,
+    now: DateTime<Utc>,
+) -> Option<ActiveArtifactClaim> {
+    if is_consumed(events, file) {
+        return None;
+    }
+    open_artifact_claims(events, file)
+        .into_iter()
+        .rev()
+        .find(|claim| state::claim_timing_at(&claim.state, now).active)
+        .map(|claim| ActiveArtifactClaim {
+            owner: format!(
+                "{} via {}",
+                claim.state.owner.actor, claim.state.owner.harness
+            ),
+            at: claim
+                .state
+                .claimed_at
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        })
 }
 
 fn pending_transition(dir: &Path, events: &[JournalEvent], file: &str) -> bool {
@@ -12203,11 +12269,21 @@ pub(crate) struct LaneEntry {
     pub(crate) last_activity: String,
     pub(crate) ttl_seconds: u64,
     pub(crate) scope: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) item: Option<LaneItem>,
     pub(crate) status: Option<String>,
     #[serde(skip)]
     opened_time: DateTime<Utc>,
     #[serde(skip)]
     last_activity_time: DateTime<Utc>,
+}
+
+/// Live lanes currently open in `events` at `now`.
+pub(crate) fn live_lanes_in(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEntry> {
+    lanes_from_journal(events, now)
+        .into_iter()
+        .filter(|lane| lane.state == "live")
+        .collect()
 }
 
 fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEntry> {
@@ -12217,6 +12293,7 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
         opened_time: DateTime<Utc>,
         ttl_seconds: u64,
         scope: Vec<String>,
+        item: Option<LaneItem>,
         status: Option<String>,
     }
 
@@ -12268,6 +12345,7 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
                         opened_time: timestamp,
                         ttl_seconds: ttl,
                         scope,
+                        item: event.lane_item.clone(),
                         status,
                     },
                 );
@@ -12326,6 +12404,7 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
                 last_activity: activity.to_rfc3339_opts(SecondsFormat::Secs, true),
                 ttl_seconds: lane.ttl_seconds,
                 scope: lane.scope,
+                item: lane.item,
                 status: lane.status,
                 opened_time: lane.opened_time,
                 last_activity_time: activity,
@@ -12505,7 +12584,15 @@ fn render_lanes(lanes: &[LaneEntry], now: DateTime<Utc>) {
         } else {
             format!("  +scope: {}", lane.scope.join(", "))
         };
-        println!("  {}  {}  {}{}", lane.topic, lane.owner, activity, scope);
+        let item = lane
+            .item
+            .as_ref()
+            .map(|target| format!("  item: {target}"))
+            .unwrap_or_default();
+        println!(
+            "  {}  {}  {}{}{}",
+            lane.topic, lane.owner, activity, scope, item
+        );
         if let Some(status) = &lane.status {
             println!("    {status}");
         }
@@ -12546,6 +12633,7 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             ttl,
             status,
             status_file,
+            item,
         } => {
             let status = match (status, status_file) {
                 (None, None) => None,
@@ -12555,7 +12643,8 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             if !valid_topic(&topic) {
                 bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
             }
-            parse_ttl(&ttl).context("ttl must be a positive integer followed by s, m, or h")?;
+            let ttl_seconds =
+                parse_ttl(&ttl).context("ttl must be a positive integer followed by s, m, or h")?;
             let scope: Vec<String> = scope
                 .as_deref()
                 .map(|value| value.split(',').map(str::to_string).collect())
@@ -12565,27 +12654,32 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             }
             let _transition = lock_journal_transition(&dir)?;
             let now = Utc::now();
-            let lanes = lanes_from_journal(&read_events(&dir)?, now);
+            let current_events = read_events(&dir)?;
+            let lane_item = item
+                .as_deref()
+                .map(|spec| series::resolve_lane_item(&dir, &current_events, spec))
+                .transpose()?;
+            let lanes = lanes_from_journal(&current_events, now);
             if let Some(overlap) = lanes.iter().find(|lane| {
                 lane.state == "live"
                     && lane.owner != owner
-                    && (lane.topic == topic || lane.scope.contains(&topic))
+                    && (lane.topic == topic
+                        || lane.scope.contains(&topic)
+                        || (lane_item.is_some() && lane.item == lane_item))
             }) {
                 eprintln!(
                     "warning: topic {topic} is covered by live lane {} owned by {}",
                     overlap.topic, overlap.owner
                 );
             }
-            let mut message = format!("lane opened [{ttl}]");
-            if !scope.is_empty() {
-                message.push_str(&format!(" scope={}", scope.join(",")));
-            }
-            if let Some(status) = status {
-                message.push_str(&format!(": {status}"));
-            }
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
-            append_journal(&dir, ctx, now, &topic, &message, None)?;
+            let mut event = JournalEvent::base(ctx, now, &topic, "lane-opened");
+            event.ttl_seconds = Some(ttl_seconds);
+            event.scope = Some(scope);
+            event.lane_item = lane_item;
+            event.status = status;
+            append_event(ctx, &dir, &event)?;
         }
         LaneCmd::Renew {
             topic,
@@ -18804,6 +18898,37 @@ pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
         );
     }
     Ok(kind)
+}
+
+/// Whether two `--from-journal` references resolve to the exact same journal
+/// directory and artifact filename.
+pub(crate) fn same_artifact_reference(ctx: &Ctx, left: &str, right: &str) -> Result<bool> {
+    let left = locate_artifact(ctx, left)?;
+    let right = locate_artifact(ctx, right)?;
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Ok(canonical(&left.hot) == canonical(&right.hot) && left.file == right.file)
+}
+
+/// Whether `reference` names an open, unconsumed, live actionable artifact in
+/// its journal (without printing unanswered-question warnings).
+pub(crate) fn reference_is_open_actionable(ctx: &Ctx, reference: &str) -> Result<bool> {
+    let location = locate_artifact(ctx, reference)?;
+    let filename = location.file.as_str();
+    let Some((_, _, kind)) = parse_artifact_name(filename) else {
+        return Ok(false);
+    };
+    if !is_actionable_kind(&kind) {
+        return Ok(false);
+    }
+    let dir = &location.hot;
+    let events = read_events(dir)?;
+    if !dir.join(filename).is_file()
+        || pending_transition(dir, &events, filename)
+        || is_consumed(&events, filename)
+    {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// The kinds a transition may produce. A transition retires one live

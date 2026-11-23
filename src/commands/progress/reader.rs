@@ -81,11 +81,53 @@ pub(crate) struct ItemRow {
     /// on a person.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) waiting: Option<Waiting>,
+    /// The originating journal artifact (`--from` / `source`), with its
+    /// derived status in the owning journal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<SourceStatus>,
+    /// The durable artifact recorded as resolving an unlinked `done` item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_by: Option<series::ResolvedBy>,
+    /// Live advisory ownership on an unlinked open item, derived from a live
+    /// journal lane targeting `<series>:<item>` or an active `arc claim` on
+    /// its `--from` source artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claimed: Option<PreChangeClaim>,
     /// The reason or note recorded with a done, dropped, split or reopened item.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) split_into: Vec<String>,
+}
+
+/// Originating journal artifact linked to an item, with derived open/consumed
+/// status and drift detection.
+#[derive(Serialize, Clone)]
+pub(crate) struct SourceStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project_slug: Option<String>,
+    pub(crate) file: String,
+    /// `open`, `consumed`, or `unknown` when a foreign journal cannot be read.
+    pub(crate) status: &'static str,
+    /// True when the item is `integrated` or `done` while its non-plan
+    /// source filing remains `open` in its journal.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) drift: bool,
+}
+
+/// Advisory pre-change ownership surfaced on an unlinked open item before
+/// `arc begin` runs.
+#[derive(Serialize, Clone)]
+pub(crate) struct PreChangeClaim {
+    /// `lane` (a live `arc journal lane open --item`) or `artifact-claim` (an
+    /// active `arc claim` on the item's `--from` source artifact).
+    pub(crate) via: &'static str,
+    pub(crate) owner: String,
+    pub(crate) at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lane: Option<String>,
 }
 
 /// A run dispatched against a linked change, as the ledger records it: no
@@ -136,6 +178,9 @@ impl ItemRow {
             revision: None,
             dispatch: None,
             waiting: None,
+            source: None,
+            resolved_by: item.resolved_by.clone(),
+            claimed: None,
             note: item.note.clone(),
             split_into: item.split_into.clone(),
         }
@@ -162,6 +207,10 @@ pub(crate) struct Counts {
     pub(crate) in_flight: usize,
     /// Standing items no change carries and nobody marked done.
     pub(crate) open: usize,
+    /// Standing unlinked open items held by a live pre-change lane or source
+    /// artifact claim, also counted under `open`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) claimed: usize,
     /// Linked items whose change closed without integrating.
     pub(crate) closed: usize,
     /// Standing items waiting on an open question, each also counted by its
@@ -551,10 +600,17 @@ impl Registry {
 }
 
 /// Whether reading `series` needs the registry: an item linked into another
-/// project, or a relation to one.
+/// project, a cross-project source artifact, or a relation to another project.
 pub(crate) fn needs_registry(series: &[Series]) -> bool {
     series.iter().any(|series| {
-        !series.related.is_empty() || series.items.iter().any(|item| item.project.is_some())
+        !series.related.is_empty()
+            || series.items.iter().any(|item| {
+                item.project.is_some()
+                    || item
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.project.is_some())
+            })
     })
 }
 
@@ -599,21 +655,98 @@ impl<'a> PersonQuestions<'a> {
 }
 
 /// What one series' items are read through: the ledger of the project whose
-/// series it is, the registry for an item linked into another project, and
-/// the questions of its own journal.
+/// series it is, its own journal events (for source status and live lanes),
+/// the registry for an item linked into another project, and the questions of
+/// its own journal.
 pub(crate) struct Reader<'a> {
     pub(crate) home: &'a Ledger,
     pub(crate) home_slug: Option<&'a str>,
+    pub(crate) home_events: &'a [JournalEvent],
     pub(crate) registry: &'a Registry,
     pub(crate) questions: &'a PersonQuestions<'a>,
     pub(crate) now: DateTime<Utc>,
+    live_lanes: OnceCell<Vec<crate::journal::LaneEntry>>,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    pub(crate) fn new(
+        home: &'a Ledger,
+        home_slug: Option<&'a str>,
+        home_events: &'a [JournalEvent],
+        registry: &'a Registry,
+        questions: &'a PersonQuestions<'a>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            home,
+            home_slug,
+            home_events,
+            registry,
+            questions,
+            now,
+            live_lanes: OnceCell::new(),
+        }
+    }
+
+    fn live_lanes(&self) -> &[crate::journal::LaneEntry] {
+        self.live_lanes
+            .get_or_init(|| crate::journal::live_lanes_in(self.home_events, self.now))
+    }
+
+    fn resolve_source(
+        &self,
+        source: &series::ItemSource,
+        stage: &str,
+    ) -> (SourceStatus, Option<PreChangeClaim>) {
+        let foreign = source
+            .project
+            .as_deref()
+            .filter(|slug| Some(*slug) != self.home_slug);
+        let events: Option<&[JournalEvent]> = match foreign {
+            None => Some(self.home_events),
+            Some(slug) => self
+                .registry
+                .get(slug)
+                .and_then(|project| project.events().ok()),
+        };
+        let (status, claim) = match events {
+            None => ("unknown", None),
+            Some(events) => {
+                if crate::journal::is_consumed(events, &source.file) {
+                    ("consumed", None)
+                } else {
+                    let claim =
+                        crate::journal::active_artifact_claim(events, &source.file, self.now).map(
+                            |active| PreChangeClaim {
+                                via: "artifact-claim",
+                                owner: active.owner,
+                                at: active.at,
+                                lane: None,
+                            },
+                        );
+                    ("open", claim)
+                }
+            }
+        };
+        let is_plan = series::bare_artifact_kind(&source.file).as_deref() == Some("plan");
+        let drift = !is_plan && status == "open" && matches!(stage, "integrated" | "done");
+        let status_row = SourceStatus {
+            project: source
+                .project
+                .as_deref()
+                .map(|slug| self.registry.label(slug)),
+            project_slug: source.project.clone(),
+            file: source.file.clone(),
+            status,
+            drift,
+        };
+        (status_row, claim)
+    }
+
     /// One item, read from the ledger that holds its change. A change of
     /// another project whose ledger is not registered or cannot be read is
     /// `unknown` and fails nothing.
-    pub(crate) fn row(&self, item: &series::Item) -> Result<ItemRow> {
+    pub(crate) fn row(&self, series_file: &str, item: &series::Item) -> Result<ItemRow> {
         let foreign = item
             .project
             .as_deref()
@@ -639,16 +772,43 @@ impl Reader<'_> {
             row.project = Some(self.registry.label(slug));
             row.project_slug = Some(slug.clone());
         }
+        let mut source_claim = None;
+        if let Some(source) = &item.source {
+            let (status, claim) = self.resolve_source(source, row.stage);
+            row.source = Some(status);
+            source_claim = claim;
+        }
         if item.stands() {
             if let Some(wait) = &item.waits_on {
                 row.waiting = self.questions.waiting(wait)?;
+            }
+            if row.stage == "open" {
+                let lane_claim = self
+                    .live_lanes()
+                    .iter()
+                    .find(|lane| {
+                        lane.item.as_ref().is_some_and(|target| {
+                            target.file == series_file && target.item == item.id
+                        })
+                    })
+                    .map(|lane| PreChangeClaim {
+                        via: "lane",
+                        owner: lane.owner.to_string(),
+                        at: lane.opened_at.clone(),
+                        lane: Some(lane.topic.clone()),
+                    });
+                row.claimed = lane_claim.or(source_claim);
             }
         }
         Ok(row)
     }
 
     pub(crate) fn rows(&self, series: &Series) -> Result<Vec<ItemRow>> {
-        series.items.iter().map(|item| self.row(item)).collect()
+        series
+            .items
+            .iter()
+            .map(|item| self.row(&series.file, item))
+            .collect()
     }
 }
 
@@ -731,6 +891,9 @@ pub(crate) fn counts(series: &Series, rows: &[ItemRow]) -> Counts {
         counts.items += 1;
         if row.waiting.is_some() {
             counts.waiting += 1;
+        }
+        if row.claimed.is_some() {
+            counts.claimed += 1;
         }
         match row.stage {
             "integrated" => counts.integrated += 1,
@@ -835,13 +998,7 @@ fn related_report(
                 .and_then(|project| project.events().ok())
                 .unwrap_or(&[]);
             let questions = PersonQuestions::new(&dir, events);
-            let reader = Reader {
-                home,
-                home_slug: Some(&report.slug),
-                registry,
-                questions: &questions,
-                now,
-            };
+            let reader = Reader::new(home, Some(&report.slug), events, registry, &questions, now);
             // A related series is read on the way, never relied on: a ledger
             // that cannot be read makes it unavailable, not the report.
             let rows = match reader.rows(&series) {
@@ -890,13 +1047,7 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
         &local_events
     };
     let questions = PersonQuestions::new(&dir, events);
-    let reader = Reader {
-        home: &ledger,
-        home_slug: own.as_deref(),
-        registry: &registry,
-        questions: &questions,
-        now,
-    };
+    let reader = Reader::new(&ledger, own.as_deref(), events, &registry, &questions, now);
     let mut reads: Vec<(RelatedSeries, RelatedRead, Vec<String>)> = Vec::new();
     let mut reports = Vec::new();
     for series in &chosen {
@@ -1015,13 +1166,14 @@ pub(crate) fn series_of(
         }
     };
     let questions = PersonQuestions::new(journal_dir, events);
-    let reader = Reader {
+    let reader = Reader::new(
         home,
-        home_slug: home_slug.as_deref(),
+        home_slug.as_deref(),
+        events,
         registry,
-        questions: &questions,
+        &questions,
         now,
-    };
+    );
     active
         .iter()
         .map(|series| {

@@ -243,6 +243,12 @@ impl View {
                     .paint(YELLOW, &format!("{} in flight", counts.in_flight)),
             );
         }
+        if counts.claimed > 0 {
+            rest.push(
+                self.look
+                    .paint(CYAN, &format!("{} claimed", counts.claimed)),
+            );
+        }
         if counts.waiting > 0 {
             rest.push(
                 self.look
@@ -326,12 +332,35 @@ impl View {
                     .clone()
                     .unwrap_or_else(|| format!("question {} of {}", waiting.question, waiting.file))
             });
+            let source_line = row.source.as_ref().and_then(|source| {
+                let named = match &source.project {
+                    Some(project) => format!("{project}::{}", source.file),
+                    None => source.file.clone(),
+                };
+                if source.drift {
+                    Some((true, format!("source still open: {named}")))
+                } else if stage == "open" {
+                    Some((false, format!("from {named}")))
+                } else {
+                    None
+                }
+            });
             for text in question
                 .iter()
                 .chain(&row.note)
                 .flat_map(|text| self.look.wrap(text, indent))
             {
                 lines.push(format!("{}{}", " ".repeat(indent), self.dim(&text)));
+            }
+            if let Some((is_drift, text)) = source_line {
+                for wrapped in self.look.wrap(&text, indent) {
+                    let styled = if is_drift {
+                        self.look.paint(YELLOW, &wrapped)
+                    } else {
+                        self.dim(&wrapped)
+                    };
+                    lines.push(format!("{}{styled}", " ".repeat(indent)));
+                }
             }
             self.lines.extend(lines);
         }
@@ -368,6 +397,21 @@ impl View {
                     dispatch.to,
                     self.age(&dispatch.at),
                     if dispatch.bound { "" } else { ", unbound" }
+                )));
+            }
+            if let Some(by) = &row.resolved_by {
+                parts.push(self.dim(&format!("by {}", by.target)));
+            }
+            if let Some(claim) = &row.claimed {
+                let lane = claim
+                    .lane
+                    .as_deref()
+                    .map(|topic| format!(" (lane {topic})"))
+                    .unwrap_or_default();
+                parts.push(self.dim(&format!(
+                    "claimed by {} {}{lane}",
+                    claim.owner,
+                    self.age(&claim.at)
                 )));
             }
         }
@@ -428,10 +472,12 @@ fn topic(file: &str) -> String {
 }
 
 /// The stage an item's line shows: `waiting` for an open item that waits on
-/// a question, else its stage.
+/// a question, `claimed` for an unlinked open item held by an advisory lane
+/// or source-artifact claim, else its stage.
 fn shown(row: &ItemRow) -> &'static str {
     match row.stage {
         "open" if row.waiting.is_some() => "waiting",
+        "open" if row.claimed.is_some() => "claimed",
         stage => stage,
     }
 }
@@ -441,6 +487,7 @@ fn shown(row: &ItemRow) -> &'static str {
 fn mark(stage: &str) -> (&'static str, &'static str) {
     match stage {
         "waiting" => ("?", YELLOW),
+        "claimed" => ("◈", CYAN),
         "integrated" | "done" => ("✓", GREEN),
         "opened" => ("◔", YELLOW),
         "snapshotted" => ("◑", YELLOW),
@@ -507,6 +554,9 @@ mod tests {
             revision: None,
             dispatch: None,
             waiting: None,
+            source: None,
+            resolved_by: None,
+            claimed: None,
             note: None,
             split_into: Vec::new(),
         }
@@ -536,6 +586,7 @@ mod tests {
                 done: count(&["done"]),
                 in_flight: count(&["opened", "snapshotted", "verified", "reviewed"]),
                 open: count(&["open"]),
+                claimed: items.iter().filter(|row| row.claimed.is_some()).count(),
                 closed: count(&["closed"]),
                 waiting: items.iter().filter(|row| row.waiting.is_some()).count(),
                 percent: (total > 0).then(|| complete * 100 / total),
@@ -784,5 +835,61 @@ ship-it · 1 added since the start
         assert_eq!(rows.len(), 2, "{text}");
         assert!(rows[0].ends_with("integrated  01234567 · 3h ago"), "{text}");
         assert!(rows.iter().all(|row| row.chars().count() <= 72), "{text}");
+    }
+
+    /// Pre-change claims, resolving artifacts (`done --by`), and open-source
+    /// drift all surface distinctly without altering unpainted text under
+    /// colour. Rejects a claimed item drawn as bare open, a drift flag
+    /// silently omitted, or colour changing words.
+    #[test]
+    fn journal_links_and_pre_change_claims_draw_cleanly() {
+        let mut claimed = row("i1", "Profile startup", "open");
+        claimed.claimed = Some(super::super::reader::PreChangeClaim {
+            via: "lane",
+            owner: "codex sess-1".to_string(),
+            at: "2026-01-02T11:30:00Z".to_string(),
+            lane: Some("startup-probe".to_string()),
+        });
+        let mut resolved = row("i2", "Audit cache", "done");
+        resolved.resolved_by = Some(crate::journal::series::ResolvedBy {
+            kind: "conclusion".to_string(),
+            target: "20260102T000000Z-cache-audit-conclusion.md".to_string(),
+        });
+        resolved.source = Some(super::super::reader::SourceStatus {
+            project: None,
+            project_slug: None,
+            file: "20260101T000000Z-cache-audit-todo.md".to_string(),
+            status: "open",
+            drift: true,
+        });
+        let report = series(vec![claimed, resolved]);
+        let text = drawn(look(false, None), &report);
+        assert!(text.contains("1 claimed"), "{text}");
+        assert!(
+            text.contains("◈ i1  Profile startup  claimed  claimed by codex sess-1 30m ago (lane startup-probe)"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "✓ i2  Audit cache      done     by 20260102T000000Z-cache-audit-conclusion.md"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("source still open: 20260101T000000Z-cache-audit-todo.md"),
+            "{text}"
+        );
+
+        let painted = drawn(look(true, None), &report);
+        assert!(painted.contains("\x1b[36m◈\x1b[0m"), "{painted:?}");
+        let mut stripped = String::new();
+        let mut rest = painted.as_str();
+        while let Some(start) = rest.find("\x1b[") {
+            stripped.push_str(&rest[..start]);
+            rest = &rest[start..];
+            rest = &rest[rest.find('m').unwrap() + 1..];
+        }
+        stripped.push_str(rest);
+        assert_eq!(stripped, text);
     }
 }

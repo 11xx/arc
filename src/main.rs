@@ -9132,6 +9132,8 @@ mod tests {
             "progress reopen",
             "progress link",
             "progress unlink",
+            "progress source",
+            "progress unsource",
             "progress wait",
             "progress unwait",
             "progress split",

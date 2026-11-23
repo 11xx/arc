@@ -7,13 +7,14 @@
 //! reading. Nothing here runs unless a caller asks for it.
 
 use super::Ctx;
-use crate::journal::series::{self, ItemLink, Placement, RelatedSeries};
+use crate::journal::series::{self, ItemLink, ItemSource, Placement, RelatedSeries, ResolvedBy};
 use crate::model::Closure;
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(crate) mod reader;
@@ -88,6 +89,11 @@ pub enum ProgressCmd {
         /// An item's title; repeat once per item, in order
         #[arg(long = "item")]
         items: Vec<String>,
+        /// Bind a declared item to its originating journal artifact
+        /// (`<item>=<file>` such as `i1=2026...todo.md`, or `<file>` when one
+        /// item is declared; cross-project as `<project>::<file>`)
+        #[arg(long = "from")]
+        from: Vec<String>,
     },
     /// Add an item, at the end unless placed; prints its id
     Add {
@@ -101,6 +107,10 @@ pub enum ProgressCmd {
         /// Place the new item directly after this item
         #[arg(long)]
         after: Option<String>,
+        /// Originating journal artifact (`todo`, `feature-request`, `plan`, or
+        /// `handoff`), bare filename in this journal or `<project>::<file>`
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Rename an item; its id stays
     Rename {
@@ -137,12 +147,18 @@ pub enum ProgressCmd {
     /// Mark done an item no change carries
     ///
     /// A linked item's stage is read from its change and is never marked;
-    /// unlink it first.
+    /// unlink it first. Optional `--by` cites the resolving conclusion or
+    /// decision artifact (bare filename in this journal) or recorded
+    /// checkpoint name.
     Done {
         /// Series filename or topic
         series: String,
         /// Item id, such as i3
         item: String,
+        /// Resolving conclusion or decision filename of this journal, or a
+        /// recorded checkpoint name
+        #[arg(long)]
+        by: Option<String>,
         /// What finished it, one line
         #[arg(long)]
         note: Option<String>,
@@ -178,6 +194,24 @@ pub enum ProgressCmd {
     },
     /// Remove an item's link to its change
     Unlink {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+    },
+    /// Bind an item to its originating journal artifact (`todo`,
+    /// `feature-request`, `plan`, or `handoff`)
+    Source {
+        /// Series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+        /// Bare artifact filename of this journal, or `<project>::<file>` for
+        /// another registered project
+        artifact: String,
+    },
+    /// Remove an item's originating journal artifact link
+    Unsource {
         /// Series filename or topic
         series: String,
         /// Item id, such as i3
@@ -278,8 +312,10 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             title,
             follows,
             items,
+            from,
         } => {
-            let file = series::start(ctx, &topic, &title, follows.as_deref(), &items)?;
+            let sources = parse_start_sources(&from, items.len())?;
+            let file = series::start(ctx, &topic, &title, follows.as_deref(), &items, &sources)?;
             println!("{file}");
             for (index, item) in items.iter().enumerate() {
                 println!("  i{}  {}", index + 1, item.trim());
@@ -291,8 +327,15 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
             title,
             before,
             after,
+            from,
         } => {
-            let id = series::add(ctx, &name, &title, placement(&before, &after))?;
+            let id = series::add(
+                ctx,
+                &name,
+                &title,
+                placement(&before, &after),
+                from.as_deref(),
+            )?;
             println!("added {id}: {}", title.trim());
         }
         ProgressCmd::Rename {
@@ -323,10 +366,18 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
         ProgressCmd::Done {
             series: name,
             item,
+            by,
             note,
         } => {
-            series::done(ctx, &name, &item, note.as_deref())?;
-            println!("done {item}");
+            let resolved_by = by
+                .as_deref()
+                .map(|target| resolve_done_by(ctx, target))
+                .transpose()?;
+            series::done(ctx, &name, &item, resolved_by.clone(), note.as_deref())?;
+            match resolved_by {
+                Some(by) => println!("done {item} by {by}"),
+                None => println!("done {item}"),
+            }
         }
         ProgressCmd::Reopen {
             series: name,
@@ -356,6 +407,18 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
         ProgressCmd::Unlink { series: name, item } => {
             let link = series::unlink(ctx, &name, &item)?;
             println!("unlinked {item} from {link}");
+        }
+        ProgressCmd::Source {
+            series: name,
+            item,
+            artifact,
+        } => {
+            let source = series::set_source(ctx, &name, &item, &artifact)?;
+            println!("sourced {item} from {source}");
+        }
+        ProgressCmd::Unsource { series: name, item } => {
+            let source = series::clear_source(ctx, &name, &item)?;
+            println!("unsourced {item} from {source}");
         }
         ProgressCmd::Wait {
             series: name,
@@ -402,6 +465,50 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
     Ok(0)
 }
 
+fn parse_start_sources(specs: &[String], item_count: usize) -> Result<BTreeMap<usize, String>> {
+    let mut mapped = BTreeMap::new();
+    for spec in specs {
+        let (index, artifact) = if let Some((id, file)) = spec.split_once('=') {
+            let number: usize = id
+                .strip_prefix('i')
+                .and_then(|digits| digits.parse().ok())
+                .filter(|&n| n >= 1)
+                .with_context(|| {
+                    format!("--from takes <item>=<file> (such as i1=2026...todo.md); got {spec:?}")
+                })?;
+            (number - 1, file.to_string())
+        } else if item_count == 1 {
+            (0, spec.clone())
+        } else {
+            bail!(
+                "--from takes <item>=<file> when start declares more than one item; got {spec:?}"
+            );
+        };
+        if mapped.insert(index, artifact).is_some() {
+            bail!("--from names item i{} more than once", index + 1);
+        }
+    }
+    Ok(mapped)
+}
+
+fn resolve_done_by(ctx: &Ctx, target: &str) -> Result<ResolvedBy> {
+    let dir = crate::journal::resolve_dir(&ctx.cwd)?;
+    if let Some(artifact) = series::resolve_journal_resolution(&dir, target, "--by")? {
+        return Ok(artifact);
+    }
+    let store = Store::discover_existing_for_reading(&ctx.cwd)?
+        .with_context(|| format!("--by {target:?} is neither a conclusion/decision filename nor a checkpoint (no ledger here)"))?;
+    let checkpoint = super::checkpoint::find(&store, target).with_context(|| {
+        format!(
+            "--by takes a bare conclusion or decision filename of this journal, or a recorded checkpoint name; {target:?} matched neither"
+        )
+    })?;
+    Ok(ResolvedBy {
+        kind: "checkpoint".to_string(),
+        target: checkpoint.name,
+    })
+}
+
 /// An item `begin --item` or `progress link` will link, checked before
 /// anything is written. `expected` is the link read here; the write compares
 /// it under the journal's lock.
@@ -409,7 +516,27 @@ pub(crate) struct ItemTarget {
     series: String,
     item: String,
     expected: Option<ItemLink>,
+    source: Option<ItemSource>,
     replaceable: bool,
+}
+
+impl ItemTarget {
+    pub(crate) fn source_spec(&self) -> Option<&ItemSource> {
+        self.source.as_ref()
+    }
+}
+
+/// Format an item's recorded `--from` source as a `--from-journal` reference
+/// (`<file>` for this journal, or `<journal-dir>::<file>` for a registered
+/// foreign project; `None` when a foreign project is no longer registered).
+pub(crate) fn item_source_journal_ref(source: &ItemSource) -> Result<Option<String>> {
+    let Some(slug) = source.project.as_deref() else {
+        return Ok(Some(source.file.clone()));
+    };
+    let registry = Registry::read()?;
+    Ok(registry
+        .get(slug)
+        .map(|project| format!("{}::{}", project.journal_dir.display(), source.file)))
 }
 
 /// Check an item for a link. Only the journal is read, and a ledger only
@@ -417,7 +544,7 @@ pub(crate) struct ItemTarget {
 /// change, through discovery that creates nothing, so a refused item leaves
 /// no ledger behind.
 fn preflight_item(ctx: &Ctx, name: &str, item: &str) -> Result<ItemTarget> {
-    let (file, current) = series::linkable(ctx, name, item)?;
+    let (file, current, source) = series::linkable(ctx, name, item)?;
     let replaceable = match &current {
         None => true,
         Some(link) => {
@@ -437,6 +564,7 @@ fn preflight_item(ctx: &Ctx, name: &str, item: &str) -> Result<ItemTarget> {
         series: file,
         item: item.to_string(),
         expected: current,
+        source,
         replaceable,
     })
 }
@@ -759,6 +887,36 @@ fn render_row(row: &ItemRow, width: usize) {
                 .unwrap_or_default()
         ));
     }
+    if let Some(claim) = &row.claimed {
+        detail.push(format!(
+            "claimed by {} at {} via {}{}",
+            claim.owner,
+            claim.at,
+            claim.via,
+            claim
+                .lane
+                .as_deref()
+                .map(|lane| format!(" ({lane})"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(by) = &row.resolved_by {
+        detail.push(format!("by {by}"));
+    }
+    if let Some(source) = &row.source {
+        let named = match (&source.project, &source.project_slug) {
+            (Some(project), Some(slug)) => {
+                format!("{project}::{} (project {slug})", source.file)
+            }
+            _ => source.file.clone(),
+        };
+        let drift = if source.drift {
+            ", drift: source still open"
+        } else {
+            ""
+        };
+        detail.push(format!("from {named} ({}{drift})", source.status));
+    }
     if !row.split_into.is_empty() {
         detail.push(format!("into {}", row.split_into.join(", ")));
     }
@@ -785,6 +943,9 @@ fn render_counts(counts: &Counts, since: bool) {
         line.push_str(&format!(", {percent}% by count of items"));
     }
     line.push_str(&format!("; {} in flight", counts.in_flight));
+    if counts.claimed > 0 {
+        line.push_str(&format!("; {} claimed", counts.claimed));
+    }
     if counts.waiting > 0 {
         line.push_str(&format!("; {} waiting", counts.waiting));
     }

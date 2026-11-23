@@ -35,6 +35,40 @@ pub fn begin(
             "--from-fork cannot be combined with --adopt without an explicit --base for recovery"
         );
     }
+    let item = item
+        .as_deref()
+        .map(|spec| super::progress::preflight_begin_item(ctx, spec))
+        .transpose()?;
+    // If the linked progress item carries a `--from` source artifact,
+    // propagate it as `--from-journal` when still open and actionable, or
+    // verify an explicit `--from-journal` agrees with it.
+    let from_journal = match (
+        from_journal,
+        item.as_ref().and_then(|target| target.source_spec()),
+    ) {
+        (Some(explicit), Some(item_source)) => {
+            if let Some(item_ref) = super::progress::item_source_journal_ref(item_source)? {
+                if !crate::journal::same_artifact_reference(ctx, &explicit, &item_ref)? {
+                    bail!(
+                        "--from-journal {explicit} differs from progress item source {item_source}; \
+                         pass the matching artifact or update the item's source with `arc progress source`"
+                    );
+                }
+            }
+            Some(explicit)
+        }
+        (None, Some(item_source)) => match super::progress::item_source_journal_ref(item_source)? {
+            Some(item_ref)
+                if crate::journal::reference_is_open_actionable(ctx, &item_ref)
+                    .unwrap_or(false) =>
+            {
+                println!("from-journal: {item_ref} (from progress item source)");
+                Some(item_ref)
+            }
+            _ => None,
+        },
+        (explicit, None) => explicit,
+    };
     // Promotion is one journal transition from the open preflight through the
     // superseding consume event. Holding the same guard across the Git and
     // ledger work prevents two callers from both passing the advisory source.
@@ -51,10 +85,6 @@ pub fn begin(
     let journal_ref_digest = from_journal
         .as_deref()
         .map(|filename| crate::journal::artifact_digest(ctx, filename))
-        .transpose()?;
-    let item = item
-        .as_deref()
-        .map(|spec| super::progress::preflight_begin_item(ctx, spec))
         .transpose()?;
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
