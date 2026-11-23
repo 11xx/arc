@@ -56,7 +56,7 @@ fn item_events(dir: &Path) -> usize {
         .count()
 }
 
-fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
+pub(super) fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
     let root = repo.root.parent().unwrap().join(name);
     fs::create_dir_all(&root).unwrap();
     git(&root, &["init", "-b", "master"]);
@@ -303,7 +303,7 @@ fn a_dropped_item_leaves_the_share_and_stays_visible() {
 /// Every RFC 3339 timestamp in `text` replaced by `<ts>`: when the session
 /// last wrote is a clock fact every journal write moves, not a line of
 /// progress.
-fn without_timestamps(text: &str) -> String {
+pub(super) fn without_timestamps(text: &str) -> String {
     let bytes = text.as_bytes();
     let stamp = |at: usize| {
         bytes.len() >= at + 19

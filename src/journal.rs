@@ -35,6 +35,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 pub(crate) mod guide_topics;
+pub(crate) mod milestone;
 mod page;
 mod pins;
 mod private_text;
@@ -288,7 +289,7 @@ fn recognized_journal_kinds() -> impl Iterator<Item = &'static str> {
     JournalKind::value_variants()
         .iter()
         .map(|kind| kind.as_str())
-        .chain([series::KIND])
+        .chain([series::KIND, milestone::KIND])
         .chain(RETIRED_JOURNAL_KINDS)
 }
 
@@ -9460,6 +9461,8 @@ pub(crate) struct JournalEvent {
     /// linked change, and a related series.
     #[serde(flatten)]
     series: series::SeriesFields,
+    #[serde(flatten)]
+    milestone: milestone::MilestoneFields,
 }
 
 /// A progress series item claimed by an advisory work lane.
@@ -9782,6 +9785,7 @@ impl JournalEvent {
             adopted_from: None,
             lane_item: None,
             series: series::SeriesFields::default(),
+            milestone: milestone::MilestoneFields::default(),
         }
     }
 
@@ -9913,6 +9917,14 @@ impl JournalEvent {
                     })
             }
             "source-attach" => self.file.is_some() && self.source.is_some(),
+            "note"
+                if self
+                    .file
+                    .as_deref()
+                    .is_some_and(milestone::is_milestone_file) =>
+            {
+                milestone::well_formed(self)
+            }
             "note" => self.file.is_some(),
             "verified" => self.file.is_some(),
             "pinned" => {
@@ -9958,6 +9970,8 @@ impl JournalEvent {
             }
             "consumed" => {
                 self.file.is_some()
+                    && (self.milestone.milestone_checkpoint.is_none()
+                        || milestone::well_formed(self))
                     && self
                         .outcome
                         .as_deref()
@@ -10184,6 +10198,7 @@ impl JournalEvent {
             | "wave-removed"
             | "series-related"
             | "series-unrelated" => series::well_formed(self),
+            kind if kind.starts_with("milestone-") => milestone::well_formed(self),
             _ => false,
         }
     }
@@ -11269,6 +11284,7 @@ fn event_message(event: &JournalEvent) -> String {
                 .unwrap_or_default()
         ),
         kind if kind.starts_with("workbench-") => workbench::event_message(event),
+        kind if kind.starts_with("milestone-") => milestone::event_message(event),
         kind if kind.starts_with("item-")
             || kind.starts_with("series-")
             || kind.starts_with("wave-") =>

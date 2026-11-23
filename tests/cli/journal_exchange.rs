@@ -1,7 +1,7 @@
 use super::common::*;
 
 /// Two independent stores, paired in one logical project.
-fn pair(source: &Repo, recipient: &Repo, source_name: &str, recipient_name: &str) {
+pub(super) fn pair(source: &Repo, recipient: &Repo, source_name: &str, recipient_name: &str) {
     let recipient_id = repository_id(recipient);
     source
         .arc(&source.root)

@@ -8,7 +8,7 @@ mod bundle_output;
 pub(crate) mod candidate;
 mod chain;
 mod changelog;
-mod checkpoint;
+pub(crate) mod checkpoint;
 mod claims;
 mod config_cmd;
 mod cost;
@@ -33,6 +33,7 @@ mod hooks;
 pub(crate) mod land;
 mod lifecycle;
 pub(crate) mod messaging;
+pub mod milestone;
 mod observe;
 mod pass;
 mod policy_cmd;
@@ -179,6 +180,7 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "journal catchup",
     "journal open",
     "progress",
+    "milestone",
     "workspace progress",
 ];
 
@@ -254,6 +256,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "workspace pins",
     "workspace progress",
     "progress",
+    "milestone",
     "restack",
     "journal dir",
     "journal doctor",

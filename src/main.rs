@@ -3655,6 +3655,9 @@ enum Cmd {
     /// as text and `--json` the versioned `arc-progress/1`. See
     /// `arc guide progress`.
     Progress(commands::progress::ProgressArgs),
+
+    /// Read milestones or record their waves, tracks, checkpoints, and closure
+    Milestone(commands::milestone::MilestoneArgs),
     /// Cross-harness project and operator journals over plain Markdown.
     ///
     /// Events replay in append order; timestamps record observation time. Project reads
@@ -6380,7 +6383,21 @@ fn command_path(matches: &clap::ArgMatches) -> String {
 /// The command tree. `--version` prints the release and, on a second line,
 /// the build; `-V` prints the release alone.
 fn cli_command() -> clap::Command {
-    instruction_help(Cli::command()).long_version(format!(
+    let command = Cli::command();
+    // The track-add leaf owns `--role`. Reuse the global execution-role
+    // argument under a distinct flag there, preserving its id and environment.
+    let execution_role = command
+        .get_arguments()
+        .find(|arg| arg.get_id() == "role")
+        .expect("global execution role")
+        .clone()
+        .long("execution-role");
+    let command = command.mut_subcommand("milestone", |milestone| {
+        milestone.mut_subcommand("track", |track| {
+            track.mut_subcommand("add", |add| add.arg(execution_role))
+        })
+    });
+    instruction_help(command).long_version(format!(
         "{}\nbuild: {}",
         env!("CARGO_PKG_VERSION"),
         context::build_revision().label()
@@ -9029,6 +9046,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         } => commands::catchup(&ctx, limit, sessions, json),
         Cmd::Fr { write } => journal::feature_request(&ctx, write),
         Cmd::Progress(args) => commands::progress::run(&ctx, args),
+        Cmd::Milestone(args) => commands::milestone::run(&ctx, args),
         Cmd::Journal { cmd, global } => journal::run(&ctx, cmd, global),
     }
 }
@@ -9155,6 +9173,17 @@ mod tests {
             "progress relate",
             "progress unrelate",
             "progress retire",
+            "milestone start",
+            "milestone wave add",
+            "milestone wave rename",
+            "milestone wave move",
+            "milestone wave remove",
+            "milestone track add",
+            "milestone track role",
+            "milestone track move",
+            "milestone track remove",
+            "milestone checkpoint",
+            "milestone close",
             "journal bind",
             "journal spool",
             "journal note",

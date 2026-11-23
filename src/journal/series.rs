@@ -246,7 +246,7 @@ pub(crate) struct RelatedSeries {
     pub(crate) file: String,
 }
 
-fn single_line(value: &str) -> bool {
+pub(super) fn single_line(value: &str) -> bool {
     !value.trim().is_empty() && !value.contains(['\n', '\r'])
 }
 
@@ -1345,7 +1345,7 @@ fn state_word(state: ItemState) -> &'static str {
     }
 }
 
-fn one_line(what: &str, value: &str) -> Result<String> {
+pub(super) fn one_line(what: &str, value: &str) -> Result<String> {
     if !single_line(value) {
         bail!("{what} must be one non-empty line");
     }
@@ -1373,7 +1373,12 @@ pub(crate) fn bare_artifact_kind(name: &str) -> Option<String> {
 /// regular file in the hot journal or its cold archive. A symbolic link is
 /// refused rather than followed, so a name never leads out of the journal's
 /// directories.
-fn named_artifact(dir: &Path, name: &str, kind: &str, flag: &str) -> Result<std::path::PathBuf> {
+pub(super) fn named_artifact(
+    dir: &Path,
+    name: &str,
+    kind: &str,
+    flag: &str,
+) -> Result<std::path::PathBuf> {
     let Some(found) = bare_artifact_kind(name) else {
         bail!(
             "{flag} takes a bare {kind} artifact filename of this journal \

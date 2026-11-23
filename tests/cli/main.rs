@@ -101,6 +101,7 @@ mod landing_reads;
 mod lifecycle;
 mod lock_waits;
 mod lookup_reasons;
+mod milestone;
 mod model_resolution;
 mod native_child_binding;
 mod observe;
