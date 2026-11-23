@@ -3187,9 +3187,9 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         series(&all, &series_a)["items"][0]
     );
 
-    // Simulate an interrupted cross-project transfer: destination already has an
-    // item with matching `transferred_from`, while source item is still open.
-    let src_s = start(&repo, &repo.root, "src-retry", &["Retry me"]);
+    // 1. A legacy destination item carrying matching `transferred_from` without
+    // a durable `transfer_key` is refused before retiring the source.
+    let legacy_src = start(&repo, &repo.root, "legacy-retry", &["Legacy item"]);
     let here_slug = journal_dir(&repo, &repo.root)
         .file_name()
         .unwrap()
@@ -3197,26 +3197,75 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         .unwrap()
         .to_string();
     let other_dir = journal_dir(&repo, &other);
-    let partial_add = serde_json::json!({
+    let legacy_add = serde_json::json!({
         "schema": "journal-events/2",
         "ts": "2026-01-03T00:00:00Z",
         "topic": "series-c",
         "event": "item-added",
         "file": series_c,
         "item": "i3",
-        "title": "Retry me",
+        "title": "Unverified legacy",
         "transferred_from": {
             "project": here_slug,
-            "series": src_s,
+            "series": legacy_src,
             "item": "i1"
         }
     });
     let mut other_events = fs::read_to_string(other_dir.join("events.jsonl")).unwrap();
-    other_events.push_str(&format!("{partial_add}\n"));
+    other_events.push_str(&format!("{legacy_add}\n"));
     fs::write(other_dir.join("events.jsonl"), other_events).unwrap();
 
-    // Retrying the transfer reuses C:i3 instead of creating C:i4 and finishes
-    // retiring src-retry:i1.
+    repo.arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &legacy_src,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "should refuse unverified legacy match",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("transfer_key"));
+    assert_eq!(
+        series(&report(&repo, &repo.root, &[&legacy_src]), &legacy_src)["items"][0]["stage"],
+        "open"
+    );
+
+    // 2. Real interrupted cross-project transfer (destination carries matching
+    // durable `transfer_key`, source missed its trailing `item-transferred`)
+    // recovers idempotently reusing the exact destination item ID.
+    let src_s = start(&repo, &repo.root, "src-retry", &["Retry me"]);
+    let first_out = progress(
+        &repo,
+        &repo.root,
+        &[
+            "transfer",
+            &src_s,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "initial transfer",
+        ],
+    );
+    assert!(first_out.contains("i4"), "got: {first_out}");
+
+    // Strip the final `item-transferred` line from the source journal to
+    // simulate an interruption between destination commit and source commit.
+    let here_dir = journal_dir(&repo, &repo.root);
+    let src_events_path = here_dir.join("events.jsonl");
+    let mut src_lines: Vec<String> = fs::read_to_string(&src_events_path)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let dropped = src_lines.pop().unwrap();
+    assert!(dropped.contains("item-transferred"), "{dropped}");
+    fs::write(&src_events_path, format!("{}\n", src_lines.join("\n"))).unwrap();
+
     let retry_out = progress(
         &repo,
         &repo.root,
@@ -3230,14 +3279,14 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
             "complete interrupted transfer",
         ],
     );
-    assert!(retry_out.contains("i3"), "got: {retry_out}");
+    assert!(retry_out.contains("i4"), "got: {retry_out}");
     let after_c = report(&repo, &other, &[&series_c]);
     assert_eq!(
         series(&after_c, &series_c)["items"]
             .as_array()
             .unwrap()
             .len(),
-        3
+        4
     );
     let after_src = report(&repo, &repo.root, &[&src_s]);
     assert_eq!(
@@ -3246,6 +3295,6 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
     );
     assert_eq!(
         series(&after_src, &src_s)["items"][0]["transferred_to"]["item"],
-        "i3"
+        "i4"
     );
 }

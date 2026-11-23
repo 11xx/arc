@@ -99,6 +99,11 @@ pub(crate) struct SeriesFields {
     /// Origin item on an `item-added` created by a transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transferred_from: Option<ItemRef>,
+    /// Durable digest of the source journal, series, and item creation events
+    /// recorded on an `item-added` created by transfer so retries bind to the
+    /// exact originating item even if slugs are later renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer_key: Option<String>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
@@ -318,7 +323,9 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         && fields.change_project.is_none()
         && fields.waits_on.is_none()
         && fields.related.is_none();
-    let no_transfer = fields.transferred_to.is_none() && fields.transferred_from.is_none();
+    let no_transfer = fields.transferred_to.is_none()
+        && fields.transferred_from.is_none()
+        && fields.transfer_key.is_none();
     let bare = no_link_or_wait
         && no_wave_or_dep
         && no_transfer
@@ -349,6 +356,10 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.item_source.as_ref().is_none_or(valid_item_source)
                 && fields.transferred_to.is_none()
                 && fields.transferred_from.as_ref().is_none_or(valid_item_ref)
+                && fields
+                    .transfer_key
+                    .as_deref()
+                    .is_none_or(|key| fields.transferred_from.is_some() && single_line(key))
         }
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
@@ -714,6 +725,8 @@ pub(crate) struct Item {
     pub(crate) transferred_to: Option<ItemRef>,
     /// For an item created by transfer, the source series item it came from.
     pub(crate) transferred_from: Option<ItemRef>,
+    /// Durable origin fingerprint recorded on transferred items for retry matching.
+    pub(crate) transfer_key: Option<String>,
     initial: bool,
 }
 
@@ -964,6 +977,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     split_into: Vec::new(),
                     transferred_to: None,
                     transferred_from: fields.transferred_from.clone(),
+                    transfer_key: fields.transfer_key.clone(),
                     initial: fields.initial,
                 };
                 place(
@@ -1025,6 +1039,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             split_into: Vec::new(),
                             transferred_to: None,
                             transferred_from: None,
+                            transfer_key: None,
                             initial: false,
                         },
                     );
@@ -2628,14 +2643,22 @@ pub(crate) fn transfer(
         super::append_events(ctx, &here, &records)?;
         new_id
     } else {
-        // Cross-project transfer: recover idempotently by provenance if a
-        // previous attempt already published the destination item before
-        // retiring the source.
-        let new_id = if let Some(existing) = target_series
+        // Cross-project transfer: bind retries to a durable source-item digest
+        // (canonical journal directory, series file, item ID, and immutable
+        // creation events) so reusing a slug after a rename can never match a
+        // different source's historical destination item.
+        let expected_key = source_transfer_key(
+            &canonical(&here),
+            &source_events,
+            &source_file,
+            item_id,
+            source_item,
+        );
+        let exact_retry = target_series
             .items
             .iter()
-            .find(|item| item.transferred_from.as_ref() == Some(&provenance))
-        {
+            .find(|item| item.transfer_key.as_deref() == Some(expected_key.as_str()));
+        let new_id = if let Some(existing) = exact_retry {
             if let Some(link) = carried_link {
                 if existing.link().as_ref() != Some(&link) {
                     let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
@@ -2647,6 +2670,17 @@ pub(crate) fn transfer(
                 }
             }
             existing.id.clone()
+        } else if let Some(legacy) = target_series.items.iter().find(|item| {
+            item.transferred_from.as_ref() == Some(&provenance) && item.transfer_key.is_none()
+        }) {
+            bail!(
+                "destination {} already holds item {} with matching transferred_from {} \
+                 but no durable transfer_key; refusing to assume it originated from this \
+                 source item before retiring {item_id}",
+                target_series.file,
+                legacy.id,
+                provenance
+            );
         } else {
             let new_id = format!("i{}", target_series.next_id());
             let mut dest_records = Vec::with_capacity(2);
@@ -2657,6 +2691,7 @@ pub(crate) fn transfer(
             add_event.series.wave = dest_wave.clone();
             add_event.series.item_source = carried_source;
             add_event.series.transferred_from = Some(provenance);
+            add_event.series.transfer_key = Some(expected_key);
             dest_records.push(add_event);
 
             if let Some(link) = carried_link {
@@ -2692,6 +2727,45 @@ pub(crate) fn transfer(
         wave: dest_wave,
         warnings,
     })
+}
+
+/// Compute a durable, immutable digest identifying one source item across
+/// cross-project transfer retries (combining canonical source journal path,
+/// series filename, item ID, series start event, and item creation event).
+fn source_transfer_key(
+    here_canon: &Path,
+    source_events: &[JournalEvent],
+    source_file: &str,
+    item_id: &str,
+    source_item: &Item,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(here_canon.to_string_lossy().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(source_file.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(item_id.as_bytes());
+    hasher.update([0u8]);
+    if let Some(start_note) = source_events
+        .iter()
+        .find(|e| e.event == "note" && e.file.as_deref() == Some(source_file))
+    {
+        if let Ok(json) = serde_json::to_vec(start_note) {
+            hasher.update(json);
+        }
+    }
+    hasher.update([0u8]);
+    let creator = source_events.iter().find(|e| {
+        e.file.as_deref() == Some(source_file)
+            && ((e.event == "item-added" && e.series.item.as_deref() == Some(item_id))
+                || (e.event == "item-split" && e.series.parts.iter().any(|p| p.item == item_id)))
+    });
+    match creator.and_then(|e| serde_json::to_vec(e).ok()) {
+        Some(json) => hasher.update(json),
+        None => hasher.update(source_item.title.as_bytes()),
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 /// Record that a series relates to one in another project.
