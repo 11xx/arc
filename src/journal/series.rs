@@ -99,9 +99,10 @@ pub(crate) struct SeriesFields {
     /// Origin item on an `item-added` created by a transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transferred_from: Option<ItemRef>,
-    /// Durable digest of the source journal, series, and item creation events
-    /// recorded on an `item-added` created by transfer so retries bind to the
-    /// exact originating item even if slugs are later renamed.
+    /// Durable transfer key persisted on `item-transfer-pending` in the source
+    /// journal and echoed on the destination `item-added` so cross-project
+    /// transfer retries bind to the exact originating item across journal
+    /// relocations and slug renames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transfer_key: Option<String>,
     /// The series in another project a `series-related` event names.
@@ -364,6 +365,18 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
         "item-dropped" => names_item && line(&event.note) && placements.is_empty() && bare,
+        "item-transfer-pending" => {
+            names_item
+                && event.note.is_none()
+                && placements.is_empty()
+                && no_link_or_wait
+                && no_wave_or_dep
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.transferred_to.is_none()
+                && fields.transferred_from.is_none()
+                && fields.transfer_key.as_deref().is_some_and(single_line)
+        }
         "item-transferred" => {
             names_item
                 && line(&event.note)
@@ -373,6 +386,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.transferred_from.is_none()
+                && fields.transfer_key.is_none()
                 && fields.transferred_to.as_ref().is_some_and(valid_item_ref)
         }
         "item-done" => {
@@ -652,6 +666,7 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        "item-transfer-pending" => format!("pending transfer of item {item} of {file}"),
         "item-transferred" => format!(
             "transferred item {item} of {file} to {}: {note}",
             fields
@@ -725,8 +740,11 @@ pub(crate) struct Item {
     pub(crate) transferred_to: Option<ItemRef>,
     /// For an item created by transfer, the source series item it came from.
     pub(crate) transferred_from: Option<ItemRef>,
-    /// Durable origin fingerprint recorded on transferred items for retry matching.
+    /// Durable transfer key recorded on transferred items for retry matching.
     pub(crate) transfer_key: Option<String>,
+    /// Durable transfer key recorded on an in-flight cross-project transfer
+    /// before destination creation so retries match across journal relocations.
+    pub(crate) pending_transfer_key: Option<String>,
     initial: bool,
 }
 
@@ -978,6 +996,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     transferred_to: None,
                     transferred_from: fields.transferred_from.clone(),
                     transfer_key: fields.transfer_key.clone(),
+                    pending_transfer_key: None,
                     initial: fields.initial,
                 };
                 place(
@@ -1040,6 +1059,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             transferred_to: None,
                             transferred_from: None,
                             transfer_key: None,
+                            pending_transfer_key: None,
                             initial: false,
                         },
                     );
@@ -1083,9 +1103,13 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
+                    "item-transfer-pending" => {
+                        item.pending_transfer_key = fields.transfer_key.clone();
+                    }
                     "item-transferred" => {
                         item.state = ItemState::Transferred;
                         item.transferred_to = fields.transferred_to.clone();
+                        item.pending_transfer_key = None;
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
@@ -2487,35 +2511,36 @@ pub(crate) fn transfer(
     // For cross-project transfers, establish this journal's unique registered
     // slug so the destination can record unambiguous provenance and re-scope
     // local references without colliding with another same-basename journal.
-    let here_slug: Option<String> = if target_project.is_some() {
-        let cfg = crate::config::load()?;
-        let known = crate::registry::known_journals(&cfg)?;
-        let here_canon = canonical(&here);
-        let found = known
-            .iter()
-            .find(|(_, journal)| canonical(journal) == here_canon)
-            .map(|(slug, _)| slug.clone());
-        let Some(slug) = found else {
-            bail!(
-                "this project's journal is not registered; bind or record a journal entry \
-                 before transferring items to another project"
-            );
+    let (here_slug, known_journals): (Option<String>, Vec<(String, std::path::PathBuf)>) =
+        if target_project.is_some() {
+            let cfg = crate::config::load()?;
+            let known = crate::registry::known_journals(&cfg)?;
+            let here_canon = canonical(&here);
+            let found = known
+                .iter()
+                .find(|(_, journal)| canonical(journal) == here_canon)
+                .map(|(slug, _)| slug.clone());
+            let Some(slug) = found else {
+                bail!(
+                    "this project's journal is not registered; bind or record a journal entry \
+                     before transferring items to another project"
+                );
+            };
+            let same_slug_count = known
+                .iter()
+                .filter(|(other_slug, _)| *other_slug == slug)
+                .count();
+            if same_slug_count > 1 {
+                bail!(
+                    "this project's journal slug {slug:?} is ambiguous across {same_slug_count} \
+                     registered journals; give each journal a unique directory name before \
+                     transferring items across projects"
+                );
+            }
+            (Some(slug), known)
+        } else {
+            (None, Vec::new())
         };
-        let same_slug_count = known
-            .iter()
-            .filter(|(other_slug, _)| *other_slug == slug)
-            .count();
-        if same_slug_count > 1 {
-            bail!(
-                "this project's journal slug {slug:?} is ambiguous across {same_slug_count} \
-                 registered journals; give each journal a unique directory name before \
-                 transferring items across projects"
-            );
-        }
-        Some(slug)
-    } else {
-        None
-    };
 
     let carried_source = source_item
         .source
@@ -2643,21 +2668,17 @@ pub(crate) fn transfer(
         super::append_events(ctx, &here, &records)?;
         new_id
     } else {
-        // Cross-project transfer: bind retries to a durable source-item digest
-        // (canonical journal directory, series file, item ID, and immutable
-        // creation events) so reusing a slug after a rename can never match a
-        // different source's historical destination item.
-        let expected_key = source_transfer_key(
-            &canonical(&here),
-            &source_events,
-            &source_file,
-            item_id,
-            source_item,
-        );
-        let exact_retry = target_series
-            .items
-            .iter()
-            .find(|item| item.transfer_key.as_deref() == Some(expected_key.as_str()));
+        // Cross-project transfer: persist a unique `transfer_key` on the source
+        // journal via `item-transfer-pending` before touching the destination so
+        // retries match the committed half-transfer even if the source journal is
+        // relocated on disk or a slug is later reused by another producer.
+        let pending_key = source_item.pending_transfer_key.as_deref();
+        let exact_retry = pending_key.and_then(|key| {
+            target_series
+                .items
+                .iter()
+                .find(|item| item.transfer_key.as_deref() == Some(key))
+        });
         let new_id = if let Some(existing) = exact_retry {
             if let Some(link) = carried_link {
                 if existing.link().as_ref() != Some(&link) {
@@ -2670,18 +2691,43 @@ pub(crate) fn transfer(
                 }
             }
             existing.id.clone()
-        } else if let Some(legacy) = target_series.items.iter().find(|item| {
-            item.transferred_from.as_ref() == Some(&provenance) && item.transfer_key.is_none()
-        }) {
-            bail!(
-                "destination {} already holds item {} with matching transferred_from {} \
-                 but no durable transfer_key; refusing to assume it originated from this \
-                 source item before retiring {item_id}",
-                target_series.file,
-                legacy.id,
-                provenance
-            );
         } else {
+            if let Some(key) = pending_key {
+                if let Some((other_slug, other_file, other_item)) =
+                    find_transfer_key_in_known(&known_journals, key)
+                {
+                    bail!(
+                        "item {item_id} already landed as {other_item} in \
+                         {other_slug}::{other_file} under a pending transfer; finish that \
+                         transfer before moving {item_id} elsewhere"
+                    );
+                }
+            }
+            if let Some(legacy) = target_series.items.iter().find(|item| {
+                item.transferred_from.as_ref() == Some(&provenance) && item.transfer_key.is_none()
+            }) {
+                bail!(
+                    "destination {} already holds item {} with matching transferred_from {} \
+                     but no durable transfer_key; refusing to assume it originated from this \
+                     source item before retiring {item_id}",
+                    target_series.file,
+                    legacy.id,
+                    provenance
+                );
+            }
+            let expected_key = match pending_key {
+                Some(key) => key.to_string(),
+                None => {
+                    let key = crate::ids::new_identifier();
+                    let mut pending_event =
+                        JournalEvent::base(ctx, now, &source_topic, "item-transfer-pending");
+                    pending_event.file = Some(source_file.clone());
+                    pending_event.series.item = Some(item_id.to_string());
+                    pending_event.series.transfer_key = Some(key.clone());
+                    append_event(ctx, &here, &pending_event)?;
+                    key
+                }
+            };
             let new_id = format!("i{}", target_series.next_id());
             let mut dest_records = Vec::with_capacity(2);
             let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
@@ -2729,43 +2775,36 @@ pub(crate) fn transfer(
     })
 }
 
-/// Compute a durable, immutable digest identifying one source item across
-/// cross-project transfer retries (combining canonical source journal path,
-/// series filename, item ID, series start event, and item creation event).
-fn source_transfer_key(
-    here_canon: &Path,
-    source_events: &[JournalEvent],
-    source_file: &str,
-    item_id: &str,
-    source_item: &Item,
-) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(here_canon.to_string_lossy().as_bytes());
-    hasher.update([0u8]);
-    hasher.update(source_file.as_bytes());
-    hasher.update([0u8]);
-    hasher.update(item_id.as_bytes());
-    hasher.update([0u8]);
-    if let Some(start_note) = source_events
-        .iter()
-        .find(|e| e.event == "note" && e.file.as_deref() == Some(source_file))
-    {
-        if let Ok(json) = serde_json::to_vec(start_note) {
-            hasher.update(json);
+/// Search registered journals for any series item already carrying `key` so a
+/// retried transfer with a pending key cannot retarget onto a second series
+/// while a committed half-transfer already exists elsewhere.
+fn find_transfer_key_in_known(
+    known: &[(String, std::path::PathBuf)],
+    key: &str,
+) -> Option<(String, String, String)> {
+    let mut seen_dirs = std::collections::HashSet::new();
+    for (slug, dir) in known {
+        let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        if !seen_dirs.insert(canon) {
+            continue;
+        }
+        let Ok(events) = super::read_events(dir) else {
+            continue;
+        };
+        for file in series_files(&events) {
+            let Some(series) = replay(&events, &file) else {
+                continue;
+            };
+            if let Some(item) = series
+                .items
+                .iter()
+                .find(|item| item.transfer_key.as_deref() == Some(key))
+            {
+                return Some((slug.clone(), file, item.id.clone()));
+            }
         }
     }
-    hasher.update([0u8]);
-    let creator = source_events.iter().find(|e| {
-        e.file.as_deref() == Some(source_file)
-            && ((e.event == "item-added" && e.series.item.as_deref() == Some(item_id))
-                || (e.event == "item-split" && e.series.parts.iter().any(|p| p.item == item_id)))
-    });
-    match creator.and_then(|e| serde_json::to_vec(e).ok()) {
-        Some(json) => hasher.update(json),
-        None => hasher.update(source_item.title.as_bytes()),
-    }
-    format!("sha256:{}", hex::encode(hasher.finalize()))
+    None
 }
 
 /// Record that a series relates to one in another project.

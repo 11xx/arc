@@ -10159,12 +10159,31 @@ impl JournalEvent {
             | "workbench-closed"
             | "workbench-archived"
             | "workbench-unarchived" => workbench::well_formed(self),
-            "item-added" | "item-renamed" | "item-moved" | "item-dropped" | "item-done"
-            | "item-reopened" | "item-linked" | "item-unlinked" | "item-sourced"
-            | "item-unsourced" | "item-waved" | "item-unwaved" | "item-depended"
-            | "item-undepended" | "item-split" | "item-transferred" | "item-waiting"
-            | "item-unwaited" | "wave-declared" | "wave-renamed" | "wave-moved"
-            | "wave-removed" | "series-related" | "series-unrelated" => series::well_formed(self),
+            "item-added"
+            | "item-renamed"
+            | "item-moved"
+            | "item-dropped"
+            | "item-done"
+            | "item-reopened"
+            | "item-linked"
+            | "item-unlinked"
+            | "item-sourced"
+            | "item-unsourced"
+            | "item-waved"
+            | "item-unwaved"
+            | "item-depended"
+            | "item-undepended"
+            | "item-split"
+            | "item-transfer-pending"
+            | "item-transferred"
+            | "item-waiting"
+            | "item-unwaited"
+            | "wave-declared"
+            | "wave-renamed"
+            | "wave-moved"
+            | "wave-removed"
+            | "series-related"
+            | "series-unrelated" => series::well_formed(self),
             _ => false,
         }
     }

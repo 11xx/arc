@@ -3297,4 +3297,112 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         series(&after_src, &src_s)["items"][0]["transferred_to"]["item"],
         "i4"
     );
+
+    // 3. Relocating the source journal directory between half-transfer and
+    // retry preserves the persisted `item-transfer-pending` key so the retry
+    // reuses the committed destination item instead of duplicating it, while
+    // retargeting to a second series is refused.
+    let relocated_src = start(&repo, &repo.root, "relocated-retry", &["Move me"]);
+    let alt_dest = start(&repo, &other, "alt-dest", &["Alt"]);
+    let reloc_first = progress(
+        &repo,
+        &repo.root,
+        &[
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "initial before move",
+        ],
+    );
+    assert!(reloc_first.contains("i5"), "got: {reloc_first}");
+
+    // Simulate interruption before the trailing `item-transferred` record.
+    let mut lines: Vec<String> = fs::read_to_string(&src_events_path)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let dropped_reloc = lines.pop().unwrap();
+    assert!(
+        dropped_reloc.contains("item-transferred"),
+        "{dropped_reloc}"
+    );
+    fs::write(&src_events_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    // Relocate the source journal to a new parent directory keeping the same slug.
+    let new_parent = repo.home.join("relocated-journals");
+    fs::create_dir_all(&new_parent).unwrap();
+    let moved_dir = new_parent.join(&here_slug);
+    fs::rename(&here_dir, &moved_dir).unwrap();
+    let cfg_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(
+        cfg_dir.join("config.toml"),
+        format!(
+            "[journals.dirs]\n\"{}\" = \"{}\"\n",
+            repo.root.display(),
+            moved_dir.display()
+        ),
+    )
+    .unwrap();
+
+    // Retargeting to a different destination series while i5 is already committed
+    // under the pending transfer key must refuse rather than duplicate.
+    repo.arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &format!("other-xfer::{alt_dest}"),
+            "--reason",
+            "try switching target mid-transfer",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already landed as i5"));
+
+    // Retrying the original destination after relocating the source journal
+    // reuses i5 without creating i6 and retires the source against i5.
+    let reloc_retry = progress(
+        &repo,
+        &repo.root,
+        &[
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "complete after relocation",
+        ],
+    );
+    assert!(reloc_retry.contains("i5"), "got: {reloc_retry}");
+    let after_reloc_dest = report(&repo, &other, &[&series_c]);
+    assert_eq!(
+        series(&after_reloc_dest, &series_c)["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    let after_reloc_src = report(&repo, &repo.root, &[&relocated_src]);
+    assert_eq!(
+        series(&after_reloc_src, &relocated_src)["items"][0]["stage"],
+        "transferred"
+    );
+    assert_eq!(
+        series(&after_reloc_src, &relocated_src)["items"][0]["transferred_to"]["item"],
+        "i5"
+    );
+
+    // Journal doctor accepts `item-transfer-pending` + `item-transferred` cleanly.
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
 }
