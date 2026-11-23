@@ -401,17 +401,25 @@ fn defer(
             Some(_) => {
                 // Crossing back into the milestone's own journal from a foreign track.
                 let cfg = crate::config::load()?;
-                let here_slug = crate::registry::known_journals(&cfg)?
-                    .into_iter()
-                    .find(|(_, journal)| {
-                        let c = |p: &std::path::Path| {
-                            p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-                        };
-                        c(journal) == c(&dir)
-                    })
-                    .map(|(slug, _)| slug);
+                let known = crate::registry::known_journals(&cfg)?;
+                let c = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                let here_canon = c(&dir);
+                let here_slug = known
+                    .iter()
+                    .find(|(_, journal)| c(journal) == here_canon)
+                    .map(|(slug, _)| slug.clone());
                 match here_slug {
-                    Some(slug) => format!("{slug}::{}", dst_track.reference.file),
+                    Some(slug) => {
+                        let count = known.iter().filter(|(s, _)| *s == slug).count();
+                        if count > 1 {
+                            bail!(
+                                "this project's journal slug {slug:?} is ambiguous across {count} \
+                                 registered journals; give each journal a unique directory name \
+                                 before deferring from a cross-project track into a local track"
+                            );
+                        }
+                        format!("{slug}::{}", dst_track.reference.file)
+                    }
                     None => bail!(
                         "this project's journal is not registered; bind or record a journal entry \
                          before deferring from a cross-project track into a local track"

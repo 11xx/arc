@@ -618,9 +618,10 @@ fn read_track(
         if own_slug == Some(*slug) {
             return false;
         }
-        !registry
-            .by_dir(home_dir)
-            .is_some_and(|project| project.slug == *slug)
+        // Normalize an explicit project slug to home only when that slug
+        // uniquely resolves to `home_dir`; an ambiguous duplicate-basename
+        // slug stays foreign so `registry.get(slug)` reports it unavailable.
+        registry.slug_of(home_dir) != Some(*slug)
     });
 
     match foreign_slug {
