@@ -110,6 +110,12 @@ pub(crate) struct SeriesFields {
     /// or inspectable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transfer_target: Option<RelatedSeries>,
+    /// Durable digest of the intended destination journal directory and series
+    /// start event recorded on `item-transfer-pending` so slug rebinding onto
+    /// another journal with the same series filename cannot duplicate an
+    /// interrupted transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer_target_digest: Option<String>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
@@ -332,7 +338,8 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
     let no_transfer = fields.transferred_to.is_none()
         && fields.transferred_from.is_none()
         && fields.transfer_key.is_none()
-        && fields.transfer_target.is_none();
+        && fields.transfer_target.is_none()
+        && fields.transfer_target_digest.is_none();
     let bare = no_link_or_wait
         && no_wave_or_dep
         && no_transfer
@@ -368,6 +375,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                     .as_deref()
                     .is_none_or(|key| fields.transferred_from.is_some() && single_line(key))
                 && fields.transfer_target.is_none()
+                && fields.transfer_target_digest.is_none()
         }
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
@@ -387,6 +395,10 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                     .transfer_target
                     .as_ref()
                     .is_none_or(|t| single_line(&t.project) && is_series_file(&t.file))
+                && fields
+                    .transfer_target_digest
+                    .as_deref()
+                    .is_none_or(single_line)
         }
         "item-transferred" => {
             names_item
@@ -399,6 +411,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.transferred_from.is_none()
                 && fields.transfer_key.is_none()
                 && fields.transfer_target.is_none()
+                && fields.transfer_target_digest.is_none()
                 && fields.transferred_to.as_ref().is_some_and(valid_item_ref)
         }
         "item-done" => {
@@ -759,6 +772,9 @@ pub(crate) struct Item {
     pub(crate) pending_transfer_key: Option<String>,
     /// Intended cross-project destination of an in-flight transfer.
     pub(crate) pending_transfer_target: Option<RelatedSeries>,
+    /// Durable digest of the intended destination journal directory and series
+    /// creation event for an in-flight transfer.
+    pub(crate) pending_transfer_target_digest: Option<String>,
     initial: bool,
 }
 
@@ -1012,6 +1028,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     transfer_key: fields.transfer_key.clone(),
                     pending_transfer_key: None,
                     pending_transfer_target: None,
+                    pending_transfer_target_digest: None,
                     initial: fields.initial,
                 };
                 place(
@@ -1076,6 +1093,7 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             transfer_key: None,
                             pending_transfer_key: None,
                             pending_transfer_target: None,
+                            pending_transfer_target_digest: None,
                             initial: false,
                         },
                     );
@@ -1122,12 +1140,14 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     "item-transfer-pending" => {
                         item.pending_transfer_key = fields.transfer_key.clone();
                         item.pending_transfer_target = fields.transfer_target.clone();
+                        item.pending_transfer_target_digest = fields.transfer_target_digest.clone();
                     }
                     "item-transferred" => {
                         item.state = ItemState::Transferred;
                         item.transferred_to = fields.transferred_to.clone();
                         item.pending_transfer_key = None;
                         item.pending_transfer_target = None;
+                        item.pending_transfer_target_digest = None;
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
@@ -2485,7 +2505,7 @@ pub(crate) fn transfer(
         }
     };
 
-    let (target_dir, target_series) = match &target_project {
+    let (target_dir, target_series, target_events) = match &target_project {
         None => {
             let target_file = resolve_name(&source_events, target_series_name, &here)?;
             if target_file == source_file {
@@ -2496,7 +2516,7 @@ pub(crate) fn transfer(
             if series.retired.is_some() {
                 bail!("{target_file} was retired; it is read-only");
             }
-            (here.clone(), series)
+            (here.clone(), series, None)
         }
         Some(project) => {
             let target_events = super::read_events(&project.journal_dir)?;
@@ -2510,7 +2530,7 @@ pub(crate) fn transfer(
                     project.label()
                 );
             }
-            (project.journal_dir.clone(), series)
+            (project.journal_dir.clone(), series, Some(target_events))
         }
     };
 
@@ -2713,6 +2733,11 @@ pub(crate) fn transfer(
                 project: target_proj_slug.to_string(),
                 file: target_series.file.clone(),
             };
+            let current_target_digest = destination_series_digest(
+                &target_dir,
+                target_events.as_deref().unwrap_or(&[]),
+                &target_series.file,
+            );
             let pending_key = source_item.pending_transfer_key.as_deref();
             let exact_retry = pending_key.and_then(|key| {
                 target_series
@@ -2737,27 +2762,33 @@ pub(crate) fn transfer(
                 if let Some(key) = pending_key {
                     // An in-doubt pending transfer may only complete against the
                     // destination that already holds `key` (matched above) or retry
-                    // the exact originally targeted `(project, series)` when nothing
-                    // was written yet. Silently retargeting to another destination is
-                    // always refused because an unreachable, moved, or rebound target
-                    // may already hold the committed half-transfer.
-                    match source_item.pending_transfer_target.as_ref() {
-                        Some(target) if target == &current_target => {}
-                        Some(target) => bail!(
-                            "item {item_id} has a pending cross-project transfer to {}::{}; \
-                             retry that destination to finish it instead of transferring to {}::{}",
-                            target.project,
-                            target.file,
-                            current_target.project,
-                            current_target.file
-                        ),
-                        None => bail!(
-                            "item {item_id} has a pending cross-project transfer ({key}) whose \
-                             destination does not match {}::{}; finish that transfer at its \
-                             original destination first",
-                            current_target.project,
-                            current_target.file
-                        ),
+                    // the exact originally targeted `(project, series)` instance
+                    // verified by its journal directory + series start digest.
+                    // Silently retargeting to another destination or to a rebound
+                    // journal carrying a same-named series is always refused.
+                    let target_matches = source_item.pending_transfer_target.as_ref()
+                        == Some(&current_target)
+                        && source_item.pending_transfer_target_digest.as_deref()
+                            == Some(current_target_digest.as_str());
+                    if !target_matches {
+                        match source_item.pending_transfer_target.as_ref() {
+                            Some(target) => bail!(
+                                "item {item_id} has a pending cross-project transfer to {}::{} \
+                                 that does not match the resolved destination journal/series for \
+                                 {}::{}; retry the original destination to finish it",
+                                target.project,
+                                target.file,
+                                current_target.project,
+                                current_target.file
+                            ),
+                            None => bail!(
+                                "item {item_id} has a pending cross-project transfer ({key}) whose \
+                                 destination does not match {}::{}; finish that transfer at its \
+                                 original destination first",
+                                current_target.project,
+                                current_target.file
+                            ),
+                        }
                     }
                     if let Some((other_slug, other_file, other_item)) =
                         find_transfer_key_in_known(&known_journals, key)?
@@ -2792,6 +2823,7 @@ pub(crate) fn transfer(
                         pending_event.series.item = Some(item_id.to_string());
                         pending_event.series.transfer_key = Some(key.clone());
                         pending_event.series.transfer_target = Some(current_target);
+                        pending_event.series.transfer_target_digest = Some(current_target_digest);
                         append_event(ctx, &here, &pending_event)?;
                         key
                     }
@@ -2842,6 +2874,35 @@ pub(crate) fn transfer(
         wave: dest_wave,
         warnings,
     })
+}
+
+/// Compute a durable digest identifying one destination series instance
+/// (canonical destination journal directory, series filename, and immutable
+/// `note` start event) so rebinding the destination slug to another journal
+/// carrying the same series filename cannot satisfy a pending transfer retry.
+fn destination_series_digest(
+    target_dir: &Path,
+    target_events: &[JournalEvent],
+    target_file: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let canon = target_dir
+        .canonicalize()
+        .unwrap_or_else(|_| target_dir.to_path_buf());
+    hasher.update(canon.to_string_lossy().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(target_file.as_bytes());
+    hasher.update([0u8]);
+    if let Some(start_note) = target_events
+        .iter()
+        .find(|e| e.event == "note" && e.file.as_deref() == Some(target_file))
+    {
+        if let Ok(json) = serde_json::to_vec(start_note) {
+            hasher.update(json);
+        }
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 /// Search registered journals for any series item already carrying `key`.

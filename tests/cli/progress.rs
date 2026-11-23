@@ -3427,8 +3427,39 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         String::from_utf8_lossy(&retarget_aside.stderr)
     );
 
-    let decoy_dir = repo.home.join("decoy-journals").join("other-xfer");
+    // Rebind `other-xfer`'s exact slug to an unrelated journal carrying an
+    // independent series with the exact same filename as `series_c` (moving the
+    // original journal directory out of `journals/` so the slug resolves
+    // unambiguously to the decoy). Retrying `--to other-xfer::<series_c>` must
+    // refuse rather than duplicating the pending transfer key into the decoy.
+    let other_slug = other_dir.file_name().unwrap().to_str().unwrap().to_string();
+    let decoy_dir = repo.home.join("decoy-journals").join(&other_slug);
     fs::create_dir_all(&decoy_dir).unwrap();
+    fs::write(decoy_dir.join(&series_c), "# Decoy series\n").unwrap();
+    let decoy_note = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": "2026-01-03T00:00:00.999999999Z",
+        "topic": "series-c",
+        "event": "note",
+        "file": series_c,
+        "title": "Decoy series"
+    });
+    let decoy_item = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": "2026-01-03T00:00:00.999999999Z",
+        "topic": "series-c",
+        "event": "item-added",
+        "file": series_c,
+        "item": "i1",
+        "title": "Decoy item"
+    });
+    fs::write(
+        decoy_dir.join("events.jsonl"),
+        format!("{decoy_note}\n{decoy_item}\n"),
+    )
+    .unwrap();
+    let other_dir_aside = repo.home.join("other-journal-aside");
+    fs::rename(&other_dir, &other_dir_aside).unwrap();
     let config_path = cfg_dir.join("config.toml");
     let saved_config = fs::read_to_string(&config_path).unwrap();
     fs::write(
@@ -3456,7 +3487,22 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
         ])
         .output()
         .unwrap();
+    let retry_rebound_same_name = repo
+        .arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &relocated_src,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "retry same slug+file after slug rebinding",
+        ])
+        .output()
+        .unwrap();
     fs::write(&config_path, &saved_config).unwrap();
+    fs::rename(&other_dir_aside, &other_dir).unwrap();
     assert!(
         !retarget_rebound.status.success(),
         "retarget succeeded when original dest slug was rebound to an unrelated journal"
@@ -3466,6 +3512,24 @@ fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idem
             .contains("pending cross-project transfer"),
         "unexpected stderr: {}",
         String::from_utf8_lossy(&retarget_rebound.stderr)
+    );
+    assert!(
+        !retry_rebound_same_name.status.success(),
+        "retry succeeded against rebound journal with identical series filename"
+    );
+    assert!(
+        String::from_utf8_lossy(&retry_rebound_same_name.stderr)
+            .contains("does not match the resolved destination journal/series"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&retry_rebound_same_name.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(decoy_dir.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "decoy journal must remain untouched"
     );
 
     #[cfg(unix)]
