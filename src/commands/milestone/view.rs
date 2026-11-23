@@ -132,7 +132,7 @@ impl View {
                 self.look.paint(CYAN, &cp.name),
                 self.dim(&format!(
                     "at {} (event {})",
-                    short_sha(&cp.revision),
+                    crate::render::short_sha(&cp.revision),
                     cp.event_id
                 ))
             ));
@@ -184,20 +184,24 @@ impl View {
     }
 
     fn matrix_table(&mut self, ms: &MilestoneReport) {
-        let mut columns: Vec<String> = ms.waves.iter().map(|w| w.id.clone()).collect();
+        let mut columns: Vec<Option<String>> =
+            ms.waves.iter().map(|w| Some(w.id.clone())).collect();
         let has_unassigned = ms.tracks.iter().any(|t| {
             t.waves
                 .iter()
-                .any(|c| c.wave == "unassigned" && c.counts.items > 0)
+                .any(|c| c.wave.is_none() && c.counts.items > 0)
         });
         if has_unassigned {
-            columns.push("unassigned".to_string());
+            columns.push(None);
         }
         if columns.is_empty() {
             for track in &ms.tracks {
                 self.track_line(track);
             }
             return;
+        }
+        fn col_label(col: &Option<String>) -> &str {
+            col.as_deref().unwrap_or("(unassigned)")
         }
         let name_w = ms
             .tracks
@@ -210,7 +214,10 @@ impl View {
             .max()
             .unwrap_or(5)
             .max(5);
-        let mut col_w: Vec<usize> = columns.iter().map(|c| c.chars().count().max(5)).collect();
+        let mut col_w: Vec<usize> = columns
+            .iter()
+            .map(|c| col_label(c).chars().count().max(5))
+            .collect();
         for track in &ms.tracks {
             for (idx, col) in columns.iter().enumerate() {
                 let cell = track.waves.iter().find(|c| c.wave == *col);
@@ -219,7 +226,7 @@ impl View {
         }
         let mut header = format!("  {:<name_w$}", "Track");
         for (col, w) in columns.iter().zip(&col_w) {
-            header.push_str(&format!("  {:>w$}", col));
+            header.push_str(&format!("  {:>w$}", col_label(col)));
         }
         self.lines.push(self.dim(&header));
 
@@ -394,10 +401,6 @@ fn topic(file: &str) -> String {
         .unwrap_or_else(|| file.to_string())
 }
 
-fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(8)]
-}
-
 fn cells(parts: [usize; 3], width: usize) -> [usize; 3] {
     let total: usize = parts.iter().sum();
     if total == 0 {
@@ -511,13 +514,13 @@ mod tests {
                     }),
                     waves: vec![
                         WaveCell {
-                            wave: "w0".to_string(),
+                            wave: Some("w0".to_string()),
                             declared: true,
                             counts: w0_crit,
                             items: vec!["i1".into(), "i2".into()],
                         },
                         WaveCell {
-                            wave: "w1".to_string(),
+                            wave: Some("w1".to_string()),
                             declared: true,
                             counts: w1_crit,
                             items: vec!["i3".into(), "i4".into()],
@@ -549,7 +552,7 @@ mod tests {
                     unavailable: None,
                     counts: Some(sideband_counts.clone()),
                     waves: vec![WaveCell {
-                        wave: "w0".to_string(),
+                        wave: Some("w0".to_string()),
                         declared: true,
                         counts: sideband_counts.clone(),
                         items: vec!["i1".into()],
@@ -643,5 +646,46 @@ mod tests {
         assert!(out.contains("ui [critical]"), "{out}");
         assert!(out.contains("unavailable (journal unreadable)"), "{out}");
         assert!(out.contains("cleanup [sideband]"), "{out}");
+    }
+
+    /// Claim: checkpoint revisions containing multibyte UTF-8 characters are
+    /// abbreviated on character boundaries without panicking, and an unwaved
+    /// cell renders distinctly from a declared wave named `"unassigned"`.
+    #[test]
+    fn multibyte_checkpoint_revision_and_unassigned_wave_render_without_panic() {
+        let now: DateTime<Utc> = "2026-11-23T12:30:00Z".parse().unwrap();
+        let mut report = sample_report();
+        report
+            .checkpoints
+            .push(crate::journal::milestone::MilestoneCheckpoint {
+                name: "utf8-cp".to_string(),
+                revision: "éééééééééééééé".to_string(),
+                event_id: "01TESTEVENT".to_string(),
+            });
+        report.tracks[0].waves.push(WaveCell {
+            wave: None,
+            declared: false,
+            counts: MatrixCounts {
+                items: 1,
+                open: 1,
+                ready: 1,
+                ..Default::default()
+            },
+            items: vec!["i5".into()],
+        });
+        let mut view = View::new(
+            Look {
+                color: false,
+                width: None,
+            },
+            now,
+        );
+        view.milestones(std::slice::from_ref(&report), false);
+        let out = view.finish();
+        assert!(
+            out.contains("utf8-cp at éééééééééééé (event 01TESTEVENT)"),
+            "{out}"
+        );
+        assert!(out.contains("(unassigned)"), "{out}");
     }
 }
