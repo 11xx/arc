@@ -388,18 +388,55 @@ impl<'a> Watch<'a> {
             stale.insert(dir);
         }
         // A series item or milestone track linked into another project reads
-        // that project's journal and ledger, so a write there leaves every row
+        // that project's journal and ledger, so a write there — or a newly
+        // added or removed registration for that slug — leaves every row
         // referencing it stale.
-        let mut written = BTreeSet::new();
+        let mut written_slugs: BTreeSet<String> = BTreeSet::new();
+        let old_registrations: Option<BTreeMap<PathBuf, String>> =
+            (dirty.everything || dirty.registry).then(|| {
+                self.registered
+                    .iter()
+                    .map(|p| (p.journal_dir.clone(), p.slug.clone()))
+                    .collect()
+            });
         for project in &mut self.registered {
             if stale.contains(&project.journal_dir) {
                 // A write may be the first for a registered project's ledger.
                 if project.ledger.is_none() && !dirty.everything && !dirty.registry {
                     project.refresh_ledger();
                 }
-                written.insert(project.slug.as_str());
+                written_slugs.insert(project.slug.clone());
             }
         }
+        if let Some(old_map) = old_registrations {
+            self.read_registry()?;
+            let mut new_dirs: BTreeSet<&Path> = BTreeSet::new();
+            for project in &self.registered {
+                new_dirs.insert(project.journal_dir.as_path());
+                match old_map.get(&project.journal_dir) {
+                    None => {
+                        // Newly registered project: invalidate any row that
+                        // already referenced its slug (e.g. an unavailable track).
+                        written_slugs.insert(project.slug.clone());
+                    }
+                    Some(old_slug) if old_slug != &project.slug => {
+                        written_slugs.insert(old_slug.clone());
+                        written_slugs.insert(project.slug.clone());
+                    }
+                    Some(_) => {
+                        if stale.contains(&project.journal_dir) {
+                            written_slugs.insert(project.slug.clone());
+                        }
+                    }
+                }
+            }
+            for (old_dir, old_slug) in &old_map {
+                if !new_dirs.contains(old_dir.as_path()) {
+                    written_slugs.insert(old_slug.clone());
+                }
+            }
+        }
+        let written: BTreeSet<&str> = written_slugs.iter().map(String::as_str).collect();
         let linking: Vec<PathBuf> = self
             .rows
             .iter()
@@ -421,9 +458,6 @@ impl<'a> Watch<'a> {
                 self.hot.insert(0, dir.clone());
             }
             self.hot.truncate(HOT);
-        }
-        if dirty.everything || dirty.registry {
-            self.read_registry()?;
         }
         for dir in &stale {
             self.rows.remove(dir);

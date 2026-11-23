@@ -828,3 +828,125 @@ fn watch_milestones_invalidates_on_foreign_prerequisite_completion() {
     drop(watch);
     reader.join().unwrap();
 }
+
+/// Claim: `arc workspace watch --milestones` invalidates an owner's milestone
+/// row when a previously unregistered foreign journal registers and writes, so
+/// an initially `unavailable` track resolves in the next emitted watch report.
+#[test]
+fn watch_milestones_resolves_track_when_foreign_journal_registers() {
+    let repo = Repo::new();
+    let other = repo.root.parent().unwrap().join("late-upstream");
+    std::fs::create_dir_all(&other).unwrap();
+    for args in [
+        &["init", "-b", "master"][..],
+        &["config", "user.name", "Tester"],
+        &["config", "user.email", "tester@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+    ] {
+        git(&other, args);
+    }
+    repo.commit(&other, "README.md", "other\n", "init");
+    let other = std::fs::canonicalize(other).unwrap();
+
+    // Start the foreign series once to attach it, then park its journal so the
+    // project is unregistered when the watch opens.
+    let remote_series = stdout(repo.arc(&other).args([
+        "progress",
+        "start",
+        "restored",
+        "--title",
+        "Restored track",
+        "--item",
+        "Item one",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+    let other_journal = std::path::PathBuf::from(
+        crate::common::json_stdout(repo.arc(&other).args(["progress", "--json"]))["journal_dir"]
+            .as_str()
+            .unwrap(),
+    );
+
+    let ms = stdout(repo.arc(&repo.root).args([
+        "milestone",
+        "start",
+        "late-reg",
+        "--title",
+        "Late Registration",
+    ]))
+    .trim()
+    .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "milestone",
+            "track",
+            "add",
+            &ms,
+            &format!("late-upstream::{remote_series}"),
+        ])
+        .assert()
+        .success();
+
+    let parked = other_journal.with_extension("parked");
+    std::fs::rename(&other_journal, &parked).unwrap();
+
+    let mut watch =
+        RunningWatch(repo.spawn_arc_piped(&repo.root, &["workspace", "watch", "--milestones"]));
+    let stdin = watch.0.stdin.take().unwrap();
+    let (lines, reports) = mpsc::channel::<String>();
+    let output = BufReader::new(watch.0.stdout.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        for line in output.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let next = |what: &str| -> Value {
+        let line = reports
+            .recv_timeout(OWED)
+            .unwrap_or_else(|_| panic!("the milestone watch printed no report {what}"));
+        bare(serde_json::from_str(&line).expect("one JSON report per line"))
+    };
+    let track = |report: &Value| -> Value {
+        report["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("milestones").and_then(|m| m.as_array()))
+            .flatten()
+            .find(|m| m["file"] == ms)
+            .map(|m| m["tracks"][0].clone())
+            .unwrap_or_else(|| panic!("no milestone {ms} in {report}"))
+    };
+
+    let initial = track(&next("at start"));
+    assert!(
+        initial["unavailable"]
+            .as_str()
+            .is_some_and(|s| s.contains("no journal is registered")),
+        "expected unavailable track initially, got: {initial}"
+    );
+
+    // Restore the foreign journal and append a journal write so the feed
+    // announces the newly registered journal.
+    std::fs::rename(&parked, &other_journal).unwrap();
+    repo.arc(&other)
+        .args(["progress", "add", &remote_series, "Second item"])
+        .assert()
+        .success();
+
+    let resolved = track(&next("after foreign journal registered and wrote"));
+    assert!(
+        resolved["unavailable"].is_null(),
+        "expected track to resolve after registration, got: {resolved}"
+    );
+    assert_eq!(resolved["title"], "Restored track");
+
+    drop(stdin);
+    drop(watch);
+    reader.join().unwrap();
+}
