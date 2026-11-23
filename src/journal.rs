@@ -18825,6 +18825,86 @@ fn body_digest(path: &Path) -> Result<String> {
     ))
 }
 
+/// Digest an already-open regular file handle without re-resolving any path.
+pub(crate) fn body_digest_file(mut file: std::fs::File) -> Result<String> {
+    use std::io::Read;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("artifact is not a regular file");
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+}
+
+/// Open a bare journal artifact body from `hot` or its sibling cold archive
+/// without following symlinks in either directory name or the filename.
+pub(crate) fn open_artifact_body_nofollow(
+    hot: &Path,
+    filename: &str,
+) -> Result<Option<std::fs::File>> {
+    if series::bare_artifact_kind(filename).is_none() {
+        return Ok(None);
+    }
+    let parent_path = hot
+        .parent()
+        .with_context(|| format!("journal directory {} has no parent", hot.display()))?;
+    let hot_name = hot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("journal directory {} has no valid name", hot.display()))?;
+    let cold_name = format!("{hot_name}-archive");
+    let parent = crate::custody::anchored::Dir::open_root(parent_path)
+        .with_context(|| format!("cannot open journal root {}", parent_path.display()))?;
+    for dir_name in [hot_name, cold_name.as_str()] {
+        let Some(dir) = parent.descend(dir_name, None)? else {
+            continue;
+        };
+        match dir.open_entry(filename) {
+            Ok(file) => {
+                if !file.metadata()?.is_file() {
+                    bail!("artifact {filename} is not a regular file");
+                }
+                return Ok(Some(file));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if crate::custody::anchored::Dir::refused_link(&error) => {
+                bail!("artifact {filename} is a symlink; refusing to follow it");
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot open artifact {filename} in {dir_name}"));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Validate a bare artifact filename of `expected_kind` inside `hot` or its
+/// sibling archive without following symlinks, and digest the open handle.
+pub(crate) fn artifact_body_digest_nofollow(
+    hot: &Path,
+    filename: &str,
+    expected_kind: &str,
+    flag: &str,
+) -> Result<String> {
+    let Some(actual) = series::bare_artifact_kind(filename) else {
+        bail!(
+            "{flag} takes a bare {expected_kind} filename (<timestamp>-<topic>-{expected_kind}.md), not a path"
+        );
+    };
+    if actual != expected_kind {
+        bail!("{flag} takes a {expected_kind} artifact; {filename} is a {actual}");
+    }
+    let Some(file) = open_artifact_body_nofollow(hot, filename)? else {
+        bail!(
+            "no {expected_kind} {filename} as a regular file in {} or its cold archive",
+            hot.display()
+        );
+    };
+    body_digest_file(file)
+}
+
 fn same_storage_body(source: &Path, destination: &Path) -> Result<bool> {
     #[cfg(unix)]
     {

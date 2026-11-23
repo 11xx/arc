@@ -138,6 +138,7 @@ enum TrackCmd {
     /// `ARC_ROLE` or with `arc --role ROLE milestone track add ...`.
     Add {
         milestone: String,
+        #[arg(allow_hyphen_values = true)]
         series: String,
         #[arg(
             long = "role",
@@ -148,14 +149,15 @@ enum TrackCmd {
         role: TrackRole,
         #[arg(long)]
         label: Option<String>,
-        #[arg(long, conflicts_with = "after")]
+        #[arg(long, conflicts_with = "after", allow_hyphen_values = true)]
         before: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         after: Option<String>,
     },
     /// Set a track's role
     Role {
         milestone: String,
+        #[arg(allow_hyphen_values = true)]
         track: String,
         #[arg(id = "track_role", value_name = "ROLE", value_enum)]
         role: TrackRole,
@@ -163,14 +165,24 @@ enum TrackCmd {
     /// Move a track next to another track
     Move {
         milestone: String,
+        #[arg(allow_hyphen_values = true)]
         track: String,
-        #[arg(long, conflicts_with = "after", required_unless_present = "after")]
+        #[arg(
+            long,
+            conflicts_with = "after",
+            required_unless_present = "after",
+            allow_hyphen_values = true
+        )]
         before: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         after: Option<String>,
     },
     /// Detach a track
-    Remove { milestone: String, track: String },
+    Remove {
+        milestone: String,
+        #[arg(allow_hyphen_values = true)]
+        track: String,
+    },
 }
 
 pub fn run(ctx: &Ctx, args: MilestoneArgs) -> Result<i32> {
@@ -674,20 +686,24 @@ fn print_compact(milestone: &MilestoneReport, ready_only: bool) {
 }
 
 fn print_matrix_table(milestone: &MilestoneReport) {
-    let mut columns: Vec<String> = milestone.waves.iter().map(|w| w.id.clone()).collect();
+    let mut columns: Vec<Option<String>> =
+        milestone.waves.iter().map(|w| Some(w.id.clone())).collect();
     let has_unassigned = milestone.tracks.iter().any(|t| {
         t.waves
             .iter()
-            .any(|c| c.wave == "unassigned" && c.counts.items > 0)
+            .any(|c| c.wave.is_none() && c.counts.items > 0)
     });
     if has_unassigned {
-        columns.push("unassigned".to_string());
+        columns.push(None);
     }
     if columns.is_empty() {
         for track in &milestone.tracks {
             print_track_line(track);
         }
         return;
+    }
+    fn col_label(col: &Option<String>) -> &str {
+        col.as_deref().unwrap_or("(unassigned)")
     }
     let name_w = milestone
         .tracks
@@ -696,7 +712,7 @@ fn print_matrix_table(milestone: &MilestoneReport) {
         .max()
         .unwrap_or(5)
         .max(5);
-    let mut col_w: Vec<usize> = columns.iter().map(|c| c.len().max(5)).collect();
+    let mut col_w: Vec<usize> = columns.iter().map(|c| col_label(c).len().max(5)).collect();
     for track in &milestone.tracks {
         for (idx, col) in columns.iter().enumerate() {
             let cell = track.waves.iter().find(|c| c.wave == *col);
@@ -705,7 +721,7 @@ fn print_matrix_table(milestone: &MilestoneReport) {
     }
     let mut header = format!("  {:<name_w$}", "Track");
     for (col, w) in columns.iter().zip(&col_w) {
-        header.push_str(&format!("  {:>w$}", col));
+        header.push_str(&format!("  {:>w$}", col_label(col)));
     }
     println!("{header}");
     for track in &milestone.tracks {

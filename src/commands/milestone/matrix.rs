@@ -6,7 +6,7 @@
 //! foreign tracks degrade to `unavailable` without failing the milestone view.
 
 use crate::commands::progress::reader::{
-    needs_registry, Blocker, ItemRow, Ledger, PersonQuestions, Reader, Registry,
+    Blocker, ItemRow, Ledger, PersonQuestions, Reader, Registry,
 };
 use crate::commands::Ctx;
 use crate::journal::{
@@ -120,8 +120,9 @@ pub(crate) struct WaveReport {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WaveCell {
-    /// Wave identifier, or `"unassigned"` for items without a wave.
-    pub(crate) wave: String,
+    /// Wave identifier, or `None` (`null` in JSON) for items with no wave
+    /// assignment, kept distinct from a declared wave named `"unassigned"`.
+    pub(crate) wave: Option<String>,
     /// Whether this wave is declared on the milestone.
     pub(crate) declared: bool,
     pub(crate) counts: MatrixCounts,
@@ -246,42 +247,14 @@ fn build_in(
     ignore_waves: bool,
     now: DateTime<Utc>,
 ) -> Result<Vec<MilestoneReport>> {
-    let mut local_series_needed = Vec::new();
-    let mut has_foreign_track = false;
-    for ms in chosen {
-        for track in &ms.tracks {
-            if track.reference.project.is_some() {
-                has_foreign_track = true;
-            } else if let Some(s) = series::replay(&raw_events, &track.reference.file) {
-                local_series_needed.push(s);
-            }
-        }
-    }
-    let registry = if has_foreign_track || needs_registry(&local_series_needed) {
-        Registry::read()?
-    } else {
-        Registry::default()
-    };
-    let own = registry.slug_of(dir).map(str::to_string);
-    let local_events_owner;
-    let local_events: &[JournalEvent] = match own.as_deref() {
-        Some(slug) => {
-            registry.seed_events(dir, raw_events);
-            registry
-                .get(slug)
-                .and_then(|project| project.events().ok())
-                .unwrap_or(&[])
-        }
-        None => {
-            local_events_owner = raw_events;
-            &local_events_owner
-        }
-    };
-    let local_questions = PersonQuestions::new(dir, local_events);
+    let registry = Registry::lazy();
+    registry.seed_events(dir, raw_events.clone());
+    let local_questions = PersonQuestions::new(dir, &raw_events);
     let local_reader = Reader::new(
         local_ledger,
-        own.as_deref(),
-        local_events,
+        dir,
+        None,
+        &raw_events,
         &registry,
         &local_questions,
         now,
@@ -291,10 +264,11 @@ fn build_in(
     for ms in chosen {
         reports.push(build_one(
             ms,
-            local_events,
+            dir,
+            &raw_events,
             &local_reader,
             &registry,
-            own.as_deref(),
+            None,
             ready_only,
             ignore_waves,
             now,
@@ -315,6 +289,7 @@ struct ReadTrack {
 #[allow(clippy::too_many_arguments)]
 fn build_one(
     ms: &Milestone,
+    home_dir: &Path,
     local_events: &[JournalEvent],
     local_reader: &Reader,
     registry: &Registry,
@@ -328,6 +303,7 @@ fn build_one(
     for track in &ms.tracks {
         tracks.push(read_track(
             track,
+            home_dir,
             local_events,
             local_reader,
             registry,
@@ -505,16 +481,21 @@ fn build_one(
         }
 
         let mut track_counts = MatrixCounts::default();
-        let mut cells_by_wave: BTreeMap<String, (bool, MatrixCounts, Vec<String>)> =
+        let mut cells_by_wave: BTreeMap<Option<String>, (bool, MatrixCounts, Vec<String>)> =
             BTreeMap::new();
         for w in &ms.waves {
-            cells_by_wave.insert(w.id.clone(), (true, MatrixCounts::default(), Vec::new()));
+            cells_by_wave.insert(
+                Some(w.id.clone()),
+                (true, MatrixCounts::default(), Vec::new()),
+            );
         }
 
         for row in &track.rows {
             track_counts.add_row(row);
-            let wave_key = row.wave.clone().unwrap_or_else(|| "unassigned".to_string());
-            let declared = declared_wave_ids.contains(wave_key.as_str());
+            let wave_key = row.wave.clone();
+            let declared = wave_key
+                .as_deref()
+                .is_some_and(|w| declared_wave_ids.contains(w));
             let entry = cells_by_wave
                 .entry(wave_key.clone())
                 .or_insert_with(|| (declared, MatrixCounts::default(), Vec::new()));
@@ -522,10 +503,12 @@ fn build_one(
             if !matches!(row.stage, "dropped" | "split" | "transferred") {
                 entry.2.push(row.id.clone());
             }
-            if let Some(&idx) = wave_index.get(wave_key.as_str()) {
-                match track.meta.role {
-                    TrackRole::Critical => wave_reports[idx].critical.add_row(row),
-                    TrackRole::Sideband => wave_reports[idx].sideband.add_row(row),
+            if let Some(wave_id) = wave_key.as_deref() {
+                if let Some(&idx) = wave_index.get(wave_id) {
+                    match track.meta.role {
+                        TrackRole::Critical => wave_reports[idx].critical.add_row(row),
+                        TrackRole::Sideband => wave_reports[idx].sideband.add_row(row),
+                    }
                 }
             }
             if row.readiness == "ready" {
@@ -547,25 +530,25 @@ fn build_one(
         }
 
         // Emit wave cells in milestone wave declaration order, followed by any
-        // undeclared track waves and `"unassigned"` (only when non-empty).
+        // undeclared track waves and unassigned (`None`) items (only when non-empty).
         let mut cells = Vec::new();
         for w in &ms.waves {
-            if let Some((declared, mut c, items)) = cells_by_wave.remove(&w.id) {
+            if let Some((declared, mut c, items)) = cells_by_wave.remove(&Some(w.id.clone())) {
                 c.finish();
                 cells.push(WaveCell {
-                    wave: w.id.clone(),
+                    wave: Some(w.id.clone()),
                     declared,
                     counts: c,
                     items,
                 });
             }
         }
-        let unassigned = cells_by_wave.remove("unassigned");
-        for (wave_id, (declared, mut c, items)) in cells_by_wave {
+        let unassigned = cells_by_wave.remove(&None);
+        for (wave_key, (declared, mut c, items)) in cells_by_wave {
             if c.items > 0 {
                 c.finish();
                 cells.push(WaveCell {
-                    wave: wave_id,
+                    wave: wave_key,
                     declared,
                     counts: c,
                     items,
@@ -576,7 +559,7 @@ fn build_one(
             if c.items > 0 {
                 c.finish();
                 cells.push(WaveCell {
-                    wave: "unassigned".to_string(),
+                    wave: None,
                     declared,
                     counts: c,
                     items,
@@ -624,17 +607,21 @@ fn build_one(
 
 fn read_track(
     track: &Track,
+    home_dir: &Path,
     local_events: &[JournalEvent],
     local_reader: &Reader,
     registry: &Registry,
     own_slug: Option<&str>,
     now: DateTime<Utc>,
 ) -> ReadTrack {
-    let foreign_slug = track
-        .reference
-        .project
-        .as_deref()
-        .filter(|slug| Some(*slug) != own_slug);
+    let foreign_slug = track.reference.project.as_deref().filter(|slug| {
+        if own_slug == Some(*slug) {
+            return false;
+        }
+        !registry
+            .by_dir(home_dir)
+            .is_some_and(|project| project.slug == *slug)
+    });
 
     match foreign_slug {
         None => match series::replay(local_events, &track.reference.file) {
@@ -703,6 +690,7 @@ fn read_track(
             let questions = PersonQuestions::new(&project.journal_dir, events);
             let reader = Reader::new(
                 &project.ledger,
+                &project.journal_dir,
                 Some(slug),
                 events,
                 registry,
@@ -744,7 +732,9 @@ fn recompute_readiness(row: &mut ItemRow) {
         row.readiness = "waiting";
     } else if row.claimed.is_some() {
         row.readiness = "claimed";
-    } else {
+    } else if row.stage == "open" && row.change.is_none() {
         row.readiness = "ready";
+    } else {
+        row.readiness = "blocked";
     }
 }

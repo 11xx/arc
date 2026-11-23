@@ -661,6 +661,91 @@ impl Open {
             file: series.file,
         })
     }
+
+    /// Resolve a track already attached to this milestone purely from recorded
+    /// membership, without opening any foreign journal or reading bodies, so
+    /// an unavailable critical track can still be demoted, moved, or removed.
+    fn resolve_attached_track(&self, spec: &str) -> Result<TrackRef> {
+        // 1. Exact stored reference match (`<slug>::<file>` or `<file>`).
+        if let Some(track) = self
+            .milestone
+            .tracks
+            .iter()
+            .find(|t| t.reference.to_string() == spec)
+        {
+            return Ok(track.reference.clone());
+        }
+
+        let matches: Vec<&Track> = if let Some((prefix, rest)) = spec.split_once("::") {
+            let resolved_slug = super::registered_project(prefix).ok().map(|p| p.slug);
+            self.milestone
+                .tracks
+                .iter()
+                .filter(|t| {
+                    let project_ok = t.reference.project.as_deref() == Some(prefix)
+                        || (resolved_slug.is_some() && t.reference.project == resolved_slug);
+                    if !project_ok {
+                        return false;
+                    }
+                    let topic = parse_artifact_name(&t.reference.file)
+                        .map(|(_, topic, _)| topic)
+                        .unwrap_or_default();
+                    t.reference.file == rest || topic == rest
+                })
+                .collect()
+        } else {
+            let by_label: Vec<&Track> = self
+                .milestone
+                .tracks
+                .iter()
+                .filter(|t| t.label.as_deref() == Some(spec))
+                .collect();
+            if !by_label.is_empty() {
+                by_label
+            } else {
+                let local: Vec<&Track> = self
+                    .milestone
+                    .tracks
+                    .iter()
+                    .filter(|t| {
+                        t.reference.project.is_none()
+                            && (t.reference.file == spec
+                                || parse_artifact_name(&t.reference.file)
+                                    .is_some_and(|(_, topic, _)| topic == spec))
+                    })
+                    .collect();
+                if !local.is_empty() {
+                    local
+                } else {
+                    self.milestone
+                        .tracks
+                        .iter()
+                        .filter(|t| {
+                            t.reference.file == spec
+                                || parse_artifact_name(&t.reference.file)
+                                    .is_some_and(|(_, topic, _)| topic == spec)
+                        })
+                        .collect()
+                }
+            }
+        };
+
+        match matches.as_slice() {
+            [one] => Ok(one.reference.clone()),
+            [] => bail!(
+                "{} has no attached track matching {spec:?}",
+                self.milestone.file
+            ),
+            many => {
+                let names: Vec<String> = many.iter().map(|t| t.reference.to_string()).collect();
+                bail!(
+                    "{spec:?} matches several tracks on {}: {}; name one by its full reference",
+                    self.milestone.file,
+                    names.join(", ")
+                );
+            }
+        }
+    }
 }
 
 fn check_wave_id(id: &str) -> Result<()> {
@@ -748,7 +833,9 @@ pub(crate) fn track_add(
 ) -> Result<()> {
     let open = Open::read(ctx, name)?;
     let track = open.resolve_track(series)?;
-    let (before, after) = placement.map(|anchor| open.resolve_track(anchor))?.fields();
+    let (before, after) = placement
+        .map(|anchor| open.resolve_attached_track(anchor))?
+        .fields();
     open.append(
         ctx,
         "milestone-track-added",
@@ -767,7 +854,7 @@ pub(crate) fn track_add(
 
 pub(crate) fn track_set_role(ctx: &Ctx, name: &str, track: &str, role: TrackRole) -> Result<()> {
     let open = Open::read(ctx, name)?;
-    let track = open.resolve_track(track)?;
+    let track = open.resolve_attached_track(track)?;
     open.append(
         ctx,
         "milestone-track-role-set",
@@ -786,8 +873,10 @@ pub(crate) fn track_move(
     placement: Placement<&str>,
 ) -> Result<()> {
     let open = Open::read(ctx, name)?;
-    let track = open.resolve_track(track)?;
-    let (before, after) = placement.map(|anchor| open.resolve_track(anchor))?.fields();
+    let track = open.resolve_attached_track(track)?;
+    let (before, after) = placement
+        .map(|anchor| open.resolve_attached_track(anchor))?
+        .fields();
     open.append(
         ctx,
         "milestone-track-moved",
@@ -802,7 +891,7 @@ pub(crate) fn track_move(
 
 pub(crate) fn track_remove(ctx: &Ctx, name: &str, track: &str) -> Result<()> {
     let open = Open::read(ctx, name)?;
-    let track = open.resolve_track(track)?;
+    let track = open.resolve_attached_track(track)?;
     open.append(
         ctx,
         "milestone-track-removed",
@@ -858,10 +947,10 @@ pub(crate) fn close(
         .transpose()?;
     event.outcome = Some(if by.is_some() { "superseded" } else { "done" }.to_string());
     if let Some(by) = by {
-        let path = series::named_artifact(&open.dir, by, "conclusion", "--by")?;
+        let digest = super::artifact_body_digest_nofollow(&open.dir, by, "conclusion", "--by")?;
         event.decision = Some(by.to_string());
         event.decision_kind = Some("conclusion".to_string());
-        event.decision_digest = Some(super::body_digest(&path)?);
+        event.decision_digest = Some(digest);
     }
     append_event(ctx, &open.dir, &event)?;
     Ok(open.milestone.file)

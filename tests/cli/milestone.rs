@@ -865,3 +865,176 @@ fn milestone_defer_transfers_slice_across_milestones_and_preserves_provenance() 
 
     arc(&repo, &["journal", "doctor"]);
 }
+
+#[test]
+fn unavailable_track_edits_unassigned_wave_collision_and_symlinked_archive_refusal() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "vanishing");
+    let start_s = |cwd: &Path, topic: &str, extra: &[&str]| -> String {
+        let mut args = vec!["progress", "start", topic, "--title", topic];
+        args.extend_from_slice(extra);
+        stdout(repo.arc(cwd).args(&args))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let start_ms = |topic: &str, extra: &[&str]| -> String {
+        let mut args = vec!["milestone", "start", topic];
+        args.extend_from_slice(extra);
+        arc(&repo, &args).lines().next().unwrap().to_string()
+    };
+    let jdir = |cwd: &Path| -> PathBuf {
+        PathBuf::from(
+            json_stdout(repo.arc(cwd).args(["progress", "--json"]))["journal_dir"]
+                .as_str()
+                .unwrap(),
+        )
+    };
+
+    // 1. An unavailable foreign critical track can still be demoted and removed
+    // by its recorded reference or label without opening the foreign journal.
+    let local_s = start_s(
+        &repo.root,
+        "local-s",
+        &[
+            "--wave",
+            "w0",
+            "--wave",
+            "w1",
+            "--item",
+            "Item 1",
+            "--item-wave",
+            "i1=w1",
+        ],
+    );
+    let foreign_s = start_s(
+        &other,
+        "foreign-s",
+        &[
+            "--wave",
+            "w0",
+            "--item",
+            "Foreign 1",
+            "--item-wave",
+            "i1=w0",
+        ],
+    );
+    let ms = start_ms(
+        "recover",
+        &["--title", "Recover", "--wave", "w0", "--wave", "w1"],
+    );
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &ms,
+            &local_s,
+            "--label",
+            "local",
+        ],
+    );
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &ms,
+            &format!("vanishing::{foreign_s}"),
+            "--label",
+            "ext",
+        ],
+    );
+
+    // Delete the foreign journal so the track becomes unavailable.
+    let other_journal = jdir(&other);
+    fs::remove_dir_all(&other_journal).unwrap();
+
+    // Unavailable critical track blocks w1.
+    let blocked = report(&repo, &ms);
+    assert_eq!(blocked["counts"]["unavailable_tracks"], 1);
+    assert_eq!(blocked["tracks"][0]["items"][0]["readiness"], "blocked");
+
+    // Demote unavailable track to sideband by label -> w1 unblocks!
+    arc(
+        &repo,
+        &["milestone", "track", "role", &ms, "ext", "sideband"],
+    );
+    let demoted = report(&repo, &ms);
+    assert_eq!(demoted["tracks"][0]["items"][0]["readiness"], "ready");
+
+    // Remove unavailable track by exact stored reference -> succeeds!
+    let other_slug = other_journal
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "remove",
+            &ms,
+            &format!("{other_slug}::{foreign_s}"),
+        ],
+    );
+    let cleaned = report(&repo, &ms);
+    assert_eq!(cleaned["tracks"].as_array().unwrap().len(), 1);
+
+    // 2. A declared wave literally named `unassigned` stays distinct from items
+    // with no wave assignment (`wave: null`).
+    let un_s = start_s(
+        &repo.root,
+        "unassigned-collision",
+        &["--item", "Truly unwaved"],
+    );
+    let un_ms = start_ms(
+        "unassigned-ms",
+        &["--title", "Unassigned wave test", "--wave", "unassigned"],
+    );
+    arc(&repo, &["milestone", "track", "add", &un_ms, &un_s]);
+    let un_rep = report(&repo, &un_ms);
+    // Declared wave `unassigned` must have 0 items, NOT count the unwaved item!
+    assert_eq!(un_rep["waves"][0]["id"], "unassigned");
+    assert_eq!(un_rep["waves"][0]["critical"]["items"], 0);
+    // Track wave cells keep declared `"unassigned"` (0 items) separate from `null` (1 item).
+    let cells = un_rep["tracks"][0]["waves"].as_array().unwrap();
+    let declared_cell = cells
+        .iter()
+        .find(|c| c["wave"] == "unassigned")
+        .expect("declared unassigned cell");
+    assert_eq!(declared_cell["counts"]["items"], 0);
+    assert_eq!(declared_cell["declared"], true);
+    let unwaved_cell = cells
+        .iter()
+        .find(|c| c["wave"].is_null())
+        .expect("unwaved null cell");
+    assert_eq!(unwaved_cell["counts"]["items"], 1);
+    assert_eq!(unwaved_cell["declared"], false);
+
+    // 3. `milestone close --by <conclusion>` refuses to traverse a symlinked
+    // `<journal>-archive` directory.
+    #[cfg(unix)]
+    {
+        let dir = jdir(&repo.root);
+        let outside = tempfile::tempdir().unwrap();
+        let fake_conclusion = "20260101T000000Z-escaped-conclusion.md";
+        fs::write(outside.path().join(fake_conclusion), "# Outside secret\n").unwrap();
+        let mut cold = dir.as_os_str().to_os_string();
+        cold.push("-archive");
+        let cold_path = std::path::PathBuf::from(cold);
+        let _ = fs::remove_dir_all(&cold_path);
+        std::os::unix::fs::symlink(outside.path(), &cold_path).unwrap();
+
+        repo.arc(&repo.root)
+            .args(["milestone", "close", &un_ms, "--by", fake_conclusion])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("symlink"));
+    }
+}
