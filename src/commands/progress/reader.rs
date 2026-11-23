@@ -513,25 +513,33 @@ impl Registry {
         ))
     }
 
+    /// Look up one registered project by slug only when that slug uniquely
+    /// identifies a single registration. Two configured journals sharing a
+    /// basename-derived slug return `None` rather than silently reading the
+    /// wrong project.
     pub(crate) fn get(&self, slug: &str) -> Option<&Registered> {
-        self.projects.iter().find(|project| project.slug == slug)
+        let mut matches = self.projects.iter().filter(|project| project.slug == slug);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
-    /// The slug the registry gives the journal at `dir`.
-    pub(crate) fn slug_of(&self, dir: &Path) -> Option<&str> {
+    /// Look up the exact registered project owning `dir`, by canonical path.
+    pub(crate) fn by_dir(&self, dir: &Path) -> Option<&Registered> {
         self.projects
             .iter()
             .find(|project| same_dir(&project.journal_dir, dir))
-            .map(|project| project.slug.as_str())
+    }
+
+    /// The slug the registry gives the journal at `dir`, when that slug
+    /// uniquely identifies it among all registered projects.
+    pub(crate) fn slug_of(&self, dir: &Path) -> Option<&str> {
+        let slug = self.by_dir(dir)?.slug.as_str();
+        self.get(slug).map(|_| slug)
     }
 
     /// Seed already-read journal events for `dir` when it is registered here.
     pub(crate) fn seed_events(&self, dir: &Path, events: Vec<JournalEvent>) {
-        if let Some(project) = self
-            .projects
-            .iter()
-            .find(|project| same_dir(&project.journal_dir, dir))
-        {
+        if let Some(project) = self.by_dir(dir) {
             project.seed_events(events);
         }
     }
@@ -871,18 +879,15 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>) -> Result<ProgressReport> {
     };
     let own = registry.slug_of(&dir).map(str::to_string);
     let local_events;
-    let events: &[JournalEvent] = match own.as_deref() {
-        Some(slug) => {
-            registry.seed_events(&dir, events);
-            registry
-                .get(slug)
-                .and_then(|project| project.events().ok())
-                .unwrap_or(&[])
-        }
-        None => {
-            local_events = events;
-            &local_events
-        }
+    let events: &[JournalEvent] = if registry.by_dir(&dir).is_some() {
+        registry.seed_events(&dir, events);
+        registry
+            .by_dir(&dir)
+            .and_then(|project| project.events().ok())
+            .unwrap_or(&[])
+    } else {
+        local_events = events;
+        &local_events
     };
     let questions = PersonQuestions::new(&dir, events);
     let reader = Reader {
@@ -971,22 +976,23 @@ pub(crate) fn series_of(
     now: DateTime<Utc>,
 ) -> Result<Vec<SeriesReport>> {
     let owned_events;
-    let events: &[JournalEvent] = match shared.and_then(|(registry, slug)| registry.get(slug)) {
-        Some(project) => project
-            .events()
-            .map_err(|reason| anyhow::anyhow!("{reason}"))?,
-        None => {
-            owned_events = crate::journal::read_events(journal_dir)?;
-            &owned_events
-        }
-    };
+    let events: &[JournalEvent] =
+        match shared.and_then(|(registry, _)| registry.by_dir(journal_dir)) {
+            Some(project) => project
+                .events()
+                .map_err(|reason| anyhow::anyhow!("{reason}"))?,
+            None => {
+                owned_events = crate::journal::read_events(journal_dir)?;
+                &owned_events
+            }
+        };
     let active = series::active_in(events);
     if active.is_empty() {
         return Ok(Vec::new());
     }
     let read;
     let (registry, home_slug) = match shared {
-        Some((registry, slug)) => (registry, Some(slug.to_string())),
+        Some((registry, slug)) => (registry, registry.get(slug).map(|_| slug.to_string())),
         None => {
             read = if needs_registry(&active) {
                 Registry::read()?
@@ -998,7 +1004,7 @@ pub(crate) fn series_of(
         }
     };
     let own;
-    let home = match home_slug.as_deref().and_then(|slug| registry.get(slug)) {
+    let home = match registry.by_dir(journal_dir) {
         Some(project) => &project.ledger,
         None => {
             own = match anchor {
@@ -1145,5 +1151,47 @@ mod tests {
         };
         seeded.seed_events(&dir.path().join("absent"), first.to_vec());
         assert_eq!(seeded.get("beta").unwrap().events().unwrap().len(), 1);
+    }
+
+    /// Claim: two configured journals sharing a basename-derived slug each read
+    /// their own journal events via canonical directory lookup, never colliding
+    /// on the first registration's cache.
+    #[test]
+    fn duplicate_basename_slugs_never_alias_each_others_events() {
+        let root = tempfile::tempdir().unwrap();
+        let alpha_dir = root.path().join("a").join("shared");
+        let beta_dir = root.path().join("b").join("shared");
+        std::fs::create_dir_all(&alpha_dir).unwrap();
+        std::fs::create_dir_all(&beta_dir).unwrap();
+        let write_series = |dir: &Path, topic: &str, title: &str| {
+            let line = serde_json::json!({
+                "schema": "journal-events/2",
+                "ts": "2026-01-02T00:00:00Z",
+                "topic": topic,
+                "event": "note",
+                "file": format!("20260102T000000Z-{topic}-progress.md"),
+                "title": title,
+            });
+            std::fs::write(dir.join("events.jsonl"), format!("{line}\n")).unwrap();
+        };
+        write_series(&alpha_dir, "alpha", "Alpha");
+        write_series(&beta_dir, "beta", "Beta");
+
+        let registry = Registry {
+            projects: vec![
+                registered_for("shared", alpha_dir.clone()),
+                registered_for("shared", beta_dir.clone()),
+            ],
+        };
+        // Ambiguous slug lookup returns None rather than aliasing.
+        assert!(registry.get("shared").is_none());
+        assert!(registry.slug_of(&alpha_dir).is_none());
+        assert!(registry.slug_of(&beta_dir).is_none());
+
+        let now = Utc::now();
+        let alpha = series_of(&alpha_dir, None, Some((&registry, "shared")), now).unwrap();
+        let beta = series_of(&beta_dir, None, Some((&registry, "shared")), now).unwrap();
+        assert_eq!(alpha[0].title, "Alpha");
+        assert_eq!(beta[0].title, "Beta");
     }
 }
