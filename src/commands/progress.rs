@@ -323,6 +323,31 @@ pub enum ProgressCmd {
         #[arg(long)]
         wave: Option<String>,
     },
+    /// Transfer or defer an item to another progress series (local or cross-project)
+    ///
+    /// Preserves the item's title, originating `--from` source link, active
+    /// change link, and wave (when declared in the destination, or given by
+    /// `--wave`). The source item remains visible as `transferred` pointing to
+    /// its destination and leaves the source series' active count; prerequisites
+    /// targeting it follow the transfer to the destination item.
+    #[command(visible_alias = "defer")]
+    Transfer {
+        /// Source series filename or topic
+        series: String,
+        /// Item id, such as i3
+        item: String,
+        /// Destination series: `<series>` in this journal, or
+        /// `<project>::<series>` in another registered project
+        #[arg(long)]
+        to: String,
+        /// Wave in the destination series (defaults to the source wave when
+        /// declared there)
+        #[arg(long)]
+        wave: Option<String>,
+        /// Why the item is being transferred or deferred, one line
+        #[arg(long)]
+        reason: String,
+    },
     /// Relate a series to a series in another project
     ///
     /// The relation is recorded in this project's journal only. It is mutual
@@ -670,6 +695,30 @@ pub fn run(ctx: &Ctx, args: ProgressArgs) -> Result<i32> {
         } => {
             let parts = series::split(ctx, &name, &item, &into, &reason, wave.as_deref())?;
             println!("split {item} into {}", parts.join(", "));
+        }
+        ProgressCmd::Transfer {
+            series: name,
+            item,
+            to,
+            wave,
+            reason,
+        } => {
+            let outcome = series::transfer(ctx, &name, &item, &to, wave.as_deref(), &reason)?;
+            for warning in &outcome.warnings {
+                eprintln!("warning: {warning}");
+            }
+            let dest = match &outcome.target_project_label {
+                Some(label) => {
+                    format!("{label}::{}:{}", outcome.target_series, outcome.target_item)
+                }
+                None => format!("{}:{}", outcome.target_series, outcome.target_item),
+            };
+            let wave_suffix = outcome
+                .wave
+                .as_deref()
+                .map(|w| format!(" (wave {w})"))
+                .unwrap_or_default();
+            println!("transferred {} -> {dest}{wave_suffix}", outcome.source_item);
         }
         ProgressCmd::Relate {
             series: name,
@@ -1251,6 +1300,12 @@ fn render_row(row: &ItemRow, width: usize) {
     if !row.split_into.is_empty() {
         detail.push(format!("into {}", row.split_into.join(", ")));
     }
+    if let Some(dest) = &row.transferred_to {
+        detail.push(format!("-> {dest}"));
+    }
+    if let Some(src) = &row.transferred_from {
+        detail.push(format!("transferred from {src}"));
+    }
     if let Some(note) = &row.note {
         detail.push(note.clone());
     }
@@ -1293,8 +1348,13 @@ fn render_counts(counts: &Counts, since: bool) {
     println!("{line}");
     if since {
         let start = counts.since_start;
+        let transferred = if start.transferred > 0 {
+            format!(", {} transferred", start.transferred)
+        } else {
+            String::new()
+        };
         println!(
-            "  {} items; {} declared at the start; since then {} added, {} dropped, {} split",
+            "  {} items; {} declared at the start; since then {} added, {} dropped, {} split{transferred}",
             counts.items, start.declared, start.added, start.dropped, start.split
         );
     }

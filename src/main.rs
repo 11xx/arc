@@ -9151,6 +9151,7 @@ mod tests {
             "progress wait",
             "progress unwait",
             "progress split",
+            "progress transfer",
             "progress relate",
             "progress unrelate",
             "progress retire",

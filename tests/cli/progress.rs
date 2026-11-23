@@ -2912,3 +2912,233 @@ fn ready_excludes_unknown_links_split_cycles_refused_and_watch_wakes_on_claim_ex
     assert_eq!(reached["condition"], "item-ready");
     assert_eq!(reached["items"], serde_json::json!(["i1"]));
 }
+
+#[test]
+fn transfer_and_defer_preserve_provenance_active_change_and_follow_prereqs() {
+    let repo = Repo::new();
+
+    // File a source todo so we verify `--from` preservation across transfer.
+    let todo_body = repo.root.join("todo.md");
+    std::fs::write(&todo_body, "Carry me over\n").unwrap();
+    let todo = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "todo",
+            "carry-me",
+            "--title",
+            "Carry me",
+            "--body-file",
+            todo_body.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let todo = String::from_utf8(todo).unwrap();
+    let todo = Path::new(
+        todo.lines()
+            .find_map(|line| line.strip_prefix("wrote: "))
+            .unwrap_or_else(|| todo.lines().next().unwrap())
+            .trim(),
+    )
+    .file_name()
+    .unwrap()
+    .to_str()
+    .unwrap()
+    .to_string();
+
+    // Start two local series with shared waves `w0` and `w1`.
+    let rc2 = progress(
+        &repo,
+        &repo.root,
+        &[
+            "start",
+            "rc2",
+            "--title",
+            "RC2",
+            "--wave",
+            "w0=Baseline",
+            "--wave",
+            "w1=Cut",
+            "--item",
+            "Carry over",
+            "--item",
+            "Depends on carry",
+            "--item",
+            "Already done",
+            "--from",
+            &format!("i1={todo}"),
+            "--item-wave",
+            "i1=w0",
+            "--item-wave",
+            "i2=w1",
+        ],
+    );
+    let rc2 = rc2.lines().next().unwrap().trim().to_string();
+    let rc3 = progress(
+        &repo,
+        &repo.root,
+        &[
+            "start",
+            "rc3",
+            "--title",
+            "RC3",
+            "--wave",
+            "w0=Baseline",
+            "--wave",
+            "w1=Cut",
+        ],
+    );
+    let rc3 = rc3.lines().next().unwrap().trim().to_string();
+
+    // Link an open change to rc2:i1, make rc2:i2 depend on rc2:i1, and finish rc2:i3.
+    let change = begin_change_in(&repo, &repo.root, "carry-change");
+    progress(&repo, &repo.root, &["link", &rc2, "i1", &change]);
+    progress(&repo, &repo.root, &["depend", &rc2, "i2", "--on", "i1"]);
+    progress(&repo, &repo.root, &["done", &rc2, "i3"]);
+
+    // Completed items refuse transfer.
+    repo.arc(&repo.root)
+        .args([
+            "progress",
+            "transfer",
+            &rc2,
+            "i3",
+            "--to",
+            &rc3,
+            "--reason",
+            "cannot move done work",
+        ])
+        .assert()
+        .failure();
+
+    // Defer (alias for transfer) rc2:i1 -> rc3; preserves title, wave, source, and open change link.
+    let out = progress(
+        &repo,
+        &repo.root,
+        &[
+            "defer",
+            &rc2,
+            "i1",
+            "--to",
+            &rc3,
+            "--reason",
+            "pushed to rc3 train",
+        ],
+    );
+    assert!(out.contains(&format!("transferred i1 -> {rc3}:i1 (wave w0)")));
+
+    let json = report(&repo, &repo.root, &[]);
+    let src = series(&json, &rc2);
+    let dst = series(&json, &rc3);
+
+    // Source item is transferred, leaves active count, records since_start.transferred != dropped.
+    let src_i1 = &src["items"][0];
+    assert_eq!(src_i1["stage"], "transferred");
+    assert_eq!(src_i1["readiness"], "inactive");
+    assert_eq!(src_i1["transferred_to"]["series"], rc3);
+    assert_eq!(src_i1["transferred_to"]["item"], "i1");
+    assert_eq!(src["counts"]["items"], 2);
+    assert_eq!(src["counts"]["since_start"]["transferred"], 1);
+    assert_eq!(src["counts"]["since_start"]["dropped"], 0);
+
+    // Destination item inherited title, wave, source, change link, and transferred_from.
+    let dst_i1 = &dst["items"][0];
+    assert_eq!(dst_i1["title"], "Carry over");
+    assert_eq!(dst_i1["wave"], "w0");
+    assert_eq!(dst_i1["change"], change);
+    assert_eq!(dst_i1["stage"], "opened");
+    assert_eq!(dst_i1["source"]["file"], todo);
+    assert_eq!(dst_i1["transferred_from"]["series"], rc2);
+    assert_eq!(dst_i1["transferred_from"]["item"], "i1");
+
+    // Reopening a transferred item is refused.
+    repo.arc(&repo.root)
+        .args(["progress", "reopen", &rc2, "i1"])
+        .assert()
+        .failure();
+
+    // rc2:i2 depended on rc2:i1; prerequisite resolution follows transferred_to -> rc3:i1!
+    let src_i2 = &src["items"][1];
+    assert_eq!(src_i2["readiness"], "blocked");
+    assert_eq!(src_i2["blocked_by"][0]["series"], rc3);
+    assert_eq!(src_i2["blocked_by"][0]["item"], "i1");
+    assert_eq!(src_i2["blocked_by"][0]["stage"], "opened");
+
+    // Once rc3:i1 completes, rc2:i2 becomes ready.
+    progress(&repo, &repo.root, &["unlink", &rc3, "i1"]);
+    progress(&repo, &repo.root, &["done", &rc3, "i1"]);
+    let after = report(&repo, &repo.root, &[&rc2]);
+    let after_src = series(&after, &rc2);
+    assert_eq!(after_src["items"][1]["readiness"], "ready");
+
+    // Plain output shows transferred provenance and transferred count.
+    let plain = progress(&repo, &repo.root, &[&rc2, "--plain"]);
+    assert!(plain.contains(&format!("-> {rc3}:i1")));
+    assert!(plain.contains("1 transferred"));
+
+    // Journal doctor accepts all emitted events cleanly.
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cross_project_transfer_preserves_provenance_and_follows_prereqs() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    let local = start(&repo, &repo.root, "local-train", &["Move across", "Waiter"]);
+    let remote = start(&repo, &other, "remote-train", &["Existing remote"]);
+
+    let local_change = begin_change_in(&repo, &repo.root, "local-in-flight");
+    progress(&repo, &repo.root, &["link", &local, "i1", &local_change]);
+    progress(&repo, &repo.root, &["depend", &local, "i2", "--on", "i1"]);
+
+    // Transfer local:i1 -> other::remote-train.
+    let out = progress(
+        &repo,
+        &repo.root,
+        &[
+            "transfer",
+            &local,
+            "i1",
+            "--to",
+            &format!("other::{remote}"),
+            "--reason",
+            "owned by sibling repo",
+        ],
+    );
+    assert!(out.contains(&format!("other::{remote}:i2")));
+
+    // Source series tracks transferred_to with foreign slug and follows prereq across projects.
+    let local_json = report(&repo, &repo.root, &[&local]);
+    let local_s = series(&local_json, &local);
+    assert_eq!(local_s["items"][0]["stage"], "transferred");
+    assert!(local_s["items"][0]["transferred_to"]["project"].is_string());
+    assert_eq!(local_s["items"][0]["transferred_to"]["series"], remote);
+    assert_eq!(local_s["items"][0]["transferred_to"]["item"], "i2");
+    assert_eq!(local_s["items"][1]["readiness"], "blocked");
+    assert_eq!(local_s["items"][1]["blocked_by"][0]["series"], remote);
+    assert_eq!(local_s["items"][1]["blocked_by"][0]["item"], "i2");
+
+    // Destination series in `other` carries transferred_from and re-scoped change link.
+    let remote_json = report(&repo, &other, &[&remote]);
+    let remote_s = series(&remote_json, &remote);
+    let moved = &remote_s["items"][1];
+    assert_eq!(moved["id"], "i2");
+    assert_eq!(moved["title"], "Move across");
+    assert_eq!(moved["change"], local_change);
+    assert!(moved["project_slug"].is_string());
+    assert_eq!(moved["stage"], "opened");
+    assert_eq!(moved["transferred_from"]["series"], local);
+    assert_eq!(moved["transferred_from"]["item"], "i1");
+
+    // Completing the moved item in `other` unblocks local:i2.
+    progress(&repo, &other, &["unlink", &remote, "i2"]);
+    progress(&repo, &other, &["done", &remote, "i2"]);
+    let unblocked = report(&repo, &repo.root, &[&local]);
+    assert_eq!(series(&unblocked, &local)["items"][1]["readiness"], "ready");
+}

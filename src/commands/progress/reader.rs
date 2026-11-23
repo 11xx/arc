@@ -105,11 +105,18 @@ pub(crate) struct ItemRow {
     /// Unsatisfied prerequisites or gated wave barriers blocking this item.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) blocked_by: Vec<Blocker>,
-    /// The reason or note recorded with a done, dropped, split or reopened item.
+    /// The reason or note recorded with a done, dropped, split, transferred or
+    /// reopened item.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) split_into: Vec<String>,
+    /// Destination item when this item was transferred to another series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) transferred_to: Option<series::ItemRef>,
+    /// Origin item when this item arrived via transfer from another series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) transferred_from: Option<series::ItemRef>,
 }
 
 /// One unsatisfied prerequisite or wave barrier blocking an item.
@@ -231,6 +238,7 @@ impl ItemRow {
                 ItemState::Done => "done",
                 ItemState::Dropped => "dropped",
                 ItemState::Split => "split",
+                ItemState::Transferred => "transferred",
             },
             change: item.change.clone(),
             project: None,
@@ -250,11 +258,13 @@ impl ItemRow {
             readiness: match item.state {
                 ItemState::Open => "ready",
                 ItemState::Done => "complete",
-                ItemState::Dropped | ItemState::Split => "inactive",
+                ItemState::Dropped | ItemState::Split | ItemState::Transferred => "inactive",
             },
             blocked_by: Vec::new(),
             note: item.note.clone(),
             split_into: item.split_into.clone(),
+            transferred_to: item.transferred_to.clone(),
+            transferred_from: item.transferred_from.clone(),
         }
     }
 
@@ -262,7 +272,7 @@ impl ItemRow {
         self.change.is_some()
             && !matches!(
                 self.stage,
-                "integrated" | "closed" | "dropped" | "split" | "unknown"
+                "integrated" | "closed" | "dropped" | "split" | "transferred" | "unknown"
             )
     }
 }
@@ -694,6 +704,14 @@ pub(crate) fn needs_registry(series: &[Series]) -> bool {
                         .source
                         .as_ref()
                         .is_some_and(|source| source.project.is_some())
+                    || item
+                        .transferred_to
+                        .as_ref()
+                        .is_some_and(|dest| dest.project.is_some())
+                    || item
+                        .transferred_from
+                        .as_ref()
+                        .is_some_and(|src| src.project.is_some())
                     || item.depends_on.iter().any(|dep| dep.project.is_some())
             })
     })
@@ -1173,35 +1191,17 @@ impl<'a> Reader<'a> {
             return;
         };
         let stage = self.item_stage_in(ledger, foreign_slug.or(self.home_slug), target_item);
-        if target_item.state == ItemState::Split && !target_item.split_into.is_empty() {
-            for part_id in &target_item.split_into {
-                let child = series::ItemPrereq {
-                    project: foreign_slug.map(str::to_string),
-                    series: Some(target_series_file.clone()),
-                    item: part_id.clone(),
-                };
-                self.collect_prereq_blockers(
-                    current_series,
-                    own_stages,
-                    own_items,
-                    &child,
-                    visiting,
-                    out,
-                );
-            }
-        } else if !matches!(stage, "integrated" | "done") {
-            let reason = (stage == "dropped").then(|| "prerequisite dropped".to_string());
-            out.push(Blocker {
-                kind: "prereq",
-                project: label,
-                project_slug: foreign_slug.map(str::to_string),
-                series: Some(target_series_file),
-                item: Some(prereq.item.clone()),
-                wave: None,
-                stage,
-                reason,
-            });
-        }
+        self.judge_target(
+            current_series,
+            own_stages,
+            own_items,
+            foreign_slug,
+            Some(target_series_file),
+            target_item,
+            stage,
+            visiting,
+            out,
+        );
         visiting.remove(&node);
     }
 
@@ -1238,6 +1238,27 @@ impl<'a> Reader<'a> {
                 );
             }
             return;
+        }
+        if target_item.state == ItemState::Transferred {
+            if let Some(dest) = &target_item.transferred_to {
+                let dest_prereq = series::ItemPrereq {
+                    project: dest
+                        .project
+                        .clone()
+                        .or_else(|| foreign_slug.map(str::to_string)),
+                    series: Some(dest.series.clone()),
+                    item: dest.item.clone(),
+                };
+                self.collect_prereq_blockers(
+                    current_series,
+                    own_stages,
+                    own_items,
+                    &dest_prereq,
+                    visiting,
+                    out,
+                );
+                return;
+            }
         }
         let reason = (stage == "dropped").then(|| "prerequisite dropped".to_string());
         out.push(Blocker {

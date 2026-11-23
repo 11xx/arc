@@ -6775,11 +6775,16 @@ PROGRESS
     depend <item> --on <ref>                undepend <item> --on <ref>
     wait <item> <discussion> --question Q   unwait <item>
     split <item> --into T --into T... --reason R [--wave W]
+    transfer|defer <item> --to [<project>::]<target> [--wave W] --reason R
   Items take no generic correction; each edit has its reversal. `reopen`
   undoes `drop` and `done` alike, for any item; a reopened linked item reads
   its derived stage again. A rename is undone by another rename, a move by
-  another move, a link by `unlink`, a wait by `unwait`. A split is final: its parts are items of
-  their own. A dropped or split item stays visible and leaves the count.
+  another move, a link by `unlink`, a wait by `unwait`. A split or transfer
+  is final: `split` replaces an item with new parts, and `transfer` (aliased
+  as `defer`) moves it to another local or cross-project series while
+  preserving title, `--from` source, active change link, and matching wave
+  (reverse a transfer by transferring back). A dropped, split, or transferred
+  item stays visible and leaves the count.
 
   `done` is for an item no change carries; a linked item's stage is the
   ledger's. Optional `--by <target>` on `done` cites the resolving bare
@@ -6822,7 +6827,7 @@ PROGRESS
   question is answered the row shows nothing of it. A wait leaves the stage
   as it is.
 
-  Stages. Unlinked: `open`, `done`, `dropped`, `split`. Linked, as the
+  Stages. Unlinked: `open`, `done`, `dropped`, `split`, `transferred`. Linked, as the
   change's own events in the ledger holding it record it: `opened`;
   `snapshotted` (a patchset is recorded); `verified` (at the newest
   patchset's head at least one gate has a recorded run and every gate's most
@@ -6847,7 +6852,7 @@ PROGRESS
   The share complete is a count: integrated and done items over the items that
   stand, printed as counts first and one percentage after. No estimate of
   time, no weighting. The report also says how many items were declared at
-  the start and how many were added, dropped and split since. The waiting
+  the start and how many were added, dropped, split and transferred since. The waiting
   count overlaps the others: an item that waits is also counted under its
   stage.
 
@@ -6860,7 +6865,8 @@ PROGRESS
   `integrated` or `done`. Explicit prerequisites (`depend <item> --on <ref>`,
   `undepend`) accept `<item>`, `<series>:<item>`, or
   `<project>::<series>:<item>` and refuse cycles at write time; a split
-  prerequisite expands to its standing parts, a dropped prerequisite stays
+  prerequisite expands to its standing parts, a transferred prerequisite follows
+  `transferred_to` to its destination, a dropped prerequisite stays
   unsatisfied until removed, and an unreadable foreign journal degrades that
   prerequisite to `unknown` without failing the report. Each row derives
   `readiness` (`ready`, `claimed`, `blocked`, `waiting`, `in-flight`,

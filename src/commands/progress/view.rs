@@ -157,6 +157,7 @@ impl View {
             (start.added, "added"),
             (start.dropped, "dropped"),
             (start.split, "split"),
+            (start.transferred, "transferred"),
         ]
         .iter()
         .filter(|(count, _)| *count > 0)
@@ -304,7 +305,7 @@ impl View {
                 vec![row.title.clone()]
             };
             let faded = |text: &str| match row.stage {
-                "dropped" | "split" => self.dim(text),
+                "dropped" | "split" | "transferred" => self.dim(text),
                 _ => text.to_string(),
             };
             let mut line = format!(
@@ -435,6 +436,12 @@ impl View {
         if !row.split_into.is_empty() {
             parts.push(self.dim(&format!("into {}", row.split_into.join(", "))));
         }
+        if let Some(dest) = &row.transferred_to {
+            parts.push(self.dim(&format!("-> {}", short_item_ref(dest))));
+        }
+        if let Some(src) = &row.transferred_from {
+            parts.push(self.dim(&format!("from {}", short_item_ref(src))));
+        }
         parts.join(&self.dim(" · "))
     }
 
@@ -485,6 +492,13 @@ fn topic(file: &str) -> String {
         .unwrap_or_else(|| file.to_string())
 }
 
+fn short_item_ref(reference: &crate::journal::series::ItemRef) -> String {
+    match &reference.project {
+        Some(project) => format!("{project}::{}:{}", topic(&reference.series), reference.item),
+        None => format!("{}:{}", topic(&reference.series), reference.item),
+    }
+}
+
 /// The stage an item's line shows: `waiting` for an open item that waits on
 /// a question, `blocked` when prerequisites or wave barriers hold it,
 /// `claimed` for an unlinked open item held by an advisory lane or source
@@ -513,6 +527,7 @@ fn mark(stage: &str) -> (&'static str, &'static str) {
         "open" => ("○", DIM),
         "dropped" => ("×", DIM),
         "split" => ("÷", DIM),
+        "transferred" => ("↦", DIM),
         "closed" => ("×", RED),
         _ => ("?", RED),
     }
@@ -578,18 +593,20 @@ mod tests {
             depends_on: Vec::new(),
             readiness: match stage {
                 "integrated" | "done" => "complete",
-                "dropped" | "split" => "inactive",
+                "dropped" | "split" | "transferred" => "inactive",
                 "opened" | "snapshotted" | "verified" | "reviewed" => "in-flight",
                 _ => "ready",
             },
             blocked_by: Vec::new(),
             note: None,
             split_into: Vec::new(),
+            transferred_to: None,
+            transferred_from: None,
         }
     }
 
     fn series(items: Vec<ItemRow>) -> SeriesReport {
-        let standing = |row: &&ItemRow| !matches!(row.stage, "dropped" | "split");
+        let standing = |row: &&ItemRow| !matches!(row.stage, "dropped" | "split" | "transferred");
         let count = |stages: &[&str]| {
             items
                 .iter()

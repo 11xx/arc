@@ -93,9 +93,34 @@ pub(crate) struct SeriesFields {
     /// Prerequisite item on `item-depended` or `item-undepended`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     depends_on: Option<ItemPrereq>,
+    /// Destination item on `item-transferred`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transferred_to: Option<ItemRef>,
+    /// Origin item on an `item-added` created by a transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transferred_from: Option<ItemRef>,
     /// The series in another project a `series-related` event names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<RelatedSeries>,
+}
+
+/// Another series' item referenced by a transfer (`transferred_to` or
+/// `transferred_from`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ItemRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<String>,
+    pub(crate) series: String,
+    pub(crate) item: String,
+}
+
+impl std::fmt::Display for ItemRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.project {
+            Some(project) => write!(f, "{project}::{}:{}", self.series, self.item),
+            None => write!(f, "{}:{}", self.series, self.item),
+        }
+    }
 }
 
 /// One declared wave on a progress series.
@@ -237,6 +262,12 @@ fn valid_prereq(prereq: &ItemPrereq) -> bool {
         }
 }
 
+fn valid_item_ref(reference: &ItemRef) -> bool {
+    valid_item_id(&reference.item)
+        && is_series_file(&reference.series)
+        && reference.project.as_deref().is_none_or(single_line)
+}
+
 fn valid_item_source(source: &ItemSource) -> bool {
     source.project.as_deref().is_none_or(single_line)
         && bare_artifact_kind(&source.file)
@@ -287,8 +318,10 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
         && fields.change_project.is_none()
         && fields.waits_on.is_none()
         && fields.related.is_none();
+    let no_transfer = fields.transferred_to.is_none() && fields.transferred_from.is_none();
     let bare = no_link_or_wait
         && no_wave_or_dep
+        && no_transfer
         && fields.item_source.is_none()
         && fields.resolved_by.is_none();
     if !on_series {
@@ -314,16 +347,30 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.depends_on.is_none()
                 && fields.wave.as_deref().is_none_or(valid_wave_id)
                 && fields.item_source.as_ref().is_none_or(valid_item_source)
+                && fields.transferred_to.is_none()
+                && fields.transferred_from.as_ref().is_none_or(valid_item_ref)
         }
         "item-renamed" => names_item && line(&event.title) && placements.is_empty() && bare,
         "item-moved" => names_item && placements.len() == 1 && placed && bare,
         "item-dropped" => names_item && line(&event.note) && placements.is_empty() && bare,
+        "item-transferred" => {
+            names_item
+                && line(&event.note)
+                && placements.is_empty()
+                && no_link_or_wait
+                && no_wave_or_dep
+                && fields.item_source.is_none()
+                && fields.resolved_by.is_none()
+                && fields.transferred_from.is_none()
+                && fields.transferred_to.as_ref().is_some_and(valid_item_ref)
+        }
         "item-done" => {
             names_item
                 && event.note.as_deref().is_none_or(single_line)
                 && placements.is_empty()
                 && no_link_or_wait
                 && no_wave_or_dep
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.as_ref().is_none_or(valid_resolved_by)
         }
@@ -339,6 +386,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && placements.is_empty()
                 && no_link_or_wait
                 && no_wave_or_dep
+                && no_transfer
                 && fields.resolved_by.is_none()
                 && fields.item_source.as_ref().is_some_and(valid_item_source)
         }
@@ -347,6 +395,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && event.note.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.wave_title.is_none()
@@ -361,6 +410,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && event.note.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.wave.is_none()
@@ -374,6 +424,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
             fields.item.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.depends_on.is_none()
@@ -386,6 +437,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
             fields.item.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.depends_on.is_none()
@@ -398,6 +450,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
             fields.item.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.depends_on.is_none()
@@ -411,6 +464,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
             fields.item.is_none()
                 && placements.is_empty()
                 && no_link_or_wait
+                && no_transfer
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && fields.depends_on.is_none()
@@ -429,6 +483,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && no_wave_or_dep
+                && no_transfer
                 && fields.related.is_none()
         }
         "item-waiting" => {
@@ -441,6 +496,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && no_wave_or_dep
+                && no_transfer
                 && fields.related.is_none()
                 && fields.waits_on.as_ref().is_some_and(|wait| {
                     bare_artifact_kind(&wait.file).is_some() && single_line(&wait.question)
@@ -465,6 +521,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.wave_after.is_none()
                 && fields.wave_gated.is_none()
                 && fields.depends_on.is_none()
+                && no_transfer
                 && fields.wave.as_deref().is_none_or(valid_wave_id)
                 && fields.related.is_none()
         }
@@ -478,6 +535,7 @@ pub(super) fn well_formed(event: &JournalEvent) -> bool {
                 && fields.item_source.is_none()
                 && fields.resolved_by.is_none()
                 && no_wave_or_dep
+                && no_transfer
                 && fields.related.as_ref().is_some_and(|related| {
                     single_line(&related.project) && is_series_file(&related.file)
                 })
@@ -583,6 +641,13 @@ pub(super) fn event_message(event: &JournalEvent) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        "item-transferred" => format!(
+            "transferred item {item} of {file} to {}: {note}",
+            fields
+                .transferred_to
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string)
+        ),
         "series-related" | "series-unrelated" => {
             let related = fields.related.as_ref();
             format!(
@@ -614,6 +679,7 @@ pub(crate) enum ItemState {
     Done,
     Dropped,
     Split,
+    Transferred,
 }
 
 /// One item of a series as its events leave it.
@@ -644,6 +710,10 @@ pub(crate) struct Item {
     pub(crate) state_at: Option<String>,
     /// For a split item, the items that replaced it.
     pub(crate) split_into: Vec<String>,
+    /// For a transferred item, the destination series item it moved to.
+    pub(crate) transferred_to: Option<ItemRef>,
+    /// For an item created by transfer, the source series item it came from.
+    pub(crate) transferred_from: Option<ItemRef>,
     initial: bool,
 }
 
@@ -656,10 +726,13 @@ impl Item {
         })
     }
 
-    /// Whether the item counts in the list as it stands. A dropped or split
-    /// item stays visible and leaves the count.
+    /// Whether the item counts in the list as it stands. A dropped, split, or
+    /// transferred item stays visible and leaves the count.
     pub(crate) fn stands(&self) -> bool {
-        !matches!(self.state, ItemState::Dropped | ItemState::Split)
+        !matches!(
+            self.state,
+            ItemState::Dropped | ItemState::Split | ItemState::Transferred
+        )
     }
 }
 
@@ -689,6 +762,10 @@ pub(crate) struct Series {
     added: usize,
 }
 
+fn is_zero_count(value: &usize) -> bool {
+    *value == 0
+}
+
 /// What changed in the list since the call that started the series.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub(crate) struct SinceStart {
@@ -697,6 +774,8 @@ pub(crate) struct SinceStart {
     pub(crate) added: usize,
     pub(crate) dropped: usize,
     pub(crate) split: usize,
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub(crate) transferred: usize,
 }
 
 impl Series {
@@ -709,6 +788,7 @@ impl Series {
             match item.state {
                 ItemState::Dropped => since.dropped += 1,
                 ItemState::Split => since.split += 1,
+                ItemState::Transferred => since.transferred += 1,
                 _ => {}
             }
         }
@@ -882,6 +962,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     note: None,
                     state_at: at,
                     split_into: Vec::new(),
+                    transferred_to: None,
+                    transferred_from: fields.transferred_from.clone(),
                     initial: fields.initial,
                 };
                 place(
@@ -941,6 +1023,8 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                             note: None,
                             state_at: at.clone(),
                             split_into: Vec::new(),
+                            transferred_to: None,
+                            transferred_from: None,
                             initial: false,
                         },
                     );
@@ -981,6 +1065,12 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                         } else {
                             None
                         };
+                        item.note = event.note.clone();
+                        item.state_at = at;
+                    }
+                    "item-transferred" => {
+                        item.state = ItemState::Transferred;
+                        item.transferred_to = fields.transferred_to.clone();
                         item.note = event.note.clone();
                         item.state_at = at;
                     }
@@ -1174,6 +1264,7 @@ fn state_word(state: ItemState) -> &'static str {
         ItemState::Done => "done",
         ItemState::Dropped => "dropped",
         ItemState::Split => "split",
+        ItemState::Transferred => "transferred",
     }
 }
 
@@ -2110,6 +2201,15 @@ fn check_no_cycle(
             let next_series = dep.series.clone().unwrap_or_else(|| series_file.clone());
             stack.push((next_proj, next_series, dep.item.clone()));
         }
+        if item.state == ItemState::Transferred {
+            if let Some(dest) = &item.transferred_to {
+                let next_proj = match &dest.project {
+                    Some(slug) => normalize_project(Some(slug.as_str())),
+                    None => proj.clone(),
+                };
+                stack.push((next_proj, dest.series.clone(), dest.item.clone()));
+            }
+        }
     }
     let _ = dir;
     Ok(())
@@ -2212,6 +2312,308 @@ pub(crate) fn undepend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<Item
     event.series.depends_on = Some(matched.clone());
     open.append(ctx, &event)?;
     Ok(matched)
+}
+
+/// The result of transferring an item to another series.
+pub(crate) struct TransferOutcome {
+    pub(crate) source_item: String,
+    pub(crate) target_project_label: Option<String>,
+    pub(crate) target_series: String,
+    pub(crate) target_item: String,
+    pub(crate) wave: Option<String>,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Transfer or defer a standing open item to another series (in this journal
+/// or `<project>::<series>` in another registered project).
+///
+/// Refuses completed (`done`), dropped, split, already transferred, or
+/// integrated-change items. Preserves title, `--from` source, active change
+/// link (skipping a closed-without-integrating change), and matching wave
+/// unless overridden by `--wave`.
+///
+/// Same-journal transfers execute under one journal transition lock.
+/// Cross-project transfers lock both journals in canonical path order before
+/// reading or writing, and append the destination item before marking the
+/// source item transferred.
+pub(crate) fn transfer(
+    ctx: &Ctx,
+    source_name: &str,
+    item_id: &str,
+    target_spec: &str,
+    wave: Option<&str>,
+    reason: &str,
+) -> Result<TransferOutcome> {
+    use crate::commands::progress::reader::Ledger;
+    use crate::model::Closure;
+    use crate::store::Store;
+
+    let reason = one_line("--reason", reason)?;
+    let here = resolve_dir(&ctx.cwd)?;
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    let (target_project, target_series_name) =
+        if let Some((prefix, series_name)) = target_spec.split_once(super::REFERENCE_SEPARATOR) {
+            let project = super::registered_project(prefix)?;
+            if canonical(&project.journal_dir) == canonical(&here) {
+                bail!("{prefix} is this project; name {series_name} without a project");
+            }
+            (Some(project), series_name)
+        } else {
+            (None, target_spec)
+        };
+
+    // Acquire journal transition lock(s) in canonical path order to prevent deadlock.
+    let (_lock_a, _lock_b) = match &target_project {
+        None => (lock_journal_transition(&here)?, None),
+        Some(project) => {
+            let here_canon = canonical(&here);
+            let there_canon = canonical(&project.journal_dir);
+            if here_canon <= there_canon {
+                let first = lock_journal_transition(&here)?;
+                let second = lock_journal_transition(&project.journal_dir)?;
+                (first, Some(second))
+            } else {
+                let first = lock_journal_transition(&project.journal_dir)?;
+                let second = lock_journal_transition(&here)?;
+                (first, Some(second))
+            }
+        }
+    };
+
+    let source_events = super::read_events(&here)?;
+    let source_file = resolve_name(&source_events, source_name, &here)?;
+    let source_series = replay(&source_events, &source_file)
+        .with_context(|| format!("{source_file} was never started"))?;
+    if source_series.retired.is_some() {
+        bail!("{source_file} was retired; it is read-only");
+    }
+    let source_item = source_series.require_item(item_id)?;
+    if !source_item.stands() {
+        bail!(
+            "item {item_id} of {source_file} is {}; it no longer stands in the list",
+            state_word(source_item.state)
+        );
+    }
+    if source_item.state == ItemState::Done {
+        bail!("item {item_id} of {source_file} is done; completed work cannot be transferred");
+    }
+
+    // Check any linked change: refuse integrated changes, drop closed-without-integrating
+    // links so the destination starts clean, and preserve open in-flight links.
+    let active_link: Option<ItemLink> = match source_item.link() {
+        None => None,
+        Some(link) => {
+            let state = match &link.project {
+                None => Store::discover_existing_for_reading(&ctx.cwd)?
+                    .and_then(|store| store.state(&link.change).ok()),
+                Some(slug) => super::registered_project(slug).ok().and_then(|project| {
+                    project
+                        .anchor
+                        .as_deref()
+                        .and_then(|anchor| Ledger::at(anchor).state(&link.change).ok().flatten())
+                }),
+            };
+            match state.and_then(|s| s.closure) {
+                Some(closure) if closure.outcome == Closure::Integrated => {
+                    bail!(
+                        "item {item_id} of {source_file} is linked to integrated change {}; \
+                         completed work cannot be transferred",
+                        link
+                    );
+                }
+                Some(_) => None,
+                None => Some(link),
+            }
+        }
+    };
+
+    let (target_dir, target_series) = match &target_project {
+        None => {
+            let target_file = resolve_name(&source_events, target_series_name, &here)?;
+            if target_file == source_file {
+                bail!("cannot transfer item {item_id} to its own series {source_file}");
+            }
+            let series = replay(&source_events, &target_file)
+                .with_context(|| format!("{target_file} was never started"))?;
+            if series.retired.is_some() {
+                bail!("{target_file} was retired; it is read-only");
+            }
+            (here.clone(), series)
+        }
+        Some(project) => {
+            let target_events = super::read_events(&project.journal_dir)?;
+            let target_file =
+                resolve_name(&target_events, target_series_name, &project.journal_dir)?;
+            let series = replay(&target_events, &target_file)
+                .with_context(|| format!("{target_file} was never started"))?;
+            if series.retired.is_some() {
+                bail!(
+                    "{}::{target_file} was retired; it is read-only",
+                    project.label()
+                );
+            }
+            (project.journal_dir.clone(), series)
+        }
+    };
+
+    let dest_wave = match wave {
+        Some(wave_id) => {
+            target_series.require_wave(wave_id)?;
+            Some(wave_id.to_string())
+        }
+        None => source_item
+            .wave
+            .as_ref()
+            .filter(|wave_id| target_series.wave(wave_id).is_some())
+            .cloned(),
+    };
+
+    // For cross-project transfers, establish this journal's registered slug so
+    // the destination can record provenance and re-scope local references.
+    let here_slug: Option<String> = if target_project.is_some() {
+        let cfg = crate::config::load()?;
+        let found = crate::registry::known_journals(&cfg)?
+            .into_iter()
+            .find(|(_, journal)| canonical(journal) == canonical(&here))
+            .map(|(slug, _)| slug);
+        let Some(slug) = found else {
+            bail!(
+                "this project's journal is not registered; bind or record a journal entry \
+                 before transferring items to another project"
+            );
+        };
+        Some(slug)
+    } else {
+        None
+    };
+
+    let carried_source = source_item
+        .source
+        .as_ref()
+        .map(|src| match &target_project {
+            None => src.clone(),
+            Some(target_proj) => {
+                let project = match &src.project {
+                    None => here_slug.clone(),
+                    Some(slug) if slug == &target_proj.slug => None,
+                    Some(slug) => Some(slug.clone()),
+                };
+                ItemSource {
+                    project,
+                    file: src.file.clone(),
+                }
+            }
+        });
+
+    let carried_link = active_link.map(|link| match &target_project {
+        None => link,
+        Some(target_proj) => {
+            let project = match &link.project {
+                None => here_slug.clone(),
+                Some(slug) if slug == &target_proj.slug => None,
+                Some(slug) => Some(slug.clone()),
+            };
+            ItemLink {
+                project,
+                change: link.change,
+            }
+        }
+    });
+
+    // Warn when a local standing item depends on the transferred item and the
+    // transfer shifts it into a later wave than its dependent.
+    let mut warnings = Vec::new();
+    if let Some(dest_wave_id) = dest_wave.as_deref() {
+        for file in series_files(&source_events) {
+            let Some(other_series) = replay(&source_events, &file) else {
+                continue;
+            };
+            if other_series.retired.is_some() {
+                continue;
+            }
+            let Some(dest_idx) = other_series.waves.iter().position(|w| w.id == dest_wave_id)
+            else {
+                continue;
+            };
+            for dep_item in &other_series.items {
+                if !dep_item.stands() {
+                    continue;
+                }
+                let depends = dep_item.depends_on.iter().any(|dep| {
+                    dep.project.is_none()
+                        && dep.item == item_id
+                        && dep.series.as_deref().unwrap_or(&other_series.file) == source_file
+                });
+                if !depends {
+                    continue;
+                }
+                if let Some(dep_wave) = dep_item.wave.as_deref() {
+                    if let Some(dep_idx) = other_series.waves.iter().position(|w| w.id == dep_wave)
+                    {
+                        if dest_idx > dep_idx {
+                            warnings.push(format!(
+                                "item {}:{} in wave {dep_wave} depends on {item_id}, which is \
+                                 moving to later wave {dest_wave_id}",
+                                other_series.file, dep_item.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let now = Utc::now();
+    let new_id = format!("i{}", target_series.next_id());
+    let target_topic = parse_artifact_name(&target_series.file)
+        .map(|(_, topic, _)| topic)
+        .unwrap_or_default();
+    let source_topic = parse_artifact_name(&source_file)
+        .map(|(_, topic, _)| topic)
+        .unwrap_or_default();
+
+    let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
+    add_event.file = Some(target_series.file.clone());
+    add_event.title = Some(source_item.title.clone());
+    add_event.series.item = Some(new_id.clone());
+    add_event.series.wave = dest_wave.clone();
+    add_event.series.item_source = carried_source;
+    add_event.series.transferred_from = Some(ItemRef {
+        project: here_slug,
+        series: source_file.clone(),
+        item: item_id.to_string(),
+    });
+    append_event(ctx, &target_dir, &add_event)?;
+
+    if let Some(link) = carried_link {
+        let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
+        link_event.file = Some(target_series.file.clone());
+        link_event.series.item = Some(new_id.clone());
+        link_event.series.change = Some(link.change);
+        link_event.series.change_project = link.project;
+        append_event(ctx, &target_dir, &link_event)?;
+    }
+
+    let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
+    xfer_event.file = Some(source_file.clone());
+    xfer_event.note = Some(reason);
+    xfer_event.series.item = Some(item_id.to_string());
+    xfer_event.series.transferred_to = Some(ItemRef {
+        project: target_project.as_ref().map(|p| p.slug.clone()),
+        series: target_series.file.clone(),
+        item: new_id.clone(),
+    });
+    append_event(ctx, &here, &xfer_event)?;
+
+    Ok(TransferOutcome {
+        source_item: item_id.to_string(),
+        target_project_label: target_project.as_ref().map(|p| p.label()),
+        target_series: target_series.file,
+        target_item: new_id,
+        wave: dest_wave,
+        warnings,
+    })
 }
 
 /// Record that a series relates to one in another project.
