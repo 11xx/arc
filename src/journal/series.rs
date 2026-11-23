@@ -2019,6 +2019,20 @@ fn resolve_prereq(
     })
 }
 
+/// Look up a unique journal directory in the slug namespace alone so a stored
+/// project slug never collides with another project's label.
+fn unique_journal_by_slug<'a>(
+    known: &'a [(String, std::path::PathBuf)],
+    slug: &str,
+) -> Option<&'a Path> {
+    let mut matches = known
+        .iter()
+        .filter(|(entry_slug, _)| entry_slug == slug)
+        .map(|(_, path)| path.as_path());
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 /// Check whether adding `source -> target` creates a cycle in the reachable
 /// prerequisite graph across this journal and any readable registered project.
 /// Split items expand to their children just as readiness derivation does, so
@@ -2028,7 +2042,7 @@ fn check_no_cycle(
     dir: &Path,
     local_events: &[JournalEvent],
     local_slug: Option<&str>,
-    locked_foreign: Option<(&str, &[JournalEvent])>,
+    known: &[(String, std::path::PathBuf)],
     source_series: &str,
     source_item: &str,
     target: &ItemPrereq,
@@ -2066,19 +2080,13 @@ fn check_no_cycle(
         let (proj, series_file, item_id) = &node;
         let events_slice: Option<&[JournalEvent]> = match proj {
             None => Some(local_events),
-            Some(slug) => match locked_foreign {
-                Some((locked_slug, locked_events)) if locked_slug == slug.as_str() => {
-                    Some(locked_events)
-                }
-                _ => cache
-                    .entry(Some(slug.clone()))
-                    .or_insert_with(|| {
-                        super::registered_project(slug)
-                            .ok()
-                            .and_then(|p| super::read_events(&p.journal_dir).ok())
-                    })
-                    .as_deref(),
-            },
+            Some(slug) => cache
+                .entry(Some(slug.clone()))
+                .or_insert_with(|| {
+                    unique_journal_by_slug(known, slug)
+                        .and_then(|journal_dir| super::read_events(journal_dir).ok())
+                })
+                .as_deref(),
         };
         let Some(events_slice) = events_slice else {
             continue;
@@ -2122,22 +2130,22 @@ pub(crate) fn depend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPr
     if item.depends_on.contains(&prereq) {
         bail!("item {id} already depends on {prereq}");
     }
-    let cfg = crate::config::load().ok();
-    let local_slug = cfg.as_ref().and_then(|cfg| {
-        crate::registry::known_journals(cfg)
-            .ok()?
-            .into_iter()
-            .find(|(_, journal)| {
-                let c = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-                c(journal) == c(&open.dir)
-            })
-            .map(|(slug, _)| slug)
-    });
+    let known = crate::config::load()
+        .ok()
+        .and_then(|cfg| crate::registry::known_journals(&cfg).ok())
+        .unwrap_or_default();
+    let c = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let here_canon = c(&open.dir);
+    let local_slug = known
+        .iter()
+        .find(|(_, journal)| c(journal) == here_canon)
+        .map(|(slug, _)| slug.as_str())
+        .filter(|slug| unique_journal_by_slug(&known, slug).is_some());
     check_no_cycle(
         &open.dir,
         &open.events,
-        local_slug.as_deref(),
-        None,
+        local_slug,
+        &known,
         &open.series.file,
         id,
         &prereq,
