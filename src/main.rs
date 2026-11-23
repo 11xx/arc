@@ -5570,6 +5570,13 @@ enum CheckpointCmd {
         /// A note kept with the checkpoint and in the tag message
         #[arg(long)]
         note: Option<String>,
+        /// Bind a milestone (by filename or topic), snapshotting all its tracks
+        /// and binding the recorded checkpoint back onto the milestone if open
+        #[arg(long)]
+        milestone: Option<String>,
+        /// Bind a progress series (`<series>` or `<project>::<series>`); repeatable
+        #[arg(long = "series")]
+        series: Vec<String>,
     },
     /// Show a checkpoint against the current state.
     ///
@@ -8650,7 +8657,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 rev,
                 tag,
                 note,
-            } => commands::record_checkpoint(&ctx, name, rev, tag, note).map(|_| 0),
+                milestone,
+                series,
+            } => commands::record_checkpoint(&ctx, name, rev, tag, note, milestone, series)
+                .map(|_| 0),
             CheckpointCmd::Show { name, json } => {
                 commands::show_checkpoint(&ctx, name, json).map(|_| 0)
             }

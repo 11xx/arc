@@ -2286,6 +2286,15 @@ pub enum Payload {
         /// recorded before arc kept it, which judge by filing time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filed_todos: Option<Vec<String>>,
+        /// Bound milestone filename recorded with `--milestone`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        milestone: Option<String>,
+        /// Bound progress series snapshots recorded via `--milestone` or `--series`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        series: Option<Vec<CheckpointSeries>>,
+        /// Outstanding review debts at the checkpoint revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        debts: Option<Vec<CheckpointDebt>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
@@ -2899,6 +2908,42 @@ pub struct CheckpointTodo {
     /// filename and this time identify the creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Snapshot of one progress series (or milestone track) at checkpoint time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSeries {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<CheckpointSeriesItem>,
+}
+
+/// Snapshot of one progress item at checkpoint time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSeriesItem {
+    pub id: String,
+    pub title: String,
+    pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+}
+
+/// An outstanding review debt recorded at a checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointDebt {
+    pub change_id: String,
+    pub slug: String,
+    pub reason: String,
 }
 
 /// One landing member as its attempt pinned it at plan time.

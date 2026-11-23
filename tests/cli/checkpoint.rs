@@ -527,3 +527,178 @@ fn doctor_names_a_checkpoint_whose_revision_is_absent() {
         "{dangling:?}"
     );
 }
+
+#[test]
+fn checkpoint_binds_milestone_series_and_diffs_items_and_review_debt() {
+    let repo = Repo::new();
+
+    // Open a change, make a commit, snapshot, and integrate it with review debt.
+    let indebted = begin_change(&repo, "indebted", None);
+    let wt = repo.root.clone();
+    fs::write(wt.join("debt.txt"), "hello\n").unwrap();
+    git(&wt, &["add", "debt.txt"]);
+    git(&wt, &["commit", "-q", "-m", "add debt file"]);
+    stdout(repo.arc(&wt).args(["snapshot", &indebted]));
+    stdout(repo.arc(&wt).args([
+        "integrate",
+        &indebted,
+        "--debt",
+        "deferred review for checkpoint test",
+    ]));
+
+    // Start two progress series and a milestone with one critical track.
+    let track = stdout(repo.arc(&wt).args([
+        "progress",
+        "start",
+        "rc3-core",
+        "--title",
+        "RC3 Core",
+        "--wave",
+        "w0",
+        "--item",
+        "Complete after checkpoint",
+        "--item",
+        "Defer after checkpoint",
+        "--item-wave",
+        "i1=w0",
+        "--item-wave",
+        "i2=w0",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+    let later = stdout(repo.arc(&wt).args([
+        "progress", "start", "rc4-core", "--title", "RC4 Core", "--wave", "w0",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+    let extra = stdout(repo.arc(&wt).args([
+        "progress",
+        "start",
+        "extra",
+        "--title",
+        "Extra Series",
+        "--item",
+        "Extra item",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let ms = stdout(repo.arc(&wt).args([
+        "milestone",
+        "start",
+        "rc3",
+        "--title",
+        "Release Candidate 3",
+        "--wave",
+        "w0",
+    ]))
+    .trim()
+    .to_string();
+    stdout(
+        repo.arc(&wt)
+            .args(["milestone", "track", "add", &ms, &track, "--label", "core"]),
+    );
+
+    // Record checkpoint bound to both `--milestone` and `--series`.
+    let rec = stdout(repo.arc(&wt).args([
+        "checkpoint",
+        "record",
+        "rc3-handover",
+        "--milestone",
+        "rc3",
+        "--series",
+        &extra,
+    ]));
+    assert!(rec.contains(&format!("milestone: {ms}")), "{rec}");
+    assert!(rec.contains("bound series: 2"), "{rec}");
+    assert!(rec.contains("open debts: 1"), "{rec}");
+
+    // Milestone automatically recorded the checkpoint binding.
+    let ms_json = json_stdout(repo.arc(&wt).args(["milestone", &ms, "--json"]));
+    assert_eq!(
+        ms_json["milestones"][0]["checkpoints"][0]["name"],
+        "rc3-handover"
+    );
+
+    // Mutate after the checkpoint: finish i1, transfer i2 -> rc4-core, add i3.
+    stdout(repo.arc(&wt).args(["progress", "done", &track, "i1"]));
+    stdout(repo.arc(&wt).args([
+        "progress",
+        "transfer",
+        &track,
+        "i2",
+        "--to",
+        &later,
+        "--reason",
+        "slipped to rc4",
+    ]));
+    stdout(
+        repo.arc(&wt)
+            .args(["progress", "add", &track, "Post-checkpoint fix"]),
+    );
+
+    // Show JSON verifies milestone, series diffs, and owed debt.
+    let view = show(&repo, "rc3-handover");
+    assert_eq!(view["schema"], "arc-checkpoint/1");
+    assert_eq!(view["milestone"], ms);
+    let series_diffs = view["series"].as_array().unwrap();
+    assert_eq!(series_diffs.len(), 2);
+    let core_diff = &series_diffs[0];
+    assert_eq!(core_diff["file"], track);
+    assert_eq!(core_diff["role"], "critical");
+    assert_eq!(core_diff["completed_since"][0]["id"], "i1");
+    assert_eq!(core_diff["transferred_since"][0]["id"], "i2");
+    assert_eq!(
+        core_diff["transferred_since"][0]["transferred_to"],
+        format!("{later}:i1")
+    );
+    assert_eq!(core_diff["added_since"][0]["id"], "i3");
+    assert_eq!(view["debts"][0]["change_id"], indebted);
+    assert_eq!(view["debts"][0]["status"], "owed");
+
+    // Text view prints bound series diffs and owed review debt.
+    let text = stdout(repo.arc(&wt).args(["checkpoint", "show", "rc3-handover"]));
+    assert!(text.contains(&format!("milestone: {ms}")), "{text}");
+    assert!(
+        text.contains("completed i1 Complete after checkpoint"),
+        "{text}"
+    );
+    assert!(
+        text.contains("transferred i2 Defer after checkpoint"),
+        "{text}"
+    );
+    assert!(text.contains("added i3 Post-checkpoint fix"), "{text}");
+    assert!(text.contains("review debt at the checkpoint:"), "{text}");
+    assert!(text.contains("still owed"), "{text}");
+
+    // Discharging the debt with an independent audit updates checkpoint show.
+    stdout(repo.arc(&wt).args([
+        "--actor",
+        "auditor",
+        "--harness",
+        "codex",
+        "--session",
+        "audit-session-1",
+        "--model",
+        "gpt-6.2-astra#xhigh",
+        "audit",
+        &indebted,
+        "--verdict",
+        "approved",
+        "--body",
+        "Post-checkpoint audit approved",
+    ]));
+    let after_audit = show(&repo, "rc3-handover");
+    assert_eq!(after_audit["debts"][0]["status"], "discharged");
+    let text_after = stdout(repo.arc(&wt).args(["checkpoint", "show", "rc3-handover"]));
+    assert!(text_after.contains("discharged since"), "{text_after}");
+}

@@ -2,9 +2,14 @@
 //! journal todos open when it was named, read back against what has happened
 //! since.
 
+use crate::commands::milestone::matrix as milestone_matrix;
+use crate::commands::progress::reader::{ItemRow, Ledger, PersonQuestions, Reader, Registry};
 use crate::gitio::{self, Ancestry};
-use crate::journal::{self, TodoRecord};
-use crate::model::{CheckpointChange, CheckpointTodo, Closure, Event, Payload};
+use crate::journal::{self, milestone, series, TodoRecord};
+use crate::model::{
+    CheckpointChange, CheckpointDebt, CheckpointSeries, CheckpointSeriesItem, CheckpointTodo,
+    Closure, Event, Payload,
+};
 use crate::render::short_sha;
 use crate::state::ChangeState;
 use crate::store::Store;
@@ -29,6 +34,9 @@ pub(crate) struct Recorded {
     pub(crate) changes: Vec<CheckpointChange>,
     pub(crate) todos: Vec<CheckpointTodo>,
     pub(crate) filed_todos: Option<BTreeSet<String>>,
+    pub(crate) milestone: Option<String>,
+    pub(crate) series: Option<Vec<CheckpointSeries>>,
+    pub(crate) debts: Option<Vec<CheckpointDebt>>,
     pub(crate) note: Option<String>,
 }
 
@@ -45,6 +53,9 @@ fn recorded(events: &[Event]) -> Vec<Recorded> {
                 changes,
                 todos,
                 filed_todos,
+                milestone,
+                series,
+                debts,
                 note,
             } => Some(Recorded {
                 event: event.clone(),
@@ -58,6 +69,9 @@ fn recorded(events: &[Event]) -> Vec<Recorded> {
                 filed_todos: filed_todos
                     .as_ref()
                     .map(|files| files.iter().cloned().collect()),
+                milestone: milestone.clone(),
+                series: series.clone(),
+                debts: debts.clone(),
                 note: note.clone(),
             }),
             _ => None,
@@ -113,12 +127,20 @@ pub fn record_checkpoint(
     rev: Option<String>,
     tag: bool,
     note: Option<String>,
+    milestone_name: Option<String>,
+    series_specs: Vec<String>,
 ) -> Result<()> {
     validate_name(&name)?;
     let note = match note {
         Some(note) if note.trim().is_empty() => bail!("--note must not be blank"),
         note => note,
     };
+
+    // Snapshot any bound milestone and/or explicit progress series before taking
+    // the repository event lock so invalid names refuse cleanly up front.
+    let (bound_milestone, milestone_was_open, bound_series) =
+        snapshot_bindings(ctx, milestone_name.as_deref(), &series_specs)?;
+
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
     if let Some(existing) = recorded(&store.load_repository_events()?)
@@ -152,10 +174,18 @@ pub fn record_checkpoint(
 
     let read = store.read()?;
     let mut changes = Vec::new();
+    let mut debts = Vec::new();
     for change_id in read.change_ids()? {
         let state = read
             .state(&change_id)
             .with_context(|| format!("cannot read change {change_id}"))?;
+        if let Some(debt) = state.debt.as_ref().filter(|_| state.debt_outstanding()) {
+            debts.push(CheckpointDebt {
+                change_id: state.change_id.clone(),
+                slug: state.slug.clone(),
+                reason: debt.reason.clone(),
+            });
+        }
         if state.is_closed() {
             continue;
         }
@@ -168,6 +198,7 @@ pub fn record_checkpoint(
             head: patchset.map(|patchset| patchset.head.clone()),
         });
     }
+    debts.sort_by(|a, b| a.change_id.cmp(&b.change_id));
     let records = journal::todo_records(cwd)?;
     let filed_todos: Vec<String> = records.iter().map(|todo| todo.file.clone()).collect();
     let todos: Vec<CheckpointTodo> = records
@@ -180,7 +211,8 @@ pub fn record_checkpoint(
             created_at: todo.created_at,
         })
         .collect();
-    let (change_count, todo_count) = (changes.len(), todos.len());
+    let (change_count, todo_count, debt_count) = (changes.len(), todos.len(), debts.len());
+    let series_count = bound_series.as_ref().map_or(0, Vec::len);
     let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
@@ -193,6 +225,9 @@ pub fn record_checkpoint(
             changes,
             todos,
             filed_todos: Some(filed_todos),
+            milestone: bound_milestone.clone(),
+            series: bound_series,
+            debts: Some(debts),
             note: note.clone(),
         },
     )?;
@@ -205,6 +240,12 @@ pub fn record_checkpoint(
         let tag = tag_name.as_deref().zip(tag_object.as_deref());
         return Err(failed_append(&store, cwd, &event, tag, error));
     }
+    drop(_repository_events);
+
+    if let Some(ms_file) = bound_milestone.as_deref().filter(|_| milestone_was_open) {
+        milestone::bind_checkpoint(ctx, ms_file, &name)?;
+    }
+
     println!("checkpoint: {name}");
     println!("revision: {revision}");
     println!("tree: {tree}");
@@ -214,10 +255,135 @@ pub fn record_checkpoint(
     if let Some(tag_name) = &tag_name {
         println!("tag: {tag_name}");
     }
+    if let Some(ms_file) = &bound_milestone {
+        println!("milestone: {ms_file}");
+    }
+    if series_count > 0 {
+        println!("bound series: {series_count}");
+    }
     println!("open changes: {change_count}");
     println!("open todos: {todo_count}");
+    println!("open debts: {debt_count}");
     println!("event: {}", event.event_id);
     Ok(())
+}
+
+fn snapshot_bindings(
+    ctx: &Ctx,
+    milestone_name: Option<&str>,
+    series_specs: &[String],
+) -> Result<(Option<String>, bool, Option<Vec<CheckpointSeries>>)> {
+    if milestone_name.is_none() && series_specs.is_empty() {
+        return Ok((None, false, None));
+    }
+    let mut bound_milestone = None;
+    let mut milestone_was_open = false;
+    let mut snapshots: Vec<CheckpointSeries> = Vec::new();
+    let mut seen: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+
+    if let Some(ms_name) = milestone_name {
+        let doc = milestone_matrix::build(ctx, Some(ms_name), false, false)?;
+        let Some(ms) = doc.milestones.into_iter().next() else {
+            bail!("no milestone named {ms_name:?}");
+        };
+        milestone_was_open = ms.closure.is_none();
+        bound_milestone = Some(ms.file);
+        for track in ms.tracks {
+            seen.insert((track.project.clone(), track.file.clone()));
+            snapshots.push(CheckpointSeries {
+                project: track.project,
+                file: track.file,
+                title: track.title,
+                role: Some(track.role.as_str().to_string()),
+                unavailable: track.unavailable,
+                items: track.items.iter().map(snapshot_item).collect(),
+            });
+        }
+    }
+
+    if !series_specs.is_empty() {
+        let now = Utc::now();
+        let here = journal::resolve_dir(&ctx.cwd)?;
+        let local_events = journal::read_events(&here)?;
+        let local_ledger = Ledger::local(ctx);
+        let registry = Registry::read()?;
+        let own = registry.slug_of(&here).map(str::to_string);
+        let local_questions = PersonQuestions::new(&here, &local_events);
+        let local_reader = Reader::new(
+            &local_ledger,
+            own.as_deref(),
+            &local_events,
+            &registry,
+            &local_questions,
+            now,
+        );
+
+        for spec in series_specs {
+            if let Some((prefix, remote_name)) = spec.split_once(journal::REFERENCE_SEPARATOR) {
+                let project = journal::registered_project(prefix)?;
+                let remote_events = journal::read_events(&project.journal_dir)?;
+                let s = series::named_in(&remote_events, &project.journal_dir, remote_name)
+                    .with_context(|| {
+                        format!("cannot read series {remote_name:?} in {}", project.label())
+                    })?;
+                if !seen.insert((Some(project.slug.clone()), s.file.clone())) {
+                    continue;
+                }
+                let questions = PersonQuestions::new(&project.journal_dir, &remote_events);
+                let ledger = match project.anchor.as_deref() {
+                    Some(anchor) => Ledger::at(anchor),
+                    None => Ledger::none(&project.journal_dir),
+                };
+                let reader = Reader::new(
+                    &ledger,
+                    Some(&project.slug),
+                    &remote_events,
+                    &registry,
+                    &questions,
+                    now,
+                );
+                let rows = reader.rows(&s)?;
+                snapshots.push(CheckpointSeries {
+                    project: Some(project.slug),
+                    file: s.file,
+                    title: Some(s.title),
+                    role: None,
+                    unavailable: None,
+                    items: rows.iter().map(snapshot_item).collect(),
+                });
+            } else {
+                let s = series::named_in(&local_events, &here, spec)?;
+                if !seen.insert((None, s.file.clone())) {
+                    continue;
+                }
+                let rows = local_reader.rows(&s)?;
+                snapshots.push(CheckpointSeries {
+                    project: None,
+                    file: s.file,
+                    title: Some(s.title),
+                    role: None,
+                    unavailable: None,
+                    items: rows.iter().map(snapshot_item).collect(),
+                });
+            }
+        }
+    }
+
+    Ok((
+        bound_milestone,
+        milestone_was_open,
+        (!snapshots.is_empty()).then_some(snapshots),
+    ))
+}
+
+fn snapshot_item(row: &ItemRow) -> CheckpointSeriesItem {
+    CheckpointSeriesItem {
+        id: row.id.clone(),
+        title: row.title.clone(),
+        stage: row.stage.to_string(),
+        wave: row.wave.clone(),
+        change: row.change.clone(),
+    }
 }
 
 /// The error for a checkpoint append that failed, after settling the tag
@@ -352,6 +518,49 @@ struct TodoView {
 }
 
 #[derive(Serialize)]
+struct DebtView {
+    change_id: String,
+    slug: String,
+    reason: String,
+    /// `owed`, `discharged`, or `absent`.
+    status: &'static str,
+}
+
+#[derive(Serialize, Clone)]
+struct SeriesItemDiff {
+    id: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage_then: Option<String>,
+    stage_now: String,
+    /// `completed-since`, `transferred-since`, `added-since`,
+    /// `dropped-since`, `split-since`, `changed`, or `unchanged`.
+    change: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wave: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transferred_to: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SeriesDiffView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<String>,
+    items_then: usize,
+    completed_since: Vec<SeriesItemDiff>,
+    transferred_since: Vec<SeriesItemDiff>,
+    added_since: Vec<SeriesItemDiff>,
+    items: Vec<SeriesItemDiff>,
+}
+
+#[derive(Serialize)]
 struct ShowView {
     schema: &'static str,
     name: String,
@@ -366,6 +575,8 @@ struct ShowView {
     branch: Option<String>,
     tag: Option<String>,
     note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    milestone: Option<String>,
     changes: Vec<ChangeView>,
     /// Why ancestry cannot be judged against the checkpoint at all: its
     /// revision is not in this repository. `landed_since` is then null.
@@ -378,6 +589,10 @@ struct ShowView {
     /// recorded as filed. False on a checkpoint recorded without them, whose
     /// `filed_since` compares filing times and is approximate.
     filed_since_exact: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series: Option<Vec<SeriesDiffView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debts: Option<Vec<DebtView>>,
 }
 
 fn todo_view(file: &str, recorded: Option<&CheckpointTodo>, now: Option<&TodoRecord>) -> TodoView {
@@ -551,6 +766,30 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         .map(|record| todo_view(&record.file, None, Some(record)))
         .collect();
 
+    let debts = checkpoint.debts.as_ref().map(|recorded_debts| {
+        recorded_debts
+            .iter()
+            .map(|debt| {
+                let status = match states.get(&debt.change_id) {
+                    None => "absent",
+                    Some(state) if state.debt_outstanding() => "owed",
+                    Some(_) => "discharged",
+                };
+                DebtView {
+                    change_id: debt.change_id.clone(),
+                    slug: debt.slug.clone(),
+                    reason: debt.reason.clone(),
+                    status,
+                }
+            })
+            .collect()
+    });
+    let series = checkpoint
+        .series
+        .as_ref()
+        .map(|recorded_series| diff_bound_series(ctx, recorded_series))
+        .transpose()?;
+
     Ok(ShowView {
         schema: "arc-checkpoint/1",
         name: checkpoint.name,
@@ -563,6 +802,7 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         branch: checkpoint.branch,
         tag: checkpoint.tag,
         note: checkpoint.note,
+        milestone: checkpoint.milestone,
         changes,
         landed_since: ancestry_unknown.is_none().then_some(landed_since),
         ancestry_unknown,
@@ -570,7 +810,160 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         todos,
         filed_since,
         filed_since_exact: checkpoint.filed_todos.is_some(),
+        series,
+        debts,
     })
+}
+
+fn diff_bound_series(ctx: &Ctx, snapshots: &[CheckpointSeries]) -> Result<Vec<SeriesDiffView>> {
+    let now = Utc::now();
+    let here = journal::resolve_dir(&ctx.cwd)?;
+    let local_events = journal::read_events(&here)?;
+    let local_ledger = Ledger::local(ctx);
+    let registry = Registry::read()?;
+    let own = registry.slug_of(&here).map(str::to_string);
+    let local_questions = PersonQuestions::new(&here, &local_events);
+    let local_reader = Reader::new(
+        &local_ledger,
+        own.as_deref(),
+        &local_events,
+        &registry,
+        &local_questions,
+        now,
+    );
+
+    let mut out = Vec::with_capacity(snapshots.len());
+    for snap in snapshots {
+        let current_rows: std::result::Result<(Option<String>, Vec<ItemRow>), String> = match snap
+            .project
+            .as_deref()
+            .filter(|slug| Some(*slug) != own.as_deref())
+        {
+            None => match series::replay(&local_events, &snap.file) {
+                None => Err(format!("no series {}", snap.file)),
+                Some(s) => local_reader
+                    .rows(&s)
+                    .map(|rows| (Some(s.title), rows))
+                    .map_err(|e| format!("{e:#}").replace(['\n', '\r'], " ")),
+            },
+            Some(slug) => match registry.get(slug) {
+                None => Err(format!("no journal is registered as {slug}")),
+                Some(project) => match project.events() {
+                    Err(reason) => Err(reason.to_string()),
+                    Ok(events) => match series::replay(events, &snap.file) {
+                        None => Err(format!("{slug} holds no series {}", snap.file)),
+                        Some(s) => {
+                            let questions = PersonQuestions::new(&project.journal_dir, events);
+                            let reader = Reader::new(
+                                &project.ledger,
+                                Some(slug),
+                                events,
+                                &registry,
+                                &questions,
+                                now,
+                            );
+                            reader
+                                .rows(&s)
+                                .map(|rows| (Some(s.title), rows))
+                                .map_err(|e| format!("{e:#}").replace(['\n', '\r'], " "))
+                        }
+                    },
+                },
+            },
+        };
+
+        match current_rows {
+            Err(reason) => out.push(SeriesDiffView {
+                project: snap.project.clone(),
+                file: snap.file.clone(),
+                title: snap.title.clone(),
+                role: snap.role.clone(),
+                unavailable: Some(reason),
+                items_then: snap.items.len(),
+                completed_since: Vec::new(),
+                transferred_since: Vec::new(),
+                added_since: Vec::new(),
+                items: Vec::new(),
+            }),
+            Ok((title, rows)) => {
+                let then_map: BTreeMap<&str, &CheckpointSeriesItem> = snap
+                    .items
+                    .iter()
+                    .map(|item| (item.id.as_str(), item))
+                    .collect();
+                let mut completed_since = Vec::new();
+                let mut transferred_since = Vec::new();
+                let mut added_since = Vec::new();
+                let mut items = Vec::with_capacity(rows.len());
+
+                for row in &rows {
+                    let transferred_to = row.transferred_to.as_ref().map(ToString::to_string);
+                    let diff = match then_map.get(row.id.as_str()) {
+                        None => {
+                            let d = SeriesItemDiff {
+                                id: row.id.clone(),
+                                title: row.title.clone(),
+                                stage_then: None,
+                                stage_now: row.stage.to_string(),
+                                change: "added-since",
+                                wave: row.wave.clone(),
+                                transferred_to,
+                            };
+                            added_since.push(d.clone());
+                            d
+                        }
+                        Some(prev) => {
+                            let was_complete = matches!(prev.stage.as_str(), "integrated" | "done");
+                            let is_complete = matches!(row.stage, "integrated" | "done");
+                            let kind = if !was_complete && is_complete {
+                                "completed-since"
+                            } else if prev.stage != "transferred" && row.stage == "transferred" {
+                                "transferred-since"
+                            } else if prev.stage != "dropped" && row.stage == "dropped" {
+                                "dropped-since"
+                            } else if prev.stage != "split" && row.stage == "split" {
+                                "split-since"
+                            } else if prev.stage != row.stage {
+                                "changed"
+                            } else {
+                                "unchanged"
+                            };
+                            let d = SeriesItemDiff {
+                                id: row.id.clone(),
+                                title: row.title.clone(),
+                                stage_then: Some(prev.stage.clone()),
+                                stage_now: row.stage.to_string(),
+                                change: kind,
+                                wave: row.wave.clone(),
+                                transferred_to,
+                            };
+                            if kind == "completed-since" {
+                                completed_since.push(d.clone());
+                            } else if kind == "transferred-since" {
+                                transferred_since.push(d.clone());
+                            }
+                            d
+                        }
+                    };
+                    items.push(diff);
+                }
+
+                out.push(SeriesDiffView {
+                    project: snap.project.clone(),
+                    file: snap.file.clone(),
+                    title: title.or_else(|| snap.title.clone()),
+                    role: snap.role.clone(),
+                    unavailable: None,
+                    items_then: snap.items.len(),
+                    completed_since,
+                    transferred_since,
+                    added_since,
+                    items,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Whether a todo was filed after the checkpoint. A checkpoint that recorded
@@ -616,6 +1009,9 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
     );
     if let Some(note) = &view.note {
         println!("note: {note}");
+    }
+    if let Some(ms) = &view.milestone {
+        println!("milestone: {ms}");
     }
     println!();
     println!("changes open at the checkpoint:");
@@ -683,6 +1079,73 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
         println!("filed since (not part of the checkpoint; approximate, by filing time):");
     }
     render_todos(&view.filed_since);
+    if let Some(series_list) = &view.series {
+        println!("bound series:");
+        if series_list.is_empty() {
+            println!("  (none)");
+        }
+        for s in series_list {
+            let name = match &s.project {
+                Some(slug) => format!("{slug}::{}", s.file),
+                None => s.file.clone(),
+            };
+            let role = s
+                .role
+                .as_deref()
+                .map(|r| format!(" [{r}]"))
+                .unwrap_or_default();
+            if let Some(reason) = &s.unavailable {
+                println!("  {name}{role}: unavailable ({reason})");
+                continue;
+            }
+            println!(
+                "  {name}{role}: {} completed since, {} transferred since, {} added since",
+                s.completed_since.len(),
+                s.transferred_since.len(),
+                s.added_since.len()
+            );
+            for item in &s.completed_since {
+                println!(
+                    "    completed {} {}: {} -> {}",
+                    item.id,
+                    item.title,
+                    item.stage_then.as_deref().unwrap_or("?"),
+                    item.stage_now
+                );
+            }
+            for item in &s.transferred_since {
+                println!(
+                    "    transferred {} {}{}",
+                    item.id,
+                    item.title,
+                    item.transferred_to
+                        .as_deref()
+                        .map(|to| format!(" -> {to}"))
+                        .unwrap_or_default()
+                );
+            }
+            for item in &s.added_since {
+                println!("    added {} {}: {}", item.id, item.title, item.stage_now);
+            }
+        }
+    }
+    if let Some(debts) = &view.debts {
+        println!("review debt at the checkpoint:");
+        if debts.is_empty() {
+            println!("  (none)");
+        }
+        for debt in debts {
+            let state = match debt.status {
+                "discharged" => "discharged since",
+                "owed" => "still owed",
+                other => other,
+            };
+            println!(
+                "  {} {}: {state} ({})",
+                debt.change_id, debt.slug, debt.reason
+            );
+        }
+    }
     Ok(())
 }
 
@@ -932,6 +1395,9 @@ mod tests {
             changes: Vec::new(),
             todos: Vec::new(),
             filed_todos: Some(["earlier", "same-second"].map(String::from).into()),
+            milestone: None,
+            series: None,
+            debts: None,
             note: None,
         };
         assert!(!filed_after(&checkpoint, &earlier));

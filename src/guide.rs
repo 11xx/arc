@@ -2400,6 +2400,7 @@ END A SESSION (what the next one reads)
 
 CHECKPOINTS (a revision handed over for testing)
   arc checkpoint record <name> [--rev REV] [--tag] [--note TEXT]
+                               [--milestone <slug>] [--series <series>]...
   arc checkpoint show <name> [--json]
   arc checkpoint list [--json]
   arc journal handoff <topic> --checkpoint <name>
@@ -2408,7 +2409,10 @@ CHECKPOINTS (a revision handed over for testing)
   checkpoint at the revision handed over (`HEAD` unless `--rev` names one).
   It holds the revision, its tree and branch, every open change with its
   patchset and head, every live, unconsumed journal todo of the project,
-  and the name of every todo filed by then, open or consumed. Names are
+  the name of every todo filed by then (open or consumed), every outstanding
+  review debt (matching `arc query --debt`), and — when given `--milestone`
+  and/or repeatable `--series` — a snapshot of each bound series' items and
+  stages (also binding the checkpoint onto the milestone when it is open). Names are
   unique in a repository. `--tag` also writes the annotated tag
   `checkpoint/<name>` with `git tag -a`, signed as Git's configuration
   signs tags; an existing tag refuses with nothing recorded and is never
@@ -2439,7 +2443,11 @@ CHECKPOINTS (a revision handed over for testing)
   since, with outcome and time, or still open. Filed since lists the todos
   the checkpoint did not record as filed; they are not part of it. A
   checkpoint recorded without that list compares filing times instead and
-  marks the answer approximate. A finding about a change landed since is fixed since, one matching a todo
+  marks the answer approximate. For bound series/milestone snapshots, `show`
+  reports which items completed, transferred, or were added since the
+  checkpoint; for recorded review debts, it reports which have since been
+  discharged (`arc audit`) versus remain owed. Legacy checkpoints without
+  those fields read cleanly with those sections omitted. A finding about a change landed since is fixed since, one matching a todo
   is already filed, and the rest are new. `arc journal checkpoint` is a
   different record: progress on a claimed journal artifact.
 

@@ -7,7 +7,7 @@ use crate::journal::{
 use anyhow::{bail, ensure, Result};
 use clap::{ArgGroup, Args, Subcommand};
 
-mod matrix;
+pub(crate) mod matrix;
 mod view;
 use matrix::{MatrixCounts, MilestoneReport};
 
