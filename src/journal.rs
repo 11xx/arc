@@ -120,6 +120,35 @@ fn lock_journal_file_for_exchange(
     Ok(JournalTransitionLock(file))
 }
 
+/// Workspace-wide lock serializing prerequisite graph mutations across all
+/// registered journals so concurrent `progress depend` writes (including
+/// multi-hop N-project cycles with disjoint endpoints) cannot race past cycle
+/// checks. Placed directly under `cfg.ai_home` (outside `journals/`) so it is
+/// never mistaken for a project journal directory.
+pub(super) fn lock_depend_graph(fallback_dir: &Path) -> Result<JournalTransitionLock> {
+    let lock_parent = crate::config::load()
+        .map(|cfg| cfg.ai_home)
+        .unwrap_or_else(|_| fallback_dir.parent().unwrap_or(fallback_dir).to_path_buf());
+    std::fs::create_dir_all(&lock_parent)
+        .with_context(|| format!("cannot create lock parent {}", lock_parent.display()))?;
+    let path = lock_parent.join(".arc-depend-graph.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("cannot open prerequisite graph lock {}", path.display()))?;
+    crate::store::wait_for_lock(
+        &file,
+        &path,
+        "prerequisite graph",
+        crate::store::LOCK_TIMEOUT,
+        crate::store::LockMode::Exclusive,
+    )?;
+    Ok(JournalTransitionLock(file))
+}
+
 /// The transition lock of the journal a reference names, which is another
 /// project's journal for a `<journal-dir>::<file>` reference.
 pub(crate) fn lock_reference_transition(

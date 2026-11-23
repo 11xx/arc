@@ -2109,39 +2109,14 @@ fn check_no_cycle(
 
 /// Record a prerequisite edge on a standing item, refusing cycles.
 ///
-/// Cross-project edges acquire both journals' transition locks in canonical
-/// path order so concurrent reciprocal inserts serialize rather than each
-/// observing the other's pre-insert graph.
+/// Acquires the workspace-wide prerequisite graph lock before taking this
+/// journal's transition lock so concurrent `progress depend` writes across any
+/// number of journals serialize and observe each prior committed edge before
+/// cycle checking.
 pub(crate) fn depend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPrereq> {
-    let (open, _foreign_lock, foreign_locked_events) =
-        if let Some((prefix, _rest)) = on.split_once(super::REFERENCE_SEPARATOR) {
-            let local_dir = resolve_dir(&ctx.cwd)?;
-            let project = super::registered_project(prefix)?;
-            let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-            let local_key = canonical(&local_dir);
-            let foreign_key = canonical(&project.journal_dir);
-            if local_key == foreign_key {
-                bail!("{prefix} is this project; name the prerequisite without a project");
-            }
-            let (local_lock, foreign_lock) = if local_key < foreign_key {
-                let first = lock_journal_transition(&local_dir)?;
-                let second = lock_journal_transition(&project.journal_dir)?;
-                (first, second)
-            } else {
-                let first = lock_journal_transition(&project.journal_dir)?;
-                let second = lock_journal_transition(&local_dir)?;
-                (second, first)
-            };
-            let open = open_under_lock(local_dir, local_lock, name)?;
-            let foreign_events = super::read_events(&project.journal_dir)?;
-            (
-                open,
-                Some(foreign_lock),
-                Some((project.slug, foreign_events)),
-            )
-        } else {
-            (open_for_write(ctx, name)?, None, None)
-        };
+    let local_dir = resolve_dir(&ctx.cwd)?;
+    let _graph_lock = super::lock_depend_graph(&local_dir)?;
+    let open = open_for_write(ctx, name)?;
     let item = open.standing(id)?;
     let prereq = resolve_prereq(&open.dir, &open.events, &open.series, on)?;
     if item.depends_on.contains(&prereq) {
@@ -2162,9 +2137,7 @@ pub(crate) fn depend(ctx: &Ctx, name: &str, id: &str, on: &str) -> Result<ItemPr
         &open.dir,
         &open.events,
         local_slug.as_deref(),
-        foreign_locked_events
-            .as_ref()
-            .map(|(slug, ev)| (slug.as_str(), ev.as_slice())),
+        None,
         &open.series.file,
         id,
         &prereq,
