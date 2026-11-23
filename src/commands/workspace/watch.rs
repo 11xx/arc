@@ -130,6 +130,11 @@ struct Watch<'a> {
     scope: ResolvedWorkspaceScope,
     listed: Listed,
     registered: Vec<crate::registry::Project>,
+    /// The `(journal_dir -> slug)` registry snapshot that produced the last
+    /// emitted report, preserved across any eager reloads in [`Watch::note`] so
+    /// coalesced first-ledger notices never hide a newly registered or removed
+    /// dependency from invalidation.
+    reported_registry: Option<BTreeMap<PathBuf, String>>,
     /// Absent Git markers at reachable journal-only anchors. A store creation
     /// can be the first notice after one of these directories acquired Git.
     pending_git: Vec<PathBuf>,
@@ -169,6 +174,7 @@ impl<'a> Watch<'a> {
                 retired: show_retired,
             },
             registered: Vec::new(),
+            reported_registry: None,
             pending_git: Vec::new(),
             ledgers: HashMap::new(),
             journals: HashMap::new(),
@@ -388,18 +394,17 @@ impl<'a> Watch<'a> {
             stale.insert(dir);
         }
         // A series item or milestone track linked into another project reads
-        // that project's journal and ledger, so a write there — or a newly
-        // added or removed registration for that slug — leaves every row
-        // referencing it stale.
+        // that project's journal and ledger, so a write there — or any
+        // registration added, removed, or renamed since the last emitted
+        // report (including reloads triggered eagerly in `note()`) — leaves
+        // every row referencing it stale.
+        if dirty.everything || dirty.registry {
+            self.read_registry()?;
+        }
         let mut written_slugs: BTreeSet<String> = BTreeSet::new();
-        let old_registrations: Option<BTreeMap<PathBuf, String>> =
-            (dirty.everything || dirty.registry).then(|| {
-                self.registered
-                    .iter()
-                    .map(|p| (p.journal_dir.clone(), p.slug.clone()))
-                    .collect()
-            });
+        let mut current_dirs: BTreeSet<PathBuf> = BTreeSet::new();
         for project in &mut self.registered {
+            current_dirs.insert(project.journal_dir.clone());
             if stale.contains(&project.journal_dir) {
                 // A write may be the first for a registered project's ledger.
                 if project.ledger.is_none() && !dirty.everything && !dirty.registry {
@@ -407,31 +412,22 @@ impl<'a> Watch<'a> {
                 }
                 written_slugs.insert(project.slug.clone());
             }
-        }
-        if let Some(old_map) = old_registrations {
-            self.read_registry()?;
-            let mut new_dirs: BTreeSet<&Path> = BTreeSet::new();
-            for project in &self.registered {
-                new_dirs.insert(project.journal_dir.as_path());
-                match old_map.get(&project.journal_dir) {
+            if let Some(reported) = &self.reported_registry {
+                match reported.get(&project.journal_dir) {
                     None => {
-                        // Newly registered project: invalidate any row that
-                        // already referenced its slug (e.g. an unavailable track).
                         written_slugs.insert(project.slug.clone());
                     }
                     Some(old_slug) if old_slug != &project.slug => {
                         written_slugs.insert(old_slug.clone());
                         written_slugs.insert(project.slug.clone());
                     }
-                    Some(_) => {
-                        if stale.contains(&project.journal_dir) {
-                            written_slugs.insert(project.slug.clone());
-                        }
-                    }
+                    Some(_) => {}
                 }
             }
-            for (old_dir, old_slug) in &old_map {
-                if !new_dirs.contains(old_dir.as_path()) {
+        }
+        if let Some(reported) = &self.reported_registry {
+            for (old_dir, old_slug) in reported {
+                if !current_dirs.contains(old_dir) {
                     written_slugs.insert(old_slug.clone());
                 }
             }
@@ -523,6 +519,12 @@ impl<'a> Watch<'a> {
             .map(|row| (PathBuf::from(&row.journal_dir), row))
             .collect();
         self.registered = collected.registered;
+        self.reported_registry = Some(
+            self.registered
+                .iter()
+                .map(|p| (p.journal_dir.clone(), p.slug.clone()))
+                .collect(),
+        );
         self.shed();
         report
     }
