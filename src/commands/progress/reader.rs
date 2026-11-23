@@ -619,30 +619,52 @@ impl Registered {
     }
 }
 
-/// The registered projects one report reads through: the registry, read once
-/// and only when an item or a relation names another project. Each project's
-/// journal events and ledger open at most once, when something read needs them.
+/// The registered projects one report reads through: loaded at most once, and
+/// when constructed via [`Registry::lazy`] only on the first actual foreign
+/// traversal. Each project's journal events and ledger open lazily once per
+/// report.
 #[derive(Default)]
 pub(crate) struct Registry {
-    projects: Vec<Registered>,
+    projects: OnceCell<Vec<Registered>>,
+    lazy: bool,
+    seed: OnceCell<(PathBuf, Vec<JournalEvent>)>,
 }
 
 impl Registry {
+    fn convert(projects: Vec<crate::registry::Project>) -> Vec<Registered> {
+        projects
+            .into_iter()
+            .map(|project| Registered {
+                label: project.label(),
+                ledger: match project.anchor.as_deref() {
+                    Some(anchor) => Ledger::at(anchor),
+                    None => Ledger::none(&project.journal_dir),
+                },
+                slug: project.slug,
+                journal_dir: project.journal_dir,
+                events: OnceCell::new(),
+            })
+            .collect()
+    }
+
     pub(crate) fn of(projects: Vec<crate::registry::Project>) -> Self {
+        let cell = OnceCell::new();
+        let _ = cell.set(Self::convert(projects));
         Self {
-            projects: projects
-                .into_iter()
-                .map(|project| Registered {
-                    label: project.label(),
-                    ledger: match project.anchor.as_deref() {
-                        Some(anchor) => Ledger::at(anchor),
-                        None => Ledger::none(&project.journal_dir),
-                    },
-                    slug: project.slug,
-                    journal_dir: project.journal_dir,
-                    events: OnceCell::new(),
-                })
-                .collect(),
+            projects: cell,
+            lazy: false,
+            seed: OnceCell::new(),
+        }
+    }
+
+    /// A registry that loads on the first lookup rather than upfront, so a
+    /// transitive local-to-foreign reference (such as `A -> local B -> foreign C`)
+    /// resolves identically regardless of which series was requested.
+    pub(crate) fn lazy() -> Self {
+        Self {
+            projects: OnceCell::new(),
+            lazy: true,
+            seed: OnceCell::new(),
         }
     }
 
@@ -655,19 +677,41 @@ impl Registry {
         ))
     }
 
+    fn projects(&self) -> &[Registered] {
+        self.projects.get_or_init(|| {
+            if !self.lazy {
+                return Vec::new();
+            }
+            let loaded = crate::config::load()
+                .ok()
+                .and_then(|cfg| crate::registry::journal_projects(&cfg).ok())
+                .unwrap_or_default();
+            let list = Self::convert(loaded);
+            if let Some((dir, events)) = self.seed.get() {
+                if let Some(project) = list.iter().find(|p| same_dir(&p.journal_dir, dir)) {
+                    project.seed_events(events.clone());
+                }
+            }
+            list
+        })
+    }
+
     /// Look up one registered project by slug only when that slug uniquely
     /// identifies a single registration. Two configured journals sharing a
     /// basename-derived slug return `None` rather than silently reading the
     /// wrong project.
     pub(crate) fn get(&self, slug: &str) -> Option<&Registered> {
-        let mut matches = self.projects.iter().filter(|project| project.slug == slug);
+        let mut matches = self
+            .projects()
+            .iter()
+            .filter(|project| project.slug == slug);
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
     }
 
     /// Look up the exact registered project owning `dir`, by canonical path.
     pub(crate) fn by_dir(&self, dir: &Path) -> Option<&Registered> {
-        self.projects
+        self.projects()
             .iter()
             .find(|project| same_dir(&project.journal_dir, dir))
     }
@@ -681,8 +725,15 @@ impl Registry {
 
     /// Seed already-read journal events for `dir` when it is registered here.
     pub(crate) fn seed_events(&self, dir: &Path, events: Vec<JournalEvent>) {
-        if let Some(project) = self.by_dir(dir) {
-            project.seed_events(events);
+        if let Some(projects) = self.projects.get() {
+            if let Some(project) = projects
+                .iter()
+                .find(|project| same_dir(&project.journal_dir, dir))
+            {
+                project.seed_events(events);
+            }
+        } else if self.lazy {
+            let _ = self.seed.set((dir.to_path_buf(), events));
         }
     }
 
@@ -690,31 +741,6 @@ impl Registry {
         self.get(slug)
             .map_or_else(|| slug.to_string(), |project| project.label.clone())
     }
-}
-
-/// Whether reading `series` needs the registry: an item linked into another
-/// project, a cross-project source or prerequisite, or a relation to another
-/// project.
-pub(crate) fn needs_registry(series: &[Series]) -> bool {
-    series.iter().any(|series| {
-        !series.related.is_empty()
-            || series.items.iter().any(|item| {
-                item.project.is_some()
-                    || item
-                        .source
-                        .as_ref()
-                        .is_some_and(|source| source.project.is_some())
-                    || item
-                        .transferred_to
-                        .as_ref()
-                        .is_some_and(|dest| dest.project.is_some())
-                    || item
-                        .transferred_from
-                        .as_ref()
-                        .is_some_and(|src| src.project.is_some())
-                    || item.depends_on.iter().any(|dep| dep.project.is_some())
-            })
-    })
 }
 
 /// The questions of one journal that wait on a person, found from events
@@ -765,6 +791,7 @@ pub(crate) struct Reader<'a> {
     pub(crate) home: &'a Ledger,
     pub(crate) home_dir: &'a Path,
     pub(crate) home_slug: Option<&'a str>,
+    resolved_home_slug: OnceCell<Option<String>>,
     pub(crate) home_events: &'a [JournalEvent],
     pub(crate) registry: &'a Registry,
     pub(crate) questions: &'a PersonQuestions<'a>,
@@ -786,12 +813,27 @@ impl<'a> Reader<'a> {
             home,
             home_dir,
             home_slug,
+            resolved_home_slug: OnceCell::new(),
             home_events,
             registry,
             questions,
             now,
             live_lanes: OnceCell::new(),
         }
+    }
+
+    fn home_slug(&self) -> Option<&str> {
+        if self.home_slug.is_some() {
+            return self.home_slug;
+        }
+        self.resolved_home_slug
+            .get_or_init(|| self.registry.slug_of(self.home_dir).map(str::to_string))
+            .as_deref()
+    }
+
+    fn foreign_slug<'b>(&self, slug: Option<&'b str>) -> Option<&'b str> {
+        let slug = slug?;
+        (Some(slug) != self.home_slug()).then_some(slug)
     }
 
     fn live_lanes(&self) -> &[crate::journal::LaneEntry] {
@@ -804,10 +846,7 @@ impl<'a> Reader<'a> {
         source: &series::ItemSource,
         stage: &str,
     ) -> (SourceStatus, Option<PreChangeClaim>) {
-        let foreign = source
-            .project
-            .as_deref()
-            .filter(|slug| Some(*slug) != self.home_slug);
+        let foreign = self.foreign_slug(source.project.as_deref());
         let resolved: Option<(&[JournalEvent], &Path)> = match foreign {
             None => Some((self.home_events, self.home_dir)),
             Some(slug) => self.registry.get(slug).and_then(|project| {
@@ -866,10 +905,7 @@ impl<'a> Reader<'a> {
     /// another project whose ledger is not registered or cannot be read is
     /// `unknown` and fails nothing.
     pub(crate) fn row(&self, series_file: &str, item: &series::Item) -> Result<ItemRow> {
-        let foreign = item
-            .project
-            .as_deref()
-            .filter(|slug| Some(*slug) != self.home_slug);
+        let foreign = self.foreign_slug(item.project.as_deref());
         let mut row = match foreign {
             None => self.home.row(item, self.now)?,
             Some(slug) => match self
@@ -969,11 +1005,7 @@ impl<'a> Reader<'a> {
             // 1. Explicit prerequisite edges.
             for prereq in &item.depends_on {
                 let mut visiting = BTreeSet::new();
-                visiting.insert((
-                    self.home_slug.map(str::to_string),
-                    series.file.clone(),
-                    item.id.clone(),
-                ));
+                visiting.insert((None, series.file.clone(), item.id.clone()));
                 self.collect_prereq_blockers(
                     series,
                     &own_stages,
@@ -1057,13 +1089,8 @@ impl<'a> Reader<'a> {
         visiting: &mut BTreeSet<(Option<String>, String, String)>,
         out: &mut Vec<Blocker>,
     ) {
-        let foreign_slug = prereq
-            .project
-            .as_deref()
-            .filter(|slug| Some(*slug) != self.home_slug);
-        let target_project_key = foreign_slug
-            .map(str::to_string)
-            .or_else(|| self.home_slug.map(str::to_string));
+        let foreign_slug = self.foreign_slug(prereq.project.as_deref());
+        let target_project_key = foreign_slug.map(str::to_string);
         let target_series_file = prereq
             .series
             .clone()
@@ -1190,7 +1217,7 @@ impl<'a> Reader<'a> {
             visiting.remove(&node);
             return;
         };
-        let stage = self.item_stage_in(ledger, foreign_slug.or(self.home_slug), target_item);
+        let stage = self.item_stage_in(ledger, foreign_slug, target_item);
         self.judge_target(
             current_series,
             own_stages,
@@ -1279,10 +1306,10 @@ impl<'a> Reader<'a> {
         home_slug: Option<&str>,
         item: &series::Item,
     ) -> &'static str {
-        let foreign = item
-            .project
-            .as_deref()
-            .filter(|slug| Some(*slug) != home_slug);
+        let foreign = match home_slug {
+            Some(home_slug) => item.project.as_deref().filter(|slug| *slug != home_slug),
+            None => self.foreign_slug(item.project.as_deref()),
+        };
         match foreign {
             None => match home.row(item, self.now) {
                 Ok(row) => row.stage,
@@ -1534,33 +1561,10 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>, ready_only: bool) -> Result<P
         None => series::active_in(&events),
     };
     let ledger = Ledger::local(ctx);
-    let registry = if needs_registry(&chosen) {
-        Registry::read()?
-    } else {
-        Registry::default()
-    };
-    let own = registry.slug_of(&dir).map(str::to_string);
-    let local_events;
-    let events: &[JournalEvent] = if registry.by_dir(&dir).is_some() {
-        registry.seed_events(&dir, events);
-        registry
-            .by_dir(&dir)
-            .and_then(|project| project.events().ok())
-            .unwrap_or(&[])
-    } else {
-        local_events = events;
-        &local_events
-    };
-    let questions = PersonQuestions::new(&dir, events);
-    let reader = Reader::new(
-        &ledger,
-        &dir,
-        own.as_deref(),
-        events,
-        &registry,
-        &questions,
-        now,
-    );
+    let registry = Registry::lazy();
+    registry.seed_events(&dir, events.clone());
+    let questions = PersonQuestions::new(&dir, &events);
+    let reader = Reader::new(&ledger, &dir, None, &events, &registry, &questions, now);
     let mut reads: Vec<(RelatedSeries, RelatedRead, Vec<String>)> = Vec::new();
     let mut reports = Vec::new();
     for series in &chosen {
@@ -1580,7 +1584,7 @@ pub(crate) fn build(ctx: &Ctx, name: Option<&str>, ready_only: bool) -> Result<P
             let (_, read, from) = &mut reads[index];
             from.push(series.file.clone());
             let mutual = read.result.as_ref().ok().map(|(other, _)| {
-                own.as_deref().is_some_and(|slug| {
+                registry.slug_of(&dir).is_some_and(|slug| {
                     other
                         .related
                         .iter()
@@ -1659,27 +1663,29 @@ pub(crate) fn series_of(
         return Ok(Vec::new());
     }
     let read;
-    let (registry, home_slug) = match shared {
-        Some((registry, slug)) => (registry, registry.get(slug).map(|_| slug.to_string())),
-        None => {
-            read = if needs_registry(&active) {
-                Registry::read()?
-            } else {
-                Registry::default()
-            };
-            let slug = read.slug_of(journal_dir).map(str::to_string);
-            (&read, slug)
-        }
-    };
     let own;
-    let home = match registry.by_dir(journal_dir) {
-        Some(project) => &project.ledger,
+    let (registry, home, home_slug) = match shared {
+        Some((registry, slug)) => {
+            let home = match registry.by_dir(journal_dir) {
+                Some(project) => &project.ledger,
+                None => {
+                    own = match anchor {
+                        Some(anchor) => Ledger::at(anchor),
+                        None => Ledger::none(journal_dir),
+                    };
+                    &own
+                }
+            };
+            (registry, home, registry.get(slug).map(|_| slug.to_string()))
+        }
         None => {
+            read = Registry::lazy();
+            read.seed_events(journal_dir, events.to_vec());
             own = match anchor {
                 Some(anchor) => Ledger::at(anchor),
                 None => Ledger::none(journal_dir),
             };
-            &own
+            (&read, &own, None)
         }
     };
     let questions = PersonQuestions::new(journal_dir, events);
@@ -1817,7 +1823,9 @@ mod tests {
 
         // Seeding events for a nonexistent directory likewise avoids disk I/O.
         let seeded = Registry {
-            projects: vec![registered_for("beta", dir.path().join("absent"))],
+            projects: OnceCell::from(vec![registered_for("beta", dir.path().join("absent"))]),
+            lazy: false,
+            seed: OnceCell::new(),
         };
         seeded.seed_events(&dir.path().join("absent"), first.to_vec());
         assert_eq!(seeded.get("beta").unwrap().events().unwrap().len(), 1);
@@ -1848,10 +1856,12 @@ mod tests {
         write_series(&beta_dir, "beta", "Beta");
 
         let registry = Registry {
-            projects: vec![
+            projects: OnceCell::from(vec![
                 registered_for("shared", alpha_dir.clone()),
                 registered_for("shared", beta_dir.clone()),
-            ],
+            ]),
+            lazy: false,
+            seed: OnceCell::new(),
         };
         // Ambiguous slug lookup returns None rather than aliasing.
         assert!(registry.get("shared").is_none());

@@ -3142,3 +3142,110 @@ fn cross_project_transfer_preserves_provenance_and_follows_prereqs() {
     let unblocked = report(&repo, &repo.root, &[&local]);
     assert_eq!(series(&unblocked, &local)["items"][1]["readiness"], "ready");
 }
+
+#[test]
+fn transitive_foreign_transfer_reads_identically_single_or_all_and_retry_is_idempotent() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other-xfer");
+
+    // Register both repos by starting series in each.
+    let series_a = start(&repo, &repo.root, "series-a", &["Depends on B"]);
+    let series_b = start(&repo, &repo.root, "series-b", &["Will move to C"]);
+    let series_c = start(&repo, &other, "series-c", &["Existing C"]);
+
+    // A:i1 depends on local B:i1 (no direct foreign references on A!).
+    progress(
+        &repo,
+        &repo.root,
+        &["depend", &series_a, "i1", "--on", &format!("{series_b}:i1")],
+    );
+
+    // Transfer B:i1 to foreign C and mark C:i2 done.
+    progress(
+        &repo,
+        &repo.root,
+        &[
+            "transfer",
+            &series_b,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "owned by other-xfer",
+        ],
+    );
+    progress(&repo, &other, &["done", &series_c, "i2"]);
+
+    // Exact-head check: `progress series-a --json` and `progress --json` must
+    // both resolve A -> local B -> foreign C and report A:i1 as ready!
+    let single = report(&repo, &repo.root, &[&series_a]);
+    let all = report(&repo, &repo.root, &[]);
+    assert_eq!(series(&single, &series_a)["items"][0]["readiness"], "ready");
+    assert_eq!(series(&all, &series_a)["items"][0]["readiness"], "ready");
+    assert_eq!(
+        series(&single, &series_a)["items"][0],
+        series(&all, &series_a)["items"][0]
+    );
+
+    // Simulate an interrupted cross-project transfer: destination already has an
+    // item with matching `transferred_from`, while source item is still open.
+    let src_s = start(&repo, &repo.root, "src-retry", &["Retry me"]);
+    let here_slug = journal_dir(&repo, &repo.root)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let other_dir = journal_dir(&repo, &other);
+    let partial_add = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": "2026-01-03T00:00:00Z",
+        "topic": "series-c",
+        "event": "item-added",
+        "file": series_c,
+        "item": "i3",
+        "title": "Retry me",
+        "transferred_from": {
+            "project": here_slug,
+            "series": src_s,
+            "item": "i1"
+        }
+    });
+    let mut other_events = fs::read_to_string(other_dir.join("events.jsonl")).unwrap();
+    other_events.push_str(&format!("{partial_add}\n"));
+    fs::write(other_dir.join("events.jsonl"), other_events).unwrap();
+
+    // Retrying the transfer reuses C:i3 instead of creating C:i4 and finishes
+    // retiring src-retry:i1.
+    let retry_out = progress(
+        &repo,
+        &repo.root,
+        &[
+            "transfer",
+            &src_s,
+            "i1",
+            "--to",
+            &format!("other-xfer::{series_c}"),
+            "--reason",
+            "complete interrupted transfer",
+        ],
+    );
+    assert!(retry_out.contains("i3"), "got: {retry_out}");
+    let after_c = report(&repo, &other, &[&series_c]);
+    assert_eq!(
+        series(&after_c, &series_c)["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let after_src = report(&repo, &repo.root, &[&src_s]);
+    assert_eq!(
+        series(&after_src, &src_s)["items"][0]["stage"],
+        "transferred"
+    );
+    assert_eq!(
+        series(&after_src, &src_s)["items"][0]["transferred_to"]["item"],
+        "i3"
+    );
+}

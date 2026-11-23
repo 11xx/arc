@@ -2565,46 +2565,110 @@ pub(crate) fn transfer(
     }
 
     let now = Utc::now();
-    let new_id = format!("i{}", target_series.next_id());
     let target_topic = parse_artifact_name(&target_series.file)
         .map(|(_, topic, _)| topic)
         .unwrap_or_default();
     let source_topic = parse_artifact_name(&source_file)
         .map(|(_, topic, _)| topic)
         .unwrap_or_default();
-
-    let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
-    add_event.file = Some(target_series.file.clone());
-    add_event.title = Some(source_item.title.clone());
-    add_event.series.item = Some(new_id.clone());
-    add_event.series.wave = dest_wave.clone();
-    add_event.series.item_source = carried_source;
-    add_event.series.transferred_from = Some(ItemRef {
+    let provenance = ItemRef {
         project: here_slug,
         series: source_file.clone(),
         item: item_id.to_string(),
-    });
-    append_event(ctx, &target_dir, &add_event)?;
+    };
 
-    if let Some(link) = carried_link {
-        let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
-        link_event.file = Some(target_series.file.clone());
-        link_event.series.item = Some(new_id.clone());
-        link_event.series.change = Some(link.change);
-        link_event.series.change_project = link.project;
-        append_event(ctx, &target_dir, &link_event)?;
-    }
+    let new_id = if target_project.is_none() {
+        // Local same-journal transfer: publish destination creation, optional
+        // active change link, and source retirement in one recoverable write.
+        let new_id = format!("i{}", target_series.next_id());
+        let mut records = Vec::with_capacity(3);
+        let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
+        add_event.file = Some(target_series.file.clone());
+        add_event.title = Some(source_item.title.clone());
+        add_event.series.item = Some(new_id.clone());
+        add_event.series.wave = dest_wave.clone();
+        add_event.series.item_source = carried_source;
+        add_event.series.transferred_from = Some(provenance);
+        records.push(add_event);
 
-    let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
-    xfer_event.file = Some(source_file.clone());
-    xfer_event.note = Some(reason);
-    xfer_event.series.item = Some(item_id.to_string());
-    xfer_event.series.transferred_to = Some(ItemRef {
-        project: target_project.as_ref().map(|p| p.slug.clone()),
-        series: target_series.file.clone(),
-        item: new_id.clone(),
-    });
-    append_event(ctx, &here, &xfer_event)?;
+        if let Some(link) = carried_link {
+            let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
+            link_event.file = Some(target_series.file.clone());
+            link_event.series.item = Some(new_id.clone());
+            link_event.series.change = Some(link.change);
+            link_event.series.change_project = link.project;
+            records.push(link_event);
+        }
+
+        let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
+        xfer_event.file = Some(source_file.clone());
+        xfer_event.note = Some(reason);
+        xfer_event.series.item = Some(item_id.to_string());
+        xfer_event.series.transferred_to = Some(ItemRef {
+            project: None,
+            series: target_series.file.clone(),
+            item: new_id.clone(),
+        });
+        records.push(xfer_event);
+
+        super::append_events(ctx, &here, &records)?;
+        new_id
+    } else {
+        // Cross-project transfer: recover idempotently by provenance if a
+        // previous attempt already published the destination item before
+        // retiring the source.
+        let new_id = if let Some(existing) = target_series
+            .items
+            .iter()
+            .find(|item| item.transferred_from.as_ref() == Some(&provenance))
+        {
+            if let Some(link) = carried_link {
+                if existing.link().as_ref() != Some(&link) {
+                    let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
+                    link_event.file = Some(target_series.file.clone());
+                    link_event.series.item = Some(existing.id.clone());
+                    link_event.series.change = Some(link.change);
+                    link_event.series.change_project = link.project;
+                    append_event(ctx, &target_dir, &link_event)?;
+                }
+            }
+            existing.id.clone()
+        } else {
+            let new_id = format!("i{}", target_series.next_id());
+            let mut dest_records = Vec::with_capacity(2);
+            let mut add_event = JournalEvent::base(ctx, now, &target_topic, "item-added");
+            add_event.file = Some(target_series.file.clone());
+            add_event.title = Some(source_item.title.clone());
+            add_event.series.item = Some(new_id.clone());
+            add_event.series.wave = dest_wave.clone();
+            add_event.series.item_source = carried_source;
+            add_event.series.transferred_from = Some(provenance);
+            dest_records.push(add_event);
+
+            if let Some(link) = carried_link {
+                let mut link_event = JournalEvent::base(ctx, now, &target_topic, "item-linked");
+                link_event.file = Some(target_series.file.clone());
+                link_event.series.item = Some(new_id.clone());
+                link_event.series.change = Some(link.change);
+                link_event.series.change_project = link.project;
+                dest_records.push(link_event);
+            }
+            super::append_events(ctx, &target_dir, &dest_records)?;
+            new_id
+        };
+
+        let mut xfer_event = JournalEvent::base(ctx, now, &source_topic, "item-transferred");
+        xfer_event.file = Some(source_file.clone());
+        xfer_event.note = Some(reason);
+        xfer_event.series.item = Some(item_id.to_string());
+        xfer_event.series.transferred_to = Some(ItemRef {
+            project: target_project.as_ref().map(|p| p.slug.clone()),
+            series: target_series.file.clone(),
+            item: new_id.clone(),
+        });
+        append_event(ctx, &here, &xfer_event)?;
+        new_id
+    };
 
     Ok(TransferOutcome {
         source_item: item_id.to_string(),
