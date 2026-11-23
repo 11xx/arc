@@ -1044,3 +1044,127 @@ fn unavailable_track_edits_unassigned_wave_collision_and_symlinked_archive_refus
             .stderr(predicates::str::contains("symlink"));
     }
 }
+
+#[test]
+fn workspace_milestones_and_report_integration() {
+    let repo = Repo::new();
+    let other = sibling_project(&repo, "other");
+    let local_series = stdout(repo.arc(&repo.root).args([
+        "progress",
+        "start",
+        "core",
+        "--title",
+        "Core",
+        "--wave",
+        "w0",
+        "--item",
+        "First cut",
+        "--item-wave",
+        "i1=w0",
+    ]))
+    .lines()
+    .next()
+    .unwrap()
+    .trim()
+    .to_string();
+    let remote_series = start_series(&repo, &other, "remote");
+
+    let ms_local = arc(
+        &repo,
+        &[
+            "milestone",
+            "start",
+            "rc3",
+            "--title",
+            "RC3 Local",
+            "--wave",
+            "w0",
+        ],
+    )
+    .trim()
+    .to_string();
+    arc(
+        &repo,
+        &["milestone", "track", "add", &ms_local, &local_series],
+    );
+    arc(
+        &repo,
+        &[
+            "milestone",
+            "track",
+            "add",
+            &ms_local,
+            &format!("other::{remote_series}"),
+        ],
+    );
+    let ms_other = stdout(repo.arc(&other).args([
+        "milestone",
+        "start",
+        "other-ms",
+        "--title",
+        "Other Milestone",
+    ]))
+    .trim()
+    .to_string();
+
+    // `arc workspace milestones --json` emits `arc-workspace-milestones/1` for all projects.
+    let ws = json_stdout(
+        repo.arc(&repo.home)
+            .args(["workspace", "milestones", "--json"]),
+    );
+    assert_eq!(ws["schema"], "arc-workspace-milestones/1");
+    assert_eq!(ws["failures"], serde_json::json!([]));
+    let projects = ws["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 2, "{ws}");
+    assert!(
+        projects
+            .iter()
+            .any(|p| p["milestones"][0]["file"] == ms_local),
+        "{ws}"
+    );
+    assert!(
+        projects
+            .iter()
+            .any(|p| p["milestones"][0]["file"] == ms_other),
+        "{ws}"
+    );
+
+    // `--here` scopes to the current checkout's project only.
+    let scoped =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "milestones", "--here", "--json"]),
+        );
+    assert_eq!(scoped["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(scoped["projects"][0]["milestones"][0]["file"], ms_local);
+
+    // Text and --plain forms both work and never paint on a pipe.
+    let text = stdout(repo.arc(&repo.home).args(["workspace", "milestones"]));
+    assert!(!text.contains('\x1b'));
+    assert!(text.contains("RC3 Local"), "{text}");
+    assert!(text.contains("Other Milestone"), "{text}");
+    let plain = stdout(
+        repo.arc(&repo.home)
+            .args(["workspace", "milestones", "--plain"]),
+    );
+    assert!(plain.contains(&ms_local), "{plain}");
+
+    // `arc workspace report` omits milestones by default (pull-only), and carries them with `--milestones`.
+    let report_default = json_stdout(repo.arc(&repo.home).args(["workspace", "report", "--json"]));
+    for proj in report_default["projects"].as_array().unwrap() {
+        assert!(proj.get("milestones").is_none(), "{proj}");
+    }
+    let report_with =
+        json_stdout(
+            repo.arc(&repo.home)
+                .args(["workspace", "report", "--milestones", "--json"]),
+        );
+    assert_eq!(report_with["schema"], "arc-workspace-report/3");
+    assert!(
+        report_with["projects"].as_array().unwrap().iter().any(|p| p
+            .get("milestones")
+            .and_then(|m| m.as_array())
+            .is_some_and(|arr| arr.iter().any(|m| m["file"] == ms_local))),
+        "{report_with}"
+    );
+}

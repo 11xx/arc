@@ -42,6 +42,30 @@ impl View {
         }
     }
 
+    pub(super) fn workspace(&mut self, projects: &[super::ProjectMilestones]) {
+        if projects.is_empty() {
+            self.lines.push("No active milestones.".to_string());
+            return;
+        }
+        for project in projects {
+            self.blank();
+            let count = match project.milestones.len() {
+                1 => "(1 milestone)".to_string(),
+                n => format!("({n} milestones)"),
+            };
+            self.lines.push(format!(
+                "{} {} {}",
+                self.dim("──"),
+                self.look.paint(&format!("{BOLD};{CYAN}"), &project.project),
+                self.dim(&count)
+            ));
+            for ms in &project.milestones {
+                self.blank();
+                self.milestone(ms, false);
+            }
+        }
+    }
+
     pub(super) fn milestone(&mut self, ms: &MilestoneReport, ready_only: bool) {
         self.lines.push(format!(
             "{}  {}",

@@ -383,8 +383,13 @@ impl<'a> Watch<'a> {
             }
             stale.extend(journals.iter().cloned());
         }
-        // A series item linked into another project reads that project's
-        // ledger, so a write there leaves every row linking into it stale.
+        for dir in dirty.journals {
+            crate::journal::forget_projection(&dir);
+            stale.insert(dir);
+        }
+        // A series item or milestone track linked into another project reads
+        // that project's journal and ledger, so a write there leaves every row
+        // referencing it stale.
         let mut written = BTreeSet::new();
         for project in &mut self.registered {
             if stale.contains(&project.journal_dir) {
@@ -402,14 +407,13 @@ impl<'a> Watch<'a> {
                 row.progress
                     .as_ref()
                     .is_some_and(|series| super::super::progress::links_into(series, &written))
+                    || row.milestones.as_ref().is_some_and(|milestones| {
+                        super::super::milestone::milestones_link_into(milestones, &written)
+                    })
             })
             .map(|(dir, _)| dir.clone())
             .collect();
         stale.extend(linking);
-        for dir in dirty.journals {
-            crate::journal::forget_projection(&dir);
-            stale.insert(dir);
-        }
         if !dirty.everything {
             for dir in &stale {
                 self.hot.retain(|held| held != dir);

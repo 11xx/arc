@@ -1,4 +1,6 @@
+use super::progress::Form;
 use super::Ctx;
+use crate::commands::progress::reader::Registry;
 use crate::journal::{
     self, milestone,
     milestone::{Placement, Track, TrackRole},
@@ -6,10 +8,31 @@ use crate::journal::{
 };
 use anyhow::{bail, ensure, Result};
 use clap::{ArgGroup, Args, Subcommand};
+use serde::Serialize;
+use std::path::Path;
 
 pub(crate) mod matrix;
 mod view;
+pub(crate) use matrix::{milestones_link_into, project_milestones};
 use matrix::{MatrixCounts, MilestoneReport};
+
+/// The schema `arc workspace milestones --json` prints.
+const WORKSPACE_MILESTONES_SCHEMA: &str = "arc-workspace-milestones/1";
+
+#[derive(Serialize)]
+pub(crate) struct ProjectMilestones {
+    pub(crate) project: String,
+    pub(crate) slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor: Option<String>,
+    pub(crate) milestones: Vec<MilestoneReport>,
+}
+
+#[derive(Serialize)]
+struct MilestoneFailure {
+    project: String,
+    reason: String,
+}
 
 /// Read a milestone by filename or topic. With no name, list open milestones.
 #[derive(Args)]
@@ -673,4 +696,83 @@ fn print_plain(milestone: &MilestoneReport, ready_only: bool) {
             println!("    {note}");
         }
     }
+}
+
+/// `arc workspace milestones`: every registered project's active milestones.
+pub(crate) fn workspace(
+    includes: impl Fn(Option<&Path>) -> bool,
+    scope: impl Serialize,
+    form: Form,
+) -> Result<i32> {
+    let now = chrono::Utc::now();
+    let cfg = crate::config::load()?;
+    let mut projects = Vec::new();
+    let mut failures = Vec::new();
+    let registered = crate::registry::journal_projects(&cfg)?;
+    let registry = Registry::of(registered.clone());
+    for project in registered {
+        if project.retired.is_some() || !includes(project.anchor.as_deref()) {
+            continue;
+        }
+        let read = project_milestones(
+            &project.journal_dir,
+            project.anchor.as_deref(),
+            Some((&registry, &project.slug)),
+            now,
+        );
+        match read {
+            Ok(milestones) if milestones.is_empty() => {}
+            Ok(milestones) => projects.push(ProjectMilestones {
+                project: project.label(),
+                slug: project.slug.clone(),
+                anchor: project
+                    .anchor
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                milestones,
+            }),
+            Err(error) => failures.push(MilestoneFailure {
+                project: project.label(),
+                reason: format!("{error:#}"),
+            }),
+        }
+    }
+    match form {
+        Form::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": WORKSPACE_MILESTONES_SCHEMA,
+                "scope": scope,
+                "projects": projects,
+                "failures": failures,
+            }))?
+        ),
+        Form::Plain => {
+            if projects.is_empty() {
+                println!("No active milestones.");
+            }
+            for (index, project) in projects.iter().enumerate() {
+                if index > 0 {
+                    println!();
+                }
+                println!("{} ({}):", project.project, project.milestones.len());
+                for ms in &project.milestones {
+                    print_plain(ms, false);
+                }
+            }
+        }
+        Form::Terminal => {
+            let mut view = view::View::new(crate::terminal::Look::of_stdout(), now);
+            view.workspace(&projects);
+            println!("{}", view.finish());
+        }
+    }
+    for failure in &failures {
+        eprintln!(
+            "{}: unavailable ({})",
+            failure.project,
+            failure.reason.replace(['\n', '\r'], " ")
+        );
+    }
+    Ok(if failures.is_empty() { 0 } else { 16 })
 }

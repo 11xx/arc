@@ -228,7 +228,12 @@ FROM A WORKSPACE ROOT (outside a project)
                        the forms `arc progress` prints (arc guide progress).
                        Exits 16 when a journal cannot be read.
                        `arc-workspace-progress/1`.
-  arc workspace report [--previous FILE] [--library] [--progress] --json
+  arc workspace milestones [--here|--under PATH] [--plain|--json]
+                       Each project's active milestones in full, in the forms
+                       `arc milestone` prints (arc guide milestones). Exits
+                       16 when a journal cannot be read.
+                       `arc-workspace-milestones/1`.
+  arc workspace report [--previous FILE] [--library] [--progress] [--milestones] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
                        sections a reader acts from, and attention facts, so
@@ -270,6 +275,8 @@ FROM A WORKSPACE ROOT (outside a project)
                        reads enter the collection manifest as `library`.
                        With --progress, a project that has active progress
                        series carries them as `progress` (arc guide progress).
+                       With --milestones, a project that has active milestones
+                       carries them as `milestones` (arc guide milestones).
   <ai-home>/arc/feed/events.jsonl
                        The workspace feed: after each committed ledger or
                        journal write, one `arc-workspace-feed/1` line. A
@@ -282,19 +289,19 @@ FROM A WORKSPACE ROOT (outside a project)
                        follows its write: failing to append fails nothing,
                        and a follower that missed notices reads again. Past
                        1 MiB the file moves to `events.jsonl.1`, replacing it.
-  arc workspace watch [--previous FILE] [--library] [--progress]
+  arc workspace watch [--previous FILE] [--library] [--progress] [--milestones]
                        The report as one JSON line, then again each time a
                        notice changes it: only the projects the feed names are
-                       read again, and with --progress each project whose
-                       series hold an item linked into a ledger it names.
+                       read again, and with --progress or --milestones each
+                       project referencing a written project.
                        Requests on stdin compare with a previous
                        report or refresh every project; it ends when stdin
                        closes. --library retains each project's library beside
                        its row and reads it again only when that project is
                        dirty; a library-only change, including a pin or unpin,
-                       emits too. --progress retains each project's progress
-                       series the same way, so an item edit or a write to a
-                       linked change emits. `--help` holds the contract.
+                       emits too. --progress and --milestones retain each
+                       project's progress series and milestones the same way,
+                       so edits or linked writes emit. `--help` holds the contract.
   cd <anchor>          Enter one project named by the report, then orient there.
   arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
                        Take a registration whose project is gone (a probe,
@@ -7005,6 +7012,10 @@ MILESTONES
   Output prints in three forms: the default terminal matrix (painted only on
   a terminal with `NO_COLOR` unset and `TERM` not `dumb`), `--plain` (full
   filenames and per-item rows, never painted), and `--json` (`arc-milestone/1`).
+  `arc workspace milestones` prints every registered project's active
+  milestones in the same three forms (`arc-workspace-milestones/1`);
+  `arc workspace report` and `arc workspace watch`, given `--milestones`,
+  carry each project's active milestones as `projects[].milestones`.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
@@ -7078,12 +7089,13 @@ SCHEMAS
     `arc-perf/1`                     ARC_TRACE=1, one line on stderr at exit
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
-    `arc-workspace-report/3`         arc workspace report|watch; projects[].git_health; optional library, progress
+    `arc-workspace-report/3`         arc workspace report|watch; projects[].git_health; optional library, progress, milestones
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-pins/1`           arc workspace pins --json
     `arc-progress/1`                 arc progress --json
     `arc-milestone/1`                arc milestone --json
     `arc-workspace-progress/1`       arc workspace progress --json
+    `arc-workspace-milestones/1`     arc workspace milestones --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/2`            arc sandbox clone --json

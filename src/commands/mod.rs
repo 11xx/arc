@@ -182,6 +182,7 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "progress",
     "milestone",
     "workspace progress",
+    "workspace milestones",
 ];
 
 /// The commands that record nothing, in every form and flag. An invocation of
@@ -255,6 +256,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "workspace watch",
     "workspace pins",
     "workspace progress",
+    "workspace milestones",
     "progress",
     "milestone",
     "restack",

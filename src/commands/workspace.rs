@@ -76,6 +76,10 @@ pub enum WorkspaceView {
         scope: WorkspaceScope,
         plain: bool,
     },
+    Milestones {
+        scope: WorkspaceScope,
+        plain: bool,
+    },
     Backlog {
         since: Option<String>,
         items: bool,
@@ -90,6 +94,7 @@ pub enum WorkspaceView {
         show_retired: bool,
         library: bool,
         progress: bool,
+        milestones: bool,
     },
     Watch {
         scope: WorkspaceScope,
@@ -97,6 +102,7 @@ pub enum WorkspaceView {
         show_retired: bool,
         library: bool,
         progress: bool,
+        milestones: bool,
     },
     Retire {
         project: String,
@@ -410,6 +416,14 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
                 super::progress::Form::of(plain, json),
             )
         }
+        WorkspaceView::Milestones { scope, plain } => {
+            let scope = ResolvedWorkspaceScope::resolve(scope)?;
+            super::milestone::workspace(
+                |anchor| scope.includes(anchor),
+                scope.view(),
+                super::progress::Form::of(plain, json),
+            )
+        }
         WorkspaceView::Backlog {
             since,
             items,
@@ -435,6 +449,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             show_retired,
             library,
             progress,
+            milestones,
         } => workspace_report(
             ctx,
             scope,
@@ -444,6 +459,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
                 items: true,
                 library,
                 progress,
+                milestones,
             },
             json,
         ),
@@ -453,6 +469,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             show_retired,
             library,
             progress,
+            milestones,
         } => watch::watch(
             ctx,
             scope,
@@ -462,6 +479,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
                 items: true,
                 library,
                 progress,
+                milestones,
             },
         ),
         WorkspaceView::Retire {
@@ -1080,6 +1098,10 @@ struct ProjectBacklog {
     /// them and the project has any.
     #[serde(skip)]
     progress: Option<serde_json::Value>,
+    /// The project's active milestones, when the read was asked for them and
+    /// the project has any.
+    #[serde(skip)]
+    milestones: Option<serde_json::Value>,
     project: String,
     anchor: String,
     /// The journal directory this project's questions and items were read
@@ -1737,6 +1759,7 @@ struct JournalRead {
     items: bool,
     library: bool,
     progress: bool,
+    milestones: bool,
 }
 
 /// Observe one reachable project into its backlog row.
@@ -1755,64 +1778,73 @@ fn project_row(
 
     // The journal and the fork inventory read nothing of the ledger, so they
     // are read beside it.
-    let ((queues, changes), (open_queue, forks, library, progress)) = std::thread::scope(|scope| {
-        let beside = scope.spawn(|| {
-            (
-                crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None, true),
-                fork_inventory(ctx, anchor),
-                journal
-                    .library
-                    .then(|| crate::journal::library_artifacts(&project.journal_dir)),
-                journal.progress.then(|| {
-                    super::progress::project_series(
-                        &project.journal_dir,
-                        Some(anchor),
-                        chrono::Utc::now(),
-                    )
-                }),
-            )
-        });
-        let ledger = match &project.ledger {
-            Some(root) => {
-                let queues = match ledger_queues(root, Some(anchor)) {
-                    Ok(queues) => queues,
-                    Err(error) => {
-                        failures.push(ComponentFailure {
-                            component: "ledger",
-                            reason: format!("{error:#}"),
-                        });
-                        LedgerQueues::default()
-                    }
-                };
-                let changes = match Store::open_at_for(root, anchor) {
-                    Ok(Some(store)) => match observe_changes(ctx, &store, anchor) {
-                        Ok(inbox) => inbox,
+    let ((queues, changes), (open_queue, forks, library, progress, milestones)) =
+        std::thread::scope(|scope| {
+            let beside = scope.spawn(|| {
+                (
+                    crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None, true),
+                    fork_inventory(ctx, anchor),
+                    journal
+                        .library
+                        .then(|| crate::journal::library_artifacts(&project.journal_dir)),
+                    journal.progress.then(|| {
+                        super::progress::project_series(
+                            &project.journal_dir,
+                            Some(anchor),
+                            chrono::Utc::now(),
+                        )
+                    }),
+                    journal.milestones.then(|| {
+                        super::milestone::project_milestones(
+                            &project.journal_dir,
+                            Some(anchor),
+                            None,
+                            chrono::Utc::now(),
+                        )
+                    }),
+                )
+            });
+            let ledger = match &project.ledger {
+                Some(root) => {
+                    let queues = match ledger_queues(root, Some(anchor)) {
+                        Ok(queues) => queues,
                         Err(error) => {
                             failures.push(ComponentFailure {
-                                component: "changes",
+                                component: "ledger",
+                                reason: format!("{error:#}"),
+                            });
+                            LedgerQueues::default()
+                        }
+                    };
+                    let changes = match Store::open_at_for(root, anchor) {
+                        Ok(Some(store)) => match observe_changes(ctx, &store, anchor) {
+                            Ok(inbox) => inbox,
+                            Err(error) => {
+                                failures.push(ComponentFailure {
+                                    component: "changes",
+                                    reason: format!("{error:#}"),
+                                });
+                                crate::inbox::Inbox::new(None)
+                            }
+                        },
+                        Ok(None) => crate::inbox::Inbox::new(None),
+                        Err(error) => {
+                            failures.push(ComponentFailure {
+                                component: "ledger",
                                 reason: format!("{error:#}"),
                             });
                             crate::inbox::Inbox::new(None)
                         }
-                    },
-                    Ok(None) => crate::inbox::Inbox::new(None),
-                    Err(error) => {
-                        failures.push(ComponentFailure {
-                            component: "ledger",
-                            reason: format!("{error:#}"),
-                        });
-                        crate::inbox::Inbox::new(None)
-                    }
-                };
-                (queues, changes)
-            }
-            None => (LedgerQueues::default(), crate::inbox::Inbox::new(None)),
-        };
-        let beside = beside
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (ledger, beside)
-    });
+                    };
+                    (queues, changes)
+                }
+                None => (LedgerQueues::default(), crate::inbox::Inbox::new(None)),
+            };
+            let beside = beside
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (ledger, beside)
+        });
 
     let mut open_queue = match open_queue {
         Ok(queue) => queue,
@@ -1929,9 +1961,24 @@ fn project_row(
             None
         })
     });
+    let milestones = milestones.and_then(|read| {
+        let items = read.and_then(|milestones| {
+            Ok((!milestones.is_empty())
+                .then(|| serde_json::to_value(milestones))
+                .transpose()?)
+        });
+        items.unwrap_or_else(|error: anyhow::Error| {
+            failures.push(ComponentFailure {
+                component: "milestones",
+                reason: format!("{error:#}"),
+            });
+            None
+        })
+    });
     ProjectBacklog {
         library,
         progress,
+        milestones,
         project: project.label(),
         anchor: anchor.display().to_string(),
         journal_dir: project.journal_dir.display().to_string(),
@@ -2251,6 +2298,7 @@ fn workspace_backlog(
             items: show_items,
             library: false,
             progress: false,
+            milestones: false,
         },
         scope,
         listed,
@@ -2905,6 +2953,16 @@ fn build_report(
             .projects
             .iter()
             .filter_map(|project| Some((project.journal_dir.as_str(), project.progress.as_ref()?)))
+            .collect(),
+    );
+    report.attach_milestones(
+        &collected
+            .backlog
+            .projects
+            .iter()
+            .filter_map(|project| {
+                Some((project.journal_dir.as_str(), project.milestones.as_ref()?))
+            })
             .collect(),
     );
     report.attach_git_health(health);
@@ -3853,6 +3911,10 @@ mod report {
         /// the report was asked for them.
         #[serde(skip_serializing_if = "Option::is_none")]
         progress: Option<Value>,
+        /// The project's active milestones, as `arc workspace milestones --json`
+        /// reports them, when the report was asked for them.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        milestones: Option<Value>,
         project: String,
         anchor: Option<String>,
         journal_dir: Option<String>,
@@ -4115,6 +4177,7 @@ mod report {
             let mut summary = ProjectSummary {
                 library: None,
                 progress: None,
+                milestones: None,
                 git_health: Vec::new(),
                 project: name.clone(),
                 anchor: opt_text(project, "anchor"),
@@ -4670,6 +4733,16 @@ mod report {
                     .as_deref()
                     .and_then(|dir| series.get(dir))
                     .map(|series| (*series).clone());
+            }
+        }
+
+        pub(super) fn attach_milestones(&mut self, milestones: &BTreeMap<&str, &Value>) {
+            for project in &mut self.projects {
+                project.milestones = project
+                    .journal_dir
+                    .as_deref()
+                    .and_then(|dir| milestones.get(dir))
+                    .map(|milestones| (*milestones).clone());
             }
         }
 

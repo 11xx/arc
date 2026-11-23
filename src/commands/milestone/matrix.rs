@@ -284,6 +284,83 @@ pub(crate) fn build_with_registry(
     Ok(reports)
 }
 
+/// Active milestones of one project's journal, read through a shared workspace
+/// registry when supplied so each project's journal and ledger open at most once.
+pub(crate) fn project_milestones(
+    journal_dir: &Path,
+    anchor: Option<&Path>,
+    shared: Option<(&Registry, &str)>,
+    now: DateTime<Utc>,
+) -> Result<Vec<MilestoneReport>> {
+    let owned_events;
+    let events: &[JournalEvent] =
+        match shared.and_then(|(registry, _)| registry.by_dir(journal_dir)) {
+            Some(project) => project
+                .events()
+                .map_err(|reason| anyhow::anyhow!("{reason}"))?,
+            None => {
+                owned_events = journal::read_events(journal_dir)?;
+                &owned_events
+            }
+        };
+    let active = milestone::active_in(events);
+    if active.is_empty() {
+        return Ok(Vec::new());
+    }
+    let read;
+    let own;
+    let (registry, home, home_slug) = match shared {
+        Some((registry, slug)) => {
+            let home = match registry.by_dir(journal_dir) {
+                Some(project) => &project.ledger,
+                None => {
+                    own = match anchor {
+                        Some(anchor) => Ledger::at(anchor),
+                        None => Ledger::none(journal_dir),
+                    };
+                    &own
+                }
+            };
+            (registry, home, registry.get(slug).map(|_| slug.to_string()))
+        }
+        None => {
+            read = Registry::lazy();
+            read.seed_events(journal_dir, events.to_vec());
+            own = match anchor {
+                Some(anchor) => Ledger::at(anchor),
+                None => Ledger::none(journal_dir),
+            };
+            (&read, &own, None)
+        }
+    };
+    let questions = PersonQuestions::new(journal_dir, events);
+    let reader = Reader::new(
+        home,
+        journal_dir,
+        home_slug.as_deref(),
+        events,
+        registry,
+        &questions,
+        now,
+    );
+    Ok(active
+        .iter()
+        .map(|ms| {
+            build_one(
+                ms,
+                journal_dir,
+                events,
+                &reader,
+                registry,
+                home_slug.as_deref(),
+                false,
+                false,
+                now,
+            )
+        })
+        .collect())
+}
+
 fn build_in(
     dir: &Path,
     raw_events: Vec<JournalEvent>,

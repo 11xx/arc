@@ -4253,6 +4253,30 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Every project's active milestones, grouped by project in the forms
+    /// `arc milestone` prints.
+    ///
+    /// Accepts the same `--under`/`--here`/`--global` scope. Retired
+    /// registrations are skipped. A journal or ledger that cannot be read is
+    /// named on stderr and the command exits 16, keeping the projects it did
+    /// read. Versioned `arc-workspace-milestones/1`. Records no events.
+    Milestones {
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// Print line-oriented text, never painted, instead of the terminal view
+        #[arg(long, conflicts_with = "json")]
+        plain: bool,
+        /// Emit the machine-readable JSON view (`arc-workspace-milestones/1`)
+        #[arg(long)]
+        json: bool,
+    },
     /// Every artifact across the selected stores, each with why it is where it is: present,
     /// terminal, archived, or superseded.
     ///
@@ -4391,6 +4415,11 @@ enum WorkspaceCmd {
         /// series carries none
         #[arg(long)]
         progress: bool,
+        /// Include each project's active milestones in JSON, as
+        /// `arc workspace milestones --json` reports them (arc guide milestones).
+        /// A project with no active milestones carries none
+        #[arg(long)]
+        milestones: bool,
     },
     /// Emit the workspace report as one JSON line, then again each time arc
     /// records something that changes it
@@ -4454,6 +4483,12 @@ enum WorkspaceCmd {
         /// again each project whose series hold an item linked into it
         #[arg(long)]
         progress: bool,
+        /// Include each project's active milestones in JSON, as
+        /// `arc workspace milestones --json` reports them (arc guide milestones);
+        /// a milestone or track edit emits a report and refreshes projects whose
+        /// milestones attach a written project
+        #[arg(long)]
+        milestones: bool,
     },
     /// Retire a registration whose project is gone, recording why, so the
     /// workspace views stop observing it.
@@ -8947,6 +8982,19 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     },
                     json,
                 ),
+                WorkspaceCmd::Milestones {
+                    under,
+                    here,
+                    global: _,
+                    plain,
+                    json,
+                } => (
+                    commands::WorkspaceView::Milestones {
+                        scope: workspace_scope(under, here)?,
+                        plain,
+                    },
+                    json,
+                ),
                 WorkspaceCmd::Inventory {
                     storage,
                     retired,
@@ -8970,6 +9018,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     retired,
                     library,
                     progress,
+                    milestones,
                     json,
                 } => (
                     commands::WorkspaceView::Report {
@@ -8978,6 +9027,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         show_retired: retired,
                         library,
                         progress,
+                        milestones,
                     },
                     json,
                 ),
@@ -8989,6 +9039,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     retired,
                     library,
                     progress,
+                    milestones,
                 } => (
                     commands::WorkspaceView::Watch {
                         scope: workspace_scope(under, here)?,
@@ -8996,6 +9047,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         show_retired: retired,
                         library,
                         progress,
+                        milestones,
                     },
                     true,
                 ),
