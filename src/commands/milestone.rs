@@ -8,7 +8,8 @@ use anyhow::{bail, ensure, Result};
 use clap::{ArgGroup, Args, Subcommand};
 
 mod matrix;
-use matrix::{MatrixCounts, MilestoneReport, TrackReport, WaveCell};
+mod view;
+use matrix::{MatrixCounts, MilestoneReport};
 
 /// Read a milestone by filename or topic. With no name, list open milestones.
 #[derive(Args)]
@@ -555,19 +556,21 @@ fn report(
     let doc = matrix::build(ctx, name, ready_only, ignore_waves)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&doc)?);
-    } else if doc.milestones.is_empty() {
-        println!("No open milestones.");
-    } else {
-        for (idx, milestone) in doc.milestones.iter().enumerate() {
-            if idx > 0 {
-                println!();
-            }
-            if plain {
+    } else if plain {
+        if doc.milestones.is_empty() {
+            println!("No open milestones.");
+        } else {
+            for (idx, milestone) in doc.milestones.iter().enumerate() {
+                if idx > 0 {
+                    println!();
+                }
                 print_plain(milestone, ready_only);
-            } else {
-                print_compact(milestone, ready_only);
             }
         }
+    } else {
+        let mut view = view::View::new(crate::terminal::Look::of_stdout(), chrono::Utc::now());
+        view.milestones(&doc.milestones, ready_only);
+        println!("{}", view.finish());
     }
     Ok(())
 }
@@ -596,171 +599,6 @@ fn format_counts(counts: &MatrixCounts) -> String {
         parts.push(format!("{} closed", counts.closed));
     }
     parts.join("; ")
-}
-
-fn format_cell(cell: Option<&WaveCell>) -> String {
-    let Some(cell) = cell else {
-        return "-".to_string();
-    };
-    if cell.counts.items == 0 {
-        return "-".to_string();
-    }
-    let mut out = format!("{}/{}", cell.counts.complete, cell.counts.items);
-    if cell.counts.in_flight > 0 {
-        out.push('*');
-    }
-    if cell.counts.blocked > 0 {
-        out.push('!');
-    }
-    out
-}
-
-fn print_compact(milestone: &MilestoneReport, ready_only: bool) {
-    println!("{}  {}", milestone.file, milestone.title);
-    if let Some(plan) = &milestone.follows {
-        println!("  Follows {plan}");
-    }
-    if milestone.counts.critical.items > 0 || !milestone.tracks.is_empty() {
-        println!("  Critical: {}", format_counts(&milestone.counts.critical));
-    }
-    if milestone.counts.sideband.items > 0 {
-        println!("  Sideband: {}", format_counts(&milestone.counts.sideband));
-    }
-    if milestone.counts.unavailable_tracks > 0 {
-        println!(
-            "  Unavailable tracks: {}",
-            milestone.counts.unavailable_tracks
-        );
-    }
-    for wave in &milestone.waves {
-        let policy = if wave.effective_gated {
-            "gated"
-        } else {
-            "advisory"
-        };
-        let title = wave
-            .title
-            .as_deref()
-            .map(|t| format!(" {t}"))
-            .unwrap_or_default();
-        println!(
-            "  Wave {} [{policy}]{title}  critical {}/{}",
-            wave.id, wave.critical.complete, wave.critical.items
-        );
-    }
-    if ready_only {
-        if milestone.ready.is_empty() {
-            println!("  No ready items.");
-        } else {
-            println!("  Ready ({}):", milestone.ready.len());
-            for item in &milestone.ready {
-                let track = item.track_label.as_deref().unwrap_or(&item.track);
-                let wave = item
-                    .wave
-                    .as_deref()
-                    .map(|w| format!(" [{w}]"))
-                    .unwrap_or_default();
-                println!(
-                    "    {} [{}] {}:{}{wave}  {}",
-                    item.item,
-                    item.role.as_str(),
-                    track,
-                    item.item,
-                    item.title
-                );
-            }
-        }
-    } else if !milestone.tracks.is_empty() {
-        print_matrix_table(milestone);
-    }
-    for checkpoint in &milestone.checkpoints {
-        println!(
-            "  Checkpoint {} at {} (event {})",
-            checkpoint.name, checkpoint.revision, checkpoint.event_id
-        );
-    }
-    if let Some(closure) = &milestone.closure {
-        println!("  Closed {} [{}]", closure.at, closure.outcome);
-        if let Some(by) = &closure.by {
-            println!("    By {by}");
-        }
-        if let Some(checkpoint) = &closure.checkpoint {
-            println!("    At checkpoint {}", checkpoint.name);
-        }
-        if let Some(note) = &closure.note {
-            println!("    {note}");
-        }
-    }
-}
-
-fn print_matrix_table(milestone: &MilestoneReport) {
-    let mut columns: Vec<Option<String>> =
-        milestone.waves.iter().map(|w| Some(w.id.clone())).collect();
-    let has_unassigned = milestone.tracks.iter().any(|t| {
-        t.waves
-            .iter()
-            .any(|c| c.wave.is_none() && c.counts.items > 0)
-    });
-    if has_unassigned {
-        columns.push(None);
-    }
-    if columns.is_empty() {
-        for track in &milestone.tracks {
-            print_track_line(track);
-        }
-        return;
-    }
-    fn col_label(col: &Option<String>) -> &str {
-        col.as_deref().unwrap_or("(unassigned)")
-    }
-    let name_w = milestone
-        .tracks
-        .iter()
-        .map(|t| format!("{} [{}]", t.display_name(), t.role.as_str()).len())
-        .max()
-        .unwrap_or(5)
-        .max(5);
-    let mut col_w: Vec<usize> = columns.iter().map(|c| col_label(c).len().max(5)).collect();
-    for track in &milestone.tracks {
-        for (idx, col) in columns.iter().enumerate() {
-            let cell = track.waves.iter().find(|c| c.wave == *col);
-            col_w[idx] = col_w[idx].max(format_cell(cell).len());
-        }
-    }
-    let mut header = format!("  {:<name_w$}", "Track");
-    for (col, w) in columns.iter().zip(&col_w) {
-        header.push_str(&format!("  {:>w$}", col_label(col)));
-    }
-    println!("{header}");
-    for track in &milestone.tracks {
-        let label = format!("{} [{}]", track.display_name(), track.role.as_str());
-        if let Some(reason) = &track.unavailable {
-            println!("  {:<name_w$}  unavailable ({reason})", label);
-            continue;
-        }
-        let mut line = format!("  {:<name_w$}", label);
-        for (col, w) in columns.iter().zip(&col_w) {
-            let cell = track.waves.iter().find(|c| c.wave == *col);
-            line.push_str(&format!("  {:>w$}", format_cell(cell)));
-        }
-        println!("{line}");
-    }
-}
-
-fn print_track_line(track: &TrackReport) {
-    let label = track.display_name();
-    match (&track.unavailable, &track.counts) {
-        (Some(reason), _) => println!(
-            "  Track {label} [{}] unavailable ({reason})",
-            track.role.as_str()
-        ),
-        (None, Some(counts)) => println!(
-            "  Track {label} [{}] {}",
-            track.role.as_str(),
-            format_counts(counts)
-        ),
-        (None, None) => println!("  Track {label} [{}]", track.role.as_str()),
-    }
 }
 
 fn print_plain(milestone: &MilestoneReport, ready_only: bool) {

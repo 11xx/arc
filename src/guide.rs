@@ -6994,6 +6994,9 @@ MILESTONES
   Bounded reads. Reading a milestone opens each referenced project's journal
   events and ledger at most once. An unregistered or unreadable foreign track
   degrades to `unavailable` in `arc-milestone/1` without failing the report.
+  Output prints in three forms: the default terminal matrix (painted only on
+  a terminal with `NO_COLOR` unset and `TERM` not `dumb`), `--plain` (full
+  filenames and per-item rows, never painted), and `--json` (`arc-milestone/1`).
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape

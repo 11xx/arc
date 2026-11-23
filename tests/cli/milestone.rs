@@ -646,6 +646,7 @@ fn milestone_matrix_separates_critical_from_sideband_and_enforces_wave_barriers(
 
     // Compact matrix output shows critical/sideband summary and wave columns.
     let compact = arc(&repo, &["milestone", &ms]);
+    assert!(!compact.contains('\x1b'), "non-TTY output must not paint");
     assert!(
         compact.contains("Critical: 2 of 5 complete (40%)"),
         "{compact}"
@@ -656,6 +657,11 @@ fn milestone_matrix_separates_critical_from_sideband_and_enforces_wave_barriers(
     );
     assert!(compact.contains("core [critical]"), "{compact}");
     assert!(compact.contains("cleanup [sideband]"), "{compact}");
+
+    let plain = arc(&repo, &["milestone", &ms, "--plain"]);
+    assert!(!plain.contains('\x1b'));
+    assert!(plain.contains(&core), "{plain}");
+    assert!(plain.contains("Core baseline"), "{plain}");
 }
 
 #[test]
