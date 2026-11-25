@@ -84,3 +84,55 @@ fn the_build_script_runs_git_without_the_inherited_git_environment() {
         "the build script's Git wrote the inherited trace target"
     );
 }
+
+/// Claim: build metadata never emits a nonexistent `cargo:rerun-if-changed`
+/// path when refs are packed or `packed-refs` is absent. Rejects a missing
+/// watched path that marks the crate perpetually dirty and forces Cargo to
+/// recompile inside timed gates.
+#[test]
+fn packed_refs_never_emit_missing_watched_paths() {
+    let repo = Repo::new();
+    let program = build_script(&repo);
+    fs::write(
+        repo.root.join("Cargo.toml"),
+        "agent-tapes-core = { version = \"2000.1.1\", rev = \"fixture\" }\n",
+    )
+    .unwrap();
+    fs::write(repo.root.join("build.rs"), "// fixture\n").unwrap();
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+
+    let assert_all_watched_exist = |metadata: &str| {
+        let mut count = 0;
+        for line in metadata.lines() {
+            if let Some(raw) = line.strip_prefix("cargo:rerun-if-changed=") {
+                count += 1;
+                let path = Path::new(raw);
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    repo.root.join(path)
+                };
+                assert!(
+                    resolved.exists(),
+                    "watched path does not exist: {} (from line: {line})",
+                    resolved.display()
+                );
+            }
+        }
+        assert!(count >= 4, "expected watched paths, got:\n{metadata}");
+    };
+
+    // Before pack-refs: packed-refs may be absent, loose branch ref exists.
+    let before = stdout(&mut repo.fixture_env(AssertCommand::new(&program), &repo.root));
+    assert_all_watched_exist(&before);
+
+    // After pack-refs --all: loose branch ref is gone, packed-refs exists.
+    git(&repo.root, &["pack-refs", "--all"]);
+    assert!(!repo.root.join(".git/refs/heads/master").exists());
+    let after = stdout(&mut repo.fixture_env(AssertCommand::new(&program), &repo.root));
+    assert_all_watched_exist(&after);
+    assert!(
+        after.contains(&format!("ARC_BUILD_COMMIT={}", repo.head(&repo.root))),
+        "{after}"
+    );
+}

@@ -27,6 +27,12 @@ fn watch(path: PathBuf) {
     println!("cargo:rerun-if-changed={}", path.display());
 }
 
+fn watch_if_exists(path: PathBuf) {
+    if path.exists() {
+        watch(path);
+    }
+}
+
 /// The reader a fresh cost measurement names: the release and revision the
 /// manifest pins `agent-tapes-core` at, so moving the pin is one line.
 fn tapes_reader() -> String {
@@ -65,11 +71,12 @@ fn main() {
     ) {
         let git_dir = PathBuf::from(git_dir);
         let common_dir = PathBuf::from(common_dir);
-        watch(git_dir.join("HEAD"));
-        watch(git_dir.join("index"));
-        watch(common_dir.join("packed-refs"));
+        watch_if_exists(git_dir.join("HEAD"));
+        watch_if_exists(git_dir.join("index"));
+        watch_if_exists(git_dir.join("logs/HEAD"));
+        watch_if_exists(common_dir.join("packed-refs"));
         if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
-            watch(common_dir.join(branch));
+            watch_if_exists(common_dir.join(branch));
         }
     }
     println!(
