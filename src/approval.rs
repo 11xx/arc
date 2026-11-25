@@ -241,21 +241,31 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     let would_reject_findings = clearance_gap.is_some();
     let rejected_findings = would_reject_findings && !debt_waives_current_head;
 
-    let verdict = facts.latest_verdict.map(|v| VerdictStatus {
-        event_id: v.event_id.clone(),
-        origin_replica_id: v.origin_replica_id.clone(),
-        verdict: v.verdict,
-        patchset_id: v.patchset_id.clone(),
-        body: v.body.clone(),
-        provisional: v.provisional.clone(),
-        actor: v.actor.clone(),
-        on_behalf_of: v.on_behalf_of.clone(),
-        author_assumed: v.author_assumed(),
-        valid_for_current_head: v.verdict == Verdict::Approved
-            && names_latest_patchset(&v.patchset_id).is_some()
-            && facts.approved_head_matches
-            && !rejected_self_approval
-            && !rejected_findings,
+    let verdict = facts.latest_verdict.map(|v| {
+        let on_latest_patchset = names_latest_patchset(&v.patchset_id).is_some();
+        let matches_current_head = on_latest_patchset
+            && if v.verdict == Verdict::Approved {
+                facts.approved_head_matches
+            } else {
+                facts.head_matches
+            };
+        VerdictStatus {
+            event_id: v.event_id.clone(),
+            origin_replica_id: v.origin_replica_id.clone(),
+            verdict: v.verdict,
+            patchset_id: v.patchset_id.clone(),
+            body: v.body.clone(),
+            provisional: v.provisional.clone(),
+            actor: v.actor.clone(),
+            on_behalf_of: v.on_behalf_of.clone(),
+            author_assumed: v.author_assumed(),
+            matches_current_head,
+            valid_for_current_head: v.verdict == Verdict::Approved
+                && on_latest_patchset
+                && facts.approved_head_matches
+                && !rejected_self_approval
+                && !rejected_findings,
+        }
     });
     let local_approval_valid = verdict
         .as_ref()
@@ -512,22 +522,38 @@ fn advisories(facts: &ApprovalFacts) -> Vec<Advisory> {
         });
     }
     if !independent && danger.dangerous {
-        let unknown = review_map
+        let unknown_rows: Vec<&ReviewerCoverage> = review_map
             .iter()
-            .any(|row| row.covers_final && row.attribution_unknown);
-        warnings.push(if unknown {
-            Advisory {
-                code: "reviewer-attribution-unknown",
-                detail: format!(
+            .filter(|row| row.covers_final && row.attribution_unknown)
+            .collect();
+        warnings.push(if !unknown_rows.is_empty() {
+            let detail = if unknown_rows.iter().all(|row| !row.is_author) {
+                let reviewers = unknown_rows
+                    .iter()
+                    .map(|row| row.reviewer.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "reviewer {reviewers} of {} was assumed rather than declared; \
+                     pass --actor or set ARC_ACTOR so independence is recorded",
+                    final_patchset.id
+                )
+            } else {
+                format!(
                     "no reviewer of {} is distinguishable from its author; \
-                     record --on-behalf-of to make attribution legible{}",
+                     record --contributors or --on-behalf-of (or declare the reviewer \
+                     with --actor / ARC_ACTOR) to make attribution legible{}",
                     final_patchset.id,
                     if matched.is_empty() {
                         String::new()
                     } else {
                         format!("; {}", matched.join(", "))
                     }
-                ),
+                )
+            };
+            Advisory {
+                code: "reviewer-attribution-unknown",
+                detail,
             }
         } else {
             let detail = if matched.is_empty() {

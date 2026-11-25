@@ -339,6 +339,28 @@ fn source_list_for_rule(sources: &BTreeMap<String, Vec<String>>, rule: &str) -> 
 
 /// Human-readable Markdown view of one change. Suitable for terminals
 /// and for dropping into a journal artifact; the ledger stays private.
+/// Describe a local verdict's currency against the current patchset and head,
+/// keeping head currency distinct from approval validity.
+pub fn verdict_head_label(
+    verdict: crate::model::Verdict,
+    valid_for_current_head: bool,
+    matches_current_head: bool,
+) -> &'static str {
+    if valid_for_current_head {
+        "valid for current head"
+    } else if matches_current_head {
+        match verdict {
+            crate::model::Verdict::ChangesRequested => {
+                "active for current head (changes requested)"
+            }
+            crate::model::Verdict::CommentOnly => "current for this head (comment only)",
+            crate::model::Verdict::Approved => "current head (not valid for approval)",
+        }
+    } else {
+        "STALE for current head"
+    }
+}
+
 pub fn markdown(
     state: &ChangeState,
     report: &StatusReport,
@@ -744,11 +766,7 @@ pub fn markdown(
             v.verdict,
             v.patchset_id,
             by,
-            if v.valid_for_current_head {
-                "valid for current head"
-            } else {
-                "STALE for current head"
-            }
+            verdict_head_label(v.verdict, v.valid_for_current_head, v.matches_current_head)
         );
         if let Some(reason) = &report.approval_rejection_reason {
             let _ = writeln!(w, "- {reason}");
@@ -1217,7 +1235,7 @@ pub fn markdown(
         }
     }
     if let Some(view) = &report.forge_view {
-        let _ = writeln!(w, "{}", crate::forge_view::render(view));
+        let _ = writeln!(w, "\n{}", crate::forge_view::render(view).trim_end());
     }
     if let Some(forge) = &report.forge {
         let _ = writeln!(w, "\n## Forge\n");

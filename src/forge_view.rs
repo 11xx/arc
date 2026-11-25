@@ -475,44 +475,512 @@ pub fn build(
 }
 
 pub fn render(view: &Value) -> String {
-    let mut text = format!("Forge reconstruction: {}\n", view["change_id"]);
+    use std::fmt::Write as _;
+
+    let change_id = view["change_id"].as_str().unwrap_or("unknown");
+    let mut text = format!("Forge reconstruction: {change_id}\n");
     if let Some(diagnostic) = view.get("diagnostic") {
-        text.push_str(&format!("Unavailable: {diagnostic}\n"));
+        let msg = diagnostic
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| diagnostic.to_string());
+        let _ = writeln!(text, "Unavailable: {msg}");
         return text;
     }
-    for name in [
-        "identity",
-        "observations",
-        "generation_links",
-        "related_changes",
-        "patchsets",
-        "candidates",
-        "received_evidence",
-        "run_references",
-        "acceptance",
-        "coverage",
-        "availability",
-        "freshness",
-        "freshness_scope",
-        "review_bindings",
-        "findings",
-        "frontiers",
-        "reader_options",
-        "local_resolution",
-        "current_byte_availability",
-        "round_trip",
-        "deliveries",
-        "disclosures",
-        "candidate_context",
-        "source_availability",
-        "source_read_errors",
-        "byte_references",
-        "related_workflows",
-        "local_record_scope",
-    ] {
-        text.push_str(&format!("{name}: {}\n", view[name]));
+
+    // Active reader filters (only when set)
+    if let Some(opts) = view.get("reader_options").and_then(Value::as_object) {
+        let mut filters = Vec::new();
+        if let Some(obs) = opts.get("observation").and_then(Value::as_str) {
+            filters.push(format!("observation {obs}"));
+        }
+        if let Some(at) = opts.get("change_at").and_then(Value::as_str) {
+            filters.push(format!("at event {at}"));
+        }
+        if opts
+            .get("history")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            filters.push("full history".into());
+        }
+        if !filters.is_empty() {
+            let _ = writeln!(text, "- Scope: {}", filters.join(", "));
+        }
     }
+
+    // Provider tuple(s), deduplicated
+    if let Some(identities) = view["identity"].as_array() {
+        let mut seen = std::collections::BTreeSet::new();
+        for p in identities {
+            let provider = p["provider"].as_str().unwrap_or("?");
+            let host = p["host"].as_str().unwrap_or("?");
+            let repo = p["repository"].as_str().unwrap_or("?");
+            let pr = p["pr_number"].as_u64().unwrap_or(0);
+            let url = p["url"].as_str().unwrap_or("");
+            let base_repo = p["base_repo"].as_str().unwrap_or("");
+            let base_ref = p["base_ref"].as_str().unwrap_or("");
+            let head_repo = p["head_repo"].as_str().unwrap_or("");
+            let head_ref = p["head_ref"].as_str().unwrap_or("");
+            let key = (
+                provider, host, repo, pr, url, base_repo, base_ref, head_repo, head_ref,
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            let _ = writeln!(text, "- PR: {provider}:{host}/{repo}#{pr} ({url})");
+            let _ = writeln!(
+                text,
+                "  base {base_repo}@{base_ref} <- head {head_repo}@{head_ref}"
+            );
+        }
+    }
+
+    // Freshness
+    if let Some(freshness) = view.get("freshness").and_then(Value::as_object) {
+        let last = freshness
+            .get("last_successful_read")
+            .and_then(Value::as_object);
+        let latest = freshness.get("latest_attempt").and_then(Value::as_object);
+        let scope = view["freshness_scope"].as_str().unwrap_or("held history");
+        if let Some(last) = last {
+            let id = last["event_id"].as_str().unwrap_or("?");
+            let at = last["read_at"].as_str().unwrap_or("?");
+            let age = freshness
+                .get("age_seconds")
+                .and_then(Value::as_u64)
+                .map(|s| format!(", {} ago", format_age(s)))
+                .unwrap_or_default();
+            let _ = writeln!(
+                text,
+                "- Freshness: last successful read {id} at {at}{age} ({scope})"
+            );
+        }
+        if let Some(latest) = latest {
+            let latest_id = latest["event_id"].as_str().unwrap_or("?");
+            let last_id = last.and_then(|l| l["event_id"].as_str());
+            if last_id != Some(latest_id) {
+                let at = latest["read_at"].as_str().unwrap_or("?");
+                let state = latest["coverage"]["overall"]["state"]
+                    .as_str()
+                    .unwrap_or("unknown");
+                let reason = latest["coverage"]["overall"]["failure_reason"]
+                    .as_str()
+                    .map(|r| format!(": {r}"))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    text,
+                    "  latest attempt: {latest_id} at {at} ({state}{reason})"
+                );
+            }
+        }
+        if let Some(anomalies) = freshness
+            .get("clock_anomalies")
+            .and_then(Value::as_array)
+            .filter(|a| !a.is_empty())
+        {
+            let ids: Vec<&str> = anomalies.iter().filter_map(Value::as_str).collect();
+            let _ = writeln!(text, "  clock anomalies: {}", ids.join(", "));
+        }
+    }
+
+    // Lifecycle & local integration
+    let lifecycle_state = view["round_trip"]["provider_lifecycle"].as_str();
+    let merge_sha = view["round_trip"]["observed_merge_sha"].as_str();
+    let local_rev = view["round_trip"]["local_integration_revision"].as_str();
+    if lifecycle_state.is_some() || merge_sha.is_some() || local_rev.is_some() {
+        let mut parts = Vec::new();
+        if let Some(state) = lifecycle_state {
+            parts.push(format!("PR {state}"));
+        }
+        if let Some(sha) = merge_sha {
+            parts.push(format!("observed merge {}", short_sha(sha)));
+        }
+        if let Some(rev) = local_rev {
+            parts.push(format!("local integration {}", short_sha(rev)));
+        }
+        let _ = writeln!(text, "- Lifecycle: {}", parts.join("; "));
+    }
+
+    // Checks rollup
+    if let Some(checks) = view["local_resolution"]["checks"].as_object() {
+        let state = checks
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let obs_head = checks.get("observed_pr_head").and_then(Value::as_str);
+        let res_head = checks.get("resolved_pr_head").and_then(Value::as_str);
+        let detail = checks.get("detail").and_then(Value::as_str);
+        let mut line = format!("- Checks: {state}");
+        if let Some(head) = obs_head {
+            let _ = write!(line, " at head {}", short_sha(head));
+            if let Some(resolved) = res_head.filter(|r| *r != head) {
+                let _ = write!(line, " -> {}", short_sha(resolved));
+            }
+        }
+        if let Some(detail) = detail {
+            let _ = write!(line, " ({detail})");
+        }
+        let _ = writeln!(text, "{line}");
+    }
+
+    // Index local resolution and custody availability by observation / generation
+    let resolved_by_obs: std::collections::BTreeMap<&str, &Value> = view["local_resolution"]
+        ["observations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["observation_id"].as_str().map(|id| (id, entry)))
+        .collect();
+    let mut gen_availability: std::collections::BTreeMap<(&str, &str), &str> =
+        std::collections::BTreeMap::new();
+    let mut obs_custody_counts: std::collections::BTreeMap<&str, (usize, usize, usize)> =
+        std::collections::BTreeMap::new();
+    if let Some(entries) = view["availability"].as_array() {
+        for entry in entries {
+            let Some(obs_id) = entry["observation_id"].as_str() else {
+                continue;
+            };
+            let status = entry["availability"].as_str().unwrap_or("unavailable");
+            let counts = obs_custody_counts.entry(obs_id).or_default();
+            match status {
+                "available" => counts.0 += 1,
+                "corrupt" => counts.2 += 1,
+                _ => counts.1 += 1,
+            }
+            if let Some(gens) = entry["supports"]["generations"].as_array() {
+                for gen_id in gens.iter().filter_map(Value::as_str) {
+                    gen_availability.insert((obs_id, gen_id), status);
+                }
+            }
+        }
+    }
+
+    // Observations
+    if let Some(observations) = view["observations"]
+        .as_array()
+        .filter(|arr| !arr.is_empty())
+    {
+        let _ = writeln!(text, "- Observations ({}):", observations.len());
+        for record in observations {
+            let event_id = record["event_id"].as_str().unwrap_or("?");
+            let doc = &record["document"];
+            let read_id = doc["read_id"].as_str().unwrap_or("?");
+            let read_at = doc["read_at"].as_str().unwrap_or("?");
+            let cov = doc["coverage"]["overall"]["state"]
+                .as_str()
+                .unwrap_or("unknown");
+            let conflict = record["conflict"].as_bool().unwrap_or(false);
+            let invalid = record["invalid"].as_str();
+            let mut flags = String::new();
+            if conflict {
+                flags.push_str(", CONFLICT");
+            }
+            if let Some(reason) = invalid {
+                let _ = write!(flags, ", INVALID: {reason}");
+            }
+            let _ = writeln!(
+                text,
+                "  - {event_id} (read {read_id}, {read_at}, coverage {cov}{flags})"
+            );
+            let mut details = Vec::new();
+            if let Some(obs_head) = doc["observed_head_sha"].as_str() {
+                let resolved = resolved_by_obs
+                    .get(event_id)
+                    .and_then(|r| r["resolved_head"].as_str());
+                let head_str = match resolved {
+                    Some(res) if res != obs_head => {
+                        format!("head {} -> {}", short_sha(obs_head), short_sha(res))
+                    }
+                    None if resolved_by_obs.contains_key(event_id) => {
+                        format!("head {} -> dropped", short_sha(obs_head))
+                    }
+                    _ => format!("head {}", short_sha(obs_head)),
+                };
+                details.push(head_str);
+            }
+            if let Some(obs_base) = doc["observed_base_sha"].as_str() {
+                details.push(format!("base {}", short_sha(obs_base)));
+            }
+            if let Some((avail, unavail, corrupt)) = obs_custody_counts.get(event_id).copied() {
+                let mut parts = vec![format!("{avail} available")];
+                if unavail > 0 {
+                    parts.push(format!("{unavail} unavailable"));
+                }
+                if corrupt > 0 {
+                    parts.push(format!("{corrupt} corrupt"));
+                }
+                details.push(format!("custody: {}", parts.join(", ")));
+            }
+            if !details.is_empty() {
+                let _ = writeln!(text, "    {}", details.join("; "));
+            }
+            if let Some(gens) = doc["generations"].as_array().filter(|g| !g.is_empty()) {
+                for g in gens {
+                    let gid = g["generation_id"].as_str().unwrap_or("?");
+                    let kind = g["kind"].as_str().unwrap_or("?");
+                    let node = g["node_id"].as_str().unwrap_or("?");
+                    let pred = g["predecessor"]
+                        .as_str()
+                        .map(|p| format!(" <- {p}"))
+                        .unwrap_or_default();
+                    let avail = gen_availability
+                        .get(&(event_id, gid))
+                        .copied()
+                        .map(|s| format!(" ({s})"))
+                        .unwrap_or_default();
+                    let _ = writeln!(text, "    - {gid} [{kind} {node}]{pred}{avail}");
+                }
+            }
+        }
+    }
+
+    // Review bindings with forge sources or frontiers
+    if let Some(bindings) = view["review_bindings"].as_array() {
+        let forge_bound: Vec<&Value> = bindings
+            .iter()
+            .filter(|b| {
+                b["sources"].as_array().is_some_and(|s| !s.is_empty()) || !b["frontier"].is_null()
+            })
+            .collect();
+        if !forge_bound.is_empty() {
+            let _ = writeln!(text, "- Review bindings ({}):", forge_bound.len());
+            for b in forge_bound {
+                let eid = b["event_id"].as_str().unwrap_or("?");
+                let verdict = b["verdict"].as_str().unwrap_or("?");
+                let sources: Vec<String> = b["sources"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|s| {
+                        format!(
+                            "{}:{}",
+                            s["observation_id"].as_str().unwrap_or("?"),
+                            s["generation_id"].as_str().unwrap_or("?")
+                        )
+                    })
+                    .collect();
+                let later = b["later_observations"]
+                    .as_array()
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                let mut line = format!("  - {eid} ({verdict})");
+                if !sources.is_empty() {
+                    let _ = write!(line, ": sources {}", sources.join(", "));
+                }
+                if later > 0 {
+                    let _ = write!(line, "; {later} later observation(s)");
+                }
+                let _ = writeln!(text, "{line}");
+            }
+        }
+    }
+
+    // Bound findings (only those citing forge sources)
+    if let Some(findings) = view["findings"].as_object() {
+        let bound: Vec<(&String, &Value)> = findings
+            .iter()
+            .filter(|(_, f)| f["forge_sources"].as_array().is_some_and(|s| !s.is_empty()))
+            .collect();
+        if !bound.is_empty() {
+            let _ = writeln!(text, "- Bound findings ({}):", bound.len());
+            for (fid, f) in bound {
+                let blocking = if f["blocking"].as_bool().unwrap_or(false) {
+                    "blocking/"
+                } else {
+                    ""
+                };
+                let severity = f["severity"].as_str().unwrap_or("minor");
+                let summary = f["summary"].as_str().unwrap_or("");
+                let sources: Vec<String> = f["forge_sources"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|s| {
+                        format!(
+                            "{}:{}",
+                            s["observation_id"].as_str().unwrap_or("?"),
+                            s["generation_id"].as_str().unwrap_or("?")
+                        )
+                    })
+                    .collect();
+                let _ = writeln!(
+                    text,
+                    "  - {fid} [{blocking}{severity}] {summary} — sources: {}",
+                    sources.join(", ")
+                );
+            }
+        }
+    }
+
+    // Deliveries
+    if let Some(deliveries) = view["deliveries"].as_array().filter(|d| !d.is_empty()) {
+        let _ = writeln!(text, "- Deliveries ({}):", deliveries.len());
+        for entry in deliveries {
+            let d = &entry["delivery"];
+            let msg_id = d["message_id"].as_str().unwrap_or("?");
+            let attempt = d["attempt_id"].as_str().unwrap_or("?");
+            let ev_id = d["evidence_id"].as_str().unwrap_or("?");
+            let del = d["delivery"]["standing"].as_str().unwrap_or("?");
+            let ack = d["acknowledgement"]["standing"].as_str().unwrap_or("?");
+            let acted = d["acted_on"]["standing"].as_str().unwrap_or("?");
+            let _ = writeln!(
+                text,
+                "  - {msg_id}/{attempt} ({ev_id}): delivery {del}, ack {ack}, acted-on {acted}"
+            );
+        }
+    }
+
+    // Disclosures
+    if let Some(disclosures) = view["disclosures"].as_array().filter(|d| !d.is_empty()) {
+        let provenance_by_id: std::collections::BTreeMap<&str, Option<&str>> = view["round_trip"]
+            ["disclosure_availability"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                entry["disclosure_id"]
+                    .as_str()
+                    .map(|id| (id, entry["compact_provenance"].as_str()))
+            })
+            .collect();
+        let _ = writeln!(text, "- Disclosures ({}):", disclosures.len());
+        for d in disclosures {
+            let id = d["disclosure_id"].as_str().unwrap_or("?");
+            let author = d["author"].as_str().unwrap_or("?");
+            let discloser = d["discloser"].as_str().unwrap_or("?");
+            let sha = d["outgoing"]["sha256"].as_str().unwrap_or("?");
+            let len = d["outgoing"]["byte_length"].as_u64().unwrap_or(0);
+            let _ = writeln!(
+                text,
+                "  - {id} (author {author}, discloser {discloser}, outgoing {}, {len} bytes)",
+                short_sha(sha)
+            );
+            if let Some(Some(line)) = provenance_by_id.get(id) {
+                let _ = writeln!(text, "    {line}");
+            }
+        }
+    }
+
+    // Preparation origins
+    if let Some(origins) = view["round_trip"]["origins"]
+        .as_array()
+        .filter(|o| !o.is_empty())
+    {
+        let formatted: Vec<String> = origins
+            .iter()
+            .map(|o| {
+                format!(
+                    "{}:{}:{}",
+                    o["change_id"].as_str().unwrap_or("?"),
+                    o["observation"].as_str().unwrap_or("?"),
+                    o["generation"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        let _ = writeln!(text, "- Origins: {}", formatted.join(", "));
+    }
+
+    // Source/byte diagnostics (only when degraded or errors exist)
+    let mut degraded = Vec::new();
+    if let Some(sources) = view["source_availability"].as_array() {
+        for s in sources {
+            let status = s["source_status"].as_str().unwrap_or("valid");
+            let avail = s["availability"].as_str().unwrap_or("available");
+            if !matches!(status, "valid" | "recorded") || avail != "available" {
+                let rec = s["record_event_id"].as_str().unwrap_or("?");
+                degraded.push(format!("{rec}: source {status}, bytes {avail}"));
+            }
+        }
+    }
+    if let Some(bytes) = view["byte_references"].as_array() {
+        for b in bytes {
+            let avail = b["availability"].as_str().unwrap_or("available");
+            if avail != "available" {
+                let rec = b["record_event_id"].as_str().unwrap_or("?");
+                let sha = b["sha256"].as_str().unwrap_or("?");
+                degraded.push(format!("{rec}: byte {} {avail}", short_sha(sha)));
+            }
+        }
+    }
+    if let Some(errors) = view["source_read_errors"].as_array() {
+        for err in errors {
+            let cid = err["change_id"].as_str().unwrap_or("?");
+            let diag = err["diagnostic"].as_str().unwrap_or("read error");
+            degraded.push(format!("{cid}: {diag}"));
+        }
+    }
+    if !degraded.is_empty() {
+        let _ = writeln!(text, "- Custody/source diagnostics:");
+        for item in degraded {
+            let _ = writeln!(text, "  - {item}");
+        }
+    }
+
+    // Related changes (excluding self)
+    if let Some(related) = view["related_changes"].as_array() {
+        let others: Vec<&str> = related
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|id| *id != change_id)
+            .collect();
+        if !others.is_empty() {
+            let _ = writeln!(text, "- Related changes: {}", others.join(", "));
+        }
+    }
+
+    // Workflow counts (only when non-empty)
+    let mut workflow_parts = Vec::new();
+    let count_of = |v: &Value| v.as_array().map_or(0, Vec::len);
+    let candidates = count_of(&view["candidates"]);
+    let selections = count_of(&view["acceptance"]["selections"]);
+    let promotions = count_of(&view["acceptance"]["promotions"]);
+    let runs = count_of(&view["run_references"]);
+    if candidates > 0 {
+        workflow_parts.push(format!("{candidates} candidate(s)"));
+    }
+    if selections > 0 {
+        workflow_parts.push(format!("{selections} selection(s)"));
+    }
+    if promotions > 0 {
+        workflow_parts.push(format!("{promotions} promotion(s)"));
+    }
+    if runs > 0 {
+        workflow_parts.push(format!("{runs} run event(s)"));
+    }
+    if !workflow_parts.is_empty() {
+        let _ = writeln!(text, "- Workflow: {}", workflow_parts.join(", "));
+    }
+
     text
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+fn format_age(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        let h = seconds / 3600;
+        let m = (seconds % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    } else {
+        let d = seconds / 86_400;
+        let h = (seconds % 86_400) / 3600;
+        if h == 0 {
+            format!("{d}d")
+        } else {
+            format!("{d}d {h}h")
+        }
+    }
 }
 
 pub fn show(

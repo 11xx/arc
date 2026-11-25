@@ -98,7 +98,10 @@ pub use diff::{diff, DiffArgs};
 pub use doctor::run as run_doctor;
 pub use external::{record_verdict as record_external_verdict, ExternalVerdictArgs};
 pub use findings::{findings, FindingsFormat};
-pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_observe, forge_pr_state};
+pub use forge_cmd::{
+    forge_checks, forge_declare, forge_ingest, forge_link, forge_observe, forge_observe_example,
+    forge_pr_state, ForgeIngestArgs,
+};
 pub use gate_reports::{gate_paths, gate_report, init_budgets, measure_gates, over_budgets};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
@@ -572,6 +575,29 @@ impl Ctx {
             }
         }
         Ok(())
+    }
+
+    /// The same invocation representing `subject` with a fresh model-lookup
+    /// slot so a session-form subject resolves its own session store.
+    pub(crate) fn with_on_behalf_of(&self, subject: String) -> Ctx {
+        Ctx {
+            cwd: self.cwd.clone(),
+            reads_only: self.reads_only,
+            actor: self.actor.clone(),
+            actor_source: self.actor_source,
+            operator: self.operator.clone(),
+            fallback_announced: std::sync::atomic::AtomicBool::new(
+                self.fallback_announced
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            harness: self.harness.clone(),
+            session: self.session.clone(),
+            session_link: self.session_link.clone(),
+            model: self.model.clone(),
+            model_source: self.model_source,
+            model_attribution: std::sync::Arc::new(std::sync::OnceLock::new()),
+            on_behalf_of: Some(subject),
+        }
     }
 
     /// The same invocation pointed at another checkout.

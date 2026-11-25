@@ -3092,6 +3092,28 @@ pub fn patch_id(cwd: &Path, commit: &str) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
+/// The stable patch id of the combined diff from `base` to `head`, or `None`
+/// when both commits carry the same tree.
+pub fn range_patch_id(cwd: &Path, base: &str, head: &str) -> Result<Option<String>> {
+    let diff = git_bytes(
+        cwd,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--full-index",
+            base,
+            head,
+        ],
+    )?;
+    let out = git_piped(cwd, &["patch-id", "--stable"], &diff)?;
+    Ok(String::from_utf8(out)?
+        .split_whitespace()
+        .next()
+        .map(str::to_string))
+}
+
 /// Every commit in `base..head`, parents before children.
 pub fn range_commits(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>> {
     let out = git(

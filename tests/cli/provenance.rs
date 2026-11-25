@@ -837,6 +837,79 @@ fn a_derived_reviewer_is_not_independent() {
     );
 }
 
+#[test]
+fn snapshot_contributors_on_adopted_pr_represents_external_author_and_clarifies_undeclared_review()
+{
+    let repo = repo_with_self_approval_policy();
+    stdout(repo.arc(&repo.root).args(["begin", "adopted-pr"]));
+    let wt = repo.home.join(".worktrees/repo-adopted-pr");
+    repo.commit(&wt, "work.rs", "external work\n", "feat: external pr");
+
+    let snap = repo
+        .arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args([
+            "snapshot",
+            "adopted-pr",
+            "--contributors",
+            "External Author <ext@example.invalid>",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        snap.status.success(),
+        "{}",
+        String::from_utf8_lossy(&snap.stderr)
+    );
+    let snap_out = String::from_utf8_lossy(&snap.stdout);
+    let snap_err = String::from_utf8_lossy(&snap.stderr);
+    assert!(
+        snap_out.contains("subject: External Author <ext@example.invalid>"),
+        "{snap_out}"
+    );
+    assert!(
+        !snap_err.contains("nobody declared one"),
+        "unexpected assumed-actor warning on explicit external contributor snapshot: {snap_err}"
+    );
+
+    let before_review = json_stdout(repo.arc(&wt).args(["status", "adopted-pr", "--json"]));
+    assert_eq!(
+        before_review["review_subject"]["effective_author"],
+        "External Author <ext@example.invalid>",
+        "{before_review}"
+    );
+
+    // Reviewing without ARC_ACTOR gives an advisory pointing at --actor / ARC_ACTOR.
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "adopted-pr", "--verdict", "comment-only"])
+        .assert()
+        .success();
+    let assumed = json_stdout(repo.arc(&wt).args(["status", "adopted-pr", "--json"]));
+    let advisory = assumed["advisories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "reviewer-attribution-unknown")
+        .expect("expected reviewer-attribution-unknown advisory");
+    let detail = advisory["detail"].as_str().unwrap();
+    assert!(detail.contains("ARC_ACTOR"), "{detail}");
+    assert!(!detail.contains("record --on-behalf-of"), "{detail}");
+
+    // Declaring ARC_ACTOR clears the unknown-attribution advisory and allows independent approval.
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "reviewer-session")
+        .args(["review", "adopted-pr", "--verdict", "approved"])
+        .assert()
+        .success();
+    let declared = json_stdout(repo.arc(&wt).args(["status", "adopted-pr", "--json"]));
+    assert_eq!(declared["has_valid_approval"], true, "{declared}");
+    assert!(
+        !advisory_codes(&declared).contains(&"reviewer-attribution-unknown".to_string()),
+        "{declared}"
+    );
+}
+
 /// Two identities nobody declared cannot show that two people acted.
 #[test]
 fn self_approval_fails_closed_on_an_assumed_identity() {

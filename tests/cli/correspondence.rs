@@ -369,7 +369,15 @@ fn without_a_correspondence_a_cherry_pick_still_refuses() {
         ])
         .output()
         .unwrap();
-    refused_naming(&output, &["is not an integration of this change"]);
+    refused_naming(
+        &output,
+        &[
+            "is not an integration of this change",
+            "--target-before",
+            "--derive-correspondence",
+            "--correspondence",
+        ],
+    );
     let output = repo
         .arc(&repo.root)
         .args([
@@ -384,4 +392,129 @@ fn without_a_correspondence_a_cherry_pick_still_refuses() {
         .unwrap();
     refused_naming(&output, &["--target-before"]);
     still_open(&repo, &change);
+}
+
+#[test]
+fn derive_correspondence_closes_rebased_and_squashed_merges_and_refuses_ambiguous() {
+    // 1. Rebased multi-commit merge on a moved target.
+    let repo = Repo::new();
+    let (rebased, [first, second]) = two_commit_change(&repo, "rebased");
+    let before = landing_branch(&repo, "rebased-onto");
+    let landed_first = pick(&repo, &first);
+    let landed_second = pick(&repo, &second);
+    let out = stdout(repo.arc(&repo.root).args([
+        "close",
+        &rebased,
+        "--assert-integrated",
+        &landed_second,
+        "--into",
+        "rebased-onto",
+        "--target-before",
+        &before,
+        "--derive-correspondence",
+    ]));
+    assert!(out.contains("correspondence: commit (2 pairs)"), "{out}");
+    let closure =
+        json_stdout(repo.arc(&repo.root).args(["status", &rebased, "--json"]))["closure"].clone();
+    assert_eq!(
+        closure["correspondence"],
+        json!([
+            {"source": first, "landed": landed_first},
+            {"source": second, "landed": landed_second},
+        ])
+    );
+
+    // 2. Squashed multi-commit merge into one commit on a moved target.
+    let repo = Repo::new();
+    let (squashed, [s1, s2]) = two_commit_change(&repo, "squashed");
+    let sq_before = landing_branch(&repo, "squashed-onto");
+    fs::write(repo.root.join("one.txt"), "one\n").unwrap();
+    fs::write(repo.root.join("two.txt"), "two\n").unwrap();
+    git(&repo.root, &["add", "one.txt", "two.txt"]);
+    git(
+        &repo.root,
+        &["commit", "-q", "-m", "feat: squashed pr (#1)"],
+    );
+    let sq_rev = repo.head(&repo.root);
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "close",
+        &squashed,
+        "--assert-integrated",
+        &sq_rev,
+        "--into",
+        "squashed-onto",
+        "--target-before",
+        &sq_before,
+        "--derive-correspondence",
+    ]));
+    assert!(out.contains("correspondence: squash (2 pairs)"), "{out}");
+    let closure =
+        json_stdout(repo.arc(&repo.root).args(["status", &squashed, "--json"]))["closure"].clone();
+    assert_eq!(
+        closure["correspondence"],
+        json!([
+            {"source": s1, "landed": sq_rev},
+            {"source": s2, "landed": sq_rev},
+        ])
+    );
+
+    // 3. Explicit arc-correspondence/1 file with `"mode": "squash"` is accepted.
+    let repo = Repo::new();
+    let (explicit_sq, [e1, e2]) = two_commit_change(&repo, "explicit-squash");
+    let exp_before = landing_branch(&repo, "explicit-squash-onto");
+    fs::write(repo.root.join("one.txt"), "one\n").unwrap();
+    fs::write(repo.root.join("two.txt"), "two\n").unwrap();
+    git(&repo.root, &["add", "one.txt", "two.txt"]);
+    git(&repo.root, &["commit", "-q", "-m", "feat: explicit squash"]);
+    let exp_rev = repo.head(&repo.root);
+    let mut sq_doc = correspondence(
+        &explicit_sq,
+        &e2,
+        &exp_before,
+        &exp_rev,
+        &[(&e1, &exp_rev), (&e2, &exp_rev)],
+    );
+    sq_doc["mode"] = json!("squash");
+    let sq_file = write_file(&repo, "squash.json", &sq_doc);
+    let output = close(
+        &repo,
+        &explicit_sq,
+        "explicit-squash-onto",
+        &exp_before,
+        &exp_rev,
+        &sq_file,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 4. Unrelated target commit refuses derivation cleanly.
+    let repo = Repo::new();
+    let (unrelated, _) = two_commit_change(&repo, "unrelated");
+    let un_before = landing_branch(&repo, "unrelated-onto");
+    repo.commit(&repo.root, "other.txt", "nope\n", "chore: other");
+    let un_rev = repo.head(&repo.root);
+    let output = repo
+        .arc(&repo.root)
+        .args([
+            "close",
+            &unrelated,
+            "--assert-integrated",
+            &un_rev,
+            "--into",
+            "unrelated-onto",
+            "--target-before",
+            &un_before,
+            "--derive-correspondence",
+        ])
+        .output()
+        .unwrap();
+    refused_naming(
+        &output,
+        &["could not derive correspondence", "--correspondence"],
+    );
+    still_open(&repo, &unrelated);
 }

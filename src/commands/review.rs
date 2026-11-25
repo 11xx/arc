@@ -62,6 +62,7 @@ struct ReviewVerdict<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     relation: Option<&'a VerdictRelation>,
     created_at: chrono::DateTime<chrono::Utc>,
+    matches_current_head: bool,
     valid_for_current_head: bool,
     /// Why this approval was recorded as owed corroboration, when it was.
     /// An approval that gates while owing a second judgment is not the same
@@ -146,11 +147,11 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             // let a stale corroboration read as though it still covered the
             // head; the relation gets its own line below, and a contested
             // change says so once, about the change.
-            if verdict.valid_for_current_head {
-                "valid for current head"
-            } else {
-                "STALE for current head"
-            }
+            crate::render::verdict_head_label(
+                verdict.verdict,
+                verdict.valid_for_current_head,
+                verdict.matches_current_head,
+            )
         );
         if !verdict.forge_sources.is_empty() || verdict.forge_frontier.is_some() {
             println!(
@@ -281,13 +282,19 @@ fn review_verdict<'a>(
     state: &'a ChangeState,
     report: &StatusReport,
 ) -> ReviewVerdict<'a> {
-    let valid_for_current_head = state.latest_verdict().is_some_and(|latest| {
-        latest.event_id == verdict.event_id
-            && report
-                .verdict
-                .as_ref()
-                .is_some_and(|current| current.valid_for_current_head)
-    });
+    let is_authoritative = state
+        .latest_verdict()
+        .is_some_and(|latest| latest.event_id == verdict.event_id);
+    let matches_current_head = is_authoritative
+        && report
+            .verdict
+            .as_ref()
+            .is_some_and(|current| current.matches_current_head);
+    let valid_for_current_head = is_authoritative
+        && report
+            .verdict
+            .as_ref()
+            .is_some_and(|current| current.valid_for_current_head);
     let patchset = state
         .patchsets
         .iter()
@@ -303,6 +310,7 @@ fn review_verdict<'a>(
         on_behalf_of: verdict.on_behalf_of.as_deref(),
         relation: verdict.relation.as_ref(),
         created_at: verdict.created_at,
+        matches_current_head,
         valid_for_current_head,
         provisional: verdict.provisional.as_deref(),
         provisional_outstanding: state
@@ -804,6 +812,21 @@ pub(super) fn snapshot_holding(
     if let Some(contributors) = requested_contributors.as_deref() {
         warn_fewer_contributors_than_hands(ctx, &base_rev, &head, contributors);
     }
+    // Adopting or recording an external contributor's patchset with
+    // `--contributors` (when the invoking actor is absent from that set and
+    // `--on-behalf-of` was not specified) represents the first declared
+    // contributor so the recording session does not stamp itself as `subject`.
+    let contributors_represent_other = !pin_brief
+        && ctx.on_behalf_of.is_none()
+        && inherited_subject.is_none()
+        && requested_contributors.as_deref().is_some_and(|declared| {
+            !declared.is_empty() && !declared.iter().any(|contributor| contributor == &ctx.actor)
+        });
+    if contributors_represent_other {
+        inherited_subject = requested_contributors
+            .as_deref()
+            .and_then(|declared| declared.first().cloned());
+    }
     let payload = Payload::PatchsetAdded {
         budget_raise_ids: st
             .budget_raises
@@ -837,7 +860,17 @@ pub(super) fn snapshot_holding(
     for skipped in &skipped_defaults {
         eprintln!("{skipped}");
     }
-    let mut ev = ctx.event_at(store, change_id, now, payload)?;
+    let represented_ctx = if contributors_represent_other {
+        inherited_subject
+            .as_ref()
+            .map(|subject| ctx.with_on_behalf_of(subject.clone()))
+    } else {
+        None
+    };
+    let mut ev = represented_ctx
+        .as_ref()
+        .unwrap_or(ctx)
+        .event_at(store, change_id, now, payload)?;
     if let Some(subject) = inherited_subject {
         ev.on_behalf_of = Some(subject);
     }

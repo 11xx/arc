@@ -1070,6 +1070,9 @@ pub struct VerdictStatus {
     /// Whether arc invented the identity this verdict is attributed to rather
     /// than someone declaring it. Additive in `arc-status/6`.
     pub author_assumed: bool,
+    /// Whether this verdict applies to the newest patchset and current head,
+    /// independent of whether it is an approval or satisfies review policy.
+    pub matches_current_head: bool,
     pub valid_for_current_head: bool,
 }
 

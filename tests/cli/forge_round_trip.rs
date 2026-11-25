@@ -440,7 +440,10 @@ fn forge_round_trip_related_change_and_custody_closure_imports_offline() {
     for command in ["show", "log", "explain"] {
         let text = stdout(replica.arc(&replica.root).args([command, &destination]));
         assert!(
-            text.contains("arc-disclosure/1") && text.contains("local_integration_revision"),
+            text.contains("disclosure-1")
+                && text.contains("local integration")
+                && text.contains(&integrated[..12])
+                && !text.contains("\"local_integration_revision\""),
             "{command}: {text}"
         );
     }

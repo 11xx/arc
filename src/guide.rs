@@ -30,10 +30,13 @@ SAY WHO YOU ARE (before the first write)
   first line and `build: <commit> (clean|dirty)`, or `build: unknown`, on its
   second; `-V` prints the release line alone.
 
-  `arc env` leaves ARC_MODEL unset. Each write resolves the acting session's
-  model. Declare one with `--model` or export ARC_MODEL; the declaration is
-  recorded with any observed disagreement. `arc show --json` and `arc log`
-  show the model evidence.
+  `arc env` leaves ARC_MODEL and ARC_ACTOR unset. Each write resolves the acting
+  session's model. ARC_ACTOR stays undeclared by default so an inferred session
+  cannot silently satisfy declared-actor or independent-review policies; set
+  `export ARC_ACTOR=<name>` or pass `--actor <name>` when acting as a declared
+  author or reviewer. Declare a model with `--model` or export ARC_MODEL; the
+  declaration is recorded with any observed disagreement. `arc show --json` and
+  `arc log` show the model evidence.
 
   A Codex model selection outside the transcript tail is sought through at
   most sixteen 1 MiB metadata pages per invocation, in addition to the normal
@@ -1686,19 +1689,22 @@ RUN A CHANGE
   rewrite map ever names a trial commit, on either side.
 
   A change whose commits reached its target as other commits that arc did
-  not produce (a cherry-pick, a rebase elsewhere) closes with `arc close
-  <change> --assert-integrated <rev> --target-before <before>
-  --correspondence <file>`. The file (`arc-correspondence/1`, shape in `arc
-  close --help`) stands in for the asserted revision containing the source
-  head, and for nothing else. It names the change, the closed patchset and
-  its head, `<before>` and `<rev>`, each of which must match, and maps every
-  commit of the patchset, oldest first, to one commit in `<before>..<rev>`:
-  one to one, each landed commit descending from the previous one, with
-  equal stable Git patch ids. A merge or an empty commit on either side
-  has no ordinary patch identity and refuses. Each refusal names the commit
-  and the rule it broke. The closure stays asserted, never via a landing,
-  carries no gate evidence, and records the pairs, which `status`, `show`,
-  `explain` and an export carry.
+  not produce (a cherry-pick, a rebase elsewhere, or a squash merge) closes
+  with `arc close <change> --assert-integrated <rev> --target-before <before>`
+  plus `--derive-correspondence` (when commits match unambiguously by stable
+  Git patch ids or tree equivalence) or `--correspondence <file>`. The file
+  (`arc-correspondence/1`, shape in `arc close --help`) stands in for the
+  asserted revision containing the source head, and for nothing else. It names
+  the change, the closed patchset and its head, `<before>` and `<rev>`, each
+  of which must match, and maps every commit of the patchset, oldest first, to
+  commits in `<before>..<rev>`: one to one in commit order (`mode: "commit"`,
+  the default) with equal stable Git patch ids or parent/result trees, or all
+  to one non-merge landed commit matching the combined diff or tree of
+  `base..head` (`mode: "squash"`). A merge or an empty commit has no ordinary
+  patch identity and refuses. Each refusal names the commit and the rule it
+  broke. The closure stays asserted, never via a landing, carries no gate
+  evidence, and records the pairs, which `status`, `show`, `explain` and an
+  export carry.
 
   `integration.cleanup` governs branch and worktree cleanup after integration
   (built-in false). A slot checkout is never removed; its release detaches it
@@ -2606,7 +2612,15 @@ FORGE
   Missing bytes degrade only dependent claims. Export never initializes a replica.
 
   forge observe CHANGE --file frontier.json [--json] admits an adapter's
-  arc-forge-observation/1 document. Admission never changes readiness. A valid
+  arc-forge-observation/1 document. `forge observe --example` prints a minimal
+  valid manifest with self-consistent digests. `forge ingest CHANGE --file
+  PAYLOAD` converts pre-fetched provider JSON (`gh pr view --json`, GitHub REST
+  API, or MCP `pull_request_read` output; strictly offline) into an admitted
+  `arc-forge-observation/1` record and custody bytes, reusing unchanged item
+  generations and chaining `previous_observation` from the change's latest
+  usable read; `--dry-run`, `--out-manifest` and `--out-custody-dir` emit the
+  built artifacts without writing to the ledger. Admission never changes
+  readiness. A valid
   failed or truncated read succeeds; invalid schemas, digests, references and
   generation relationships refuse before append. Identical read_id retries
   return the original event with already-recorded; conflicting content refuses.
@@ -7151,8 +7165,8 @@ SCHEMAS
     `arc-custody-bundle/1`           arc export / import --custody-dir
     `arc-forge-delivery/1`           arc message --delivery-file
     `arc-disclosure/1`               arc context declare --disclosure-file
-    `arc-forge-observation/1`        arc forge observe --file
-    `arc-forge-receipt/1`            arc forge observe|link|checks|pr-state --json
+    `arc-forge-observation/1`        arc forge observe --file; arc forge ingest
+    `arc-forge-receipt/1`            arc forge observe|ingest|link|checks|pr-state --json
     `arc-review-receipt/1`           arc receipt template; arc review|audit --receipt
     `arc-received-evidence/1`        arc candidate register --evidence-file
     `arc-replica-bundle/3`           arc replica export / import

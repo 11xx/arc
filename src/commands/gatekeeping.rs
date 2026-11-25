@@ -6384,6 +6384,7 @@ pub struct CloseArgs {
     pub into: Option<String>,
     pub target_before: Option<String>,
     pub correspondence: Option<std::path::PathBuf>,
+    pub derive_correspondence: bool,
     pub abandoned: bool,
     pub superseded_by: Option<String>,
     pub external_reference: Option<String>,
@@ -6396,6 +6397,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
         into,
         target_before,
         correspondence,
+        derive_correspondence,
         abandoned,
         superseded_by,
         external_reference,
@@ -6430,6 +6432,12 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     if correspondence.is_some() && assert_integrated.is_none() {
         bail!("--correspondence describes an asserted integration; pass --assert-integrated <REV>");
     }
+    if derive_correspondence && assert_integrated.is_none() {
+        bail!("--derive-correspondence describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    if correspondence.is_some() && derive_correspondence {
+        bail!("--correspondence and --derive-correspondence cannot be combined");
+    }
     if let Some(reference) = external_reference.as_deref() {
         if reference.trim().is_empty() || reference.contains('\n') || reference.contains('\r') {
             bail!("--external-reference must be one nonempty line");
@@ -6438,139 +6446,176 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             bail!("--external-reference requires --assert-integrated");
         }
     }
-    let (payload, integrated_rev) = match (assert_integrated, abandoned, superseded_by) {
-        (Some(rev), false, None) => {
-            let rev = gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &rev))?;
-            let patchset = match patchset {
-                Some(id) => st
-                    .patchsets
-                    .iter()
-                    .find(|patchset| patchset.id == id)
-                    .with_context(|| format!("{id} is not a patchset of {change_id}"))?,
-                None => st.latest_patchset().with_context(|| {
-                    format!(
-                        "no patchset recorded on {change_id}, so nothing says what was \
-                         integrated; record one with `arc snapshot {change_id}` first"
-                    )
-                })?,
-            };
-            if let Some(reference) = external_reference.as_deref() {
-                let external = st
-                    .latest_external_verdict_for_revision(&patchset.head)
-                    .filter(|external| {
-                        external.verdict == crate::model::ExternalVerdict::Approved
-                            && external.reference == reference
-                    })
-                    .with_context(|| {
+    let (payload, integrated_rev, derived_summary) =
+        match (assert_integrated, abandoned, superseded_by) {
+            (Some(rev), false, None) => {
+                let rev = gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &rev))?;
+                let patchset = match patchset {
+                    Some(id) => st
+                        .patchsets
+                        .iter()
+                        .find(|patchset| patchset.id == id)
+                        .with_context(|| format!("{id} is not a patchset of {change_id}"))?,
+                    None => st.latest_patchset().with_context(|| {
                         format!(
-                            "no external approval at {} has reference {reference:?}",
-                            patchset.head
+                            "no patchset recorded on {change_id}, so nothing says what was \
+                         integrated; record one with `arc snapshot {change_id}` first"
                         )
-                    })?;
-                let _ = external;
-            }
-            let target = into.unwrap_or_else(|| st.target_branch.clone());
-            if !gitio::branch_exists(&ctx.cwd, &target) {
-                bail!(
+                    })?,
+                };
+                if let Some(reference) = external_reference.as_deref() {
+                    let external = st
+                        .latest_external_verdict_for_revision(&patchset.head)
+                        .filter(|external| {
+                            external.verdict == crate::model::ExternalVerdict::Approved
+                                && external.reference == reference
+                        })
+                        .with_context(|| {
+                            format!(
+                                "no external approval at {} has reference {reference:?}",
+                                patchset.head
+                            )
+                        })?;
+                    let _ = external;
+                }
+                let target = into.unwrap_or_else(|| st.target_branch.clone());
+                if !gitio::branch_exists(&ctx.cwd, &target) {
+                    bail!(
                     "{target} is not a branch in this repository; an assertion names where the \
                      work actually landed"
                 );
-            }
-            // An assertion arc did not guard still has to be about this
-            // change. Without these two checks it could name any commit at
-            // all, and the ledger would record an integration that never
-            // happened — worse than recording nothing, because it reads as
-            // authoritative. A correspondence stands in for the ancestry
-            // proof, and is checked once `target_before` is known.
-            if external_reference.is_none()
-                && correspondence.is_none()
-                && !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)?
-            {
-                bail!(
-                    "{rev} does not contain {} ({}), so it is not an integration of this change",
+                }
+                // An assertion arc did not guard still has to be about this
+                // change. Without these two checks it could name any commit at
+                // all, and the ledger would record an integration that never
+                // happened — worse than recording nothing, because it reads as
+                // authoritative. A correspondence stands in for the ancestry
+                // proof, and is checked once `target_before` is known.
+                if external_reference.is_none()
+                    && correspondence.is_none()
+                    && !derive_correspondence
+                    && !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)?
+                {
+                    bail!(
+                    "{rev} does not contain {} ({}), so it is not an integration of this change; \
+                     if it landed by rebase, cherry-pick, or squash, pass --target-before <REV> \
+                     with --derive-correspondence (or --correspondence <FILE>)",
                     patchset.id,
                     &patchset.head[..patchset.head.len().min(8)]
                 );
-            }
-            if !gitio::is_ancestor(
-                &ctx.cwd,
-                &rev,
-                &gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &target))?,
-            )? {
-                bail!("{rev} is not on {target}; nothing there integrated this change");
-            }
-            // A merge's first parent is the prior target when the merge itself
-            // integrated the change. A fast-forward onto a merge head instead
-            // makes that parent part of the change. An explicit ancestor is
-            // recorded as asserted; only an absent flag permits inference.
-            let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
-            let target_before = match (target_before, parents.len()) {
-                (Some(named), _) => {
-                    let base = gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &named))?;
-                    if !gitio::is_ancestor(&ctx.cwd, &base, &rev)? {
-                        bail!("--target-before {named} ({base}) is not an ancestor of {rev}");
-                    }
-                    Some(base)
                 }
-                (None, 2..) => parents.into_iter().next(),
-                (None, _) => None,
-            };
-            let correspondence = match (&correspondence, &target_before) {
-                (Some(path), Some(before)) => crate::correspondence::check(
+                if !gitio::is_ancestor(
                     &ctx.cwd,
-                    path,
-                    &crate::correspondence::Subject {
-                        change_id: &change_id,
-                        patchset_id: &patchset.id,
-                        base: &patchset.base,
-                        head: &patchset.head,
-                        target_before: before,
-                        revision: &rev,
+                    &rev,
+                    &gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &target))?,
+                )? {
+                    bail!("{rev} is not on {target}; nothing there integrated this change");
+                }
+                // A merge's first parent is the prior target when the merge itself
+                // integrated the change. A fast-forward onto a merge head instead
+                // makes that parent part of the change. An explicit ancestor is
+                // recorded as asserted; only an absent flag permits inference.
+                let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
+                let target_before = match (target_before, parents.len()) {
+                    (Some(named), _) => {
+                        let base = gitio::fresh_read(|| gitio::rev_parse(&ctx.cwd, &named))?;
+                        if !gitio::is_ancestor(&ctx.cwd, &base, &rev)? {
+                            bail!("--target-before {named} ({base}) is not an ancestor of {rev}");
+                        }
+                        Some(base)
+                    }
+                    (None, 2..) => parents.into_iter().next(),
+                    (None, _) => None,
+                };
+                let (correspondence, derived_summary) =
+                    match (&correspondence, derive_correspondence, &target_before) {
+                        (Some(path), false, Some(before)) => (
+                            crate::correspondence::check(
+                                &ctx.cwd,
+                                path,
+                                &crate::correspondence::Subject {
+                                    change_id: &change_id,
+                                    patchset_id: &patchset.id,
+                                    base: &patchset.base,
+                                    head: &patchset.head,
+                                    target_before: before,
+                                    revision: &rev,
+                                },
+                            )?,
+                            None,
+                        ),
+                        (None, true, Some(before)) => {
+                            let derived = crate::correspondence::derive(
+                                &ctx.cwd,
+                                &crate::correspondence::Subject {
+                                    change_id: &change_id,
+                                    patchset_id: &patchset.id,
+                                    base: &patchset.base,
+                                    head: &patchset.head,
+                                    target_before: before,
+                                    revision: &rev,
+                                },
+                            )?;
+                            let count = derived.pairs.len();
+                            (derived.pairs, Some((derived.mode, count)))
+                        }
+                        (Some(_), _, None) => bail!("--correspondence needs --target-before"),
+                        (None, true, None) => {
+                            bail!("--derive-correspondence needs --target-before")
+                        }
+                        (Some(_), true, _) => unreachable!("checked above"),
+                        (None, false, _) => (Vec::new(), None),
+                    };
+                (
+                    Payload::IntegrationAsserted {
+                        integrated_commit: rev.clone(),
+                        source_patchset_id: patchset.id.clone(),
+                        source_head: patchset.head.clone(),
+                        target_branch: target,
+                        target_before,
+                        external_reference: external_reference.clone(),
+                        correspondence,
                     },
-                )?,
-                (Some(_), None) => bail!("--correspondence needs --target-before"),
-                (None, _) => Vec::new(),
-            };
-            (
-                Payload::IntegrationAsserted {
-                    integrated_commit: rev.clone(),
-                    source_patchset_id: patchset.id.clone(),
-                    source_head: patchset.head.clone(),
-                    target_branch: target,
-                    target_before,
-                    external_reference: external_reference.clone(),
-                    correspondence,
-                },
-                Some(rev),
-            )
-        }
-        (None, true, None) => (
-            Payload::ChangeClosed {
-                outcome: Closure::Abandoned,
-                integrated_commit: None,
-                superseded_by: None,
-            },
-            None,
-        ),
-        (None, false, Some(other)) => {
-            let other_id = store.resolve_change(&other)?;
-            (
+                    Some(rev),
+                    derived_summary,
+                )
+            }
+            (None, true, None) => (
                 Payload::ChangeClosed {
-                    outcome: Closure::Superseded,
+                    outcome: Closure::Abandoned,
                     integrated_commit: None,
-                    superseded_by: Some(other_id),
+                    superseded_by: None,
                 },
                 None,
-            )
-        }
-        _ => bail!(
+                None,
+            ),
+            (None, false, Some(other)) => {
+                let other_id = store.resolve_change(&other)?;
+                (
+                    Payload::ChangeClosed {
+                        outcome: Closure::Superseded,
+                        integrated_commit: None,
+                        superseded_by: Some(other_id),
+                    },
+                    None,
+                    None,
+                )
+            }
+            _ => bail!(
             "provide exactly one of --assert-integrated <rev>, --abandoned, --superseded <change>"
         ),
-    };
+        };
     let mut ev = ctx.event(&store, &change_id, payload)?;
     store.append_local_event(&mut ev)?;
     drop(transition);
     println!("closed: {change_id}");
+    if let Some((mode, count)) = derived_summary {
+        println!(
+            "correspondence: {} ({count} pair{})",
+            mode.as_str(),
+            if count == 1 { "" } else { "s" }
+        );
+    }
     println!("event: {}", ev.event_id);
     if let Err(error) = release_retention_refs(ctx, &change_id, integrated_rev.as_deref()) {
         eprintln!(

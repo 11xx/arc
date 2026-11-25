@@ -379,6 +379,54 @@ fn brief_cause_is_canonical_validated_and_required_after_v1() {
     );
 }
 
+#[test]
+fn brief_v1_accepts_forge_origin_and_refuses_renegotiation_causes_with_guidance() {
+    let (repo, id) = super::forge_observation::setup();
+    let doc = super::forge_observation::document("read-1", "g1", "PR body", None);
+    fs::write(repo.root.join("frontier.json"), doc.to_string()).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "observe", &id, "--file", "frontier.json"]),
+    );
+
+    // Renegotiation causes still refuse on v1 and point to forge origins.
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            &id,
+            "--body-file",
+            "-",
+            "--cause-note",
+            "renegotiation",
+        ])
+        .write_stdin("Should refuse\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forge:<obs>:<gen>"))
+        .stderr(predicates::str::contains("context declare --forge-origin"));
+
+    // A forge observation origin is permitted on brief v1.
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            &id,
+            "--body-file",
+            "-",
+            "--caused-by",
+            "forge:read-1:g1",
+        ])
+        .write_stdin("External PR review contract.\n")
+        .assert()
+        .success();
+
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &id, "--json"]));
+    assert_eq!(state["briefs"][0]["caused_by"][0]["kind"], "forge");
+    assert_eq!(
+        state["briefs"][0]["caused_by"][0]["source"]["generation_id"],
+        "g1"
+    );
+}
+
 /// A cause is resolved once and stored canonically in an append-only event, so
 /// an ambiguous prefix has to refuse. Picking the first candidate would record
 /// the wrong relationship permanently, and nothing downstream could tell.

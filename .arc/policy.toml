@@ -365,6 +365,7 @@ acknowledged_safe = [
   "src/commands/changelog.rs",
   "src/commands/run.rs",
   "src/forge_view.rs",
+  "src/forge_ingest.rs",
   "src/forge.rs",
   "src/commands/forge_cmd.rs",
   # Cost views read recorded usage. `cost retain` writes an observation event

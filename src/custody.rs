@@ -423,6 +423,30 @@ impl Custody {
         )?;
         Ok(Installed::Written)
     }
+
+    /// Publish in-memory bytes under their verified digest. Bytes already held
+    /// and verified are left alone; damaged ones are replaced.
+    pub fn install_bytes(&self, content: &Content, bytes: &[u8]) -> Result<Installed> {
+        ensure!(is_digest(&content.sha256), "invalid content digest");
+        ensure!(
+            bytes.len() as u64 == content.byte_length,
+            "content {} has length {}, not the recorded length {}",
+            short(&content.sha256),
+            bytes.len(),
+            content.byte_length
+        );
+        ensure!(
+            hex::encode(Sha256::digest(bytes)) == content.sha256,
+            "content {} does not match the recorded digest",
+            short(&content.sha256)
+        );
+        if self.availability(content).is_available() {
+            return Ok(Installed::AlreadyHeld);
+        }
+        let directory = self.objects(true)?.context("custody directory is absent")?;
+        write_atomic(&directory, &content.sha256, bytes, Visibility::Private)?;
+        Ok(Installed::Written)
+    }
 }
 
 /// Adapter-materialized files, verified and ready to publish.

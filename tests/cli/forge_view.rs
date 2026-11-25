@@ -816,3 +816,74 @@ fn forge_observation_frontier_counts_only_the_drift_recorded_within_it() {
         json!([])
     );
 }
+
+#[test]
+fn forge_show_and_show_render_readable_text_without_raw_json_dumps() {
+    let (repo, id) = setup();
+    retained_pair(&repo, &id);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "link", &id, "--observation", "read-1"]),
+    );
+    let wt = snapshot(&repo, &id);
+    stdout(repo.arc(&wt).args([
+        "finding",
+        &id,
+        "--summary",
+        "check boundary condition",
+        "--blocking",
+        "--forge-source",
+        "read-1:g1",
+    ]));
+    stdout(repo.arc(&wt).args([
+        "review",
+        &id,
+        "--verdict",
+        "comment-only",
+        "--forge-source",
+        "read-1:g1",
+    ]));
+
+    let forge_text = stdout(repo.arc(&repo.root).args(["forge", "show", &id]));
+    assert!(
+        forge_text.contains(&format!("Forge reconstruction: {id}\n")),
+        "{forge_text}"
+    );
+    assert!(
+        forge_text.contains("- PR: example:forge.example.invalid/sample/project#1"),
+        "{forge_text}"
+    );
+    assert!(forge_text.contains("- Freshness:"), "{forge_text}");
+    assert!(forge_text.contains("- Observations (1):"), "{forge_text}");
+    assert!(
+        forge_text.contains("- Review bindings (1):"),
+        "{forge_text}"
+    );
+    assert!(forge_text.contains("- Bound findings (1):"), "{forge_text}");
+    assert!(
+        forge_text.contains("check boundary condition"),
+        "{forge_text}"
+    );
+    // Empty sections are omitted and raw JSON dumps are reserved for --json.
+    for forbidden in [
+        "identity: [",
+        "observations: [",
+        "local_resolution: {",
+        "deliveries: []",
+        "- Deliveries",
+        "- Related changes:",
+    ] {
+        assert!(
+            !forge_text.contains(forbidden),
+            "{forbidden} in {forge_text}"
+        );
+    }
+
+    let show_text = stdout(repo.arc(&repo.root).args(["show", &id]));
+    assert!(
+        show_text.contains(&format!("Forge reconstruction: {id}\n")),
+        "{show_text}"
+    );
+    assert!(!show_text.contains("local_resolution: {"), "{show_text}");
+    assert!(!show_text.contains("observations: ["), "{show_text}");
+}

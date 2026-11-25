@@ -211,6 +211,92 @@ fn read_view_marks_approval_stale_after_new_snapshot() {
 }
 
 #[test]
+fn active_changes_requested_and_comment_only_verdicts_are_not_marked_stale() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "review-active-non-approval");
+
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-active-non-approval",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+
+    let shown = stdout(
+        repo.arc(&worktree)
+            .args(["show", "review-active-non-approval"]),
+    );
+    assert!(
+        shown.contains("active for current head (changes requested)"),
+        "{shown}"
+    );
+    assert!(!shown.contains("STALE for current head"), "{shown}");
+
+    let reviewed = stdout(
+        repo.arc(&worktree)
+            .args(["review", "review-active-non-approval"]),
+    );
+    assert!(
+        reviewed.contains("active for current head (changes requested)"),
+        "{reviewed}"
+    );
+    assert!(!reviewed.contains("STALE for current head"), "{reviewed}");
+
+    let status =
+        json_stdout(
+            repo.arc(&worktree)
+                .args(["status", "review-active-non-approval", "--json"]),
+        );
+    assert_eq!(status["verdict"]["matches_current_head"], true, "{status}");
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], false,
+        "{status}"
+    );
+
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-active-non-approval",
+            "--verdict",
+            "comment-only",
+        ])
+        .assert()
+        .success();
+    let comment_shown = stdout(
+        repo.arc(&worktree)
+            .args(["show", "review-active-non-approval"]),
+    );
+    assert!(
+        comment_shown.contains("current for this head (comment only)"),
+        "{comment_shown}"
+    );
+    assert!(
+        !comment_shown.contains("STALE for current head"),
+        "{comment_shown}"
+    );
+
+    // Moving past the patchset makes the verdict genuinely stale.
+    repo.commit(&worktree, "next.txt", "next\n", "test: next revision");
+    stdout(
+        repo.arc(&worktree)
+            .args(["snapshot", "review-active-non-approval"]),
+    );
+    let stale_shown = stdout(
+        repo.arc(&worktree)
+            .args(["show", "review-active-non-approval"]),
+    );
+    assert!(
+        stale_shown.contains("STALE for current head"),
+        "{stale_shown}"
+    );
+}
+
+#[test]
 fn read_view_json_has_versioned_schema() {
     let repo = Repo::new();
     let (_, worktree, _) = change_with_patchset(&repo, "review-json");

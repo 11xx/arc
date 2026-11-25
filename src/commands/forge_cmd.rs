@@ -199,6 +199,205 @@ fn receipt(
     Ok(())
 }
 
+pub fn forge_observe_example() -> Result<()> {
+    let example = crate::forge_ingest::example_observation();
+    println!("{}", serde_json::to_string_pretty(&example)?);
+    Ok(())
+}
+
+pub struct ForgeIngestArgs {
+    pub file: String,
+    pub format: crate::forge_ingest::InputFormat,
+    pub overrides: crate::forge_ingest::IngestOverrides,
+    pub comments_file: Option<String>,
+    pub reviews_file: Option<String>,
+    pub checks_file: Option<String>,
+    pub out_manifest: Option<std::path::PathBuf>,
+    pub out_custody_dir: Option<std::path::PathBuf>,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
+fn read_input_bytes(path: &str) -> Result<Vec<u8>> {
+    if path == "-" {
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .context("cannot read provider payload from stdin")?;
+        Ok(buf)
+    } else {
+        std::fs::read(path).with_context(|| format!("cannot read {path}"))
+    }
+}
+
+pub fn forge_ingest(ctx: &Ctx, reference: &str, args: ForgeIngestArgs) -> Result<()> {
+    let primary_bytes = read_input_bytes(&args.file)?;
+    let comments_bytes = args
+        .comments_file
+        .as_deref()
+        .map(read_input_bytes)
+        .transpose()?;
+    let reviews_bytes = args
+        .reviews_file
+        .as_deref()
+        .map(read_input_bytes)
+        .transpose()?;
+    let checks_bytes = args
+        .checks_file
+        .as_deref()
+        .map(read_input_bytes)
+        .transpose()?;
+
+    let store = if args.dry_run {
+        Store::discover_for_reading(&ctx.cwd)?
+    } else {
+        ctx.store()?
+    };
+    let change_id = store.resolve_change(reference)?;
+    let _transition = (!args.dry_run)
+        .then(|| store.lock_transition(&change_id))
+        .transpose()?;
+    let st = store.state(&change_id)?;
+
+    let build_with_history = |history: &[ObservationRecord]| {
+        crate::forge_ingest::build_observation(
+            &primary_bytes,
+            &args.file,
+            comments_bytes
+                .as_deref()
+                .map(|bytes| crate::forge_ingest::SupplementalInput {
+                    response_id: "comments",
+                    handle: args.comments_file.as_deref().unwrap_or("comments"),
+                    bytes,
+                }),
+            reviews_bytes
+                .as_deref()
+                .map(|bytes| crate::forge_ingest::SupplementalInput {
+                    response_id: "reviews",
+                    handle: args.reviews_file.as_deref().unwrap_or("reviews"),
+                    bytes,
+                }),
+            checks_bytes
+                .as_deref()
+                .map(|bytes| crate::forge_ingest::SupplementalInput {
+                    response_id: "checks",
+                    handle: args.checks_file.as_deref().unwrap_or("checks"),
+                    bytes,
+                }),
+            args.format,
+            &args.overrides,
+            history,
+        )
+    };
+    let existing_pos = args.overrides.read_id.as_deref().and_then(|rid| {
+        st.forge
+            .observations
+            .iter()
+            .position(|r| r.document.read_id == rid)
+    });
+    let mut built = build_with_history(match existing_pos {
+        Some(pos) => &st.forge.observations[..pos],
+        None => &st.forge.observations,
+    })?;
+    if existing_pos.is_none() {
+        if let Some(pos) = st
+            .forge
+            .observations
+            .iter()
+            .position(|r| r.document.read_id == built.document.read_id)
+        {
+            built = build_with_history(&st.forge.observations[..pos])?;
+        }
+    }
+
+    if let Some(path) = &args.out_manifest {
+        let rendered = serde_json::to_vec_pretty(&built.document)?;
+        std::fs::write(path, rendered)
+            .with_context(|| format!("cannot write manifest {}", path.display()))?;
+    }
+    if let Some(dir) = &args.out_custody_dir {
+        crate::forge_ingest::write_custody_dir(dir, &built.blobs)?;
+    }
+
+    if args.dry_run {
+        if args.json || args.out_manifest.is_none() {
+            println!("{}", serde_json::to_string_pretty(&built.document)?);
+        } else {
+            println!(
+                "forge ingest dry-run: {change_id} (read {}, {} generations, {} custody blobs)",
+                built.document.read_id,
+                built.document.generations.len(),
+                built.blobs.len()
+            );
+        }
+        return Ok(());
+    }
+
+    let document = built.document;
+    let custody = crate::custody::Custody::at(&store.root);
+    let publish_blobs = || -> Result<()> {
+        for reference in document.contents() {
+            let content = crate::custody::Content::from(reference);
+            if let Some(bytes) = built.blobs.get(&content.sha256) {
+                custody.install_bytes(&content, bytes)?;
+            }
+        }
+        Ok(())
+    };
+
+    if let Some(original) = st
+        .forge
+        .observations
+        .iter()
+        .find(|r| r.document.read_id == document.read_id)
+    {
+        if !original.usable() {
+            bail!("read_id is conflicting or invalid");
+        }
+        if original.document != document {
+            bail!("read_id conflicts with recorded observation");
+        }
+        publish_blobs()?;
+        return receipt(
+            "ingest",
+            &change_id,
+            &original.event_id,
+            Some(original),
+            &custody,
+            "already-recorded",
+            args.json,
+        );
+    }
+
+    let payload = Payload::ForgeObservationRecorded {
+        observation: document.clone(),
+    };
+    crate::forge_observation::validate_projection(&payload, &st.forge)?;
+    ensure_append_allowed(&st, &payload)?;
+    ctx.ensure_declared_actor(&store)?;
+    custody.verify_destination()?;
+    publish_blobs()?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
+    let obs = ObservationRecord {
+        event_id: event.event_id.clone(),
+        created_at: event.created_at,
+        document,
+        aliases: Vec::new(),
+        conflict: false,
+        invalid: None,
+    };
+    receipt(
+        "ingest",
+        &change_id,
+        &event.event_id,
+        Some(&obs),
+        &custody,
+        "recorded",
+        args.json,
+    )
+}
+
 pub fn forge_observe(
     ctx: &Ctx,
     reference: &str,

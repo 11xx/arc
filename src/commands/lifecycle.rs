@@ -1112,6 +1112,9 @@ pub fn brief(
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
         let has_causes = !causes.is_empty();
+        let has_non_forge_causes = causes
+            .iter()
+            .any(|cause| !matches!(cause, BriefCause::Forge { .. }));
         let output_plan_ref = plan_ref.clone();
         let output_plan_slice = plan_slice.clone();
         let payload = Payload::BriefRecorded {
@@ -1126,15 +1129,19 @@ pub fn brief(
             must_read: must_read.clone(),
         };
         ensure_append_allowed(&state, &payload)?;
-        // A first brief has nothing to be caused by. Every later version is a
-        // renegotiation, and the reason is the fact worth keeping.
+        // A first brief renegotiates nothing, so non-forge causes are refused
+        // on v1; a forge observation origin (`forge:<obs>:<gen>`) is allowed
+        // because an observed PR or review comment can originate the initial
+        // contract. Every later version requires at least one cause.
         if next_version > 1 && !has_causes {
             bail!("brief v{next_version} requires at least one cause: pass --caused-by or --cause-note");
         }
-        if next_version == 1 && has_causes {
+        if next_version == 1 && has_non_forge_causes {
             bail!(concat!(
-                "brief v1 cannot have a cause: the first brief on a change ",
-                "renegotiates nothing; drop --caused-by and --cause-note"
+                "brief v1 cannot have a renegotiation cause: the first brief on a change ",
+                "renegotiates nothing; drop non-forge --caused-by and --cause-note ",
+                "(a forge observation origin is allowed via --caused-by forge:<obs>:<gen>, ",
+                "or declare a preparation origin with `arc context declare --forge-origin`)"
             ));
         }
         let mut event = ctx.event(&store, &change_id, payload)?;

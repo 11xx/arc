@@ -59,6 +59,7 @@ mod fixture_isolation;
 mod fixture_seeds;
 mod forge;
 mod forge_custody;
+mod forge_ingest;
 mod forge_observation;
 mod forge_round_trip;
 mod forge_view;

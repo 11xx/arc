@@ -27,6 +27,7 @@ mod explain;
 mod extent;
 mod feed;
 mod forge;
+mod forge_ingest;
 mod forge_observation;
 mod forge_round_trip;
 mod forge_view;
@@ -222,9 +223,12 @@ struct BodyOpts {
 struct AttributionOpts {
     /// Explicitly set the contributors for this patchset. Recording a
     /// patchset while another actor holds a live claim on the change requires
-    /// this or --solo. Each is an actor: a harness:session form requires a
-    /// nonempty session; a placeholder or a harness:model form carrying one
-    /// refuses
+    /// this or --solo. When the invoking actor is absent from the set and
+    /// --on-behalf-of is omitted (e.g. adopting an external PR), snapshot
+    /// represents the first declared contributor as `on_behalf_of` so the
+    /// recording session does not claim authorship. Each is an actor: a
+    /// harness:session form requires a nonempty session; a placeholder or a
+    /// harness:model form carrying one refuses
     #[arg(
         long = "contributors",
         value_name = "ACTOR[,ACTOR...]",
@@ -957,14 +961,16 @@ enum Cmd {
         withdraw_probe: Vec<String>,
         /// Earlier ledger fact that caused this version (repeatable):
         /// finding:<id>, verdict:<event> naming a changes-requested verdict,
-        /// blocked-on:<event>, or forge:<observation>:<generation>, each on this change. v1 refuses a cause;
-        /// every later version requires at least one, from this flag or
+        /// blocked-on:<event>, or forge:<observation>:<generation>, each on this change.
+        /// v1 permits forge:<observation>:<generation> origins and refuses renegotiation
+        /// causes; every later version requires at least one cause, from this flag or
         /// --cause-note
         #[arg(long)]
         caused_by: Vec<String>,
         /// External cause, when no earlier ledger object represents the
-        /// reason. It is a cause like --caused-by: refused on v1, and enough
-        /// alone for any later version
+        /// reason. It is a renegotiation cause: refused on v1 (use --caused-by
+        /// forge:<obs>:<gen> or `arc context declare --forge-origin` for an
+        /// initial forge origin), and enough alone for any later version
         #[arg(long)]
         cause_note: Option<String>,
         /// A read the contract requires of whoever answers it (repeatable):
@@ -3357,26 +3363,41 @@ enum Cmd {
         #[arg(long = "target-before", requires = "assert_integrated")]
         target_before: Option<String>,
         /// Assert that the patchset's commits landed as other commits (a
-        /// cherry-pick, or a rebase arc did not perform), in place of the
-        /// asserted revision containing the source head. FILE is
-        /// `arc-correspondence/1` JSON: {"schema", "change" (the change id),
+        /// cherry-pick, a rebase, or a squash merge arc did not perform), in
+        /// place of the asserted revision containing the source head. FILE
+        /// ('-' for stdin) is `arc-correspondence/1` JSON: {"schema",
+        /// optional "mode": "commit"|"squash", "change" (the change id),
         /// "patchset", "source_head", "target_before", "revision",
         /// "commits": [{"source", "landed"}]}. The binding fields must name
         /// this change, the closed patchset and its head, --target-before
-        /// (required) and the asserted revision. Every commit of the
-        /// patchset, oldest first, maps to one commit in
+        /// (required) and the asserted revision. In commit mode (default),
+        /// every commit of the patchset, oldest first, maps to one commit in
         /// target-before..revision, one to one, each landed commit
         /// descending from the one before it, with equal stable Git patch
-        /// ids. A merge or an empty commit on either side is refused.
-        /// Each refusal names the commit and the rule. The closure stays
-        /// asserted, carries no gate evidence and records the pairs
+        /// ids or parent/result trees. In squash mode, every source commit
+        /// maps to one non-merge landed commit matching the combined diff or
+        /// tree of base..source_head. A merge or an empty commit on either
+        /// side is refused. Each refusal names the commit and the rule. The
+        /// closure stays asserted, carries no gate evidence and records the
+        /// pairs
         #[arg(
             long,
             value_name = "FILE",
             requires_all = ["assert_integrated", "target_before"],
-            conflicts_with = "external_reference"
+            conflicts_with_all = ["external_reference", "derive_correspondence"]
         )]
         correspondence: Option<PathBuf>,
+        /// Derive and verify an `arc-correspondence/1` commit or squash
+        /// correspondence automatically from base..patchset-head and
+        /// target-before..revision when commits match unambiguously by stable
+        /// Git patch ids or tree equivalence. Refuses ambiguous or mismatched
+        /// ranges, naming the commit and rule
+        #[arg(
+            long = "derive-correspondence",
+            requires_all = ["assert_integrated", "target_before"],
+            conflicts_with_all = ["correspondence", "external_reference"]
+        )]
+        derive_correspondence: bool,
         /// Close as abandoned: the work stopped and nothing was merged
         #[arg(long)]
         abandoned: bool,
@@ -4629,6 +4650,84 @@ enum HooksCmd {
     Status,
 }
 
+#[derive(clap::Args)]
+struct ForgeIngestCli {
+    /// Change whose append-only ledger receives the read
+    change: String,
+    /// Pre-fetched provider PR JSON file ('-' for stdin)
+    #[arg(long)]
+    file: String,
+    /// Input JSON flavor: auto (default), gh, github-rest, or mcp
+    #[arg(long, value_enum, default_value = "auto")]
+    format: forge_ingest::InputFormat,
+    /// Provider name recorded in provider_identity (default: github)
+    #[arg(long)]
+    provider: Option<String>,
+    /// Override or supply the forge host (e.g. github.com)
+    #[arg(long)]
+    host: Option<String>,
+    /// Override or supply the repository as OWNER/REPO
+    #[arg(long)]
+    repo: Option<String>,
+    /// Override or supply the pull request number
+    #[arg(long)]
+    pr: Option<u64>,
+    /// Override or supply the canonical PR URL
+    #[arg(long)]
+    url: Option<String>,
+    /// Override or supply the base repository (OWNER/REPO)
+    #[arg(long = "base-repo")]
+    base_repo: Option<String>,
+    /// Override or supply the base branch ref
+    #[arg(long = "base-ref")]
+    base_ref: Option<String>,
+    /// Override or supply the head repository (OWNER/REPO)
+    #[arg(long = "head-repo")]
+    head_repo: Option<String>,
+    /// Override or supply the head branch ref
+    #[arg(long = "head-ref")]
+    head_ref: Option<String>,
+    /// Override or supply the provider-observed head commit SHA
+    #[arg(long = "head-sha")]
+    head_sha: Option<String>,
+    /// Override or supply the provider-observed base commit SHA
+    #[arg(long = "base-sha")]
+    base_sha: Option<String>,
+    /// Optional supplemental JSON file of PR/issue comments
+    #[arg(long = "comments-file")]
+    comments_file: Option<String>,
+    /// Optional supplemental JSON file of PR reviews
+    #[arg(long = "reviews-file")]
+    reviews_file: Option<String>,
+    /// Optional supplemental JSON file of check runs or commit statuses
+    #[arg(long = "checks-file")]
+    checks_file: Option<String>,
+    /// Mark a collection as truncated/incomplete (repeatable: comments, reviews, checks, pull-request)
+    #[arg(long = "truncated", value_name = "COLLECTION")]
+    truncated: Vec<String>,
+    /// Explicit read_id (defaults to a fresh unique read-<ulid>)
+    #[arg(long = "read-id")]
+    read_id: Option<String>,
+    /// Explicit RFC 3339 read_at acquisition timestamp (defaults to now UTC)
+    #[arg(long = "read-at")]
+    read_at: Option<String>,
+    /// Override the adapter label recorded in the observation
+    #[arg(long)]
+    adapter: Option<String>,
+    /// Also write the built arc-forge-observation/1 JSON manifest to FILE
+    #[arg(long = "out-manifest", value_name = "FILE")]
+    out_manifest: Option<PathBuf>,
+    /// Also write materialized sha256/<digest> custody files into DIR
+    #[arg(long = "out-custody-dir", value_name = "DIR")]
+    out_custody_dir: Option<PathBuf>,
+    /// Build and validate the observation (and optional outputs) without writing to the ledger
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Emit arc-forge-receipt/1 (or with --dry-run, the arc-forge-observation/1 manifest)
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Subcommand)]
 enum ForgeCmd {
     /// Reconstruct recorded forge content offline.
@@ -4695,17 +4794,28 @@ enum ForgeCmd {
     /// `custody/` or `custody/sha256` that is one refuses the write.
     Observe {
         /// Change whose append-only ledger receives the read
-        change: String,
+        #[arg(required_unless_present = "example", conflicts_with = "example")]
+        change: Option<String>,
         /// Local arc-forge-observation/1 JSON document
-        #[arg(long)]
-        file: String,
+        #[arg(long, required_unless_present = "example", conflicts_with = "example")]
+        file: Option<String>,
         /// Directory of adapter-materialized files at sha256/<digest>
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", conflicts_with = "example")]
         custody_dir: Option<String>,
+        /// Print a minimal valid arc-forge-observation/1 JSON document and exit without writing
+        #[arg(long, conflicts_with_all = ["change", "file", "custody_dir", "json"])]
+        example: bool,
         /// Emit arc-forge-receipt/1 metadata without response bodies
-        #[arg(long)]
+        #[arg(long, conflicts_with = "example")]
         json: bool,
     },
+    /// Convert pre-fetched provider PR JSON into an admitted observation and custody bytes offline.
+    ///
+    /// Never contacts a provider. Reads pre-fetched JSON (`gh pr view --json`, GitHub REST API,
+    /// or MCP `pull_request_read` output), hashes raw responses and normalized item bodies into
+    /// ledger custody, reuses unchanged item generations from prior reads, and chains
+    /// `previous_observation` from the change's latest usable admitted observation.
+    Ingest(Box<ForgeIngestCli>),
     /// Declare the explicit projection tuple and policy for a change.
     ///
     /// Reads no provider and records no acquisition or retained content.
@@ -6513,8 +6623,13 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
         .subcommand_matches("gates")
         .and_then(|gates| gates.subcommand_matches("measure"))
         .is_some_and(|measure| measure.get_flag("concurrent"));
-    let reads_only =
-        commands::READ_ONLY_COMMANDS.contains(&path.as_str()) && !concurrent_measurement;
+    let forge_observe_example = matches
+        .subcommand_matches("forge")
+        .and_then(|forge| forge.subcommand_matches("observe"))
+        .is_some_and(|observe| observe.get_flag("example"));
+    let reads_only = (commands::READ_ONLY_COMMANDS.contains(&path.as_str())
+        && !concurrent_measurement)
+        || forge_observe_example;
     if reads_only && commands::SHARED_READ_COMMANDS.contains(&path.as_str()) {
         store::share_reads();
     }
@@ -8323,6 +8438,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             into,
             target_before,
             correspondence,
+            derive_correspondence,
             abandoned,
             superseded,
             external_reference,
@@ -8336,6 +8452,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     into,
                     target_before,
                     correspondence,
+                    derive_correspondence,
                     abandoned,
                     superseded_by: superseded,
                     external_reference,
@@ -8384,9 +8501,86 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 change,
                 file,
                 custody_dir,
+                example,
                 json,
             } => {
-                commands::forge_observe(&ctx, &change, &file, custody_dir.as_deref(), json)?;
+                if example {
+                    commands::forge_observe_example()?;
+                } else {
+                    let change = change.context("CHANGE is required without --example")?;
+                    let file = file.context("--file is required without --example")?;
+                    commands::forge_observe(&ctx, &change, &file, custody_dir.as_deref(), json)?;
+                }
+                Ok(0)
+            }
+            ForgeCmd::Ingest(cli) => {
+                let ForgeIngestCli {
+                    change,
+                    file,
+                    format,
+                    provider,
+                    host,
+                    repo,
+                    pr,
+                    url,
+                    base_repo,
+                    base_ref,
+                    head_repo,
+                    head_ref,
+                    head_sha,
+                    base_sha,
+                    comments_file,
+                    reviews_file,
+                    checks_file,
+                    truncated,
+                    read_id,
+                    read_at,
+                    adapter,
+                    out_manifest,
+                    out_custody_dir,
+                    dry_run,
+                    json,
+                } = *cli;
+                let read_at = read_at
+                    .as_deref()
+                    .map(|raw| {
+                        chrono::DateTime::parse_from_rfc3339(raw)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .with_context(|| format!("invalid --read-at timestamp {raw:?}"))
+                    })
+                    .transpose()?;
+                commands::forge_ingest(
+                    &ctx,
+                    &change,
+                    commands::ForgeIngestArgs {
+                        file,
+                        format,
+                        overrides: forge_ingest::IngestOverrides {
+                            provider,
+                            host,
+                            repository: repo,
+                            pr_number: pr,
+                            url,
+                            base_repo,
+                            base_ref,
+                            head_repo,
+                            head_ref,
+                            head_sha,
+                            base_sha,
+                            read_id,
+                            read_at,
+                            adapter,
+                            truncated,
+                        },
+                        comments_file,
+                        reviews_file,
+                        checks_file,
+                        out_manifest,
+                        out_custody_dir,
+                        dry_run,
+                        json,
+                    },
+                )?;
                 Ok(0)
             }
             ForgeCmd::Declare {
@@ -9197,6 +9391,7 @@ mod tests {
             "policy write",
             "review-ladder import",
             "forge observe",
+            "forge ingest",
             "forge declare",
             "forge link",
             "forge checks",
