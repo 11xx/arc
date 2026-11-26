@@ -621,6 +621,7 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     publish_tagged_target_at(
         &pub_fd,
         Some(&pub_common),
+        &[],
         &target_name,
         &pub_checkout.join("target"),
     )
@@ -734,6 +735,7 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
         &mode_checkout,
         &mode_checkout.join("opaque/child"),
         None,
+        &[],
     );
     fs::set_permissions(
         mode_checkout.join("opaque"),
@@ -742,6 +744,128 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     .unwrap();
     res.unwrap();
     assert!(mode_checkout.join("opaque/child").is_dir());
+
+    // Staging inside `<git-common-dir>/arc` is skipped when that parent falls under
+    // an implicitly or explicitly writable root (such as `/tmp`).
+    let tmp_scratch = tempfile::tempdir_in("/tmp").unwrap();
+    let tmp_checkout = tmp_scratch.path().join("tmp-repo");
+    fs::create_dir(&tmp_checkout).unwrap();
+    init_git(&tmp_checkout);
+    fs::write(tmp_checkout.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        tmp_checkout.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&tmp_checkout, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(tmp_checkout.join("target").is_dir());
+    assert!(
+        !tmp_checkout.join("target/CACHEDIR.TAG").exists(),
+        "repo under writable /tmp must create target unmarked rather than staging under writable /tmp"
+    );
+
+    // Custom CARGO_HOME resolves relative `build.target-dir` from the parent of
+    // CARGO_HOME (matching `cargo metadata`), regardless of directory name.
+    let scratch_ch = scratch();
+    let custom_home = scratch_ch.path().join("custom-home");
+    let ch_wt = custom_home.join("wt");
+    fs::create_dir_all(ch_wt.join("src")).unwrap();
+    init_git(&ch_wt);
+    fs::write(ch_wt.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        ch_wt.join("Cargo.toml"),
+        "[package]\nname='chpkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(ch_wt.join("src/lib.rs"), "").unwrap();
+    fs::write(
+        custom_home.join("config"),
+        "[build]\ntarget-dir = \"wt/target\"\n",
+    )
+    .unwrap();
+    let meta_out = crate::child_command::command("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(&ch_wt)
+        .env("CARGO_HOME", &custom_home)
+        .output()
+        .unwrap();
+    assert!(meta_out.status.success());
+    let meta_json: serde_json::Value = serde_json::from_slice(&meta_out.stdout).unwrap();
+    let cargo_target = PathBuf::from(meta_json["target_directory"].as_str().unwrap());
+    assert_ne!(
+        fs::canonicalize(&ch_wt).unwrap().join("target"),
+        cargo_target,
+        "fixture must make cargo resolve relative target-dir outside wt/target"
+    );
+    let mut ch_cmd = crate::child_command::command("true");
+    ch_cmd.current_dir(&ch_wt).env("CARGO_HOME", &custom_home);
+    apply_declared(
+        &mut ch_cmd,
+        &ch_wt,
+        &Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        },
+    )
+    .unwrap();
+    assert!(ch_cmd.status().unwrap().success());
+    assert!(ch_wt.join("target").is_dir());
+    assert!(
+        !ch_wt.join("target/CACHEDIR.TAG").exists(),
+        "custom CARGO_HOME relative target-dir must not tag wt/target when Cargo targets {}",
+        cargo_target.display()
+    );
+
+    // A FIFO at `.cargo/config` never blocks confinement; it fails closed and leaves
+    // `target/` unmarked while still shadowing `.cargo/config.toml`.
+    let scratch_fifo = scratch();
+    let fifo_checkout = scratch_fifo.path().join("fifo-config");
+    fs::create_dir_all(fifo_checkout.join(".cargo")).unwrap();
+    init_git(&fifo_checkout);
+    fs::write(fifo_checkout.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        fifo_checkout.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let fifo_path = fifo_checkout.join(".cargo/config");
+    let c_fifo = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_fifo` is a valid NUL-terminated path for a fresh FIFO inside scratch.
+    assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+    let (mut command, _) = shell(&fifo_checkout, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(fifo_checkout.join("target").is_dir());
+    assert!(!fifo_checkout.join("target/CACHEDIR.TAG").exists());
+
+    // EXDEV from renameat2 across a mount boundary cleans up staging and falls back
+    // to untagged directory creation without aborting preparation.
+    let scratch_exdev = scratch();
+    let exdev_checkout = scratch_exdev.path().join("exdev-checkout");
+    fs::create_dir(&exdev_checkout).unwrap();
+    let exdev_stage = tempfile::tempdir_in("/tmp").unwrap();
+    let exdev_checkout_fd = open_dir_path(&exdev_checkout).unwrap();
+    let exdev_stage_fd = open_dir_path(exdev_stage.path()).unwrap();
+    if fd_device(&exdev_checkout_fd).unwrap() != fd_device(&exdev_stage_fd).unwrap() {
+        let target_name = CString::new("target").unwrap();
+        publish_tagged_target_from(
+            &exdev_checkout_fd,
+            &exdev_stage_fd,
+            &target_name,
+            &exdev_checkout.join("target"),
+        )
+        .unwrap();
+        assert!(exdev_checkout.join("target").is_dir());
+        assert!(!exdev_checkout.join("target/CACHEDIR.TAG").exists());
+        let leftovers: Vec<_> = fs::read_dir(exdev_stage.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "leftover stage dirs after EXDEV: {leftovers:?}"
+        );
+    }
 
     // Symlink in the created root chain is rejected without writing through it.
     let scratch_sym = scratch();
@@ -761,6 +885,7 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
         &sym_checkout,
         &sym_checkout.join("target/nested"),
         None,
+        &[],
     )
     .unwrap_err();
     assert!(

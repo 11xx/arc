@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -280,7 +280,7 @@ fn apply_with_abi_and_storage(
     }
     let common = crate::gitio::common_dir(&checkout).ok();
     let home = fs::canonicalize(std::env::var_os("HOME").context("HOME is unset")?)?;
-    let mut roots = Vec::new();
+    let mut resolved_writes = Vec::new();
     for declared in &declaration.writes {
         let expanded = expand(declared)?;
         let resolved = resolve_declared(&checkout, &expanded)?;
@@ -292,16 +292,75 @@ fn apply_with_abi_and_storage(
             &owned,
             false,
         )?;
+        if !resolved.exists()
+            && !resolved.starts_with(&checkout)
+            && !owned.iter().any(|root| resolved.starts_with(root))
+        {
+            bail!(
+                "confinement writable root {} does not exist; external roots must exist",
+                resolved.display()
+            );
+        }
+        resolved_writes.push(resolved);
+    }
+    let mut owned_canonical = Vec::with_capacity(owned.len());
+    for root in owned {
+        let resolved = fs::canonicalize(root)?;
+        if checkout.starts_with(&resolved)
+            || home.starts_with(&resolved)
+            || common
+                .as_ref()
+                .is_some_and(|common| common.starts_with(&resolved))
+        {
+            bail!("arc-owned storage contains protected checkout, home or Git administration");
+        }
+        owned_canonical.push(resolved);
+    }
+    let tmp_root = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    let tmp = match command.get_envs().find(|(key, _)| *key == "TMPDIR") {
+        Some((_, value)) => value.map(PathBuf::from),
+        None => std::env::var_os("TMPDIR").map(PathBuf::from),
+    };
+    let extra_tmp = if let Some(tmp) = tmp {
+        let tmp = resolve_missing(&if tmp.is_absolute() {
+            tmp
+        } else {
+            checkout.join(tmp)
+        })?;
+        if tmp != Path::new("/tmp") && tmp != tmp_root {
+            validate_root(&tmp, &checkout, &home, common.as_deref(), &[], true)?;
+        }
+        Some(tmp)
+    } else {
+        None
+    };
+    // Collect all roots that this confined command will be allowed to write so
+    // target staging never uses a directory writable by the confined command.
+    let mut writable_roots = Vec::new();
+    writable_roots.push(tmp_root.clone());
+    if let Some(ref extra_tmp) = extra_tmp {
+        writable_roots.push(extra_tmp.clone());
+    }
+    writable_roots.extend(owned_canonical.iter().cloned());
+    writable_roots.extend(
+        resolved_writes
+            .iter()
+            .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone())),
+    );
+
+    let mut roots = Vec::new();
+    for resolved in resolved_writes {
         if !resolved.exists() {
             if resolved.starts_with(&checkout) {
-                create_checkout_root(command, &checkout, &resolved, common.as_deref())?;
-            } else if owned.iter().any(|root| resolved.starts_with(root)) {
-                fs::create_dir_all(&resolved)?;
+                create_checkout_root(
+                    command,
+                    &checkout,
+                    &resolved,
+                    common.as_deref(),
+                    &writable_roots,
+                )?;
             } else {
-                bail!(
-                    "confinement writable root {} does not exist; external roots must exist",
-                    resolved.display()
-                );
+                fs::create_dir_all(&resolved)?;
             }
         }
         roots.push(fs::canonicalize(resolved)?);
@@ -323,32 +382,9 @@ fn apply_with_abi_and_storage(
             "project command supplied unverified build storage; only arc-owned storage is implicit"
         );
     }
-    for root in owned {
-        let resolved = fs::canonicalize(root)?;
-        if checkout.starts_with(&resolved)
-            || home.starts_with(&resolved)
-            || common
-                .as_ref()
-                .is_some_and(|common| common.starts_with(&resolved))
-        {
-            bail!("arc-owned storage contains protected checkout, home or Git administration");
-        }
-        roots.push(resolved);
-    }
+    roots.extend(owned_canonical);
     roots.push(PathBuf::from("/tmp"));
-    let tmp = match command.get_envs().find(|(key, _)| *key == "TMPDIR") {
-        Some((_, value)) => value.map(PathBuf::from),
-        None => std::env::var_os("TMPDIR").map(PathBuf::from),
-    };
-    if let Some(tmp) = tmp {
-        let tmp = resolve_missing(&if tmp.is_absolute() {
-            tmp
-        } else {
-            checkout.join(tmp)
-        })?;
-        if tmp != Path::new("/tmp") {
-            validate_root(&tmp, &checkout, &home, common.as_deref(), &[], true)?;
-        }
+    if let Some(tmp) = extra_tmp {
         roots.push(tmp);
     }
     for device in [
@@ -583,6 +619,7 @@ fn create_checkout_root(
     checkout: &Path,
     resolved: &Path,
     common: Option<&Path>,
+    writable_roots: &[PathBuf],
 ) -> Result<()> {
     let relative = resolved.strip_prefix(checkout).with_context(|| {
         format!(
@@ -621,20 +658,24 @@ fn create_checkout_root(
         })?;
         current_path.push(name);
         if depth == 0 && should_mark_target {
-            publish_tagged_target_at(&current, common, &c_name, &current_path)?;
+            publish_tagged_target_at(&current, common, writable_roots, &c_name, &current_path)?;
         } else {
-            // SAFETY: `current` is an open directory fd and `c_name` is a valid NUL-terminated path component.
-            if unsafe { libc::mkdirat(current.as_raw_fd(), c_name.as_ptr(), 0o777) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(error)
-                        .with_context(|| format!("cannot create {}", current_path.display()));
-                }
-            }
+            create_untagged_dir_at(&current, &c_name, &current_path)?;
         }
         // Use `O_PATH | O_DIRECTORY | O_NOFOLLOW` so write+search-only (0300)
         // directories remain traversable without following symlinks.
         current = open_dir_at(&current, &c_name, &current_path, libc::O_PATH)?;
+    }
+    Ok(())
+}
+
+fn create_untagged_dir_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<()> {
+    // SAFETY: `parent` is an open directory fd and `name` is a valid NUL-terminated path component.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error).with_context(|| format!("cannot create {}", display.display()));
+        }
     }
     Ok(())
 }
@@ -651,14 +692,29 @@ fn fd_device(fd: &OwnedFd) -> Result<libc::dev_t> {
 }
 
 /// Choose a staging parent directory on the same filesystem as `checkout_fd`,
-/// using `<git-common-dir>/arc` (which write confinement withholds from
-/// checkout writers) so sibling checkout processes cannot replace staging
-/// entries before `renameat2(RENAME_NOREPLACE)`.
-fn staging_parent_for(checkout_fd: &OwnedFd, common: Option<&Path>) -> Result<Option<OwnedFd>> {
+/// using `<git-common-dir>/arc` only when it is withheld from the confined
+/// command's writable roots (including automatic `/tmp` and `TMPDIR` grants) so
+/// sibling checkout processes cannot replace staging entries before
+/// `renameat2(RENAME_NOREPLACE)`.
+fn staging_parent_for(
+    checkout_fd: &OwnedFd,
+    common: Option<&Path>,
+    writable_roots: &[PathBuf],
+) -> Result<Option<OwnedFd>> {
     let Some(common) = common else {
         return Ok(None);
     };
-    let Ok(common_fd) = open_dir_path(common) else {
+    let Ok(canonical_common) = fs::canonicalize(common) else {
+        return Ok(None);
+    };
+    let canonical_arc = canonical_common.join("arc");
+    if writable_roots
+        .iter()
+        .any(|root| canonical_arc.starts_with(root))
+    {
+        return Ok(None);
+    }
+    let Ok(common_fd) = open_dir_path(&canonical_common) else {
         return Ok(None);
     };
     // SAFETY: `common_fd` is an open directory fd and `"arc"` is a static C string.
@@ -668,8 +724,7 @@ fn staging_parent_for(checkout_fd: &OwnedFd, common: Option<&Path>) -> Result<Op
             return Ok(None);
         }
     }
-    let arc_dir = common.join("arc");
-    let Ok(arc_fd) = open_dir_at(&common_fd, c"arc", &arc_dir, libc::O_PATH) else {
+    let Ok(arc_fd) = open_dir_at(&common_fd, c"arc", &canonical_arc, libc::O_PATH) else {
         return Ok(None);
     };
     if fd_device(&arc_fd)? == fd_device(checkout_fd)? {
@@ -682,27 +737,30 @@ fn staging_parent_for(checkout_fd: &OwnedFd, common: Option<&Path>) -> Result<Op
 /// Atomically publish a new directory already carrying `CACHEDIR.TAG` using
 /// `renameat2(RENAME_NOREPLACE)`. All staging operations use `O_PATH` directory
 /// descriptors (working even under `umask 0477`) inside `<git-common-dir>/arc`
-/// on the same filesystem so checkout writers cannot replace staging entries;
-/// writing, publication, and cleanup stay bound to the opened handles. If
-/// `<git-common-dir>/arc` cannot stage on the same filesystem, creates the
-/// directory unmarked rather than staging inside the checkout. If `name`
+/// when withheld from the command's writable roots on the same mount; writing,
+/// publication, and cleanup stay bound to the opened handles. If
+/// `<git-common-dir>/arc` is writable by the command, unavailable, or across a
+/// mount boundary (`EXDEV`), creates the directory unmarked instead. If `name`
 /// already exists, the staged directory is removed without touching it.
 fn publish_tagged_target_at(
     checkout_fd: &OwnedFd,
     common: Option<&Path>,
+    writable_roots: &[PathBuf],
     name: &CString,
     display: &Path,
 ) -> Result<()> {
-    let Some(stage_root) = staging_parent_for(checkout_fd, common)? else {
-        // SAFETY: `checkout_fd` is an open directory fd and `name` is a valid NUL-terminated component.
-        if unsafe { libc::mkdirat(checkout_fd.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(error).with_context(|| format!("cannot create {}", display.display()));
-            }
-        }
-        return Ok(());
+    let Some(stage_root) = staging_parent_for(checkout_fd, common, writable_roots)? else {
+        return create_untagged_dir_at(checkout_fd, name, display);
     };
+    publish_tagged_target_from(checkout_fd, &stage_root, name, display)
+}
+
+fn publish_tagged_target_from(
+    checkout_fd: &OwnedFd,
+    stage_root: &OwnedFd,
+    name: &CString,
+    display: &Path,
+) -> Result<()> {
     let container_name = format!(".arc-target-stage-{}", crate::ids::new_identifier());
     let c_container =
         CString::new(container_name.as_bytes()).context("invalid staging container name")?;
@@ -714,7 +772,7 @@ fn publish_tagged_target_at(
             .with_context(|| format!("cannot stage {}", display.display()));
     }
     let stage_result = (|| -> Result<()> {
-        let container_fd = open_dir_at(&stage_root, &c_container, display, libc::O_PATH)?;
+        let container_fd = open_dir_at(stage_root, &c_container, display, libc::O_PATH)?;
         // SAFETY: `container_fd` is an open directory fd and `name` is a valid NUL-terminated name.
         if unsafe { libc::mkdirat(container_fd.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
             return Err(std::io::Error::last_os_error())
@@ -725,7 +783,7 @@ fn publish_tagged_target_at(
             cleanup_staged_inner(&container_fd, &target_fd, name);
             return Err(error);
         }
-        // SAFETY: `container_fd` and `checkout_fd` are open directory fds on the same device.
+        // SAFETY: `container_fd` and `checkout_fd` are open directory fds.
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
@@ -743,6 +801,9 @@ fn publish_tagged_target_at(
         cleanup_staged_inner(&container_fd, &target_fd, name);
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             return Ok(());
+        }
+        if error.raw_os_error() == Some(libc::EXDEV) {
+            return create_untagged_dir_at(checkout_fd, name, display);
         }
         Err(error).with_context(|| format!("cannot publish {}", display.display()))
     })();
@@ -800,9 +861,21 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         .map(|ancestor| ancestor.join(".cargo"))
         .collect();
     if let Some(cargo_home) = effective_env_value(command, "CARGO_HOME").filter(|v| !v.is_empty()) {
-        config_dirs.push(PathBuf::from(cargo_home));
+        let candidate = PathBuf::from(cargo_home);
+        let dir = if candidate.is_absolute() {
+            candidate
+        } else {
+            checkout.join(candidate)
+        };
+        config_dirs.push(fs::canonicalize(&dir).unwrap_or(dir));
     } else if let Some(home) = effective_env_value(command, "HOME").filter(|v| !v.is_empty()) {
-        config_dirs.push(PathBuf::from(home).join(".cargo"));
+        let candidate = PathBuf::from(home).join(".cargo");
+        let dir = if candidate.is_absolute() {
+            candidate
+        } else {
+            checkout.join(candidate)
+        };
+        config_dirs.push(fs::canonicalize(&dir).unwrap_or(dir));
     }
     for dir in config_dirs {
         // Cargo checks `config` before `config.toml` in each directory and
@@ -816,7 +889,7 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         } else {
             continue;
         };
-        let Ok(contents) = fs::read_to_string(&path) else {
+        let Some(contents) = read_regular_file_nonblocking(&path) else {
             return false;
         };
         let Ok(parsed) = contents.parse::<toml::Value>() else {
@@ -829,11 +902,9 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
             let Some(target_dir) = value.as_str() else {
                 return false;
             };
-            let base = if dir.file_name() == Some(OsStr::new(".cargo")) {
-                dir.parent().unwrap_or(checkout)
-            } else {
-                dir.as_path()
-            };
+            // Cargo resolves relative `build.target-dir` from the parent of
+            // the config directory regardless of whether it is named `.cargo`.
+            let base = dir.parent().unwrap_or(checkout);
             let candidate = Path::new(target_dir);
             let resolved = if candidate.is_absolute() {
                 candidate.to_path_buf()
@@ -844,6 +915,31 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         }
     }
     true
+}
+
+/// Open `path` without blocking on FIFOs/special files, verify the opened
+/// descriptor is a regular file, and read it as UTF-8.
+fn read_regular_file_nonblocking(path: &Path) -> Option<String> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a valid NUL-terminated path; fd is checked for `< 0`.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` is a freshly opened valid descriptor owned by this File.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).ok()?;
+    Some(contents)
 }
 
 fn open_dir_path(path: &Path) -> Result<OwnedFd> {

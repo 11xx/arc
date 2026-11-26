@@ -5943,12 +5943,12 @@ GATE CONFINEMENT
   An absent root is created as a directory only inside the checkout or owned
   build storage. When that creates an absent checkout-root Cargo `target`
   directory beside a root `Cargo.toml` without a `target-dir` override, Git
-  ignores its tag, and the Git common directory shares the checkout's
-  filesystem, arc stages the directory with a standard `CACHEDIR.TAG` inside
-  `<git-common-dir>/arc` and atomically publishes it with `RENAME_NOREPLACE`
-  (the marker never authorizes artifact cleanup on its own) so Cargo builds
-  into it stay marked. External roots must exist; a file root grants file
-  writes.
+  ignores its tag, and `<git-common-dir>/arc` is withheld from the command's
+  writable roots on the same mount as the checkout, arc stages the directory
+  with a standard `CACHEDIR.TAG` there and atomically publishes it with
+  `RENAME_NOREPLACE` (the marker never authorizes artifact cleanup on its own)
+  so Cargo builds into it stay marked; otherwise the directory is created
+  unmarked. External roots must exist; a file root grants file writes.
 
   A root cannot be the home directory, its immediate entries, or an ancestor
   of home or the checkout. The checkout itself is refused; declared checkout

@@ -775,4 +775,96 @@ fn path_stable_cargo_preparation_marks_confined_target_directory() {
         "CACHEDIR.TAG created under umask 0477 missing standard signature"
     );
     assert_eq!(fs::read_to_string(&umask_prep).unwrap(), "ran");
+
+    // Same-device mount boundary (bind-mounted `<git-common-dir>/arc`) produces
+    // EXDEV on renameat2; confinement cleans up staging and falls back to untagged
+    // target creation without aborting preparation.
+    let unshare_available = Command::new("unshare")
+        .args(["-rm", "true"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if unshare_available {
+        let (exdev_repo, exdev_scratch) = fixture();
+        fs::write(exdev_repo.root.join(".gitignore"), "/target\n").unwrap();
+        fs::write(
+            exdev_repo.root.join("Cargo.toml"),
+            "[package]\nname='confined-exdev'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::create_dir_all(exdev_repo.root.join(".arc")).unwrap();
+        fs::write(
+            exdev_repo.root.join(".arc/gates.toml"),
+            "[confine]\nwrites = [\"target\"]\n[gates.check]\ncommand = \"true\"\n",
+        )
+        .unwrap();
+        fs::write(
+            exdev_repo.root.join(".arc/worktrees.toml"),
+            "[prepare]\nmode = \"path-stable\"\ncommand = \"true\"\ntimeout = \"1m\"\n",
+        )
+        .unwrap();
+        git(&exdev_repo.root, &["add", "."]);
+        git(
+            &exdev_repo.root,
+            &["commit", "-m", "test: exdev mount prep"],
+        );
+        let exdev_wt = exdev_scratch.path().join("prepared-exdev-wt");
+        exdev_repo
+            .arc(&exdev_repo.root)
+            .env("TMPDIR", "/tmp")
+            .args([
+                "begin",
+                "prepared-exdev",
+                "--worktree",
+                exdev_wt.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        fs::remove_dir_all(exdev_wt.join("target")).unwrap();
+        let arc_dir = exdev_repo.root.join(".git/arc");
+        let arc_bin = assert_cmd::cargo::cargo_bin!("arc");
+        let mut cmd = Command::new("unshare");
+        cmd.args([
+            "-rm",
+            "sh",
+            "-c",
+            "mount --bind \"$1\" \"$1\" && shift && exec \"$@\"",
+            "_",
+        ])
+        .arg(&arc_dir)
+        .arg(arc_bin)
+        .args(["verify", "--all"])
+        .current_dir(&exdev_wt)
+        .env("HOME", &exdev_repo.home)
+        .env("XDG_CONFIG_HOME", exdev_repo.home.join(".config"))
+        .env("TMPDIR", "/tmp")
+        .env("ARC_ACTOR", "tester")
+        .env("ARC_HARNESS", "test")
+        .env("ARC_SESSION", "session-a")
+        .env("ARC_SANDBOX", &exdev_repo.home)
+        .env("ARC_TEST_FIXTURE_IDENTITY", "1")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_EDITOR", "true");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "verify failed across same-device bind mount:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(exdev_wt.join("target").is_dir());
+        assert!(!exdev_wt.join("target/CACHEDIR.TAG").exists());
+        let leftovers: Vec<_> = fs::read_dir(&arc_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".arc-target-stage-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "leftover stage dirs after EXDEV: {leftovers:?}"
+        );
+    }
 }
