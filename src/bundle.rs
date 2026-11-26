@@ -711,16 +711,18 @@ fn filter_exported_rewrites(
         else {
             continue;
         };
-        let scoped_changes = crate::rewrite::event_change_ids(refs, retained);
-        let branches = crate::rewrite::event_branches(refs);
-        let retains_repo = crate::rewrite::event_retains_repository_scope(retained);
-        let strictly_other_change = !retains_repo
-            && ((!scoped_changes.is_empty() && !scoped_changes.contains(change_id))
-                || (scoped_changes.is_empty()
-                    && !branches.is_empty()
-                    && branches
-                        .iter()
-                        .all(|branch| other_change_branches.contains(branch))));
+        // A rewrite is strictly scoped to other changes only when it names at
+        // least one ref/retained entry and every single entry belongs
+        // exclusively to another change. Any target branch, tag, untracked
+        // branch, repository-scoped retention ref, or own-change ref keeps the
+        // rewrite transportable.
+        let strictly_other_change = (!refs.is_empty() || !retained.is_empty())
+            && refs
+                .keys()
+                .all(|name| is_other_change_ref(name, change_id, &other_change_branches))
+            && retained
+                .keys()
+                .all(|name| is_other_change_ref(name, change_id, &other_change_branches));
         let revisions: Vec<String> = mapping
             .iter()
             .flat_map(|(old, new)| {
@@ -787,6 +789,33 @@ fn filter_exported_rewrites(
         )
         .map(|(value, _)| value)
         .collect())
+}
+
+/// Whether a ref name belongs exclusively to another change (never a target
+/// branch, tag, repository-wide ref, untracked branch, or `change_id` itself).
+fn is_other_change_ref(
+    name: &str,
+    change_id: &str,
+    other_change_branches: &BTreeSet<String>,
+) -> bool {
+    if let Some(branch) = name.strip_prefix("refs/heads/") {
+        return other_change_branches.contains(branch);
+    }
+    for prefix in [
+        crate::gitio::KEEP_PREFIX,
+        crate::gitio::RETAINED_PREFIX,
+        "refs/arc/tree/",
+        "refs/arc/merge/",
+        "refs/arc/landing/",
+        "refs/arc/provisional/",
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if let Some((owner, _)) = rest.split_once('/') {
+                return !owner.is_empty() && owner != change_id && owner != Store::REPOSITORY_SCOPE;
+            }
+        }
+    }
+    false
 }
 
 /// Collect hex revision tokens from commit-bearing fields of a JSON event.

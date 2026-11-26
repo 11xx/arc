@@ -3978,3 +3978,239 @@ fn unlanded_rewrite_conflict_on_one_change_does_not_block_unrelated_bundle() {
     let doctor = json_stdout(receiver.arc(&receiver.root).args(["doctor", "--json"]));
     assert_eq!(doctor["problems"], serde_json::json!([]), "{doctor}");
 }
+
+#[test]
+fn import_refuses_conflict_connected_through_held_rewrite_chain() {
+    let source = repo_with_gates();
+    let (change, source_wt, commit_a) = change_with_patchset(&source, "chained-conflict");
+    let bundle_path = source.home.join("chained.json");
+    source
+        .arc(&source_wt)
+        .args(["export", &change, "--output", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let receiver = Repo::new();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+    // Create synthetic successor commits B, C, D, E on receiver so `history rewrite` accepts them.
+    let tree = git_out(
+        &receiver.root,
+        &["rev-parse", &format!("{commit_a}^{{tree}}")],
+    );
+    let parent = git_out(&receiver.root, &["rev-parse", &format!("{commit_a}^")]);
+    let make_commit = |msg: &str| {
+        git_out(
+            &receiver.root,
+            &["commit-tree", &tree, "-p", &parent, "-m", msg],
+        )
+    };
+    let commit_b = make_commit("step B");
+    let commit_c = make_commit("step C");
+    let commit_d = make_commit("step D");
+    let commit_e = make_commit("step E");
+
+    // Held rewrite chain on receiver: A -> B, B -> C, C -> D.
+    for (old, new, reason) in [
+        (&commit_a, &commit_b, "held step 1"),
+        (&commit_b, &commit_c, "held step 2"),
+        (&commit_c, &commit_d, "held step 3"),
+    ] {
+        receiver
+            .arc(&receiver.root)
+            .args(["history", "rewrite", "--map", "-", "--reason", reason])
+            .write_stdin(format!("{old} {new}\n"))
+            .assert()
+            .success();
+    }
+
+    // Incoming bundle cites A and carries C -> E (conflicting with held C -> D).
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    bundle["repository_events"] = serde_json::json!([{
+        "schema_version": 7,
+        "event_id": "01ZZZCHAINCONFLICT00000000",
+        "repository_id": bundle["repository_id"],
+        "change_id": "repository",
+        "actor": "tester",
+        "created_at": "2026-10-28T18:00:00Z",
+        "event_type": "history-rewritten",
+        "mapping": { commit_c.clone(): commit_e },
+        "reason": "incoming conflicting step",
+        "tool": "arc rewrite sign"
+    }]);
+    let modified = source.home.join("chained-conflict.json");
+    fs::write(&modified, json_file_bytes(&bundle)).unwrap();
+
+    for dry_run in [true, false] {
+        let mut cmd = receiver.arc(&receiver.root);
+        cmd.args(["import", modified.to_str().unwrap()]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            !out.status.success(),
+            "conflict connected through held chain must refuse (dry_run={dry_run})"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&commit_c) && stderr.contains("01ZZZCHAINCONFLICT00000000"),
+            "refusal must name conflicting commit and incoming event:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn export_retains_rewrite_moving_target_branch_alongside_another_change() {
+    let repo = repo_with_gates();
+    let (change_a, wt_a, _) = change_with_patchset(&repo, "target-observer");
+    let (_change_b, wt_b, commit_b) = change_with_patchset(&repo, "target-mover");
+
+    // Fast-forward master to B's snapshotted commit.
+    git(&repo.root, &["merge", "--ff-only", &commit_b]);
+
+    // Rewrite B's commit on master with --include-shared so one event moves
+    // refs/heads/master, refs/heads/arc/target-mover, and B's keep ref.
+    repo.arc(&wt_b)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &commit_b,
+            "--include-shared",
+            "--no-sign",
+            "--append",
+            "Planned-by: Shared <shared@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let shared_rewrite_id = rewrite_event_id(&repo);
+
+    // Export change A: the rewrite moving master MUST remain in A's bundle.
+    let bundle_a = repo.home.join("observer.json");
+    repo.arc(&wt_a)
+        .args(["export", &change_a, "--output", bundle_a.to_str().unwrap()])
+        .assert()
+        .success();
+    let parsed: serde_json::Value = serde_json::from_slice(&fs::read(&bundle_a).unwrap()).unwrap();
+    let repo_events = parsed
+        .get("repository_events")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert!(
+        repo_events
+            .iter()
+            .any(|event| event["event_id"] == shared_rewrite_id),
+        "rewrite moving master must not be dropped from change A's export: {parsed}"
+    );
+}
+
+#[test]
+fn import_conflict_reports_unknown_landing_for_absent_incoming_successor() {
+    let source = repo_with_gates();
+    let (change, source_wt, original) = change_with_patchset(&source, "absent-incoming");
+    let initial = source.home.join("absent-initial.json");
+    source
+        .arc(&source_wt)
+        .args(["export", &change, "--output", initial.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let receiver = Repo::new();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+    git(
+        &receiver.root,
+        &["branch", "arc/absent-incoming", &original],
+    );
+    receiver
+        .arc(&receiver.root)
+        .args(["import", initial.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Locally rewrite `original` and land the successor on master so the local
+    // map's successor IS known-landed.
+    let receiver_wt = receiver.home.join("wt-absent-incoming");
+    git(
+        &receiver.root,
+        &[
+            "worktree",
+            "add",
+            receiver_wt.to_str().unwrap(),
+            "arc/absent-incoming",
+        ],
+    );
+    receiver
+        .arc(&receiver_wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &original,
+            "--no-sign",
+            "--append",
+            "Planned-by: Landed <landed@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let local_event_id = rewrite_event_id(&receiver);
+    let landed_head = receiver.head(&receiver_wt);
+    git(&receiver.root, &["merge", "--ff-only", &landed_head]);
+
+    // Build a bundle carrying a relevant conflicting rewrite whose successor
+    // object does not exist in receiver's Git object store.
+    let absent_successor = "9999999999999999999999999999999999999999";
+    let incoming_event_id = "01ZZZABSENTSUCCESSOR000000";
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&initial).unwrap()).unwrap();
+    bundle["objects"] = serde_json::json!([]);
+    bundle["repository_events"] = serde_json::json!([{
+        "schema_version": 7,
+        "event_id": incoming_event_id,
+        "repository_id": bundle["repository_id"],
+        "change_id": "repository",
+        "actor": "tester",
+        "created_at": "2026-10-28T18:00:00Z",
+        "event_type": "history-rewritten",
+        "mapping": { original.clone(): absent_successor },
+        "reason": "remote re-sign",
+        "tool": "arc rewrite sign"
+    }]);
+    let conflict_bundle = source.home.join("absent-conflict.json");
+    fs::write(&conflict_bundle, json_file_bytes(&bundle)).unwrap();
+
+    let refusal = receiver
+        .arc(&receiver.root)
+        .args(["import", conflict_bundle.to_str().unwrap(), "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(!refusal.status.success());
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(
+        stderr.contains("successors landed"),
+        "local landed map should be reported as landed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("landing status unknown"),
+        "incoming map with absent successor should report unknown landing status:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("successors never landed"),
+        "must not claim absent incoming successor never landed:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&format!("arc history withdraw {incoming_event_id}")),
+        "must not recommend concrete withdraw for unknown incoming map:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&format!("arc history withdraw {local_event_id}")),
+        "must not recommend concrete withdraw for known-landed local map:\n{stderr}"
+    );
+}

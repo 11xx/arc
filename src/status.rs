@@ -427,14 +427,26 @@ pub fn probe_base_dischargeable(base: Option<&str>, head: &str) -> bool {
 pub enum ResolutionCommitStatus {
     /// No commit was cited on the disposition, or the finding is not resolved.
     Unbound,
-    /// The cited commit (after following recorded rewrites) is an ancestor of `head`.
+    /// The cited commit (after following recorded rewrites) is an ancestor of
+    /// `head` and its fix survives at `head`.
     Contained(String),
-    /// The cited commit is not an ancestor of `head`, but a commit in `base..head`
-    /// carries the exact same Git patch-id.
+    /// The cited commit is not an ancestor of `head`, but a commit in
+    /// `base..head` carries the exact same Git patch-id and its fix survives
+    /// at `head`.
     CarriedByPatchId { recorded: String, carried: String },
+    /// The cited commit (or its patch-id-carried successor) appears in history
+    /// but was reverted before `head`.
+    RevertedInHead { recorded: String, commit: String },
     /// The cited commit is neither an ancestor of `head` nor carried by patch-id
     /// in `base..head`.
     NotInHead(String),
+}
+
+impl ResolutionCommitStatus {
+    /// Whether this status leaves the finding open at `head`.
+    pub fn leaves_open(&self) -> bool {
+        matches!(self, Self::NotInHead(_) | Self::RevertedInHead { .. })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -504,10 +516,15 @@ pub(crate) fn evaluate_finding_resolutions(
             continue;
         };
         if gitio::is_ancestor(cwd, recorded, head).unwrap_or(false) {
-            statuses.insert(
-                finding.id.clone(),
-                ResolutionCommitStatus::Contained(recorded.to_string()),
-            );
+            let status = if fix_survives_in_head(cwd, recorded, head) {
+                ResolutionCommitStatus::Contained(recorded.to_string())
+            } else {
+                ResolutionCommitStatus::RevertedInHead {
+                    recorded: recorded.to_string(),
+                    commit: recorded.to_string(),
+                }
+            };
+            statuses.insert(finding.id.clone(), status);
             continue;
         }
         let entries = range_patch_ids
@@ -522,19 +539,24 @@ pub(crate) fn evaluate_finding_resolutions(
                 let expected_pid = gitio::patch_id(cwd, recorded).ok().flatten()?;
                 entries
                     .iter()
-                    .find(|(_, pid)| pid == &expected_pid)
+                    .rfind(|(_, pid)| pid == &expected_pid)
                     .map(|(commit, _)| commit.clone())
             })
             .flatten();
         match carried {
             Some(carried) => {
-                statuses.insert(
-                    finding.id.clone(),
+                let status = if fix_survives_in_head(cwd, &carried, head) {
                     ResolutionCommitStatus::CarriedByPatchId {
                         recorded: recorded.to_string(),
                         carried,
-                    },
-                );
+                    }
+                } else {
+                    ResolutionCommitStatus::RevertedInHead {
+                        recorded: recorded.to_string(),
+                        commit: carried,
+                    }
+                };
+                statuses.insert(finding.id.clone(), status);
             }
             None => {
                 statuses.insert(
@@ -545,6 +567,68 @@ pub(crate) fn evaluate_finding_resolutions(
         }
     }
     statuses
+}
+
+/// Whether `fix_commit` (already known to be an ancestor of `head`) still
+/// survives in `head` rather than having been reverted by subsequent commits.
+///
+/// Checks two independent signals along `fix_commit..head`:
+/// 1. Explicit revert: a subsequent non-merge commit carries the exact reverse
+///    patch-id of `fix_commit` without an even later commit re-applying
+///    `fix_commit`'s forward patch-id.
+/// 2. Full state restoration: every path modified by `fix_commit` matches its
+///    pre-fix parent at `head` (or is absent at `head` for a root commit).
+fn fix_survives_in_head(cwd: &Path, fix_commit: &str, head: &str) -> bool {
+    if fix_commit == head {
+        return true;
+    }
+    let Ok(parents) = gitio::commit_parents(cwd, fix_commit) else {
+        return false;
+    };
+    if parents.len() <= 1 {
+        if let (Ok(Some(forward_pid)), Ok(Some(reverse_pid)), Ok(after)) = (
+            gitio::patch_id(cwd, fix_commit),
+            gitio::reverse_patch_id(cwd, fix_commit),
+            gitio::range_commits(cwd, fix_commit, head),
+        ) {
+            let mut reverted = false;
+            for commit in after {
+                if gitio::commit_parents(cwd, &commit)
+                    .map(|p| p.len() > 1)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if let Ok(Some(pid)) = gitio::patch_id(cwd, &commit) {
+                    if pid == reverse_pid {
+                        reverted = true;
+                    } else if pid == forward_pid {
+                        reverted = false;
+                    }
+                }
+            }
+            if reverted {
+                return false;
+            }
+        }
+    }
+    if let Ok(paths) = gitio::commit_changed_paths(cwd, fix_commit) {
+        if !paths.is_empty() {
+            match parents.first() {
+                Some(parent) => {
+                    if !gitio::paths_differ(cwd, parent, head, &paths).unwrap_or(true) {
+                        return false;
+                    }
+                }
+                None => {
+                    if !gitio::tree_has_any_path(cwd, head, &paths).unwrap_or(true) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Open blocking finding IDs for `state` at `current_head`, combining
@@ -561,10 +645,9 @@ pub(crate) fn open_blocking_finding_ids(
         .filter(|f| {
             f.blocks_integration()
                 || (f.blocking
-                    && matches!(
-                        resolution_statuses.get(&f.id),
-                        Some(ResolutionCommitStatus::NotInHead(_))
-                    ))
+                    && resolution_statuses
+                        .get(&f.id)
+                        .is_some_and(ResolutionCommitStatus::leaves_open))
         })
         .map(|f| f.id.clone())
         .collect()
@@ -1830,10 +1913,9 @@ fn build_report(
         .values()
         .map(|f| {
             let resolution_commit_status = resolution_statuses.get(&f.id).cloned();
-            let missing_commit = matches!(
-                resolution_commit_status,
-                Some(ResolutionCommitStatus::NotInHead(_))
-            );
+            let missing_commit = resolution_commit_status
+                .as_ref()
+                .is_some_and(ResolutionCommitStatus::leaves_open);
             let status = if missing_commit {
                 "open".into()
             } else {
@@ -1869,10 +1951,9 @@ fn build_report(
         .filter(|f| {
             f.blocks_integration()
                 || (f.blocking
-                    && matches!(
-                        resolution_statuses.get(&f.id),
-                        Some(ResolutionCommitStatus::NotInHead(_))
-                    ))
+                    && resolution_statuses
+                        .get(&f.id)
+                        .is_some_and(ResolutionCommitStatus::leaves_open))
         })
         .map(|f| f.id.clone())
         .collect();

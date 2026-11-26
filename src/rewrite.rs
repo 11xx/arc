@@ -125,8 +125,12 @@ impl RewriteConflict {
             enrich_summary_change(&mut first, &self.revision, store);
             enrich_summary_change(&mut second, &self.revision, store);
         }
-        let landed_first = cwd.and_then(|cwd| successors_landed(cwd, store, &first));
-        let landed_second = cwd.and_then(|cwd| successors_landed(cwd, store, &second));
+        let first_incoming = incoming_ids.contains(&first.event_id);
+        let second_incoming = incoming_ids.contains(&second.event_id);
+        let landed_first =
+            cwd.and_then(|cwd| successors_landed(cwd, store, &first, first_incoming));
+        let landed_second =
+            cwd.and_then(|cwd| successors_landed(cwd, store, &second, second_incoming));
         let format_entry = |summary: &RewriteEventSummary,
                             landed: Option<bool>,
                             incoming: bool|
@@ -145,66 +149,53 @@ impl RewriteConflict {
                 .map(|branch| format!(", branch: {branch}"))
                 .unwrap_or_default();
             let tool = summary.tool.as_deref().unwrap_or("(none)");
-            let landed_note = match landed {
-                Some(true) => ", successors landed",
-                Some(false) => ", successors never landed",
-                None => "",
+            let landed_note = match (cwd.is_some(), landed) {
+                (_, Some(true)) => ", successors landed",
+                (_, Some(false)) => ", successors never landed",
+                (true, None) => ", landing status unknown",
+                (false, None) => "",
             };
             format!(
-                    "  - event {}{origin} (change: {change}{branch}, tool: {tool}, reason: {:?}{landed_note}) maps {} -> {}",
-                    summary.event_id,
-                    summary.reason,
-                    self.revision,
-                    describe(&summary.successor),
-                )
+                "  - event {}{origin} (change: {change}{branch}, tool: {tool}, reason: {:?}{landed_note}) maps {} -> {}",
+                summary.event_id,
+                summary.reason,
+                self.revision,
+                describe(&summary.successor),
+            )
         };
-        let first_incoming = incoming_ids.contains(&first.event_id);
-        let second_incoming = incoming_ids.contains(&second.event_id);
         let mut lines = vec![
             format!("recorded rewrites disagree about {}:", self.revision),
             format_entry(&first, landed_first, first_incoming),
             format_entry(&second, landed_second, second_incoming),
         ];
+        // Concrete withdrawal advice is emitted only for local maps proven
+        // unlanded; incoming, unknown, or landed maps never receive a concrete
+        // withdrawal command naming them.
         let mut suggestions = Vec::new();
         for (summary, landed, incoming) in [
             (&first, landed_first, first_incoming),
             (&second, landed_second, second_incoming),
         ] {
-            if landed == Some(false) {
-                if incoming {
-                    suggestions.push(format!(
-                        "withdraw the unlanded incoming map on its source replica with: \
-                         arc history withdraw {} --reason \"superseded unlanded rewrite\"",
-                        summary.event_id
-                    ));
-                } else {
-                    suggestions.push(format!(
-                        "withdraw the unlanded local map with: \
-                         arc history withdraw {} --reason \"superseded unlanded rewrite\"",
-                        summary.event_id
-                    ));
-                }
+            if !incoming && landed == Some(false) {
+                suggestions.push(format!(
+                    "withdraw the unlanded local map with: \
+                     arc history withdraw {} --reason \"superseded unlanded rewrite\"",
+                    summary.event_id
+                ));
             }
         }
         if suggestions.is_empty() {
-            let local_candidates: Vec<&str> =
-                [(&first, first_incoming), (&second, second_incoming)]
-                    .into_iter()
-                    .filter(|(_, incoming)| !*incoming)
-                    .map(|(summary, _)| summary.event_id.as_str())
-                    .collect();
-            if let [only] = local_candidates.as_slice() {
-                suggestions.push(format!(
-                    "if its successors never landed, withdraw it with: \
-                     arc history withdraw {only} --reason \"superseded unlanded rewrite\""
-                ));
+            if cwd.is_some() {
+                suggestions.push(
+                    "no unlanded local map was confirmed; inspect both replicas before withdrawing a map with `arc history withdraw`"
+                        .to_string(),
+                );
             } else {
-                suggestions.push(format!(
-                    "withdraw the map whose successors never landed with: \
-                     arc history withdraw <event-id> --reason \"superseded unlanded rewrite\" \
-                     ({} or {})",
-                    first.event_id, second.event_id
-                ));
+                suggestions.push(
+                    "if a map's successors never landed, withdraw it with: \
+                     arc history withdraw <event-id> --reason \"superseded unlanded rewrite\""
+                        .to_string(),
+                );
             }
         }
         lines.extend(suggestions);
@@ -259,16 +250,6 @@ pub fn event_branches(refs: &BTreeMap<String, RefMove>) -> Vec<String> {
     refs.keys()
         .filter_map(|name| name.strip_prefix("refs/heads/").map(str::to_string))
         .collect()
-}
-
-/// Whether a rewrite event's `retained` map holds a repository-scoped commit.
-pub fn event_retains_repository_scope(retained: &BTreeMap<String, String>) -> bool {
-    let prefix = format!(
-        "{}{}/",
-        crate::gitio::RETAINED_PREFIX,
-        Store::REPOSITORY_SCOPE
-    );
-    retained.keys().any(|name| name.starts_with(&prefix))
 }
 
 pub(crate) fn summarize_event(
@@ -375,17 +356,22 @@ fn enrich_summary_change(summary: &mut RewriteEventSummary, revision: &str, stor
 /// Whether any successor named by `summary` reached a target branch or an
 /// integrated change closure in this repository.
 ///
-/// Returns `Some(true)` if at least one successor is reachable from a target
-/// branch or recorded integration commit, `Some(false)` if target/integration
-/// tips were observed and none of the successors reached them (or none exist
-/// here), and `None` when no target history can be inspected.
+/// Returns `Some(true)` if at least one successor is positively observed as
+/// reachable from a local target branch or recorded integration commit;
+/// `Some(false)` only for a local map (`!incoming`) where target/integration
+/// tips were observed, every non-dropped successor object is present locally,
+/// and every ancestry check succeeded with `false` (or every mapping dropped
+/// its commit); and `None` (unknown) when evidence is missing — including for
+/// any incoming map whose successors are not positively landed here, any
+/// absent/unreadable successor object, or any failed ancestry probe.
 pub fn successors_landed(
     cwd: &Path,
     store: Option<&Store>,
     summary: &RewriteEventSummary,
+    incoming: bool,
 ) -> Option<bool> {
     if summary.successors.is_empty() {
-        return Some(false);
+        return (!incoming).then_some(false);
     }
     let mut landed_tips = BTreeSet::new();
     let mut target_branches = BTreeSet::new();
@@ -443,17 +429,31 @@ pub fn successors_landed(
     if landed_tips.is_empty() {
         return None;
     }
+    let mut any_uncertain = false;
     for successor in &summary.successors {
-        if !crate::gitio::commit_exists(cwd, successor).unwrap_or(false) {
-            continue;
+        match crate::gitio::commit_exists(cwd, successor) {
+            Ok(true) => {}
+            _ => {
+                any_uncertain = true;
+                continue;
+            }
         }
         for tip in &landed_tips {
-            if crate::gitio::is_ancestor(cwd, successor, tip).unwrap_or(false) {
-                return Some(true);
+            match crate::gitio::is_ancestor(cwd, successor, tip) {
+                Ok(true) => return Some(true),
+                Ok(false) => {}
+                Err(_) => any_uncertain = true,
             }
         }
     }
-    Some(false)
+    // Local ref reachability cannot establish that an incoming map never
+    // landed on its source replica; missing objects or failed ancestry probes
+    // also leave landing state unknown.
+    if incoming || any_uncertain {
+        None
+    } else {
+        Some(false)
+    }
 }
 
 /// One ref move a rewrite has planned: the value the ref held when the

@@ -1731,6 +1731,15 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                                 &commit[..commit.len().min(8)]
                             )
                         }
+                        Some(crate::status::ResolutionCommitStatus::RevertedInHead {
+                            commit,
+                            ..
+                        }) => {
+                            format!(
+                                " (resolution commit {} was reverted before head)",
+                                &commit[..commit.len().min(8)]
+                            )
+                        }
                         _ => String::new(),
                     };
                     let _ = writeln!(
@@ -3379,6 +3388,14 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
                     Some(crate::status::ResolutionCommitStatus::NotInHead(commit)) => {
                         format!(
                             " (resolution commit {} not in head)",
+                            &commit[..commit.len().min(8)]
+                        )
+                    }
+                    Some(crate::status::ResolutionCommitStatus::RevertedInHead {
+                        commit, ..
+                    }) => {
+                        format!(
+                            " (resolution commit {} was reverted before head)",
                             &commit[..commit.len().min(8)]
                         )
                     }

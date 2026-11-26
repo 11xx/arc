@@ -1049,8 +1049,10 @@ RUN A CHANGE
                                      stands when that commit (after recorded
                                      rewrites) is an ancestor of the head or
                                      matches a non-merge commit in `base..head`
-                                     by exact Git patch-id; otherwise the
-                                     finding remains open.
+                                     by exact Git patch-id, and the fix
+                                     survives at the head without being
+                                     reverted; otherwise the finding remains
+                                     open.
   Nothing submits or marks a change ready: `arc snapshot` records a patchset
   and `arc check` computes readiness. `arc close <change> --abandoned` abandons.
   arc check                          Integration preflight; exit code names the blocker.

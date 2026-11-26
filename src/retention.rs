@@ -330,15 +330,37 @@ pub fn replayed(
     if exposed.is_empty() {
         return Ok(BTreeMap::new());
     }
-    Ok(cited(store)?
-        .into_iter()
-        .map(|cited| Cited {
-            commit: crate::rewrite::canonical_revision(&cited.commit),
-            ..cited
-        })
-        .filter(|cited| exposed.contains(&cited.commit))
-        .map(|cited| (cited.retained_ref(), cited.commit))
-        .collect())
+    let rewrites = crate::rewrite::RewriteMap::load(store).unwrap_or_default();
+    let mut to_retain = BTreeMap::new();
+    for entry in cited(store)? {
+        let raw = crate::rewrite::canonical_revision(&entry.commit);
+        if exposed.contains(&raw) {
+            let item = Cited {
+                commit: raw.clone(),
+                ..entry.clone()
+            };
+            to_retain.insert(item.retained_ref(), item.commit);
+        }
+        // A cited commit rewritten before this rebase (e.g. an unsnapshotted
+        // disposition commit rewritten by `arc rewrite trailers`) is followed
+        // forward to its successor by projections; hold the exposed successor
+        // as well so garbage collection cannot drop it after the rebase moves
+        // the branch off it.
+        if let Ok(current) = rewrites.current(&raw) {
+            let current = crate::rewrite::canonical_revision(&current);
+            if current != raw
+                && crate::bundle::valid_object_id(&current)
+                && exposed.contains(&current)
+            {
+                let item = Cited {
+                    commit: current,
+                    ..entry
+                };
+                to_retain.insert(item.retained_ref(), item.commit);
+            }
+        }
+    }
+    Ok(to_retain)
 }
 
 /// What an import holds once its events are published: each commit the
@@ -356,14 +378,29 @@ pub fn delivered(
     if delivered.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let candidates: Vec<Cited> = cited(store)?
-        .into_iter()
-        .map(|cited| Cited {
-            commit: crate::rewrite::canonical_revision(&cited.commit),
-            ..cited
-        })
-        .filter(|cited| delivered.contains(&cited.commit))
-        .collect();
+    let rewrites = crate::rewrite::RewriteMap::load(store).unwrap_or_default();
+    let mut candidates: Vec<Cited> = Vec::new();
+    for entry in cited(store)? {
+        let raw = crate::rewrite::canonical_revision(&entry.commit);
+        if delivered.contains(&raw) {
+            candidates.push(Cited {
+                commit: raw.clone(),
+                ..entry.clone()
+            });
+        }
+        if let Ok(current) = rewrites.current(&raw) {
+            let current = crate::rewrite::canonical_revision(&current);
+            if current != raw
+                && crate::bundle::valid_object_id(&current)
+                && delivered.contains(&current)
+            {
+                candidates.push(Cited {
+                    commit: current,
+                    ..entry
+                });
+            }
+        }
+    }
     let present = gitio::commits_among(cwd, candidates.iter().map(|cited| cited.commit.as_str()))?;
     let present: Vec<&str> = present.iter().map(String::as_str).collect();
     let unreachable = gitio::unreachable_from_refs(cwd, &present)?;

@@ -3101,6 +3101,78 @@ pub fn patch_id(cwd: &Path, commit: &str) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
+/// The stable patch id of the reverse diff of a single-parent or root commit
+/// (the patch a clean `git revert` produces), or `None` when the commit
+/// changes nothing.
+pub fn reverse_patch_id(cwd: &Path, commit: &str) -> Result<Option<String>> {
+    let diff = git_bytes(
+        cwd,
+        &[
+            "diff-tree",
+            "-R",
+            "--patch",
+            "--root",
+            "--no-commit-id",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--full-index",
+            commit,
+        ],
+    )?;
+    let out = git_piped(cwd, &["patch-id", "--stable"], &diff)?;
+    Ok(String::from_utf8(out)?
+        .split_whitespace()
+        .next()
+        .map(str::to_string))
+}
+
+/// Paths modified by `commit` relative to its first parent (or empty tree for
+/// a root commit).
+pub fn commit_changed_paths(cwd: &Path, commit: &str) -> Result<Vec<String>> {
+    let raw = git_bytes(
+        cwd,
+        &[
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            "-m",
+            "--first-parent",
+            commit,
+        ],
+    )?;
+    Ok(raw
+        .split(|&b| b == 0)
+        .filter(|slice| !slice.is_empty())
+        .filter_map(|slice| std::str::from_utf8(slice).ok().map(str::to_string))
+        .collect())
+}
+
+/// Whether `left` and `right` differ on any path in `paths`.
+pub fn paths_differ(cwd: &Path, left: &str, right: &str, paths: &[String]) -> Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let mut args = vec!["diff", "--name-only", "-z", left, right, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let raw = git_bytes(cwd, &args)?;
+    Ok(!raw.is_empty())
+}
+
+/// Whether `commit`'s tree contains at least one path in `paths`.
+pub fn tree_has_any_path(cwd: &Path, commit: &str, paths: &[String]) -> Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let mut args = vec!["ls-tree", "-z", "--name-only", "-r", commit, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let raw = git_bytes(cwd, &args)?;
+    Ok(!raw.is_empty())
+}
+
 /// The stable patch id of the combined diff from `base` to `head`, or `None`
 /// when both commits carry the same tree.
 pub fn range_patch_id(cwd: &Path, base: &str, head: &str) -> Result<Option<String>> {

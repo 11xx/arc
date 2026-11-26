@@ -713,3 +713,178 @@ fn finding_resolution_survives_rebase_via_patch_id_and_blocks_when_dropped() {
         "check should explain missing resolution commit:\n{out2}"
     );
 }
+
+#[test]
+fn reverted_resolution_reopens_blocking_finding_before_and_after_rebase() {
+    let repo = Repo::new();
+
+    // Case 1: direct revert of C1 without rebase.
+    let begin1 = stdout(repo.arc(&repo.root).args(["begin", "direct-revert"]));
+    let change1 = opened_change_id(&begin1);
+    let wt1 = repo.home.join(".worktrees/repo-direct-revert");
+    repo.commit(&wt1, "direct.rs", "broken\n", "feat: broken");
+    stdout(repo.arc(&wt1).args(["snapshot", "direct-revert"]));
+    let fid1 = stdout(repo.arc(&wt1).args([
+        "finding",
+        "direct-revert",
+        "--summary",
+        "must stay fixed",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1, "direct.rs", "fixed\n", "fix: direct fix");
+    let c1 = repo.head(&wt1);
+    stdout(repo.arc(&wt1).args([
+        "resolve",
+        "direct-revert",
+        &fid1,
+        "--status",
+        "resolved",
+        "--commit",
+        &c1,
+    ]));
+    git(&wt1, &["revert", "--no-edit", &c1]);
+    stdout(repo.arc(&wt1).args(["snapshot", "direct-revert"]));
+
+    let status1 = json_stdout(repo.arc(&wt1).args(["status", &change1, "--json"]));
+    assert_eq!(
+        status1["open_blocking_findings"],
+        serde_json::json!([fid1]),
+        "directly reverted fix must reopen blocking finding: {status1}"
+    );
+    assert_eq!(status1["findings"][0]["status"], "open", "{status1}");
+    let check1 = repo.arc(&wt1).args(["check", &change1]).assert().code(2);
+    let out1 = String::from_utf8_lossy(&check1.get_output().stdout);
+    assert!(
+        out1.contains("reverted before head"),
+        "check should explain reverted resolution commit:\n{out1}"
+    );
+
+    // Case 2: rebase carries C1 -> C2, then C2 is reverted.
+    let begin2 = stdout(repo.arc(&repo.root).args(["begin", "rebase-revert"]));
+    let change2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-rebase-revert");
+    repo.commit(&wt2, "rebased.rs", "broken\n", "feat: broken");
+    stdout(repo.arc(&wt2).args(["snapshot", "rebase-revert"]));
+    let fid2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "rebase-revert",
+        "--summary",
+        "must survive after rebase",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt2, "rebased.rs", "fixed\n", "fix: handle bug");
+    let orig_fix = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "rebase-revert",
+        &fid2,
+        "--status",
+        "resolved",
+        "--commit",
+        &orig_fix,
+    ]));
+    stdout(repo.arc(&wt2).args(["snapshot", "rebase-revert"]));
+    repo.commit(&repo.root, "target.txt", "target\n", "feat: advance target");
+    stdout(repo.arc(&wt2).args(["rebase", "rebase-revert"]));
+    let carried = repo.head(&wt2);
+    assert_ne!(carried, orig_fix);
+
+    // Revert the carried fix commit C2 and snapshot.
+    git(&wt2, &["revert", "--no-edit", &carried]);
+    stdout(repo.arc(&wt2).args(["snapshot", "rebase-revert"]));
+    let status2 = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2["open_blocking_findings"],
+        serde_json::json!([fid2]),
+        "reverted rebased fix must reopen blocking finding: {status2}"
+    );
+    assert_eq!(status2["findings"][0]["status"], "open", "{status2}");
+    let check2 = repo.arc(&wt2).args(["check", &change2]).assert().code(2);
+    let out2 = String::from_utf8_lossy(&check2.get_output().stdout);
+    assert!(
+        out2.contains("reverted before head"),
+        "check should explain reverted rebased resolution commit:\n{out2}"
+    );
+}
+
+#[test]
+fn rewritten_unsnapshotted_resolution_survives_rebase_and_gc() {
+    let repo = Repo::new();
+    let begin = stdout(repo.arc(&repo.root).args(["begin", "rewrite-rebase-gc"]));
+    let change_id = opened_change_id(&begin);
+    let wt = repo.home.join(".worktrees/repo-rewrite-rebase-gc");
+    repo.commit(&wt, "gc.rs", "broken\n", "feat: initial");
+    stdout(repo.arc(&wt).args(["snapshot", "rewrite-rebase-gc"]));
+    let fid = stdout(repo.arc(&wt).args([
+        "finding",
+        "rewrite-rebase-gc",
+        "--summary",
+        "fix before rewrite and rebase",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+
+    // Unsnapshotted fix commit C1, resolved against C1, then rewritten to C2.
+    repo.commit(&wt, "gc.rs", "fixed\n", "fix: unsnapshotted fix");
+    let c1 = repo.head(&wt);
+    stdout(repo.arc(&wt).args([
+        "resolve",
+        "rewrite-rebase-gc",
+        &fid,
+        "--status",
+        "resolved",
+        "--commit",
+        &c1,
+    ]));
+    repo.arc(&wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &c1,
+            "--no-sign",
+            "--append",
+            "Planned-by: Planner <planner@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let c2 = repo.head(&wt);
+    assert_ne!(c2, c1);
+
+    // Advance master and run `arc rebase` (carrying C2 -> C3 without snapping C2 first).
+    repo.commit(&repo.root, "target.txt", "move\n", "feat: move master");
+    stdout(repo.arc(&wt).args(["rebase", "rewrite-rebase-gc"]));
+    let c3 = repo.head(&wt);
+    assert_ne!(c3, c2);
+
+    // Prune all unreferenced objects aggressively.
+    git(&repo.root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&repo.root, &["gc", "--prune=now"]);
+
+    // C2 must still be retained so resolution verification keeps the finding resolved.
+    git(&repo.root, &["cat-file", "-e", &c2]);
+    let status = json_stdout(repo.arc(&wt).args(["status", &change_id, "--json"]));
+    assert_eq!(
+        status["open_blocking_findings"],
+        serde_json::json!([]),
+        "finding must stay resolved after rewrite + rebase + gc: {status}"
+    );
+    assert_eq!(status["findings"][0]["status"], "resolved", "{status}");
+}

@@ -1708,10 +1708,16 @@ fn skip_unrelated_conflicting_rewrites(
         }
     }
 
-    // Determine which active novel rewrites are relevant (directly or transitively).
+    // Build the relevance graph across ALL active rewrites (both locally held
+    // and novel incoming) so a chain through locally held mappings from a
+    // bundle-cited commit to a conflicting incoming rewrite is recognized as
+    // relevant and refused.
     let mut relevant: BTreeSet<String> = BTreeSet::new();
-    let mut novel_revs: Vec<(&str, Vec<String>)> = Vec::new();
-    for event in &active_novel {
+    let mut active_revs: Vec<(&str, Vec<String>)> = Vec::new();
+    for event in combined {
+        if withdrawn.contains(event.event_id.as_str()) {
+            continue;
+        }
         let Payload::HistoryRewritten {
             mapping,
             refs,
@@ -1721,6 +1727,9 @@ fn skip_unrelated_conflicting_rewrites(
         else {
             continue;
         };
+        if crate::rewrite::validate_mapping(mapping).is_err() {
+            continue;
+        }
         let changes = crate::rewrite::event_change_ids(refs, retained);
         let branches = crate::rewrite::event_branches(refs);
         let revs: Vec<String> = mapping
@@ -1740,16 +1749,16 @@ fn skip_unrelated_conflicting_rewrites(
         if touches_change {
             relevant.insert(event.event_id.clone());
         }
-        novel_revs.push((event.event_id.as_str(), revs));
+        active_revs.push((event.event_id.as_str(), revs));
     }
     loop {
-        let relevant_revs: Vec<&str> = novel_revs
+        let relevant_revs: Vec<&str> = active_revs
             .iter()
             .filter(|(id, _)| relevant.contains(*id))
             .flat_map(|(_, revs)| revs.iter().map(String::as_str))
             .collect();
         let mut grew = false;
-        for (id, revs) in &novel_revs {
+        for (id, revs) in &active_revs {
             if relevant.contains(*id) {
                 continue;
             }
