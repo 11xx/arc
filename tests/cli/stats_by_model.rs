@@ -597,3 +597,119 @@ fn stats_by_model_attribution_edges_and_post_approval_rework() {
     assert_eq!(row6_plain["identity_kind"], "label");
     assert_eq!(row6_plain["patchsets"], 1);
 }
+
+/// Regression test for clean rebase replay: when `ps-01` was recorded with a
+/// delegated session subject and shared contributors including the recorder,
+/// advancing `master` and running `arc rebase` must preserve the source
+/// attribution on `lead` without emitting a phantom `<recorder-harness>:<delegated-model>`
+/// coordinate.
+#[test]
+fn stats_by_model_clean_rebase_preserves_source_attribution_without_phantom_coordinate() {
+    let repo = Repo::new();
+    let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d9410e";
+    let delegated = format!("codex:{uuid}:gpt-carry#high");
+
+    let (change_id, wt) = begin_with_worktree(&repo, "rebase-carry", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt, "feature.txt", "v1\n", "feat: feature");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--harness",
+            "claude",
+            "--on-behalf-of",
+            &delegated,
+            "snapshot",
+            "--contributors",
+            "lead,helper",
+        ])
+        .assert()
+        .success();
+
+    // Advance master with a disjoint file, then run a clean `arc rebase`.
+    commit_file(&repo, &repo.root, "upstream.txt", "u1\n", "chore: upstream");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--harness",
+            "claude",
+            "rebase",
+            &change_id,
+        ])
+        .assert()
+        .success();
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    let models = stats["models"].as_array().expect("models array");
+    let has = |id: &str| models.iter().any(|row| row["identity"] == id);
+
+    assert!(!has("claude:gpt-carry#high"), "{stats}");
+    let lead = find_row(&stats, "lead");
+    assert_eq!(lead["identity_kind"], "label");
+    assert_eq!(lead["changes"], 1);
+    assert_eq!(lead["patchsets"], 2);
+    let helper = find_row(&stats, "helper");
+    assert_eq!(helper["identity_kind"], "label");
+    assert_eq!(helper["changes"], 1);
+    assert_eq!(helper["patchsets"], 2);
+}
+
+/// Regression test for two-snapshot attribution: when `ps-01` establishes a
+/// model for an exact `harness:<uuid>` contributor and `ps-02` names the same
+/// bare `harness:<uuid>` contributor without `--on-behalf-of` or `--model`,
+/// stats must reuse the established coordinate instead of splitting the change
+/// across the coordinate and the bare-session label.
+#[test]
+fn stats_by_model_later_snapshot_reuses_exact_session_coordinate() {
+    let repo = Repo::new();
+    let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d9410f";
+    let bare = format!("codex:{uuid}");
+    let delegated = format!("codex:{uuid}:gpt-repeat#high");
+    let contributors = format!("{bare},helper");
+
+    let (_change_id, wt) = begin_with_worktree(&repo, "repeat-session", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt, "work.txt", "v1\n", "feat: v1");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            &delegated,
+            "snapshot",
+            "--contributors",
+            &contributors,
+        ])
+        .assert()
+        .success();
+
+    commit_file(&repo, &wt, "work.txt", "v2\n", "feat: v2");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "snapshot",
+            "--contributors",
+            &contributors,
+        ])
+        .assert()
+        .success();
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    let models = stats["models"].as_array().expect("models array");
+    let has = |id: &str| models.iter().any(|row| row["identity"] == id);
+
+    assert!(!has(&bare), "{stats}");
+    let coord = find_row(&stats, "codex:gpt-repeat#high");
+    assert_eq!(coord["identity_kind"], "coordinate");
+    assert_eq!(coord["changes"], 1);
+    assert_eq!(coord["patchsets"], 2);
+    let helper = find_row(&stats, "helper");
+    assert_eq!(helper["identity_kind"], "label");
+    assert_eq!(helper["changes"], 1);
+    assert_eq!(helper["patchsets"], 2);
+}
