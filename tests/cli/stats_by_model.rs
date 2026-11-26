@@ -362,3 +362,238 @@ fn commit_file(repo: &Repo, dir: &Path, name: &str, content: &str, msg: &str) {
     git_out(dir, &["add", name]);
     git_out(dir, &["commit", "-m", msg]);
 }
+
+/// Regression tests covering contributor attribution, session-subject
+/// normalization, verbatim label whitespace preservation, and first-patchset
+/// approval after rework.
+#[test]
+fn stats_by_model_attribution_edges_and_post_approval_rework() {
+    let repo = Repo::new();
+    let uuid1 = "01a1d771-d401-7bd0-8b41-dd9ce2d9410a";
+    let uuid2 = "01a1d771-d401-7bd0-8b41-dd9ce2d9410b";
+    let uuid3 = "01a1d771-d401-7bd0-8b41-dd9ce2d9410c";
+    let uuid4 = "01a1d771-d401-7bd0-8b41-dd9ce2d9410d";
+
+    // 1. Unrelated bare-session contributor with --on-behalf-of codex:gpt-guess#high
+    //    must keep the bare-session label and never credit codex:gpt-guess#high.
+    let (_c1, wt1) = begin_with_worktree(&repo, "edge-unrelated-contrib", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt1, "a.txt", "1\n", "feat: a");
+    let bare_session_1 = format!("codex:{uuid1}");
+    repo.arc(&wt1)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "codex:gpt-guess#high",
+            "snapshot",
+            "--contributors",
+            &bare_session_1,
+        ])
+        .assert()
+        .success();
+
+    // 2. Shared patchset with --contributors codex:<uuid2>,other,
+    //    --on-behalf-of codex:<uuid2>, and --model gpt-flag#high must credit
+    //    codex:gpt-flag#high for the named session and keep `other` as a label.
+    let (_c2, wt2) = begin_with_worktree(&repo, "edge-shared-flag-model", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt2, "b.txt", "1\n", "feat: b");
+    let bare_session_2 = format!("codex:{uuid2}");
+    repo.arc(&wt2)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            &bare_session_2,
+            "--model",
+            "gpt-flag#high",
+            "snapshot",
+            "--contributors",
+            &format!("{bare_session_2},other-shared"),
+        ])
+        .assert()
+        .success();
+
+    // 3. Shared patchset with --actor lead --harness claude
+    //    --on-behalf-of codex:<uuid3>:gpt-test#high --contributors lead,other
+    //    must NOT emit a bogus claude:gpt-test#high coordinate.
+    let (_c3, wt3) = begin_with_worktree(&repo, "edge-delegated-recorder", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt3, "c.txt", "1\n", "feat: c");
+    let delegated_subject = format!("codex:{uuid3}:gpt-test#high");
+    repo.arc(&wt3)
+        .args([
+            "--actor",
+            "lead",
+            "--harness",
+            "claude",
+            "--on-behalf-of",
+            &delegated_subject,
+            "snapshot",
+            "--contributors",
+            "lead,other-delegated",
+        ])
+        .assert()
+        .success();
+
+    // 4. Session-form contributor `codex:<uuid4>:gpt-contributor#high` must
+    //    normalize to `codex:gpt-contributor#high` without retaining the UUID.
+    let (_c4, wt4) = begin_with_worktree(&repo, "edge-session-contrib", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt4, "d.txt", "1\n", "feat: d");
+    let session_contrib = format!("codex:{uuid4}:gpt-contributor#high");
+    repo.arc(&wt4)
+        .args([
+            "--actor",
+            "lead",
+            "snapshot",
+            "--contributors",
+            &session_contrib,
+        ])
+        .assert()
+        .success();
+
+    // 5. ps-01 approved, then changes requested on ps-01, then revised ps-02
+    //    approved, then abandoned: must report rework_rounds_caused == 1 AND
+    //    first_patchset_approval == 0/1 (NOT 1/1).
+    let (c5, wt5) = begin_with_worktree(&repo, "edge-post-approval-rework", |cmd| {
+        cmd.args(["--actor", "lead", "--on-behalf-of", "codex:gpt-rework#high"]);
+    });
+    commit_file(&repo, &wt5, "e.txt", "v1\n", "feat: e v1");
+    repo.arc(&wt5)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "codex:gpt-rework#high",
+            "snapshot",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt5)
+        .args([
+            "--actor",
+            "rev-a",
+            "--on-behalf-of",
+            "claude:claude-opus-5-5#high",
+            "review",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt5)
+        .args([
+            "--actor",
+            "rev-b",
+            "--on-behalf-of",
+            "claude:claude-opus-5-5#xhigh",
+            "review",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    commit_file(&repo, &wt5, "e.txt", "v2\n", "fix: e v2");
+    repo.arc(&wt5)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "codex:gpt-rework#high",
+            "snapshot",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt5)
+        .args([
+            "--actor",
+            "rev-b",
+            "--on-behalf-of",
+            "claude:claude-opus-5-5#xhigh",
+            "review",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "codex:gpt-rework#high",
+            "close",
+            &c5,
+            "--abandoned",
+        ])
+        .assert()
+        .success();
+
+    // 6. Whitespace-distinct labels `'  Label  '` and `'Label'` stay distinct
+    //    and preserve verbatim spelling.
+    let (_c6, wt6) = begin_with_worktree(&repo, "edge-whitespace-labels", |cmd| {
+        cmd.args(["--actor", "lead", "--on-behalf-of", "  Label  "]);
+    });
+    commit_file(&repo, &wt6, "f.txt", "1\n", "feat: f");
+    repo.arc(&wt6)
+        .args(["--actor", "lead", "--on-behalf-of", "Label", "snapshot"])
+        .assert()
+        .success();
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    let models = stats["models"].as_array().expect("models array");
+    let has = |id: &str| models.iter().any(|row| row["identity"] == id);
+
+    // Edge 1 assertions
+    assert!(!has("codex:gpt-guess#high"), "{stats}");
+    let row1 = find_row(&stats, &bare_session_1);
+    assert_eq!(row1["identity_kind"], "label");
+    assert_eq!(row1["patchsets"], 1);
+
+    // Edge 2 assertions
+    let row2 = find_row(&stats, "codex:gpt-flag#high");
+    assert_eq!(row2["identity_kind"], "coordinate");
+    assert_eq!(row2["patchsets"], 1);
+    assert!(!has(&bare_session_2), "{stats}");
+    let row2_other = find_row(&stats, "other-shared");
+    assert_eq!(row2_other["identity_kind"], "label");
+    assert_eq!(row2_other["patchsets"], 1);
+
+    // Edge 3 assertions
+    assert!(!has("claude:gpt-test#high"), "{stats}");
+    let row3_lead = find_row(&stats, "lead");
+    assert_eq!(row3_lead["identity_kind"], "label");
+    assert_eq!(row3_lead["patchsets"], 1);
+    let row3_other = find_row(&stats, "other-delegated");
+    assert_eq!(row3_other["identity_kind"], "label");
+    assert_eq!(row3_other["patchsets"], 1);
+
+    // Edge 4 assertions
+    assert!(!has(&session_contrib), "{stats}");
+    let row4 = find_row(&stats, "codex:gpt-contributor#high");
+    assert_eq!(row4["identity_kind"], "coordinate");
+    assert_eq!(row4["patchsets"], 1);
+
+    // Edge 5 assertions
+    let row5 = find_row(&stats, "codex:gpt-rework#high");
+    assert_eq!(row5["rework_rounds_caused"], 1);
+    assert_eq!(row5["first_patchset_approval"]["count"], 0);
+    assert_eq!(row5["first_patchset_approval"]["of"], 1);
+    assert_eq!(row5["first_patchset_approval"]["rate"], 0.0);
+
+    // Edge 6 assertions
+    let row6_padded = find_row(&stats, "  Label  ");
+    assert_eq!(row6_padded["identity_kind"], "label");
+    assert_eq!(row6_padded["patchsets"], 0);
+    let row6_plain = find_row(&stats, "Label");
+    assert_eq!(row6_plain["identity_kind"], "label");
+    assert_eq!(row6_plain["patchsets"], 1);
+}
