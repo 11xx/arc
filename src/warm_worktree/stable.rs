@@ -28,30 +28,36 @@ struct Storage {
     guard: CommandLease,
 }
 
+pub(super) fn resolved_build_directory(path: &Path, hook: &Hook) -> Result<PathBuf> {
+    let common = fs::canonicalize(gitio::common_dir(path)?)?;
+    let build = if let Some(directory) = &hook.directory {
+        let candidate = if directory.is_absolute() {
+            directory.clone()
+        } else {
+            path.join(directory)
+        };
+        let resolved = resolve_directory(&candidate)?;
+        if resolved.starts_with(path) && !resolved.starts_with(&common) {
+            bail!("path-stable build directory must be outside the source checkout or inside Git common administrative storage");
+        }
+        crate::confinement::require_external(path, &resolved)?;
+        resolved
+    } else {
+        let arc = private_directory(&common, "arc")?;
+        let cache = private_directory(&arc, "cache")?;
+        let stable = private_directory(&cache, "path-stable-worktrees")?;
+        stable.join(source_path_key(path))
+    };
+    if path.starts_with(&build) || common.starts_with(&build) {
+        bail!("path-stable build storage must not contain the source checkout or Git common directory");
+    }
+    Ok(build)
+}
+
 impl Storage {
     fn open(path: &Path, hook: &Hook, timeout: u64) -> Result<Self> {
         let common = fs::canonicalize(gitio::common_dir(path)?)?;
-        let build = if let Some(directory) = &hook.directory {
-            let candidate = if directory.is_absolute() {
-                directory.clone()
-            } else {
-                path.join(directory)
-            };
-            let resolved = resolve_directory(&candidate)?;
-            if resolved.starts_with(path) && !resolved.starts_with(&common) {
-                bail!("path-stable build directory must be outside the source checkout or inside Git common administrative storage");
-            }
-            crate::confinement::require_external(path, &resolved)?;
-            resolved
-        } else {
-            let arc = private_directory(&common, "arc")?;
-            let cache = private_directory(&arc, "cache")?;
-            let stable = private_directory(&cache, "path-stable-worktrees")?;
-            stable.join(source_path_key(path))
-        };
-        if path.starts_with(&build) || common.starts_with(&build) {
-            bail!("path-stable build storage must not contain the source checkout or Git common directory");
-        }
+        let build = resolved_build_directory(path, hook)?;
         fs::DirBuilder::new().recursive(true).mode(0o700).create(
             build
                 .parent()
@@ -145,6 +151,11 @@ impl Storage {
             &self.build,
             &self.guard,
         );
+        if let Err(error) = &outcome {
+            if error.is::<crate::interruption::Interrupted>() {
+                return Err(outcome.unwrap_err());
+            }
+        }
         let after = Source::observe(path)?;
         if after != *source {
             return Err(SourceMutation(source.changed_fields(&after)).into());
@@ -224,4 +235,29 @@ pub(super) fn configure(
     }
     storage.configure(command, path, &source);
     Ok(storage.guard)
+}
+
+/// Prepare path-stable storage and retain its exclusive build lease through
+/// subsequent probing and gate execution.
+pub(super) fn prepare_and_hold(
+    path: &Path,
+    (hook, timeout): &(Hook, u64),
+) -> Result<PreparedStorage> {
+    let source = Source::observe(path)?;
+    let mut storage = Storage::open(path, hook, *timeout)?;
+    if storage.prepare(path, &source, hook, *timeout)? {
+        crate::slots::record_built(path)?;
+    }
+    eprintln!(
+        "worktree preparation: path-stable storage {}",
+        storage.build.display()
+    );
+    Ok(PreparedStorage::from_parts(
+        path.to_path_buf(),
+        source.revision,
+        source.tree,
+        storage.cache,
+        storage.build,
+        storage.guard,
+    ))
 }

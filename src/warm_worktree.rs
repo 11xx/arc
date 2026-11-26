@@ -219,6 +219,11 @@ pub fn prepare(path: &Path) -> Result<()> {
     }
     let before = Source::observe(&path)?;
     let outcome = run(&path, &before, &hook);
+    if let Err(error) = &outcome {
+        if error.is::<crate::interruption::Interrupted>() {
+            return Err(outcome.unwrap_err());
+        }
+    }
     if Source::observe(&path)? != before {
         return Err(SourceMutation(String::new()).into());
     }
@@ -394,14 +399,181 @@ pub fn prepare_command(command: &mut Command, path: &Path) -> Result<CommandLeas
     configure(command, path, Use::Gate)
 }
 
-/// Configure a probe without running preparation, retaining its storage lease.
-pub fn configure_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
-    configure(command, path, Use::Probe)
+/// Prepared storage held across probing and gate execution for an isolated
+/// checkout so preparation and consumption stay under one continuous lease.
+#[derive(Default)]
+pub(crate) struct PreparedStorage {
+    inner: Option<PreparedInner>,
 }
 
-/// Configure a gate whose checkout was just prepared, retaining its storage lease
-/// without re-running preparation or contending on the shared cache lease.
-pub fn configure_prepared_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
+struct PreparedInner {
+    path: PathBuf,
+    revision: String,
+    tree: String,
+    cache: PathBuf,
+    build: PathBuf,
+    lease: CommandLease,
+}
+
+impl PreparedStorage {
+    fn from_parts(
+        path: PathBuf,
+        revision: String,
+        tree: String,
+        cache: PathBuf,
+        build: PathBuf,
+        lease: CommandLease,
+    ) -> Self {
+        Self {
+            inner: Some(PreparedInner {
+                path,
+                revision,
+                tree,
+                cache,
+                build,
+                lease,
+            }),
+        }
+    }
+
+    pub(crate) fn configure(&self, command: &mut Command) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        command
+            .envs(environment(
+                &inner.path,
+                &inner.revision,
+                &inner.tree,
+                &inner.cache,
+                &inner.build,
+            ))
+            .env_remove("CARGO_TARGET_DIR")
+            .env("GIT_OPTIONAL_LOCKS", "0");
+        inner.lease.inherit(command);
+    }
+}
+
+/// The resolved path-stable build directory `.arc/worktrees.toml` selects for
+/// `path`, or `None` when preparation is absent or source-bound.
+pub(crate) fn resolved_build_directory(path: &Path) -> Result<Option<PathBuf>> {
+    let text = match fs::read_to_string(path.join(CONFIG)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
+    };
+    let (hook, _) = match configuration(&text) {
+        Ok(Some(configuration)) => configuration,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            if explicit_mode(&text)? {
+                return Err(error);
+            }
+            return Ok(None);
+        }
+    };
+    if hook.mode != Mode::PathStable {
+        return Ok(None);
+    }
+    let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
+    Ok(Some(stable::resolved_build_directory(&path, &hook)?))
+}
+
+/// Prepare an isolated checkout and hold its build storage lease until the
+/// returned guard is dropped.
+///
+/// Serializes cache-leased preparation across sibling threads in the same
+/// process so concurrent isolated gates never contend on the shared cache lease.
+pub(crate) fn prepare_isolated(path: &Path) -> Result<PreparedStorage> {
+    static CACHE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    crate::interruption::check()?;
+    let text = match fs::read_to_string(path.join(CONFIG)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreparedStorage::default());
+        }
+        Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
+    };
+    let (hook, timeout) = match configuration(&text) {
+        Ok(Some(configuration)) => configuration,
+        Ok(None) => return Ok(PreparedStorage::default()),
+        Err(error) => {
+            if explicit_mode(&text)? {
+                return Err(error);
+            }
+            cold(&format!("{error:#}"));
+            return Ok(PreparedStorage::default());
+        }
+    };
+    let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
+    let _serial = CACHE_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    crate::interruption::check()?;
+    if hook.mode == Mode::PathStable {
+        return stable::prepare_and_hold(&path, &(hook, timeout));
+    }
+    let before = Source::observe(&path)?;
+    let outcome = run(&path, &before, &(hook, timeout));
+    if let Err(error) = &outcome {
+        if error.is::<crate::interruption::Interrupted>() {
+            return Err(outcome.unwrap_err());
+        }
+    }
+    if Source::observe(&path)? != before {
+        return Err(SourceMutation(String::new()).into());
+    }
+    let (hook, timeout) = configuration(&text)?.context("preparation configuration disappeared")?;
+    if let Err(error) = outcome {
+        cold_storage(&path, &before, &(hook, timeout))?;
+        cold(&format!("{error:#}"));
+    } else {
+        eprintln!("worktree preparation: prepared source tree {}", before.tree);
+        crate::slots::record_built(&path)?;
+    }
+    let (hook, timeout) = configuration(&text)?.context("preparation configuration disappeared")?;
+    let key = cache_key(&hook, timeout);
+    let source = Source::observe(&path)?;
+    let cache = gitio::common_dir(&path)?
+        .join("arc/cache/worktrees")
+        .join(&key);
+    let admin = gitio::worktree_admin_dir(&path)?;
+    let source_path = source_path_key(&path);
+    let mut build = admin
+        .join("arc-warm-build")
+        .join(&key)
+        .join(&source_path)
+        .join(&source.tree);
+    let identity = preparation_identity(&source);
+    if !already_prepared(&build.join("prepared"), &identity).unwrap_or(false) {
+        build = admin
+            .join("arc-cold-build")
+            .join(invocation_key())
+            .join(&key)
+            .join(source_path)
+            .join(&source.tree);
+    }
+    Ok(PreparedStorage::from_parts(
+        path,
+        source.revision,
+        source.tree,
+        cache.clone(),
+        build.clone(),
+        CommandLease {
+            files: Vec::new(),
+            build_lease: None,
+            storage: Some(CommandStorage {
+                build,
+                cache,
+                owned_build: true,
+            }),
+        },
+    ))
+}
+
+/// Configure a probe without running preparation, retaining its storage lease.
+pub fn configure_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
     configure(command, path, Use::Probe)
 }
 
@@ -729,6 +901,8 @@ fn run_hook(
         .stderr(Stdio::piped())
         .process_group(0);
     lease.inherit(command);
+    let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
+    crate::interruption::check()?;
     let mut child = shell.spawn().context("cannot start worktree preparation")?;
     let stdout = child
         .child()
@@ -754,7 +928,9 @@ fn run_hook(
                 .leader_exited()
                 .context("cannot observe worktree preparation")?;
         }
-        if exited && out.is_finished() && err.is_finished() {
+        if (exited && out.is_finished() && err.is_finished())
+            || crate::interruption::check().is_err()
+        {
             break;
         }
         if Instant::now() >= deadline {
@@ -767,6 +943,7 @@ fn run_hook(
         .stop()
         .context("cannot stop worktree preparation's process group")?;
     crate::gate_work::record_tree_cpu(&child.observation.timing);
+    crate::interruption::check()?;
     let out =
         process_group::join_before_deadline(out, Some(deadline), "preparation stdout reader")?
             .transpose()?

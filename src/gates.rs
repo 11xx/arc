@@ -460,6 +460,17 @@ impl ProbeFailure {
 /// it. The digest streams, so a probe that prints without bound cannot
 /// exhaust memory; the stderr kept for the failure is a bounded tail.
 pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Result<ProbeRun> {
+    environment_probe_with_prepared(cwd, probe, timeout, None)
+}
+
+/// Run a declared environment probe in `cwd`, reusing an already-held prepared
+/// storage lease when supplied.
+pub(crate) fn environment_probe_with_prepared(
+    cwd: &Path,
+    probe: &str,
+    timeout: Option<u64>,
+    prepared: Option<&crate::warm_worktree::PreparedStorage>,
+) -> Result<ProbeRun> {
     let timeout = timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS);
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(timeout))
@@ -485,17 +496,22 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let _preparation = match crate::warm_worktree::configure_command(command, cwd) {
-        Ok(lease) => lease,
-        Err(error) => {
-            return Ok(ProbeRun {
-                identity: None,
-                failure: Some(ProbeFailure {
-                    exit_code: None,
-                    timed_out: false,
-                    detail: format!("worktree storage unavailable: {error:#}"),
-                }),
-            });
+    let _preparation = if let Some(prepared) = prepared {
+        prepared.configure(command);
+        crate::warm_worktree::CommandLease::default()
+    } else {
+        match crate::warm_worktree::configure_command(command, cwd) {
+            Ok(lease) => lease,
+            Err(error) => {
+                return Ok(ProbeRun {
+                    identity: None,
+                    failure: Some(ProbeFailure {
+                        exit_code: None,
+                        timed_out: false,
+                        detail: format!("worktree storage unavailable: {error:#}"),
+                    }),
+                });
+            }
         }
     };
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;

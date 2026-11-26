@@ -626,14 +626,15 @@ fn verify_with_landing(
         if gates.has_budgets() {
             store.adopt_budgets()?;
         }
-        let mut preparation_ms =
-            if !parallel || required.iter().any(|(_, gate)| gate.environment.is_some()) {
-                let preparing = Instant::now();
-                crate::warm_worktree::prepare(&run_ctx.cwd)?;
-                preparing.elapsed().as_millis() as u64
-            } else {
-                0
-            };
+        let need_reuse_environments =
+            !parallel || (reuse && required.iter().any(|(_, gate)| gate.environment.is_some()));
+        let mut preparation_ms = if need_reuse_environments {
+            let preparing = Instant::now();
+            crate::warm_worktree::prepare(&run_ctx.cwd)?;
+            preparing.elapsed().as_millis() as u64
+        } else {
+            0
+        };
         let total = required.len();
         let mode = if parallel {
             VerificationRunMode::Parallel
@@ -645,11 +646,17 @@ fn verify_with_landing(
         )?;
         // Applicability is a property of this checkout, so every declared
         // probe is read before reuse is decided. A probe is run once per
-        // distinct command, however many gates declare it.
-        let environments = gate_environments(
-            &run_ctx.cwd,
-            required.iter().map(|(name, gate)| (name.as_str(), *gate)),
-        )?;
+        // distinct command, however many gates declare it. For --parallel,
+        // these identities decide reuse only; executed gates re-probe inside
+        // their own prepared detached worktree.
+        let environments = if need_reuse_environments {
+            gate_environments(
+                &run_ctx.cwd,
+                required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+            )?
+        } else {
+            DeclaredEnvironments::new()
+        };
         let target_head = gitio::branch_head(&run_ctx.cwd, &st.target_branch).ok();
         let Partition {
             budget_refused,
@@ -717,7 +724,6 @@ fn verify_with_landing(
                 reused.len() - budget_refused,
                 &run_id,
                 &head,
-                &environments,
                 preparation_ms,
                 note,
                 target_head.as_deref(),
@@ -2696,28 +2702,320 @@ fn describe_dirt(dirt: gitio::Dirt) -> &'static str {
     }
 }
 
-/// Stable, filesystem-safe suffix for one gate's temporary parallel worktree.
-///
-/// Reusing the same path across repeated runs lets path-stable preparation keep
-/// its build directory warm while keeping every gate in an isolated checkout.
-fn parallel_scratch_name(slug: &str, gate: &str) -> String {
-    use sha2::{Digest, Sha256};
+const PARALLEL_SCRATCH_NAMESPACE: &str = ".arc-parallel";
+const PARALLEL_SCRATCH_OWNER_FILE: &str = "arc-parallel-scratch-owner";
+const MAX_PARALLEL_SCRATCH_SLOTS: usize = 256;
 
-    let sanitized: String = gate
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' {
-                ch
-            } else {
-                '-'
+/// Stable, filesystem-safe base name for one gate's temporary parallel worktree
+/// inside the `.arc-parallel` namespace.
+///
+/// Reusing the lowest free slot path across sequential runs lets path-stable
+/// preparation keep its build directory warm while concurrent invocations take
+/// distinct locked slots and never collide.
+fn parallel_scratch_base(common_dir: &Path, repo_name: &str, slug: &str, gate: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+
+    let sanitize = |raw: &str, max: usize, fallback: &str| -> String {
+        let cleaned: String = raw
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .take(max)
+            .collect();
+        let trimmed = cleaned.trim_matches('-');
+        if trimmed.is_empty() {
+            fallback.to_owned()
+        } else {
+            trimmed.to_owned()
+        }
+    };
+    let mut digest = Sha256::new();
+    digest.update(common_dir.as_os_str().as_bytes());
+    digest.update([0]);
+    digest.update(slug.as_bytes());
+    digest.update([0]);
+    digest.update(gate.as_bytes());
+    let hash = hex::encode(digest.finalize());
+    format!(
+        "{}-{}-{}-{}",
+        sanitize(repo_name, 24, "repo"),
+        sanitize(slug, 24, "change"),
+        sanitize(gate, 24, "gate"),
+        &hash[..12]
+    )
+}
+
+fn normalize_scratch_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in config::resolved(path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
             }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn parallel_scratch_owner_marker(common_dir: &Path, path: &Path) -> String {
+    format!(
+        "arc-parallel-scratch/1\n{}\n{}\n",
+        common_dir.display(),
+        path.display()
+    )
+}
+
+fn find_worktree_admin_for_path(common_dir: &Path, path: &Path) -> Result<Option<PathBuf>> {
+    let registrations = common_dir.join("worktrees");
+    if !registrations.is_dir() {
+        return Ok(None);
+    }
+    let expected = path.join(".git");
+    let expected_resolved = config::resolved(&expected);
+    for entry in std::fs::read_dir(&registrations)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let admin = entry.path();
+        let gitdir = match std::fs::read_to_string(admin.join("gitdir")) {
+            Ok(gitdir) => gitdir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let recorded = Path::new(gitdir.trim());
+        if recorded == expected || config::resolved(recorded) == expected_resolved {
+            return Ok(Some(admin));
+        }
+    }
+    Ok(None)
+}
+
+fn has_proven_parallel_scratch_ownership(common_dir: &Path, path: &Path) -> Result<bool> {
+    let Some(admin) = find_worktree_admin_for_path(common_dir, path)? else {
+        return Ok(false);
+    };
+    let marker = admin.join(PARALLEL_SCRATCH_OWNER_FILE);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(
+            std::fs::read_to_string(&marker)? == parallel_scratch_owner_marker(common_dir, path)
+        ),
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn cleanup_owned_parallel_scratch(repo: &Path, common_dir: &Path, path: &Path) -> Result<()> {
+    let resolved = config::resolved(path);
+    let registered = gitio::worktree_inventory(repo)
+        .map(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.path == path || config::resolved(&entry.path) == resolved)
         })
-        .take(32)
-        .collect();
-    let trimmed = sanitized.trim_matches('-');
-    let label = if trimmed.is_empty() { "gate" } else { trimmed };
-    let digest = hex::encode(Sha256::digest(gate.as_bytes()));
-    format!("{slug}-parallel-{label}-{}", &digest[..8])
+        .unwrap_or(false);
+    if registered {
+        gitio::remove_worktree(repo, path, true)?;
+    } else if std::fs::symlink_metadata(path).is_ok() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("cannot remove {}", path.display()))?;
+    }
+    if let Some(admin) = find_worktree_admin_for_path(common_dir, path)? {
+        std::fs::remove_dir_all(&admin)
+            .with_context(|| format!("cannot remove {}", admin.display()))?;
+    }
+    Ok(())
+}
+
+fn try_acquire_parallel_slot_lock(path: &Path) -> Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("cannot open parallel scratch lock {}", path.display()))?;
+    if !file.metadata()?.file_type().is_file() {
+        bail!(
+            "parallel scratch lock {} is not a regular file",
+            path.display()
+        );
+    }
+    // SAFETY: `file` owns the open descriptor and keeps the flock until Drop.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(None);
+        }
+        return Err(error)
+            .with_context(|| format!("cannot lock parallel scratch {}", path.display()));
+    }
+    Ok(Some(file))
+}
+
+/// An isolated detached checkout owned exclusively by one parallel gate run.
+///
+/// Allocates inside `<worktrees_dir>/.arc-parallel`, serialized across
+/// processes by an exclusive flock held from before allocation through
+/// execution and cleanup. Refuses occupied paths that lack a matching
+/// ownership marker and removes its own checkout on exit, error, interruption,
+/// or panic.
+struct ParallelScratchWorktree {
+    repo: PathBuf,
+    common_dir: PathBuf,
+    path: PathBuf,
+    armed: bool,
+    _lock: std::fs::File,
+}
+
+impl ParallelScratchWorktree {
+    fn allocate(ctx: &Ctx, slug: &str, gate: &str, revision: &str) -> Result<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+        crate::interruption::check()?;
+        let toplevel = gitio::toplevel(&ctx.cwd)?;
+        let common_dir = std::fs::canonicalize(gitio::common_dir(&ctx.cwd)?)?;
+        let repo_name = toplevel
+            .file_name()
+            .context("cannot determine repository name")?
+            .to_string_lossy()
+            .into_owned();
+        let config = crate::config::load()?;
+        let worktrees_root = if config.worktrees_dir.is_relative() {
+            toplevel.join(config.worktrees_dir)
+        } else {
+            config.worktrees_dir
+        };
+        let scratch_root = worktrees_root.join(PARALLEL_SCRATCH_NAMESPACE);
+        let lock_root = common_dir.join("arc").join("parallel-scratch");
+        for dir in [common_dir.join("arc"), lock_root.clone()] {
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot create {}", dir.display()));
+                }
+            }
+            if !std::fs::symlink_metadata(&dir)?.file_type().is_dir() {
+                bail!("{} is not a real directory", dir.display());
+            }
+        }
+        let base = parallel_scratch_base(&common_dir, &repo_name, slug, gate);
+        for slot in 0..MAX_PARALLEL_SCRATCH_SLOTS {
+            crate::interruption::check()?;
+            let lock_path = lock_root.join(format!("{base}-{slot}.lock"));
+            let Some(lock) = try_acquire_parallel_slot_lock(&lock_path)? else {
+                continue;
+            };
+            let path = normalize_scratch_path(&scratch_root.join(format!("{base}-{slot}")));
+            if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
+                bail!(
+                    "{} lies outside the sandbox at {}",
+                    path.display(),
+                    prefix.display()
+                );
+            }
+            let path_exists = std::fs::symlink_metadata(&path).is_ok();
+            let resolved = config::resolved(&path);
+            let registered = gitio::worktree_inventory(&ctx.cwd)?
+                .iter()
+                .any(|entry| entry.path == path || config::resolved(&entry.path) == resolved);
+            if path_exists || registered {
+                if !has_proven_parallel_scratch_ownership(&common_dir, &path)? {
+                    bail!(
+                        "refusing to use occupied path {} without parallel-scratch ownership; \
+                         move or remove it and retry",
+                        path.display()
+                    );
+                }
+                cleanup_owned_parallel_scratch(&ctx.cwd, &common_dir, &path)?;
+                if std::fs::symlink_metadata(&path).is_ok()
+                    || gitio::worktree_inventory(&ctx.cwd)?.iter().any(|entry| {
+                        entry.path == path || config::resolved(&entry.path) == resolved
+                    })
+                {
+                    bail!(
+                        "stale parallel scratch checkout {} could not be cleared cleanly",
+                        path.display()
+                    );
+                }
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            crate::interruption::check()?;
+            // Arm the RAII guard before `git worktree add` so an error or
+            // interruption mid-creation still cleans up this slot while the
+            // exclusive slot lock remains held.
+            let guard = Self {
+                repo: ctx.cwd.clone(),
+                common_dir: common_dir.clone(),
+                path: path.clone(),
+                armed: true,
+                _lock: lock,
+            };
+            let display = path.display().to_string();
+            gitio::git(
+                &ctx.cwd,
+                &["worktree", "add", "--detach", &display, revision],
+            )?;
+            let admin = std::fs::canonicalize(gitio::worktree_admin_dir(&path)?)?;
+            let worktrees_admin = std::fs::canonicalize(common_dir.join("worktrees"))?;
+            if !admin.starts_with(&worktrees_admin) {
+                bail!(
+                    "parallel scratch admin dir {} lies outside {}",
+                    admin.display(),
+                    worktrees_admin.display()
+                );
+            }
+            let marker = admin.join(PARALLEL_SCRATCH_OWNER_FILE);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&marker)
+                .with_context(|| format!("cannot write {}", marker.display()))?;
+            file.write_all(parallel_scratch_owner_marker(&common_dir, &path).as_bytes())?;
+            crate::interruption::check()?;
+            return Ok(guard);
+        }
+        bail!(
+            "all {MAX_PARALLEL_SCRATCH_SLOTS} parallel scratch slots for gate {gate:?} are in use"
+        );
+    }
+}
+
+impl Drop for ParallelScratchWorktree {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(error) = cleanup_owned_parallel_scratch(&self.repo, &self.common_dir, &self.path)
+        {
+            eprintln!(
+                "warning: could not remove parallel scratch worktree {} ({error:#})",
+                self.path.display()
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2731,7 +3029,6 @@ fn verify_all_parallel(
     skipped_green: usize,
     run_id: &str,
     revision: &str,
-    environments: &DeclaredEnvironments,
     preparation_ms: u64,
     note: Option<String>,
     target_revision: Option<&str>,
@@ -2744,111 +3041,151 @@ fn verify_all_parallel(
     if required.iter().any(|(_, gate)| gate.budget.is_some()) {
         store.adopt_budgets()?;
     }
+    // Hold signal watch across the full scratch lifecycle. Declared before
+    // `scratches` so Rust drops `scratches` first while signals stay watched,
+    // ensuring every temporary detached worktree is removed before exiting.
+    let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
+    crate::interruption::check()?;
     let hostname = super::local_hostname();
-    let toplevel = gitio::toplevel(&ctx.cwd)?;
-    // Create and prepare one isolated detached worktree per gate sequentially
-    // before spawning workers so Git worktree administration and preparation
-    // cache leases never contend. `scratches` lives on this thread so RAII Drop
-    // removes every temporary worktree on return, error, or panic.
     let mut scratches = Vec::with_capacity(required.len());
-    let mut inputs = Vec::with_capacity(required.len());
-    for (index, (name, gate)) in required.into_iter().enumerate() {
-        let raw_path =
-            super::lifecycle::worktree_path_for(&ctx.cwd, &parallel_scratch_name(slug, name))?;
-        let path = if raw_path.is_relative() {
-            toplevel.join(raw_path)
-        } else {
-            raw_path
-        };
-        if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
-            bail!(
-                "{} lies outside the sandbox at {}",
-                path.display(),
-                prefix.display()
-            );
-        }
-        let scratch = {
-            let _confinement = crate::confinement::Scope::new(&gate.confine);
-            ScratchWorktree::create(&ctx.cwd, path, revision)?
-        };
-        let gate_preparation_ms =
-            scratch.preparation_ms + if index == 0 { preparation_ms } else { 0 };
-        scratches.push(scratch);
-        inputs.push(VerificationInput {
-            confine: gate.confine.clone(),
-            timings: gate.timings.clone(),
-            budget: Some(gate.declared_budget()),
-            exclusive: crate::exclusive::Request::for_gate(gate),
-            preparation_ms: gate_preparation_ms,
-            run_id: Some(run_id.to_owned()),
-            probe: None,
-            gate: Some(name.clone()),
-            command: gate.command.clone(),
-            timeout_seconds: gate.timeout,
-            work_declaration: Some(gates::declaration_identity(gate)),
-            declaration: gates::coverage_identity(gate),
-            attested_result: None,
-            tested_revision: None,
-            execution_host: None,
-            runner: None,
-            environment_identity: declared_environment(environments, gate).map(str::to_owned),
-            note: note.clone(),
-            falsification: None,
-            against_target: None,
-            target_revision: target_revision.map(str::to_owned),
-            landing: landing.clone(),
-        });
+    for (name, _) in &required {
+        scratches.push(ParallelScratchWorktree::allocate(
+            ctx, slug, name, revision,
+        )?);
     }
-    for input in &inputs {
-        eprintln!(
-            "running {}: {}",
-            input.gate.as_deref().unwrap_or("command"),
-            input.command
-        );
+    // Group gates that resolve to the same path-stable build directory so
+    // preparation and consumption stay under one continuous lease per gate
+    // without contending on a shared external `prepare.directory`. Distinct
+    // storage groups run concurrently.
+    let mut storage_groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_by_dir: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    for (index, ((_, gate), scratch)) in required.iter().zip(&scratches).enumerate() {
+        crate::interruption::check()?;
+        let resolved = {
+            let _confinement = crate::confinement::Scope::new(&gate.confine);
+            crate::warm_worktree::resolved_build_directory(&scratch.path)?
+        };
+        match resolved {
+            Some(dir) => {
+                if let Some(&group_index) = group_by_dir.get(&dir) {
+                    storage_groups[group_index].push(index);
+                } else {
+                    let group_index = storage_groups.len();
+                    group_by_dir.insert(dir, group_index);
+                    storage_groups.push(vec![index]);
+                }
+            }
+            None => storage_groups.push(vec![index]),
+        }
+    }
+    for (name, gate) in &required {
+        eprintln!("running {name}: {}", gate.command);
     }
     let executed = thread::scope(|scope| {
-        let handles = scratches
-            .iter()
-            .zip(inputs)
-            .map(|(scratch, input)| {
-                let scratch_path = scratch.path.as_path();
-                let revision = revision.to_owned();
-                let hostname = hostname.clone();
-                let output_root = store.root.as_path();
-                let producing_store = store.repository_id.as_str();
-                scope.spawn(move || -> Result<(CompletedVerification, bool, String)> {
-                    let before = gitio::worktree_tree(scratch_path)?;
-                    let dirt_before = gitio::dirt(scratch_path)?;
-                    let commit_tree = gitio::commit_tree(scratch_path, &revision)?;
-                    let dirty_before =
-                        dirt_before.tracked || dirt_before.untracked || before != commit_tree;
-                    let mut item = execute_verification(
-                        input,
-                        scratch_path,
-                        revision.clone(),
-                        hostname,
-                        output_root,
-                        producing_store,
-                        change_id,
-                        true,
-                    )?;
-                    let after = gitio::worktree_tree(scratch_path)?;
-                    let post = gitio::fresh_read(|| gitio::head(scratch_path))?;
-                    let dirt_after = gitio::dirt(scratch_path)?;
-                    let head_moved = post != revision;
-                    let tree_moved =
-                        after != before || head_moved || dirt_after.tracked || dirt_after.untracked;
-                    item.tested_tree = Some(before);
-                    item.worktree_dirty = Some(dirty_before);
-                    item.worktree_dirty_tracked = Some(dirt_before.tracked);
-                    item.worktree_dirty_untracked = Some(dirt_before.untracked);
-                    item.tree_moved = tree_moved;
-                    item.parallel_batch = true;
-                    Ok((item, head_moved, post))
-                })
+        let handles = storage_groups
+            .into_iter()
+            .map(|indices| {
+                let required = &required;
+                let scratches = &scratches;
+                let hostname = hostname.as_str();
+                let note = note.as_deref();
+                let landing = landing.as_deref();
+                scope.spawn(
+                    move || -> Result<Vec<(usize, CompletedVerification, bool, String)>> {
+                        let mut group_results = Vec::with_capacity(indices.len());
+                        for index in indices {
+                            crate::interruption::check()?;
+                            let (name, gate) = required[index];
+                            let scratch_path = scratches[index].path.as_path();
+                            let _confinement = crate::confinement::Scope::new(&gate.confine);
+                            let preparing = Instant::now();
+                            let prepared = crate::warm_worktree::prepare_isolated(scratch_path)?;
+                            let gate_preparation_ms = preparing.elapsed().as_millis() as u64
+                                + if index == 0 { preparation_ms } else { 0 };
+                            crate::interruption::check()?;
+                            let environment_identity = match gate.environment.as_deref() {
+                                Some(probe) => {
+                                    let run = gates::environment_probe_with_prepared(
+                                        scratch_path,
+                                        probe,
+                                        gate.timeout,
+                                        Some(&prepared),
+                                    )?;
+                                    if let Some(failure) = &run.failure {
+                                        eprintln!(
+                                        "warning: environment probe {probe:?} for gate {name:?} \
+                                         yielded no identity: {}",
+                                        failure.describe()
+                                    );
+                                    }
+                                    run.identity
+                                }
+                                None => None,
+                            };
+                            crate::interruption::check()?;
+                            let before = gitio::worktree_tree(scratch_path)?;
+                            let dirt_before = gitio::dirt(scratch_path)?;
+                            let commit_tree = gitio::commit_tree(scratch_path, revision)?;
+                            let dirty_before = dirt_before.tracked
+                                || dirt_before.untracked
+                                || before != commit_tree;
+                            let input = VerificationInput {
+                                confine: gate.confine.clone(),
+                                timings: gate.timings.clone(),
+                                budget: Some(gate.declared_budget()),
+                                exclusive: crate::exclusive::Request::for_gate(gate),
+                                preparation_ms: gate_preparation_ms,
+                                run_id: Some(run_id.to_owned()),
+                                probe: None,
+                                gate: Some(name.clone()),
+                                command: gate.command.clone(),
+                                timeout_seconds: gate.timeout,
+                                work_declaration: Some(gates::declaration_identity(gate)),
+                                declaration: gates::coverage_identity(gate),
+                                attested_result: None,
+                                tested_revision: None,
+                                execution_host: None,
+                                runner: None,
+                                environment_identity,
+                                note: note.map(str::to_owned),
+                                falsification: None,
+                                against_target: None,
+                                target_revision: target_revision.map(str::to_owned),
+                                landing: landing.map(str::to_owned),
+                            };
+                            let mut item = execute_verification(
+                                input,
+                                scratch_path,
+                                revision.to_owned(),
+                                hostname.to_owned(),
+                                store.root.as_path(),
+                                store.repository_id.as_str(),
+                                change_id,
+                                Some(&prepared),
+                            )?;
+                            drop(prepared);
+                            let after = gitio::worktree_tree(scratch_path)?;
+                            let post = gitio::fresh_read(|| gitio::head(scratch_path))?;
+                            let dirt_after = gitio::dirt(scratch_path)?;
+                            let head_moved = post != revision;
+                            let tree_moved = after != before
+                                || head_moved
+                                || dirt_after.tracked
+                                || dirt_after.untracked;
+                            item.tested_tree = Some(before);
+                            item.worktree_dirty = Some(dirty_before);
+                            item.worktree_dirty_tracked = Some(dirt_before.tracked);
+                            item.worktree_dirty_untracked = Some(dirt_before.untracked);
+                            item.tree_moved = tree_moved;
+                            item.parallel_batch = true;
+                            group_results.push((index, item, head_moved, post));
+                        }
+                        Ok(group_results)
+                    },
+                )
             })
             .collect::<Vec<_>>();
-        let mut completed = Vec::with_capacity(handles.len());
+        let mut completed = Vec::with_capacity(required.len());
         let mut first_error = None;
         for handle in handles {
             let outcome = handle
@@ -2856,17 +3193,19 @@ fn verify_all_parallel(
                 .map_err(|_| anyhow::anyhow!("gate worker panicked"))
                 .and_then(|result| result);
             match outcome {
-                Ok(entry) => completed.push(entry),
+                Ok(entries) => completed.extend(entries),
                 Err(error) if first_error.is_none() => first_error = Some(error),
                 Err(_) => {}
             }
         }
         first_error.map_or(Ok(completed), Err)
     });
-    // Remove all temporary detached worktrees before recording results or
-    // propagating any execution error.
+    // Remove all temporary detached worktrees while the signal watch stays
+    // active, before propagating any interruption or execution error.
     drop(scratches);
-    let executed = executed?;
+    crate::interruption::check()?;
+    let mut executed = executed?;
+    executed.sort_by_key(|(index, _, _, _)| *index);
     let post_head = gitio::fresh_read(|| gitio::head(&ctx.cwd))?;
     if post_head != revision {
         eprintln!(
@@ -2875,7 +3214,7 @@ fn verify_all_parallel(
     }
     let mut completed = Vec::with_capacity(executed.len());
     let mut work_references = crate::gate_work::References::default();
-    for (mut item, head_moved, post) in executed {
+    for (_, mut item, head_moved, post) in executed {
         if head_moved {
             eprintln!(
                 "warning: head moved in {}'s isolated worktree during parallel verification ({revision} -> {post}); evidence recorded at {revision}",
@@ -3229,7 +3568,7 @@ fn record_verification_at(
         &store.root,
         &store.repository_id,
         change_id,
-        false,
+        None,
     )?;
     if !completed.attested {
         let post = gitio::fresh_read(|| gitio::head(command_cwd))?;
@@ -3302,7 +3641,7 @@ fn execute_verification(
     output_root: &Path,
     producing_store: &str,
     change_id: &str,
-    already_prepared: bool,
+    prepared: Option<&crate::warm_worktree::PreparedStorage>,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
         work_declaration,
@@ -3365,7 +3704,7 @@ fn execute_verification(
                     exclusive
                         .as_ref()
                         .map(|request| (request, change_id, gate.as_deref().unwrap_or("command"))),
-                    already_prepared,
+                    prepared,
                 )?;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 timing = observed.timing;
@@ -3810,7 +4149,7 @@ pub(super) fn run_gate_budgeted(
         output_root,
         producing_store,
         admission,
-        false,
+        None,
     )
 }
 
@@ -3823,10 +4162,10 @@ fn run_gate_budgeted_with_prep(
     output_root: &Path,
     producing_store: &str,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
-    already_prepared: bool,
+    prepared: Option<&crate::warm_worktree::PreparedStorage>,
 ) -> Result<GateRun> {
     with_check_timings(timings, cwd, || {
-        run_gate_with_capture(cmd, cwd, timeout, admission, already_prepared, || {
+        run_gate_with_capture(cmd, cwd, timeout, admission, prepared, || {
             crate::verification_output::Capture::new(output_root, producing_store)
         })
     })
@@ -3843,7 +4182,7 @@ pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result
             request
                 .as_ref()
                 .map(|request| (request, "measurement", name)),
-            false,
+            None,
             crate::verification_output::Capture::transient,
         )
     })
@@ -3880,7 +4219,7 @@ fn run_gate_with_capture(
     cwd: &Path,
     timeout: Option<Duration>,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
-    already_prepared: bool,
+    prepared: Option<&crate::warm_worktree::PreparedStorage>,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let (shell, wait_ms) = match admission {
@@ -3894,7 +4233,7 @@ fn run_gate_with_capture(
         }
         None => crate::slots::measured_shell(cwd)?,
     };
-    run_gate_in_shell(shell, wait_ms, cmd, cwd, timeout, already_prepared, capture)
+    run_gate_in_shell(shell, wait_ms, cmd, cwd, timeout, prepared, capture)
 }
 
 fn run_gate_in_shell(
@@ -3903,7 +4242,7 @@ fn run_gate_in_shell(
     cmd: &str,
     cwd: &Path,
     timeout: Option<Duration>,
-    already_prepared: bool,
+    prepared: Option<&crate::warm_worktree::PreparedStorage>,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let command = &mut shell.command;
@@ -3915,8 +4254,9 @@ fn run_gate_in_shell(
         .stderr(Stdio::null())
         .process_group(0);
     let preparing = Instant::now();
-    let _preparation = if already_prepared {
-        crate::warm_worktree::configure_prepared_command(command, cwd)?
+    let _preparation = if let Some(prepared) = prepared {
+        prepared.configure(command);
+        crate::warm_worktree::CommandLease::default()
     } else {
         crate::warm_worktree::prepare_command(command, cwd)?
     };
@@ -7338,7 +7678,7 @@ mod pipe_deadline_tests {
             cmd,
             cwd,
             timeout_seconds.map(Duration::from_secs),
-            false,
+            None,
             || crate::verification_output::Capture::new(output_root, producing_store),
         )
     }

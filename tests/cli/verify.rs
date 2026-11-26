@@ -410,9 +410,365 @@ fn verify_all_parallel_cleans_up_temporary_worktrees_after_failing_gates_and_reu
         3,
         "expected 2 initial preps + 1 rerun prep: {builds:?}"
     );
-    assert_eq!(
-        builds[0], builds[2],
+    assert!(
+        builds[..2].contains(&builds[2]),
         "path-stable build storage was not reused: {builds:?}"
+    );
+    assert_ne!(
+        builds[0], builds[1],
+        "distinct parallel gates unexpectedly shared default path-stable build storage: {builds:?}"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+}
+
+#[test]
+fn verify_all_parallel_refuses_unowned_occupied_path_and_isolates_concurrent_invocations() {
+    let repo = Repo::new();
+    let markers = repo.home.join("concurrent-markers");
+    fs::create_dir_all(&markers).unwrap();
+    // Gate records its checkout path; when `hold` exists, waits until `release`
+    // appears so two concurrent invocations overlap live checkouts.
+    let gate_cmd = format!(
+        "pwd >> '{m}/pwds'; \
+         if [ -e '{m}/hold' ]; then \
+           touch '{m}/entered-'$$; \
+           n=0; until [ -e '{m}/release' ]; do n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done; \
+         fi",
+        m = markers.display()
+    );
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!("[gates.alpha]\ncommand = {gate_cmd:?}\n"),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-own", "--no-worktree"]),
+    );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+    // First run discovers slot-0 checkout path and leaves no worktree behind.
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-own", "--all", "--parallel"])
+        .assert()
+        .success();
+    let slot0_path = PathBuf::from(
+        fs::read_to_string(markers.join("pwds"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .trim(),
+    );
+    assert!(!slot0_path.exists());
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+
+    // Two concurrent invocations on the same change must take distinct locked
+    // slots and both succeed without clobbering each other.
+    fs::remove_file(markers.join("pwds")).unwrap();
+    fs::write(markers.join("hold"), "").unwrap();
+    let first_child = repo.spawn_arc_piped(
+        &repo.root,
+        &["verify", "parallel-own", "--all", "--parallel", "--rerun"],
+    );
+    let second_child = repo.spawn_arc_piped(
+        &repo.root,
+        &["verify", "parallel-own", "--all", "--parallel", "--rerun"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let entered = fs::read_dir(&markers)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("entered-"))
+            .count();
+        if entered >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    fs::write(markers.join("release"), "").unwrap();
+    let first_out = first_child.wait_with_output().unwrap();
+    let second_out = second_child.wait_with_output().unwrap();
+    assert!(
+        first_out.status.success(),
+        "first failed: {}",
+        String::from_utf8_lossy(&first_out.stderr)
+    );
+    assert!(
+        second_out.status.success(),
+        "second failed: {}",
+        String::from_utf8_lossy(&second_out.stderr)
+    );
+    let pwds: Vec<String> = fs::read_to_string(markers.join("pwds"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(pwds.len(), 2, "{pwds:?}");
+    assert_ne!(
+        pwds[0], pwds[1],
+        "concurrent invocations collided on one checkout: {pwds:?}"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+
+    // An unrelated branch worktree occupying slot 0 without parallel-scratch
+    // ownership must be refused cleanly and left completely untouched.
+    fs::remove_file(markers.join("hold")).unwrap();
+    fs::create_dir_all(slot0_path.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            slot0_path.to_str().unwrap(),
+            "-b",
+            "unrelated-branch",
+        ],
+    );
+    fs::write(slot0_path.join("keep.txt"), "precious\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-own", "--all", "--parallel", "--rerun"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "without parallel-scratch ownership",
+        ));
+    assert_eq!(
+        fs::read_to_string(slot0_path.join("keep.txt")).unwrap(),
+        "precious\n",
+        "unowned worktree content was modified or deleted"
+    );
+    assert!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"])
+            .contains(slot0_path.to_str().unwrap()),
+        "unowned worktree registration was removed"
+    );
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            slot0_path.to_str().unwrap(),
+        ],
+    );
+}
+
+#[test]
+fn verify_all_parallel_probes_environment_inside_actual_detached_scratch() {
+    use sha2::{Digest, Sha256};
+
+    let repo = Repo::new();
+    let probe =
+        "if git symbolic-ref -q HEAD >/dev/null; then printf attached; else printf detached; fi";
+    let command = "! git symbolic-ref -q HEAD >/dev/null";
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!("[gates.envcheck]\ncommand = {command:?}\nenvironment = {probe:?}\n"),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add env probe gate"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-env", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-env", "--all", "--parallel", "--rerun"])
+        .assert()
+        .success();
+
+    let expected_detached = format!("sha256:{}", hex::encode(Sha256::digest(b"detached")));
+    let expected_attached = format!("sha256:{}", hex::encode(Sha256::digest(b"attached")));
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-env",
+        "--type",
+        "verification-recorded",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    let recorded_identity = event["environment"]["identity"].as_str().unwrap();
+    assert_eq!(
+        recorded_identity, expected_detached,
+        "receipt claimed wrong environment (attached={expected_attached}): {event}"
+    );
+    // Because the branch checkout probes as `attached`, status must see the
+    // mismatch rather than falsely accepting detached evidence as attached.
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-env", "--json"]),
+    );
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+    assert_eq!(
+        status["gates"][0]["environment"]["inapplicable"], true,
+        "{status}"
+    );
+}
+
+#[test]
+fn verify_all_parallel_sigterm_during_preparation_and_source_mutation_clean_up_scratches() {
+    let repo = Repo::new();
+    let markers = repo.home.join("sigterm-markers");
+    fs::create_dir_all(&markers).unwrap();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        format!(
+            "[prepare]\nmode = \"path-stable\"\ncommand = \"touch '{}/entered' && sleep 30\"\ntimeout = \"60s\"\n",
+            markers.display()
+        ),
+    )
+    .unwrap();
+    write_two_gates(&repo, "true", "true");
+    git(
+        &repo.root,
+        &["add", ".arc/gates.toml", ".arc/worktrees.toml"],
+    );
+    git(
+        &repo.root,
+        &["commit", "-m", "test: add slow path-stable prep"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-sigterm", "--no-worktree"]),
+    );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+    let mut child = repo.spawn_arc_piped(
+        &repo.root,
+        &["verify", "parallel-sigterm", "--all", "--parallel"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !markers.join("entered").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        markers.join("entered").exists(),
+        "preparation hook never started"
+    );
+    // SAFETY: `child.id()` is the live child process spawned above.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before,
+        "SIGTERM during preparation left detached parallel scratch worktree registered"
+    );
+    let recorded = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-sigterm",
+        "--type",
+        "verification-recorded",
+    ]));
+    assert!(recorded.trim().is_empty(), "{recorded}");
+
+    // SourceMutation during preparation must also clean up parallel scratches.
+    repo.commit(
+        &repo.root,
+        ".arc/worktrees.toml",
+        "[prepare]\nmode = \"path-stable\"\ncommand = \"printf dirty > \\\"$ARC_WORKTREE_PATH/README.md\\\"\"\ntimeout = \"10s\"\n",
+        "test: mutate source in prep",
+    );
+    let worktrees_before_mutation = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-sigterm", "--all", "--parallel"])
+        .assert()
+        .failure();
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before_mutation,
+        "SourceMutation during preparation left detached parallel scratch worktree registered"
+    );
+}
+
+#[test]
+fn verify_all_parallel_shared_path_stable_directory_keeps_prepare_and_gate_under_one_lease() {
+    let repo = Repo::new();
+    let markers = repo.home.join("shared-dir-markers");
+    fs::create_dir_all(&markers).unwrap();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        format!(
+            "[prepare]\nmode = \"path-stable\"\ndirectory = \"../shared-build\"\ncommand = \"printf '%s' \\\"$ARC_WORKTREE_PATH\\\" > \\\"$ARC_WORKTREE_BUILD/owner\\\" && printf 'prep:%s\\n' \\\"$ARC_WORKTREE_PATH\\\" >> '{}/trace'\"\ntimeout = \"10s\"\n",
+            markers.display()
+        ),
+    )
+    .unwrap();
+    let check_owner = format!(
+        "sleep 0.05 && test \"$(cat \"$ARC_WORKTREE_BUILD/owner\")\" = \"$ARC_WORKTREE_PATH\" && printf 'gate:%s\\n' \"$ARC_WORKTREE_PATH\" >> '{}/trace'",
+        markers.display()
+    );
+    write_two_gates(&repo, &check_owner, &check_owner);
+    git(
+        &repo.root,
+        &["add", ".arc/gates.toml", ".arc/worktrees.toml"],
+    );
+    git(
+        &repo.root,
+        &["commit", "-m", "test: shared path-stable build dir"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-shared-dir", "--no-worktree"]),
+    );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-shared-dir", "--all", "--parallel"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 2/2 pass"));
+
+    let status =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "parallel-shared-dir", "--json"]),
+        );
+    assert!(
+        status["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["green_at_head"] == true && gate["worktree_dirty"] == false),
+        "{status}"
+    );
+    let trace: Vec<String> = fs::read_to_string(markers.join("trace"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(trace.len(), 4, "{trace:?}");
+    assert_eq!(
+        trace[0].strip_prefix("prep:"),
+        trace[1].strip_prefix("gate:"),
+        "first gate did not consume its own preparation: {trace:?}"
+    );
+    assert_eq!(
+        trace[2].strip_prefix("prep:"),
+        trace[3].strip_prefix("gate:"),
+        "second gate did not consume its own preparation: {trace:?}"
     );
     assert_eq!(
         git_out(&repo.root, &["worktree", "list", "--porcelain"]),
