@@ -6495,6 +6495,7 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
         Some("memories") => Some("journal memories"),
         Some("open") => Some("journal open"),
         Some("consume") => Some("journal consume"),
+        Some("reopen") => Some("journal reopen"),
         Some("archive") => Some("journal archive"),
         Some("stamp") => Some("journal stamp"),
         Some("lane") => Some("journal lane"),
@@ -6665,7 +6666,47 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
             *session = None;
         }
     }
+    if let Some(Cmd::Journal {
+        cmd: journal::JournalCmd::Reopen { session, .. },
+        ..
+    }) = cli.cmd.as_mut()
+    {
+        let reopen = matches
+            .subcommand_matches("journal")
+            .and_then(|journal| journal.subcommand_matches("reopen"));
+        if !typed_on_command_line(reopen, "session")
+            || !flag_after_subcommand("reopen", "--session")
+        {
+            *session = None;
+        } else {
+            // `--session` after `reopen` selects the session whose consumptions
+            // are reversed, not the acting session performing the reopen.
+            cli.session = std::env::var("ARC_SESSION")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+        }
+    }
     Ok((cli, reads_only))
+}
+
+fn flag_after_subcommand(subcommand: &str, flag: &str) -> bool {
+    let prefix = format!("{flag}=");
+    let mut seen_subcommand = false;
+    for arg in std::env::args().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if !seen_subcommand {
+            if arg == subcommand {
+                seen_subcommand = true;
+            }
+            continue;
+        }
+        if arg == flag || arg.starts_with(&prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Name the attached form when the unknown argument was meant as the value of
@@ -9493,6 +9534,7 @@ mod tests {
             "journal workbench close",
             "journal workbench adopt",
             "journal consume",
+            "journal reopen",
             "journal transition",
             "journal promote",
             "journal archive",

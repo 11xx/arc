@@ -294,6 +294,10 @@ fn insert_at<T: Eq + std::fmt::Display>(
 
 impl Milestone {
     fn apply(&mut self, event: &JournalEvent) -> Result<()> {
+        if event.event == "reopened" {
+            self.closure = None;
+            return Ok(());
+        }
         if self.closure.is_some() {
             bail!("{} is closed and read-only", self.file);
         }
@@ -432,9 +436,6 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Milestone> {
         // Two replicas can independently record the same track or edit a
         // wave the other has removed. Keep the first applicable transition.
         let _ = milestone.apply(event);
-        if milestone.closure.is_some() {
-            break;
-        }
     }
     Some(milestone)
 }

@@ -1726,6 +1726,41 @@ pub enum JournalCmd {
         #[arg(long = "acknowledge-claim")]
         acknowledge_claim: Vec<String>,
     },
+    /// Reverse a recorded consumption without rewriting the event log.
+    ///
+    /// Appends a typed `reopened` event under the event lock so each named
+    /// artifact returns to the state it held before the consumption; history
+    /// keeps both the `consumed` and `reopened` events. Pass one or more
+    /// artifact filenames, or select every currently consumed artifact whose
+    /// latest consumption was recorded by `--session` inside a `--since`
+    /// (and optional `--until`) time window. `--dry-run` names each matched
+    /// artifact without writing anything. `--global` targets the operator
+    /// journal.
+    Reopen {
+        /// Artifact filenames inside the journal dir (names, not paths).
+        /// Required unless reopening by `--session` and `--since`.
+        files: Vec<String>,
+        /// Reopen every currently consumed artifact whose latest consumption
+        /// was recorded by this session inside the `--since`/`--until` window.
+        /// Set `ARC_SESSION` for the acting session when filtering by
+        /// `--session`.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// Inclusive start of the consumption window: RFC 3339 or journal
+        /// stamp (`YYYYMMDDTHHMMSSZ`), used with `--session`.
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+        /// Inclusive end of the consumption window: RFC 3339 or journal
+        /// stamp (`YYYYMMDDTHHMMSSZ`), used with `--session` and `--since`.
+        #[arg(long, value_name = "TIME")]
+        until: Option<String>,
+        /// Why the consumption is reversed, recorded on each `reopened` event
+        #[arg(long)]
+        reason: String,
+        /// List each artifact that would be reopened without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Change a live artifact's workflow kind without rewriting history: a
     /// typed successor is written, linked back with `supersedes`, and the
     /// source is retired as superseded. The safe manual sequence, performed
@@ -2014,6 +2049,7 @@ impl JournalCmd {
             ),
             JournalCmd::Workbench(args) => args.writes(),
             JournalCmd::Transition { dry_run, .. }
+            | JournalCmd::Reopen { dry_run, .. }
             | JournalCmd::Relocate { dry_run, .. }
             | JournalCmd::Redact { dry_run, .. } => !dry_run,
             _ => true,
@@ -2382,6 +2418,22 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             decision.as_deref(),
             drop_questions,
             &acknowledge_claim,
+        ),
+        JournalCmd::Reopen {
+            files,
+            session,
+            since,
+            until,
+            reason,
+            dry_run,
+        } => reopen(
+            ctx,
+            &files,
+            session.as_deref(),
+            since.as_deref(),
+            until.as_deref(),
+            &reason,
+            dry_run,
         ),
         JournalCmd::Transition {
             filename,
@@ -5233,7 +5285,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         });
     }
     for event in &events {
-        if ["consumed", "archived"].contains(&event.event.as_str()) {
+        if ["consumed", "reopened", "archived"].contains(&event.event.as_str()) {
             if let Some(file) = &event.file {
                 // Only artifact-shaped names are references; legacy or
                 // hand-written prose in the file field is not a dangle.
@@ -7063,10 +7115,7 @@ pub(crate) fn filed_report_in(
         );
         promotions.sort();
         promotions.dedup();
-        let consumed = related
-            .iter()
-            .rev()
-            .find(|event| event.file.as_deref() == Some(file) && event.event == "consumed");
+        let consumed = standing_consumption(related, file);
         let promoted_consumption = consumed.is_some_and(|event| {
             event.outcome.as_deref() == Some("superseded")
                 && (event.promotion.is_some()
@@ -9977,6 +10026,13 @@ impl JournalEvent {
                         .as_deref()
                         .is_some_and(|value| ["done", "superseded", "discarded"].contains(&value))
             }
+            "reopened" => {
+                self.artifact_file()
+                    && self
+                        .note
+                        .as_deref()
+                        .is_some_and(|note| !note.trim().is_empty())
+            }
             "archived" => self.file.is_some(),
             "unarchived" => self.artifact_file(),
             "relocated" => {
@@ -11189,6 +11245,11 @@ fn event_message(event: &JournalEvent) -> String {
                 .as_deref()
                 .map(|v| format!(": {v}"))
                 .unwrap_or_default()
+        ),
+        "reopened" => format!(
+            "reopened {}: {}",
+            event.file.as_deref().unwrap_or_default(),
+            event.note.as_deref().unwrap_or_default()
         ),
         "transition" => format!(
             "transitioned {} -> {}{}",
@@ -13371,11 +13432,7 @@ fn artifact_resolution(
     events: &[JournalEvent],
     filename: &str,
 ) -> (Option<String>, Option<String>) {
-    if let Some(outcome) = events.iter().rev().find_map(|event| {
-        (event.event == "consumed" && event.file.as_deref() == Some(filename) && event.known())
-            .then(|| event.outcome.clone())
-            .flatten()
-    }) {
+    if let Some(outcome) = consumption(events, filename) {
         return (Some(outcome), Some("consumption".to_string()));
     }
     if let Some(_event) = events.iter().rev().find(|event| {
@@ -13758,25 +13815,37 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// The outcome an artifact was consumed with, if it was consumed at all.
-/// Last consume wins: the `consume` command refuses an already-consumed
-/// artifact, but the journal is hand-writable and derived views must be
-/// robust to a re-consume event anyway — display the latest, not the
-/// earliest.
-fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
-    events
-        .iter()
-        .rev()
-        .find(|event| {
-            event.event == "consumed"
-                && event.file.as_deref() == Some(filename)
-                && event.known()
-                && event
+/// The standing `consumed` event for `filename`, when the artifact is currently
+/// consumed. A `reopened` event reverses the consumption before it, and a later
+/// `consumed` event closes the artifact again. Last standing consumption wins.
+fn standing_consumption<'a>(
+    events: &'a [JournalEvent],
+    filename: &str,
+) -> Option<&'a JournalEvent> {
+    for event in events.iter().rev() {
+        if event.file.as_deref() != Some(filename) || !event.known() {
+            continue;
+        }
+        match event.event.as_str() {
+            "consumed" => {
+                if event
                     .outcome
                     .as_deref()
                     .is_some_and(|outcome| ["done", "superseded", "discarded"].contains(&outcome))
-        })
-        .and_then(|event| event.outcome.clone())
+                {
+                    return Some(event);
+                }
+            }
+            "reopened" => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The outcome an artifact is currently consumed with, if any.
+fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
+    standing_consumption(events, filename).and_then(|event| event.outcome.clone())
 }
 
 pub(crate) fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
@@ -13845,17 +13914,7 @@ pub(crate) fn todo_records(cwd: &Path) -> Result<Vec<TodoRecord>> {
         let created_at = filing.and_then(JournalEvent::timestamp).or_else(|| {
             parse_artifact_name(&name).and_then(|(stamp, _, _)| parse_artifact_timestamp(&stamp))
         });
-        let consumed = events
-            .iter()
-            .rev()
-            .find(|event| {
-                event.known()
-                    && event.event == "consumed"
-                    && event.file.as_deref() == Some(name.as_str())
-                    && event.outcome.as_deref().is_some_and(|outcome| {
-                        ["done", "superseded", "discarded"].contains(&outcome)
-                    })
-            })
+        let consumed = standing_consumption(&events, &name)
             .and_then(|event| Some((event.outcome.clone()?, event.timestamp()?)));
         records.push(TodoRecord {
             item_key: filing.and_then(|event| event.item_key.clone()),
@@ -15181,6 +15240,7 @@ pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
 
 fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> ReconciliationFacts {
     let mut facts = ReconciliationFacts::default();
+    let mut transition_successors: HashSet<String> = HashSet::new();
     for event in events {
         if !event.known() {
             continue;
@@ -15195,10 +15255,7 @@ fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> Reconciliat
                     .as_deref()
                     .filter(|outcome| ["done", "superseded", "discarded"].contains(outcome))
                 {
-                    facts
-                        .consumed
-                        .entry(file.to_string())
-                        .or_insert_with(|| outcome.to_string());
+                    facts.consumed.insert(file.to_string(), outcome.to_string());
                     // A superseded consumption that names an artifact this
                     // journal holds as what resolved it records that artifact
                     // as its successor, as a transition records the artifact
@@ -15210,15 +15267,25 @@ fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> Reconciliat
                             && artifact_body_path(dir, decision).is_some()
                     });
                     if let Some(successor) = successor {
-                        facts
-                            .successors
-                            .entry(file.to_string())
-                            .or_insert_with(|| successor.to_string());
+                        if !transition_successors.contains(file) {
+                            facts
+                                .successors
+                                .insert(file.to_string(), successor.to_string());
+                        }
+                    } else if !transition_successors.contains(file) {
+                        facts.successors.remove(file);
                     }
+                }
+            }
+            "reopened" => {
+                facts.consumed.remove(file);
+                if !transition_successors.contains(file) {
+                    facts.successors.remove(file);
                 }
             }
             "transition" => {
                 if let Some(source) = event.supersedes.as_deref() {
+                    transition_successors.insert(source.to_string());
                     facts
                         .successors
                         .entry(source.to_string())
@@ -17773,25 +17840,20 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .filter(|id| !heading_id_set.contains(*id))
         .count();
 
-    // Resolution: the newest consumed event for this file, if any. The resolver
-    // participated when a position event shares its harness-native session.
-    let resolution = events
-        .iter()
-        .rev()
-        .find(|event| {
-            event.known() && event.event == "consumed" && event.file.as_deref() == Some(filename)
-        })
-        .map(|event| Resolution {
-            outcome: event.outcome.clone().unwrap_or_default(),
-            resolver: event_identity_label(event),
-            decision: event.decision.clone(),
-            resolver_participated: position_events.iter().any(|position| {
-                event.harness().is_some()
-                    && event.session().is_some()
-                    && position.harness() == event.harness()
-                    && position.session() == event.session()
-            }),
-        });
+    // Resolution: the standing consumed event for this file, if any. The
+    // resolver participated when a position event shares its harness-native
+    // session.
+    let resolution = standing_consumption(&events, filename).map(|event| Resolution {
+        outcome: event.outcome.clone().unwrap_or_default(),
+        resolver: event_identity_label(event),
+        decision: event.decision.clone(),
+        resolver_participated: position_events.iter().any(|position| {
+            event.harness().is_some()
+                && event.session().is_some()
+                && position.harness() == event.harness()
+                && position.session() == event.session()
+        }),
+    });
 
     let (resolution_status, resolution_basis) = artifact_resolution(&events, filename);
     let (last_position_at, has_archived_positions) = position_metadata(&events, filename);
@@ -18145,6 +18207,232 @@ pub(crate) fn consume(
             .map(|label| format!("{label}::"))
             .unwrap_or_default();
         println!("resolved by: {project}{decision}   ({kind})");
+    }
+    Ok(0)
+}
+
+struct ReopenPlan {
+    file: String,
+    topic: String,
+    outcome: String,
+    archived: bool,
+}
+
+fn non_consumed_state(
+    dir: &Path,
+    events: &[JournalEvent],
+    filename: &str,
+    kind: &str,
+    archived: bool,
+) -> &'static str {
+    if pending_transition(dir, events, filename) {
+        return "pending transition";
+    }
+    if archived {
+        if artifact_resolution(events, filename).0.as_deref() == Some("unresolved") {
+            return "archived, unresolved";
+        }
+        return "archived";
+    }
+    let previously_reopened = events
+        .iter()
+        .rev()
+        .filter(|event| event.file.as_deref() == Some(filename) && event.known())
+        .find(|event| matches!(event.event.as_str(), "consumed" | "reopened"))
+        .is_some_and(|event| event.event == "reopened");
+    match (is_actionable_kind(kind), previously_reopened) {
+        (true, true) => "open (already reopened)",
+        (true, false) => "open",
+        (false, true) => "live (already reopened)",
+        (false, false) => "live",
+    }
+}
+
+fn reopen(
+    ctx: &Ctx,
+    files: &[String],
+    session: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    reason: &str,
+    dry_run: bool,
+) -> Result<i32> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("--reason must not be empty");
+    }
+    let has_files = !files.is_empty();
+    let has_window = session.is_some() || since.is_some() || until.is_some();
+    if has_files && has_window {
+        bail!("pass artifact filenames or --session with --since, not both");
+    }
+    if !has_files && !has_window {
+        bail!("reopen requires one or more artifact filenames, or --session with --since");
+    }
+    let window = if has_window {
+        let Some(session) = session else {
+            bail!("--since and --until require --session");
+        };
+        let session = session.trim();
+        if session.is_empty() {
+            bail!("--session must not be empty");
+        }
+        let Some(since_raw) = since else {
+            bail!("--session requires --since to bound the consumption window");
+        };
+        let since_ts =
+            parse_since(since_raw).with_context(|| format!("invalid --since {since_raw:?}"))?;
+        let until_ts = until
+            .map(|raw| parse_since(raw).with_context(|| format!("invalid --until {raw:?}")))
+            .transpose()?;
+        if let Some(until_ts) = until_ts {
+            if until_ts < since_ts {
+                bail!(
+                    "--until ({}) is earlier than --since ({since_raw})",
+                    until.unwrap_or_default()
+                );
+            }
+        }
+        Some((session.to_string(), since_ts, until_ts))
+    } else {
+        None
+    };
+
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = (!dry_run)
+        .then(|| lock_journal_transition(&dir))
+        .transpose()?;
+    let events = read_events(&dir)?;
+
+    let mut plans: Vec<ReopenPlan> = Vec::new();
+    if let Some((target_session, since_ts, until_ts)) = &window {
+        let mut latest_state: HashMap<&str, Option<(usize, &JournalEvent)>> = HashMap::new();
+        for (index, event) in events.iter().enumerate() {
+            if !event.known() {
+                continue;
+            }
+            let Some(file) = event.file.as_deref() else {
+                continue;
+            };
+            if parse_artifact_name(file).is_none() {
+                continue;
+            }
+            match event.event.as_str() {
+                "consumed"
+                    if event.outcome.as_deref().is_some_and(|outcome| {
+                        ["done", "superseded", "discarded"].contains(&outcome)
+                    }) =>
+                {
+                    latest_state.insert(file, Some((index, event)));
+                }
+                "reopened" => {
+                    latest_state.insert(file, None);
+                }
+                _ => {}
+            }
+        }
+        let mut candidates: Vec<(usize, &str, &JournalEvent)> = latest_state
+            .into_iter()
+            .filter_map(|(file, state)| {
+                let (index, standing) = state?;
+                if relocation(&events, file).is_some() {
+                    return None;
+                }
+                if standing.session() != Some(target_session.as_str()) {
+                    return None;
+                }
+                let ts = standing.timestamp()?;
+                if ts < *since_ts || until_ts.is_some_and(|until| ts > until) {
+                    return None;
+                }
+                Some((index, file, standing))
+            })
+            .collect();
+        candidates.sort_by_key(|(index, _, _)| *index);
+        for (_, file, standing) in candidates {
+            let (topic, _) = check_artifact_name(ctx, file)?;
+            ensure_storage_settled(&dir, &events, file)?;
+            let Some(path) = artifact_body_path(&dir, file) else {
+                return Err(missing_write_target(&dir, file));
+            };
+            plans.push(ReopenPlan {
+                file: file.to_string(),
+                topic,
+                outcome: standing.outcome.clone().unwrap_or_default(),
+                archived: !dir.join(file).is_file() && path.is_file(),
+            });
+        }
+    } else {
+        for filename in files {
+            if plans.iter().any(|plan| plan.file == *filename) {
+                continue;
+            }
+            let (topic, kind) = check_artifact_name(ctx, filename)?;
+            if let Some(refusal) = relocated_refusal(&dir, filename) {
+                return Err(refusal);
+            }
+            ensure_storage_settled(&dir, &events, filename)?;
+            let Some(path) = artifact_body_path(&dir, filename) else {
+                return Err(missing_write_target(&dir, filename));
+            };
+            let archived = !dir.join(filename).is_file() && path.is_file();
+            let Some(standing) = standing_consumption(&events, filename) else {
+                let state = non_consumed_state(&dir, &events, filename, &kind, archived);
+                bail!("{filename} is not consumed (current state: {state})");
+            };
+            plans.push(ReopenPlan {
+                file: filename.clone(),
+                topic,
+                outcome: standing.outcome.clone().unwrap_or_default(),
+                archived,
+            });
+        }
+    }
+
+    if plans.is_empty() {
+        if let Some((target_session, _, _)) = &window {
+            println!(
+                "no currently consumed artifacts matched session {target_session} in the requested window"
+            );
+        }
+        if dry_run {
+            println!("dry run: nothing written");
+        }
+        return Ok(0);
+    }
+
+    if dry_run {
+        for plan in &plans {
+            let suffix = if plan.archived { " (cold archive)" } else { "" };
+            println!("would reopen: {} [was {}]{suffix}", plan.file, plan.outcome);
+        }
+        println!(
+            "dry run: would reopen {} artifact(s); nothing written",
+            plans.len()
+        );
+        return Ok(0);
+    }
+
+    let now = Utc::now();
+    let records: Vec<JournalEvent> = plans
+        .iter()
+        .map(|plan| {
+            let mut event = JournalEvent::base(ctx, now, &plan.topic, "reopened");
+            event.file = Some(plan.file.clone());
+            event.note = Some(reason.to_string());
+            event
+        })
+        .collect();
+    append_events(ctx, &dir, &records)?;
+    for plan in &plans {
+        let suffix = if plan.archived { " (cold archive)" } else { "" };
+        println!("reopened: {} [was {}]{suffix}", plan.file, plan.outcome);
+        if plan.archived {
+            eprintln!(
+                "note: {} is in the cold archive; run `arc journal unarchive {}` to restore it to hot storage",
+                plan.file, plan.file
+            );
+        }
     }
     Ok(0)
 }

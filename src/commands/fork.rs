@@ -426,6 +426,7 @@ pub fn list_entries(ctx: &Ctx) -> Result<Vec<ForkEntry>> {
         .iter()
         .filter(|event| event.event == "consumed")
         .filter_map(|event| event.file.as_deref())
+        .filter(|file| crate::journal::is_consumed(&events, file))
         .collect();
 
     // The resolver answers which forks exist and where their checkouts are,

@@ -430,7 +430,23 @@ ORIENT INSIDE A PROJECT (start here, in this order)
 
   Shelve a discussion with journal archive FILE --unresolved --note REASON.
   Use journal position FILE --archived to argue there, and journal unarchive
-  FILE to restore storage. Terminal resolution remains terminal. Pending
+  FILE to restore storage. Terminal resolution remains terminal unless
+  explicitly reversed:
+    arc journal reopen FILE... --reason TEXT [--dry-run]
+    arc journal reopen --session ID --since TIME [--until TIME]
+        --reason TEXT [--dry-run]
+                         Reverse recorded consumptions without editing the
+                         event log: appends a typed `reopened` event under the
+                         event lock so each artifact returns to its prior live
+                         state while history keeps both events. Explicit files
+                         refuse any artifact not currently consumed; the
+                         session-window form selects currently consumed
+                         artifacts whose standing consumption was recorded by
+                         that session inside `[since, until]` (RFC 3339 or
+                         journal stamp). `--dry-run` names each matched
+                         artifact without writing, and `--global` targets the
+                         operator journal.
+  Pending
   storage moves appear in journal doctor and must be retried before other
   writes; the retry validates the operation's paths and body digest.
   Archiving keeps every byte readable. To take content out of reach:
@@ -2353,7 +2369,7 @@ END A SESSION (what the next one reads)
 
   `arc journal --global` selects that journal from any directory for all
   kinds and their positions and corrections, including `memory`,
-  `show`, `list`, `memories`, `consume`, `position`, `export` and `import`.
+  `show`, `list`, `memories`, `consume`, `reopen`, `position`, `export` and `import`.
   Project directory mappings and `ARC_JOURNAL_DIR` do not redirect this scope.
   Promotion takes a live project memory, preserves its body in the global
   journal, links the journals in both directions and consumes the project
@@ -7247,7 +7263,7 @@ SCHEMAS
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;
   an event lacking one is unsupported and cannot change ownership state.
-  `journal-events/2` covers that and the `evidence`, `relocated`,
+  `journal-events/2` covers that and the `evidence`, `reopened`, `relocated`,
   `redacted`, `pinned`, `unpinned`, `published`, and `workbench-opened`,
   `-adopted`, `-linked`, `-closed`, `-archived` and `-unarchived` kinds,
   which name a workbench and no artifact `file`; `journal-events/1`

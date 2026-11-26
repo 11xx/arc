@@ -1117,6 +1117,9 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                     by: event.decision.clone(),
                 });
             }
+            "reopened" => {
+                current.retired = None;
+            }
             kind => {
                 let Some(item) = current.items.iter_mut().find(|item| item.id == id) else {
                     continue;
