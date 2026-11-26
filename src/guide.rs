@@ -437,15 +437,20 @@ ORIENT INSIDE A PROJECT (start here, in this order)
         --reason TEXT [--dry-run]
                          Reverse recorded consumptions without editing the
                          event log: appends a typed `reopened` event under the
-                         event lock so each artifact returns to its prior live
-                         state while history keeps both events. Explicit files
-                         refuse any artifact not currently consumed; the
-                         session-window form selects currently consumed
-                         artifacts whose standing consumption was recorded by
-                         that session inside `[since, until]` (RFC 3339 or
-                         journal stamp). `--dry-run` names each matched
-                         artifact without writing, and `--global` targets the
-                         operator journal.
+                         event lock bound (`reopens`) to the exact standing
+                         consumption so each artifact returns to its prior live
+                         state without clearing a distinct, later consumption
+                         imported from another replica, while history keeps
+                         both events. Structural handoff consumptions
+                         (`journal transition`, `begin --from-journal`,
+                         `journal promote --global`) are protected in both
+                         selectors. Explicit files refuse any artifact not
+                         currently consumed; the session-window form selects
+                         currently consumed non-handoff artifacts whose
+                         standing consumption was recorded by that session
+                         inside `[since, until]` (RFC 3339 or journal stamp).
+                         `--dry-run` names each matched artifact without
+                         writing, and `--global` targets the operator journal.
   Pending
   storage moves appear in journal doctor and must be retried before other
   writes; the retry validates the operation's paths and body digest.

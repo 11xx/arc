@@ -802,6 +802,8 @@ impl Item {
 pub(crate) struct Retirement {
     pub(crate) at: String,
     pub(crate) by: Option<String>,
+    #[serde(skip)]
+    pub(crate) consumption_id: Option<String>,
 }
 
 /// A series replayed from its events.
@@ -1115,10 +1117,18 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                 current.retired = Some(Retirement {
                     at: event.ts.clone(),
                     by: event.decision.clone(),
+                    consumption_id: event.consumption_id(),
                 });
             }
             "reopened" => {
-                current.retired = None;
+                if current.retired.as_ref().is_some_and(|retired| {
+                    event
+                        .reopens
+                        .as_deref()
+                        .is_none_or(|target| retired.consumption_id.as_deref() == Some(target))
+                }) {
+                    current.retired = None;
+                }
             }
             kind => {
                 let Some(item) = current.items.iter_mut().find(|item| item.id == id) else {

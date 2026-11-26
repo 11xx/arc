@@ -780,6 +780,7 @@ ship-it · 1 added since the start
         retired.retired = Some(crate::journal::series::Retirement {
             at: "2026-01-01T12:00:00Z".to_string(),
             by: Some("20260101T000000Z-ship-it-decision.md".to_string()),
+            consumption_id: None,
         });
         let text = drawn(look(false, None), &retired);
         assert!(

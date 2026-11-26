@@ -106,6 +106,8 @@ pub(crate) struct Closure {
     pub(crate) by: Option<String>,
     pub(crate) note: Option<String>,
     pub(crate) checkpoint: Option<MilestoneCheckpoint>,
+    #[serde(skip)]
+    pub(crate) consumption_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -295,7 +297,14 @@ fn insert_at<T: Eq + std::fmt::Display>(
 impl Milestone {
     fn apply(&mut self, event: &JournalEvent) -> Result<()> {
         if event.event == "reopened" {
-            self.closure = None;
+            if self.closure.as_ref().is_some_and(|closure| {
+                event
+                    .reopens
+                    .as_deref()
+                    .is_none_or(|target| closure.consumption_id.as_deref() == Some(target))
+            }) {
+                self.closure = None;
+            }
             return Ok(());
         }
         if self.closure.is_some() {
@@ -318,6 +327,7 @@ impl Milestone {
                         by: event.decision.clone(),
                         note: event.note.clone(),
                         checkpoint: f.milestone_checkpoint.clone(),
+                        consumption_id: event.consumption_id(),
                     });
                 }
                 Ok(())

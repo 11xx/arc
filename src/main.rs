@@ -6671,42 +6671,97 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
         ..
     }) = cli.cmd.as_mut()
     {
-        let reopen = matches
-            .subcommand_matches("journal")
-            .and_then(|journal| journal.subcommand_matches("reopen"));
-        if !typed_on_command_line(reopen, "session")
-            || !flag_after_subcommand("reopen", "--session")
-        {
-            *session = None;
-        } else {
-            // `--session` after `reopen` selects the session whose consumptions
-            // are reversed, not the acting session performing the reopen.
-            cli.session = std::env::var("ARC_SESSION")
+        let (actor_session, filter_session) =
+            split_reopen_sessions(&cli_command(), std::env::args().skip(1));
+        *session = filter_session;
+        cli.session = actor_session.or_else(|| {
+            std::env::var("ARC_SESSION")
                 .ok()
-                .filter(|value| !value.trim().is_empty());
-        }
+                .filter(|value| !value.trim().is_empty())
+        });
     }
     Ok((cli, reads_only))
 }
 
-fn flag_after_subcommand(subcommand: &str, flag: &str) -> bool {
-    let prefix = format!("{flag}=");
-    let mut seen_subcommand = false;
-    for arg in std::env::args().skip(1) {
+/// Separate an explicit acting `--session` (typed before `reopen`) from
+/// `journal reopen`'s filter `--session` (typed after `reopen`), walking the
+/// command grammar so option values (such as `--actor reopen`) are never
+/// mistaken for subcommands.
+fn split_reopen_sessions<I, S>(command: &clap::Command, args: I) -> (Option<String>, Option<String>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let journal_cmd = command.find_subcommand("journal");
+    let reopen_cmd = journal_cmd.and_then(|cmd| cmd.find_subcommand("reopen"));
+    let option_takes_value = |stage: u8, long: &str| -> bool {
+        let cmds = [
+            Some(command),
+            (stage >= 1).then_some(journal_cmd).flatten(),
+            (stage >= 2).then_some(reopen_cmd).flatten(),
+        ];
+        cmds.into_iter().flatten().any(|cmd| {
+            cmd.get_arguments()
+                .any(|arg| arg.get_long() == Some(long) && arg.get_action().takes_values())
+        })
+    };
+    let short_takes_value = |stage: u8, short: char| -> bool {
+        let cmds = [
+            Some(command),
+            (stage >= 1).then_some(journal_cmd).flatten(),
+            (stage >= 2).then_some(reopen_cmd).flatten(),
+        ];
+        cmds.into_iter().flatten().any(|cmd| {
+            cmd.get_arguments()
+                .any(|arg| arg.get_short() == Some(short) && arg.get_action().takes_values())
+        })
+    };
+
+    let mut stage: u8 = 0;
+    let mut actor_session: Option<String> = None;
+    let mut filter_session: Option<String> = None;
+    let mut iter = args.into_iter();
+    while let Some(raw) = iter.next() {
+        let arg = raw.as_ref();
         if arg == "--" {
             break;
         }
-        if !seen_subcommand {
-            if arg == subcommand {
-                seen_subcommand = true;
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, attached) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (rest, None),
+            };
+            if name == "session" {
+                let value = attached.or_else(|| iter.next().map(|v| v.as_ref().to_string()));
+                if stage >= 2 {
+                    filter_session = value;
+                } else {
+                    actor_session = value;
+                }
+            } else if attached.is_none() && option_takes_value(stage, name) {
+                let _ = iter.next();
             }
             continue;
         }
-        if arg == flag || arg.starts_with(&prefix) {
-            return true;
+        if arg.starts_with('-') && arg.len() > 1 {
+            let mut chars = arg[1..].chars();
+            while let Some(ch) = chars.next() {
+                if short_takes_value(stage, ch) {
+                    if chars.as_str().is_empty() {
+                        let _ = iter.next();
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        match stage {
+            0 if arg == "journal" => stage = 1,
+            1 if arg == "reopen" => stage = 2,
+            _ => {}
         }
     }
-    false
+    (actor_session, filter_session)
 }
 
 /// Name the attached form when the unknown argument was meant as the value of

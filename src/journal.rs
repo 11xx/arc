@@ -1728,11 +1728,15 @@ pub enum JournalCmd {
     },
     /// Reverse a recorded consumption without rewriting the event log.
     ///
-    /// Appends a typed `reopened` event under the event lock so each named
-    /// artifact returns to the state it held before the consumption; history
-    /// keeps both the `consumed` and `reopened` events. Pass one or more
-    /// artifact filenames, or select every currently consumed artifact whose
-    /// latest consumption was recorded by `--session` inside a `--since`
+    /// Appends a typed `reopened` event under the event lock bound to the
+    /// exact standing consumption selected under the transition lock, so each
+    /// named artifact returns to the state it held before the consumption
+    /// without clearing a distinct, later consumption during replica exchange;
+    /// history keeps both the `consumed` and `reopened` events. Structural
+    /// handoff consumptions (`journal transition`, `begin --from-journal`, and
+    /// `journal promote --global`) are protected in both selectors. Pass one
+    /// or more artifact filenames, or select every currently consumed artifact
+    /// whose latest consumption was recorded by `--session` inside a `--since`
     /// (and optional `--until`) time window. `--dry-run` names each matched
     /// artifact without writing anything. `--global` targets the operator
     /// journal.
@@ -1742,8 +1746,8 @@ pub enum JournalCmd {
         files: Vec<String>,
         /// Reopen every currently consumed artifact whose latest consumption
         /// was recorded by this session inside the `--since`/`--until` window.
-        /// Set `ARC_SESSION` for the acting session when filtering by
-        /// `--session`.
+        /// Pass an explicit acting session before `reopen` (or via
+        /// `ARC_SESSION`).
         #[arg(long, value_name = "ID")]
         session: Option<String>,
         /// Inclusive start of the consumption window: RFC 3339 or journal
@@ -2814,6 +2818,15 @@ impl JournalEvent {
     /// question is. Two answers to a reopened question differ in it even when
     /// they say the same thing.
     fn settlement_id(&self) -> Option<String> {
+        let bytes = serde_json::to_vec(self).ok()?;
+        Some(hex::encode(Sha256::digest(bytes)))
+    }
+
+    /// The identity of one `consumed` event: the hex SHA-256 digest of its
+    /// canonical serialized event record. Two consumptions of the same
+    /// artifact differ in it, so a `reopened` event carrying `reopens` reverses
+    /// only the exact consumption it targets.
+    pub(crate) fn consumption_id(&self) -> Option<String> {
         let bytes = serde_json::to_vec(self).ok()?;
         Some(hex::encode(Sha256::digest(bytes)))
     }
@@ -9407,6 +9420,14 @@ pub(crate) struct JournalEvent {
     /// position in the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settlement: Option<String>,
+    /// The `consumed` event a `reopened` event reverses, identified by its
+    /// `consumption_id` digest. Binding a reversal to the exact consumption
+    /// selected under the transition lock prevents an imported `reopened`
+    /// event from clearing a distinct, later consumption recorded on another
+    /// replica. Optional so an unbound `reopened` event reverses whichever
+    /// consumption stands before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reopens: Option<String>,
     /// The recorded session or intake item this entry was distilled out of,
     /// when it was distilled rather than authored. Absent means the entry was
     /// authored here, which is what every event written without the field
@@ -9811,6 +9832,7 @@ impl JournalEvent {
             value: None,
             amendment_id: None,
             settlement: None,
+            reopens: None,
             source: None,
             item_key: None,
             promoted_by: None,
@@ -10032,6 +10054,9 @@ impl JournalEvent {
                         .note
                         .as_deref()
                         .is_some_and(|note| !note.trim().is_empty())
+                    && self.reopens.as_deref().is_none_or(|id| {
+                        id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
             }
             "archived" => self.file.is_some(),
             "unarchived" => self.artifact_file(),
@@ -13815,32 +13840,47 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Whether `reopened` reverses `consumed`.
+///
+/// A bound `reopened` event reverses only the exact consumption event whose
+/// `consumption_id` matches `reopens`, so importing a concurrent reversal from
+/// another replica never clears a distinct, later consumption. An unbound
+/// `reopened` event reverses whichever consumption stands before it.
+fn reopens_consumption(reopened: &JournalEvent, consumed: &JournalEvent) -> bool {
+    reopened
+        .reopens
+        .as_deref()
+        .is_none_or(|target| consumed.consumption_id().as_deref() == Some(target))
+}
+
 /// The standing `consumed` event for `filename`, when the artifact is currently
-/// consumed. A `reopened` event reverses the consumption before it, and a later
-/// `consumed` event closes the artifact again. Last standing consumption wins.
+/// consumed. A `reopened` event reverses only the consumption it targets (or
+/// the standing one when unbound), and a later `consumed` event closes the
+/// artifact again.
 fn standing_consumption<'a>(
     events: &'a [JournalEvent],
     filename: &str,
 ) -> Option<&'a JournalEvent> {
-    for event in events.iter().rev() {
+    let mut standing: Option<&'a JournalEvent> = None;
+    for event in events {
         if event.file.as_deref() != Some(filename) || !event.known() {
             continue;
         }
         match event.event.as_str() {
-            "consumed" => {
-                if event
-                    .outcome
-                    .as_deref()
-                    .is_some_and(|outcome| ["done", "superseded", "discarded"].contains(&outcome))
-                {
-                    return Some(event);
-                }
+            "consumed"
+                if event.outcome.as_deref().is_some_and(|outcome| {
+                    ["done", "superseded", "discarded"].contains(&outcome)
+                }) =>
+            {
+                standing = Some(event);
             }
-            "reopened" => return None,
+            "reopened" if standing.is_some_and(|consumed| reopens_consumption(event, consumed)) => {
+                standing = None;
+            }
             _ => {}
         }
     }
-    None
+    standing
 }
 
 /// The outcome an artifact is currently consumed with, if any.
@@ -15241,6 +15281,7 @@ pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
 fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> ReconciliationFacts {
     let mut facts = ReconciliationFacts::default();
     let mut transition_successors: HashSet<String> = HashSet::new();
+    let mut standing_events: HashMap<&str, &JournalEvent> = HashMap::new();
     for event in events {
         if !event.known() {
             continue;
@@ -15255,6 +15296,7 @@ fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> Reconciliat
                     .as_deref()
                     .filter(|outcome| ["done", "superseded", "discarded"].contains(outcome))
                 {
+                    standing_events.insert(file, event);
                     facts.consumed.insert(file.to_string(), outcome.to_string());
                     // A superseded consumption that names an artifact this
                     // journal holds as what resolved it records that artifact
@@ -15278,9 +15320,15 @@ fn reconciliation_facts_from(dir: &Path, events: &[JournalEvent]) -> Reconciliat
                 }
             }
             "reopened" => {
-                facts.consumed.remove(file);
-                if !transition_successors.contains(file) {
-                    facts.successors.remove(file);
+                if standing_events
+                    .get(file)
+                    .is_some_and(|consumed| reopens_consumption(event, consumed))
+                {
+                    standing_events.remove(file);
+                    facts.consumed.remove(file);
+                    if !transition_successors.contains(file) {
+                        facts.successors.remove(file);
+                    }
                 }
             }
             "transition" => {
@@ -18215,7 +18263,61 @@ struct ReopenPlan {
     file: String,
     topic: String,
     outcome: String,
+    consumption_id: Option<String>,
     archived: bool,
+}
+
+/// If a standing `consumed` event records a structural handoff (kind
+/// transition, change promotion via `begin --from-journal`, or global memory
+/// promotion), return a description naming the successor or change. Reopening
+/// a handoff without reconciling its successor or change would duplicate live
+/// work across queues.
+fn handoff_consumption(
+    events: &[JournalEvent],
+    filename: &str,
+    standing: &JournalEvent,
+) -> Option<String> {
+    if let Some(transition) = events.iter().rev().find(|event| {
+        event.known()
+            && event.event == "transition"
+            && event.supersedes.as_deref() == Some(filename)
+            && event.file.is_some()
+    }) {
+        let successor = transition.file.as_deref().unwrap_or_default();
+        return Some(format!("transitioned to {successor}"));
+    }
+    if standing.outcome.as_deref() != Some(ConsumeOutcome::Superseded.as_str()) {
+        return None;
+    }
+    if let Some(note) = standing.note.as_deref() {
+        if let Some(successor) = note.strip_prefix("transitioned to ") {
+            let successor = successor.trim();
+            if !successor.is_empty() {
+                return Some(format!("transitioned to {successor}"));
+            }
+        }
+        if let Some(global_file) = note.strip_prefix("promoted to global::") {
+            let global_file = global_file.trim();
+            if !global_file.is_empty() {
+                return Some(format!("promoted to global::{global_file}"));
+            }
+        }
+    }
+    if let Some(promotion) = &standing.promotion {
+        return Some(format!(
+            "promoted to change {} (repository {})",
+            promotion.change_id, promotion.repository_id
+        ));
+    }
+    if let Some(note) = standing.note.as_deref() {
+        if let Some(change) = note.strip_prefix("change ") {
+            let change = change.trim();
+            if !change.is_empty() {
+                return Some(format!("promoted to change {change}"));
+            }
+        }
+    }
+    None
 }
 
 fn non_consumed_state(
@@ -18305,6 +18407,7 @@ fn reopen(
     let events = read_events(&dir)?;
 
     let mut plans: Vec<ReopenPlan> = Vec::new();
+    let mut skipped_handoffs: Vec<(String, String)> = Vec::new();
     if let Some((target_session, since_ts, until_ts)) = &window {
         let mut latest_state: HashMap<&str, Option<(usize, &JournalEvent)>> = HashMap::new();
         for (index, event) in events.iter().enumerate() {
@@ -18325,7 +18428,12 @@ fn reopen(
                 {
                     latest_state.insert(file, Some((index, event)));
                 }
-                "reopened" => {
+                "reopened"
+                    if latest_state
+                        .get(file)
+                        .and_then(|state| *state)
+                        .is_some_and(|(_, consumed)| reopens_consumption(event, consumed)) =>
+                {
                     latest_state.insert(file, None);
                 }
                 _ => {}
@@ -18350,6 +18458,10 @@ fn reopen(
             .collect();
         candidates.sort_by_key(|(index, _, _)| *index);
         for (_, file, standing) in candidates {
+            if let Some(handoff) = handoff_consumption(&events, file, standing) {
+                skipped_handoffs.push((file.to_string(), handoff));
+                continue;
+            }
             let (topic, _) = check_artifact_name(ctx, file)?;
             ensure_storage_settled(&dir, &events, file)?;
             let Some(path) = artifact_body_path(&dir, file) else {
@@ -18359,6 +18471,7 @@ fn reopen(
                 file: file.to_string(),
                 topic,
                 outcome: standing.outcome.clone().unwrap_or_default(),
+                consumption_id: standing.consumption_id(),
                 archived: !dir.join(file).is_file() && path.is_file(),
             });
         }
@@ -18380,13 +18493,21 @@ fn reopen(
                 let state = non_consumed_state(&dir, &events, filename, &kind, archived);
                 bail!("{filename} is not consumed (current state: {state})");
             };
+            if let Some(handoff) = handoff_consumption(&events, filename, standing) {
+                bail!("cannot reopen {filename}: consumption is a structural handoff ({handoff})");
+            }
             plans.push(ReopenPlan {
                 file: filename.clone(),
                 topic,
                 outcome: standing.outcome.clone().unwrap_or_default(),
+                consumption_id: standing.consumption_id(),
                 archived,
             });
         }
+    }
+
+    for (file, handoff) in &skipped_handoffs {
+        eprintln!("skipped handoff: {file} ({handoff})");
     }
 
     if plans.is_empty() {
@@ -18420,6 +18541,7 @@ fn reopen(
             let mut event = JournalEvent::base(ctx, now, &plan.topic, "reopened");
             event.file = Some(plan.file.clone());
             event.note = Some(reason.to_string());
+            event.reopens = plan.consumption_id.clone();
             event
         })
         .collect();
