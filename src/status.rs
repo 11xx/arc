@@ -570,14 +570,19 @@ pub(crate) fn evaluate_finding_resolutions(
 }
 
 /// Whether `fix_commit` (already known to be an ancestor of `head`) still
-/// survives in `head` rather than having been reverted by subsequent commits.
+/// survives in `head` rather than having been reverted or partially rolled back
+/// by subsequent commits.
 ///
-/// Checks two independent signals along `fix_commit..head`:
-/// 1. Explicit revert: a subsequent non-merge commit carries the exact reverse
-///    patch-id of `fix_commit` without an even later commit re-applying
-///    `fix_commit`'s forward patch-id.
-/// 2. Full state restoration: every path modified by `fix_commit` matches its
-///    pre-fix parent at `head` (or is absent at `head` for a root commit).
+/// Checks three independent signals for paths modified by `fix_commit` that
+/// changed again between `fix_commit` and `head`:
+/// 1. Per-path state restoration: any modified path returned to its exact
+///    pre-fix tree entry at `head`.
+/// 2. DAG-aware revert propagation along `fix_commit..head`: a subsequent
+///    commit applies the exact per-path reverse patch-id of `fix_commit`
+///    without being re-applied or discarded by a later merge.
+/// 3. Final-tree hunk survival: any unified diff hunk of `fix_commit` on a
+///    subsequently modified path has its pre-fix lines restored and its fixed
+///    lines absent at `head`.
 fn fix_survives_in_head(cwd: &Path, fix_commit: &str, head: &str) -> bool {
     if fix_commit == head {
         return true;
@@ -585,50 +590,272 @@ fn fix_survives_in_head(cwd: &Path, fix_commit: &str, head: &str) -> bool {
     let Ok(parents) = gitio::commit_parents(cwd, fix_commit) else {
         return false;
     };
-    if parents.len() <= 1 {
-        if let (Ok(Some(forward_pid)), Ok(Some(reverse_pid)), Ok(after)) = (
-            gitio::patch_id(cwd, fix_commit),
-            gitio::reverse_patch_id(cwd, fix_commit),
-            gitio::range_commits(cwd, fix_commit, head),
-        ) {
-            let mut reverted = false;
-            for commit in after {
-                if gitio::commit_parents(cwd, &commit)
-                    .map(|p| p.len() > 1)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if let Ok(Some(pid)) = gitio::patch_id(cwd, &commit) {
-                    if pid == reverse_pid {
-                        reverted = true;
-                    } else if pid == forward_pid {
-                        reverted = false;
-                    }
-                }
-            }
-            if reverted {
-                return false;
-            }
-        }
+    let Ok(paths) = gitio::commit_changed_paths(cwd, fix_commit) else {
+        return false;
+    };
+    if paths.is_empty() {
+        return true;
     }
-    if let Ok(paths) = gitio::commit_changed_paths(cwd, fix_commit) {
-        if !paths.is_empty() {
-            match parents.first() {
-                Some(parent) => {
-                    if !gitio::paths_differ(cwd, parent, head, &paths).unwrap_or(true) {
-                        return false;
-                    }
-                }
-                None => {
-                    if !gitio::tree_has_any_path(cwd, head, &paths).unwrap_or(true) {
-                        return false;
-                    }
-                }
-            }
+    let Ok(changed_since_fix) = gitio::changed_paths_between(cwd, fix_commit, head, &paths) else {
+        return false;
+    };
+    if changed_since_fix.is_empty() {
+        return true;
+    }
+    let pre_fix = match parents.first() {
+        Some(parent) => parent.clone(),
+        None => match gitio::empty_tree_oid(cwd) {
+            Ok(oid) => oid,
+            Err(_) => return false,
+        },
+    };
+    let Ok(still_differs_from_pre_fix) =
+        gitio::changed_paths_between(cwd, &pre_fix, head, &changed_since_fix)
+    else {
+        return false;
+    };
+    if still_differs_from_pre_fix.len() < changed_since_fix.len() {
+        return false;
+    }
+    if parents.len() <= 1
+        && dag_shows_unreapplied_revert(cwd, &pre_fix, fix_commit, head, &changed_since_fix)
+    {
+        return false;
+    }
+    for path in &changed_since_fix {
+        if path_hunk_reverted_in_head(cwd, &pre_fix, fix_commit, head, path) {
+            return false;
         }
     }
     true
+}
+
+/// Propagate per-path revert state through the commit DAG `fix_commit..head`.
+///
+/// Only parents reachable from `fix_commit` participate in merge decisions so
+/// unrelated upstream branches merged in do not mask a revert, and a merge
+/// between a reverted branch and a branch that kept the fix is resolved by
+/// checking which side's tree or diff `merge` actually took on that path.
+fn dag_shows_unreapplied_revert(
+    cwd: &Path,
+    pre_fix: &str,
+    fix_commit: &str,
+    head: &str,
+    changed_paths: &[String],
+) -> bool {
+    let Ok(commits) = gitio::range_commits_with_parents(cwd, fix_commit, head) else {
+        return false;
+    };
+    if commits.is_empty() {
+        return false;
+    }
+    let empty_tree = gitio::empty_tree_oid(cwd).ok();
+    for path in changed_paths {
+        let (Ok(Some(forward_pid)), Ok(Some(reverse_pid))) = (
+            gitio::diff_patch_id(cwd, pre_fix, fix_commit, Some(path)),
+            gitio::diff_patch_id(cwd, fix_commit, pre_fix, Some(path)),
+        ) else {
+            continue;
+        };
+        let path_slice = std::slice::from_ref(path);
+        let mut reverted: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+        reverted.insert(fix_commit, false);
+        for (commit, c_parents) in &commits {
+            let state = if c_parents.len() <= 1 {
+                let mut is_rev = c_parents
+                    .first()
+                    .and_then(|p| reverted.get(p.as_str()).copied())
+                    .unwrap_or(false);
+                let parent_ref = c_parents
+                    .first()
+                    .map(String::as_str)
+                    .or(empty_tree.as_deref());
+                if let Some(parent_ref) = parent_ref {
+                    if let Ok(Some(pid)) = gitio::diff_patch_id(cwd, parent_ref, commit, Some(path))
+                    {
+                        if pid == reverse_pid {
+                            is_rev = true;
+                        } else if pid == forward_pid {
+                            is_rev = false;
+                        }
+                    }
+                }
+                is_rev
+            } else {
+                let mut reverted_parents = Vec::new();
+                let mut kept_parents = Vec::new();
+                for parent in c_parents {
+                    if let Some(&parent_rev) = reverted.get(parent.as_str()) {
+                        if parent_rev {
+                            reverted_parents.push(parent.as_str());
+                        } else {
+                            kept_parents.push(parent.as_str());
+                        }
+                    }
+                }
+                match (reverted_parents.is_empty(), kept_parents.is_empty()) {
+                    (true, true) => false,
+                    (true, false) => {
+                        let base = kept_parents[0];
+                        gitio::diff_patch_id(cwd, base, commit, Some(path))
+                            .ok()
+                            .flatten()
+                            .is_some_and(|pid| pid == reverse_pid)
+                    }
+                    (false, true) => {
+                        let base = reverted_parents[0];
+                        !gitio::diff_patch_id(cwd, base, commit, Some(path))
+                            .ok()
+                            .flatten()
+                            .is_some_and(|pid| pid == forward_pid)
+                    }
+                    (false, false) => {
+                        let kept_exact = kept_parents.iter().any(|kp| {
+                            gitio::changed_paths_between(cwd, kp, commit, path_slice)
+                                .is_ok_and(|diff| diff.is_empty())
+                        });
+                        if kept_exact {
+                            false
+                        } else {
+                            let reverted_exact = reverted_parents.iter().any(|rp| {
+                                gitio::changed_paths_between(cwd, rp, commit, path_slice)
+                                    .is_ok_and(|diff| diff.is_empty())
+                            });
+                            reverted_exact
+                                || kept_parents.iter().any(|kp| {
+                                    gitio::diff_patch_id(cwd, kp, commit, Some(path))
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|pid| pid == reverse_pid)
+                                })
+                        }
+                    }
+                }
+            };
+            reverted.insert(commit.as_str(), state);
+        }
+        if reverted.get(head).copied().unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check whether any unified diff hunk introduced by `fix_commit` on `path`
+/// has reverted back to its pre-fix lines at `head` (even when unrelated edits
+/// were also applied to the same file).
+fn path_hunk_reverted_in_head(
+    cwd: &Path,
+    pre_fix: &str,
+    fix_commit: &str,
+    head: &str,
+    path: &str,
+) -> bool {
+    let Ok(diff) = gitio::diff_for_path(cwd, pre_fix, fix_commit, path) else {
+        return false;
+    };
+    if diff.is_empty() {
+        return false;
+    }
+    let Ok(Some(head_blob)) = gitio::blob_at_commit(cwd, head, path) else {
+        return false;
+    };
+    let head_lines = split_lines(&head_blob);
+    let mut in_hunk = false;
+    let mut hunk_lines: Vec<&[u8]> = Vec::new();
+    for line in split_lines(&diff) {
+        if line.starts_with(b"Binary files ") {
+            return false;
+        }
+        if line.starts_with(b"@@ ") {
+            if in_hunk && hunk_reverted(&hunk_lines, &head_lines) {
+                return true;
+            }
+            in_hunk = true;
+            hunk_lines.clear();
+        } else if in_hunk {
+            if line.starts_with(b"diff --git ") {
+                if hunk_reverted(&hunk_lines, &head_lines) {
+                    return true;
+                }
+                in_hunk = false;
+                hunk_lines.clear();
+            } else if !line.starts_with(b"\\") {
+                hunk_lines.push(line);
+            }
+        }
+    }
+    in_hunk && hunk_reverted(&hunk_lines, &head_lines)
+}
+
+fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let trimmed = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    trimmed.split(|&b| b == b'\n').collect()
+}
+
+fn contains_subslice(haystack: &[&[u8]], needle: &[&[u8]]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn hunk_reverted(hunk_lines: &[&[u8]], head_lines: &[&[u8]]) -> bool {
+    let mut pre: Vec<&[u8]> = Vec::new();
+    let mut post: Vec<&[u8]> = Vec::new();
+    let mut has_removed = false;
+    let mut has_added = false;
+    let mut seen_change = false;
+    let mut leading_ctx = 0usize;
+    let mut trailing_ctx = 0usize;
+
+    for &line in hunk_lines {
+        match line.first().copied() {
+            Some(b' ') => {
+                let text = &line[1..];
+                pre.push(text);
+                post.push(text);
+                if !seen_change {
+                    leading_ctx += 1;
+                } else {
+                    trailing_ctx += 1;
+                }
+            }
+            Some(b'-') => {
+                pre.push(&line[1..]);
+                has_removed = true;
+                seen_change = true;
+                trailing_ctx = 0;
+            }
+            Some(b'+') => {
+                post.push(&line[1..]);
+                has_added = true;
+                seen_change = true;
+                trailing_ctx = 0;
+            }
+            _ => {}
+        }
+    }
+    if (!has_removed && !has_added) || pre.is_empty() {
+        return false;
+    }
+    if !post.is_empty() && contains_subslice(head_lines, &post) {
+        return false;
+    }
+    if has_removed || (leading_ctx > 0 && trailing_ctx > 0) {
+        contains_subslice(head_lines, &pre)
+    } else if leading_ctx == 0 && trailing_ctx > 0 {
+        head_lines.starts_with(&pre)
+    } else if leading_ctx > 0 && trailing_ctx == 0 {
+        head_lines.ends_with(&pre)
+    } else {
+        head_lines.is_empty()
+    }
 }
 
 /// Open blocking finding IDs for `state` at `current_head`, combining

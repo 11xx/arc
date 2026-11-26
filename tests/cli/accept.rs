@@ -2192,3 +2192,82 @@ fn accept_succeeds_for_unrelated_change_despite_unlanded_rewrite_conflict() {
     let doctor = json_stdout(d.receiver.arc(&d.receiver.root).args(["doctor", "--json"]));
     assert_eq!(doctor["problems"], serde_json::json!([]), "{doctor}");
 }
+
+#[test]
+fn accept_dry_run_refuses_conflicting_rewrite_on_delivery_target_branch() {
+    let mut d = Delivery::new();
+
+    // Create revisions E, F, G postdating the delivery's base and uncited by the delivery.
+    let base = d.receiver.head(&d.receiver.root);
+    let tree = git_out(
+        &d.receiver.root,
+        &["rev-parse", &format!("{base}^{{tree}}")],
+    );
+    let make_commit = |msg: &str| {
+        git_out(
+            &d.receiver.root,
+            &["commit-tree", &tree, "-p", &base, "-m", msg],
+        )
+    };
+    let commit_e = make_commit("target E");
+    let commit_f = make_commit("target F");
+    let commit_g = make_commit("target G");
+
+    // Hold E -> F locally on receiver.
+    d.receiver
+        .arc(&d.receiver.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "local master rewrite",
+        ])
+        .write_stdin(format!("{commit_e} {commit_f}\n"))
+        .assert()
+        .success();
+
+    // Give the delivery bundle a conflicting E -> G rewrite moving refs/heads/master.
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&d.input).unwrap()).unwrap();
+    let source_id = bundle["source_replica_id"].as_str().unwrap().to_string();
+    bundle["repository_events"] = serde_json::json!([{
+        "schema_version": 7,
+        "event_id": "01ZZZACCEPTTARGETCONFLICT0",
+        "repository_id": source_id,
+        "change_id": "repository",
+        "actor": "worker",
+        "created_at": "2026-10-28T18:00:00Z",
+        "event_type": "history-rewritten",
+        "mapping": { commit_e.clone(): commit_g.clone() },
+        "reason": "incoming master rewrite",
+        "tool": "arc rewrite sign",
+        "refs": {
+            "refs/heads/master": {
+                "old": commit_e,
+                "new": commit_g
+            }
+        }
+    }]);
+    let modified = d.source.home.join("delivery-with-target-conflict.json");
+    fs::write(&modified, json_file_bytes(&bundle)).unwrap();
+    d.input = modified;
+
+    let out = d.command().arg("--dry-run").output().unwrap();
+    assert!(
+        !out.status.success(),
+        "accept --dry-run must refuse conflicting target-branch rewrite; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains(&commit_e) && combined.contains("01ZZZACCEPTTARGETCONFLICT0"),
+        "accept --dry-run refusal should surface the target-branch conflict:\n{combined}"
+    );
+}

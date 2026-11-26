@@ -888,3 +888,231 @@ fn rewritten_unsnapshotted_resolution_survives_rebase_and_gc() {
     );
     assert_eq!(status["findings"][0]["status"], "resolved", "{status}");
 }
+
+#[test]
+fn reverted_fix_with_unrelated_edit_partial_rollback_and_merges() {
+    let repo = Repo::new();
+
+    // Case 1: Clean revert + unrelated edit to same file, BEFORE rebase.
+    let begin1 = stdout(repo.arc(&repo.root).args(["begin", "revert-plus-edit"]));
+    let change1 = opened_change_id(&begin1);
+    let wt1 = repo.home.join(".worktrees/repo-revert-plus-edit");
+    repo.commit(&wt1, "a.txt", "broken\n", "feat: broken");
+    stdout(repo.arc(&wt1).args(["snapshot", "revert-plus-edit"]));
+    let fid1 = stdout(repo.arc(&wt1).args([
+        "finding",
+        "revert-plus-edit",
+        "--summary",
+        "fix a.txt",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1, "a.txt", "fixed\n", "fix: repair a.txt");
+    let fix1 = repo.head(&wt1);
+    stdout(repo.arc(&wt1).args([
+        "resolve",
+        "revert-plus-edit",
+        &fid1,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1,
+    ]));
+    git(&wt1, &["revert", "--no-edit", &fix1]);
+    repo.commit(
+        &wt1,
+        "a.txt",
+        "broken\nunrelated\n",
+        "chore: unrelated line after revert",
+    );
+    stdout(repo.arc(&wt1).args(["snapshot", "revert-plus-edit"]));
+    let status1 = json_stdout(repo.arc(&wt1).args(["status", &change1, "--json"]));
+    assert_eq!(
+        status1["open_blocking_findings"],
+        serde_json::json!([fid1]),
+        "revert + unrelated edit before rebase must keep finding open: {status1}"
+    );
+    assert_eq!(status1["findings"][0]["status"], "open", "{status1}");
+    repo.arc(&wt1).args(["check", &change1]).assert().code(2);
+
+    // Case 2: Rebase carries fix -> revert carried fix -> unrelated edit to same file.
+    let begin2 = stdout(repo.arc(&repo.root).args(["begin", "rebase-revert-edit"]));
+    let change2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-rebase-revert-edit");
+    repo.commit(&wt2, "a.txt", "broken\n", "feat: broken");
+    stdout(repo.arc(&wt2).args(["snapshot", "rebase-revert-edit"]));
+    let fid2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "rebase-revert-edit",
+        "--summary",
+        "fix a.txt after rebase",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt2, "a.txt", "fixed\n", "fix: repair a.txt");
+    let fix2 = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "rebase-revert-edit",
+        &fid2,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix2,
+    ]));
+    stdout(repo.arc(&wt2).args(["snapshot", "rebase-revert-edit"]));
+    repo.commit(
+        &repo.root,
+        "target.txt",
+        "advance\n",
+        "feat: advance target",
+    );
+    stdout(repo.arc(&wt2).args(["rebase", "rebase-revert-edit"]));
+    let carried2 = repo.head(&wt2);
+    assert_ne!(carried2, fix2);
+    git(&wt2, &["revert", "--no-edit", &carried2]);
+    repo.commit(
+        &wt2,
+        "a.txt",
+        "broken\nunrelated\n",
+        "chore: unrelated line after rebased revert",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "rebase-revert-edit"]));
+    let status2 = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2["open_blocking_findings"],
+        serde_json::json!([fid2]),
+        "revert + unrelated edit after rebase must keep finding open: {status2}"
+    );
+    assert_eq!(status2["findings"][0]["status"], "open", "{status2}");
+    repo.arc(&wt2).args(["check", &change2]).assert().code(2);
+
+    // Case 3: Multi-file fix where one required file is restored to pre-fix state.
+    let begin3 = stdout(repo.arc(&repo.root).args(["begin", "partial-rollback"]));
+    let change3 = opened_change_id(&begin3);
+    let wt3 = repo.home.join(".worktrees/repo-partial-rollback");
+    fs::write(wt3.join("one.txt"), "bad-one\n").unwrap();
+    fs::write(wt3.join("two.txt"), "bad-two\n").unwrap();
+    git(&wt3, &["add", "one.txt", "two.txt"]);
+    git(&wt3, &["commit", "-m", "feat: two broken files"]);
+    stdout(repo.arc(&wt3).args(["snapshot", "partial-rollback"]));
+    let fid3 = stdout(repo.arc(&wt3).args([
+        "finding",
+        "partial-rollback",
+        "--summary",
+        "fix both files",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    fs::write(wt3.join("one.txt"), "good-one\n").unwrap();
+    fs::write(wt3.join("two.txt"), "good-two\n").unwrap();
+    git(&wt3, &["add", "one.txt", "two.txt"]);
+    git(&wt3, &["commit", "-m", "fix: repair both files"]);
+    let fix3 = repo.head(&wt3);
+    stdout(repo.arc(&wt3).args([
+        "resolve",
+        "partial-rollback",
+        &fid3,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix3,
+    ]));
+    // Restore only one.txt back to its pre-fix state while keeping two.txt fixed.
+    repo.commit(&wt3, "one.txt", "bad-one\n", "chore: restore one.txt");
+    stdout(repo.arc(&wt3).args(["snapshot", "partial-rollback"]));
+    let status3 = json_stdout(repo.arc(&wt3).args(["status", &change3, "--json"]));
+    assert_eq!(
+        status3["open_blocking_findings"],
+        serde_json::json!([fid3]),
+        "partial rollback of one file in a multi-file fix must reopen finding: {status3}"
+    );
+    assert_eq!(status3["findings"][0]["status"], "open", "{status3}");
+    repo.arc(&wt3).args(["check", &change3]).assert().code(2);
+
+    // Case 4: Normal follow-up edits on top of a surviving fix (appending and refactoring)
+    // and a side-branch revert discarded by `git merge -s ours` must NOT reopen the finding.
+    let begin4 = stdout(repo.arc(&repo.root).args(["begin", "surviving-followups"]));
+    let change4 = opened_change_id(&begin4);
+    let wt4 = repo.home.join(".worktrees/repo-surviving-followups");
+    repo.commit(&wt4, "ok.txt", "broken\n", "feat: broken");
+    stdout(repo.arc(&wt4).args(["snapshot", "surviving-followups"]));
+    let fid4 = stdout(repo.arc(&wt4).args([
+        "finding",
+        "surviving-followups",
+        "--summary",
+        "must stay resolved on follow-up edits",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt4, "ok.txt", "fixed\n", "fix: repair ok.txt");
+    let fix4 = repo.head(&wt4);
+    stdout(repo.arc(&wt4).args([
+        "resolve",
+        "surviving-followups",
+        &fid4,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix4,
+    ]));
+    // Create a side branch that reverts fix4, then merge it with `-s ours` (discarding revert).
+    git(&wt4, &["checkout", "-b", "side-revert-discarded"]);
+    git(&wt4, &["revert", "--no-edit", &fix4]);
+    git(&wt4, &["checkout", "arc/surviving-followups"]);
+    git(
+        &wt4,
+        &["merge", "-s", "ours", "--no-edit", "side-revert-discarded"],
+    );
+    git(&wt4, &["branch", "-D", "side-revert-discarded"]);
+    // Follow-up 1: append an unrelated line while keeping the fix.
+    repo.commit(
+        &wt4,
+        "ok.txt",
+        "fixed\nextra-feature\n",
+        "feat: append unrelated line",
+    );
+    stdout(repo.arc(&wt4).args(["snapshot", "surviving-followups"]));
+    let status4a = json_stdout(repo.arc(&wt4).args(["status", &change4, "--json"]));
+    assert_eq!(
+        status4a["open_blocking_findings"],
+        serde_json::json!([]),
+        "discarded side-branch revert + unrelated edit must keep finding resolved: {status4a}"
+    );
+    assert_eq!(status4a["findings"][0]["status"], "resolved", "{status4a}");
+    // Follow-up 2: refactor the fixed line to an improved implementation.
+    repo.commit(
+        &wt4,
+        "ok.txt",
+        "fixed-v2\nextra-feature\n",
+        "refactor: refine fix",
+    );
+    stdout(repo.arc(&wt4).args(["snapshot", "surviving-followups"]));
+    let status4b = json_stdout(repo.arc(&wt4).args(["status", &change4, "--json"]));
+    assert_eq!(
+        status4b["open_blocking_findings"],
+        serde_json::json!([]),
+        "normal refactor on top of surviving fix must keep finding resolved: {status4b}"
+    );
+    assert_eq!(status4b["findings"][0]["status"], "resolved", "{status4b}");
+}

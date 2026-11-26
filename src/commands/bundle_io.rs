@@ -1661,31 +1661,34 @@ fn skip_unrelated_conflicting_rewrites(
         return Ok(None);
     }
 
-    // Gather every change ID, branch, and commit revision relevant to this bundle.
+    // Gather every change ID, branch (including target and staging branches),
+    // and commit revision relevant to this bundle.
     let mut bundle_changes = BTreeSet::from([validated.bundle.change_id.clone()]);
     let mut bundle_branches = BTreeSet::new();
     let mut cited_revisions = BTreeSet::new();
+    let collect_branches = |value: &serde_json::Value, out: &mut BTreeSet<String>| {
+        for key in ["branch", "target_branch", "staging_branch"] {
+            if let Some(branch) = value.get(key).and_then(serde_json::Value::as_str) {
+                let normalized = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+                if !normalized.is_empty() {
+                    out.insert(normalized.to_string());
+                }
+            }
+        }
+    };
     for event in &validated.events {
         crate::bundle::collect_cited_revisions(&event.value, &mut cited_revisions);
-        if let Some(branch) = event
-            .value
-            .get("branch")
-            .and_then(serde_json::Value::as_str)
-        {
-            bundle_branches.insert(branch.to_string());
-        }
+        collect_branches(&event.value, &mut bundle_branches);
     }
+    let held_change_ids: BTreeSet<String> = match store {
+        Some(store) => store.list_change_ids()?.into_iter().collect(),
+        None => BTreeSet::new(),
+    };
     if let Some(store) = store {
-        if store
-            .list_change_ids()?
-            .iter()
-            .any(|id| id == &validated.bundle.change_id)
-        {
+        if held_change_ids.contains(&validated.bundle.change_id) {
             for (_, value) in store.raw_events(&validated.bundle.change_id)? {
                 crate::bundle::collect_cited_revisions(&value, &mut cited_revisions);
-                if let Some(branch) = value.get("branch").and_then(serde_json::Value::as_str) {
-                    bundle_branches.insert(branch.to_string());
-                }
+                collect_branches(&value, &mut bundle_branches);
             }
         }
     }
@@ -1693,8 +1696,14 @@ fn skip_unrelated_conflicting_rewrites(
         bundle_changes.insert(related.change_id.clone());
         for value in &related.events {
             crate::bundle::collect_cited_revisions(value, &mut cited_revisions);
-            if let Some(branch) = value.get("branch").and_then(serde_json::Value::as_str) {
-                bundle_branches.insert(branch.to_string());
+            collect_branches(value, &mut bundle_branches);
+        }
+        if let Some(store) = store {
+            if held_change_ids.contains(&related.change_id) {
+                for (_, value) in store.raw_events(&related.change_id)? {
+                    crate::bundle::collect_cited_revisions(&value, &mut cited_revisions);
+                    collect_branches(&value, &mut bundle_branches);
+                }
             }
         }
     }
@@ -1705,6 +1714,7 @@ fn skip_unrelated_conflicting_rewrites(
             Some("history-rewritten" | "history-rewrite-withdrawn")
         ) {
             crate::bundle::collect_cited_revisions(value, &mut cited_revisions);
+            collect_branches(value, &mut bundle_branches);
         }
     }
 

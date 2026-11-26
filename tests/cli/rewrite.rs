@@ -4214,3 +4214,172 @@ fn import_conflict_reports_unknown_landing_for_absent_incoming_successor() {
         "must not recommend concrete withdraw for known-landed local map:\n{stderr}"
     );
 }
+
+#[test]
+fn import_refuses_conflicting_rewrite_on_delivery_target_branch() {
+    let source = repo_with_gates();
+    let (change, source_wt, _commit_a) = change_with_patchset(&source, "target-conflict");
+    let bundle_path = source.home.join("target-conflict.json");
+    source
+        .arc(&source_wt)
+        .args(["export", &change, "--output", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let receiver = Repo::new();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+
+    // Create revisions E, F, G postdating the delivery's base and uncited by the delivery.
+    let base = receiver.head(&receiver.root);
+    let tree = git_out(&receiver.root, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let make_commit = |msg: &str| {
+        git_out(
+            &receiver.root,
+            &["commit-tree", &tree, "-p", &base, "-m", msg],
+        )
+    };
+    let commit_e = make_commit("target step E");
+    let commit_f = make_commit("target step F");
+    let commit_g = make_commit("target step G");
+
+    // Hold E -> F locally on receiver.
+    receiver
+        .arc(&receiver.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "local master rewrite",
+        ])
+        .write_stdin(format!("{commit_e} {commit_f}\n"))
+        .assert()
+        .success();
+
+    // Give the incoming bundle a conflicting E -> G rewrite that moves refs/heads/master.
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    bundle["repository_events"] = serde_json::json!([{
+        "schema_version": 7,
+        "event_id": "01ZZZTARGETBRANCHCONFLICT0",
+        "repository_id": bundle["repository_id"],
+        "change_id": "repository",
+        "actor": "tester",
+        "created_at": "2026-10-28T18:00:00Z",
+        "event_type": "history-rewritten",
+        "mapping": { commit_e.clone(): commit_g.clone() },
+        "reason": "incoming master rewrite",
+        "tool": "arc rewrite sign",
+        "refs": {
+            "refs/heads/master": {
+                "old": commit_e,
+                "new": commit_g
+            }
+        }
+    }]);
+    let modified = source.home.join("target-conflict-bundle.json");
+    fs::write(&modified, json_file_bytes(&bundle)).unwrap();
+
+    for dry_run in [true, false] {
+        let mut cmd = receiver.arc(&receiver.root);
+        cmd.args(["import", modified.to_str().unwrap()]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            !out.status.success(),
+            "conflicting target-branch rewrite must refuse (dry_run={dry_run}); stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&commit_e) && stderr.contains("01ZZZTARGETBRANCHCONFLICT0"),
+            "refusal must name conflicting target commit and event:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn chained_rewrite_conflict_recognizes_landed_final_successor() {
+    let repo = Repo::new();
+    let base = repo.head(&repo.root);
+    let tree = git_out(&repo.root, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let make_commit =
+        |msg: &str| git_out(&repo.root, &["commit-tree", &tree, "-p", &base, "-m", msg]);
+    let commit_a = make_commit("sibling A");
+    let commit_b = make_commit("sibling B");
+    let commit_c = make_commit("sibling C");
+    let commit_d = make_commit("sibling D");
+
+    // Record A -> B, then B -> C, and fast-forward master to C.
+    let first_out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "history",
+                "rewrite",
+                "--map",
+                "-",
+                "--reason",
+                "first hop A to B",
+            ])
+            .write_stdin(format!("{commit_a} {commit_b}\n")),
+    );
+    let first_event_id = first_out
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "second hop B to C",
+        ])
+        .write_stdin(format!("{commit_b} {commit_c}\n"))
+        .assert()
+        .success();
+    git(&repo.root, &["merge", "--ff-only", &commit_c]);
+
+    // Sanity check: A resolves to landed C.
+    let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", &commit_a]));
+    assert!(resolved.contains(&commit_c), "{resolved}");
+
+    // Attempting to record conflicting A -> D must recognize that A -> B reaches
+    // landed C through B -> C and must NOT advise withdrawing A -> B.
+    let refusal = repo
+        .arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "conflicting A to D",
+        ])
+        .write_stdin(format!("{commit_a} {commit_d}\n"))
+        .output()
+        .unwrap();
+    assert!(!refusal.status.success());
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(
+        stderr.contains("successors landed"),
+        "chained rewrite reaching landed C should report successors landed:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("successors never landed"),
+        "must not claim chained landed rewrite never landed:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&format!("arc history withdraw {first_event_id}")),
+        "must not recommend withdrawing A -> B when B -> C landed on master:\n{stderr}"
+    );
+}

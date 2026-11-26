@@ -353,17 +353,19 @@ fn enrich_summary_change(summary: &mut RewriteEventSummary, revision: &str, stor
     }
 }
 
-/// Whether any successor named by `summary` reached a target branch or an
-/// integrated change closure in this repository.
+/// Whether any successor named by `summary` (directly or through active held
+/// rewrite chains) reached a target branch or an integrated change closure in
+/// this repository.
 ///
-/// Returns `Some(true)` if at least one successor is positively observed as
-/// reachable from a local target branch or recorded integration commit;
-/// `Some(false)` only for a local map (`!incoming`) where target/integration
-/// tips were observed, every non-dropped successor object is present locally,
-/// and every ancestry check succeeded with `false` (or every mapping dropped
-/// its commit); and `None` (unknown) when evidence is missing — including for
-/// any incoming map whose successors are not positively landed here, any
-/// absent/unreadable successor object, or any failed ancestry probe.
+/// Returns `Some(true)` if at least one direct or transitively rewritten
+/// successor is positively observed as reachable from a local target branch or
+/// recorded integration commit; `Some(false)` only for a local map (`!incoming`)
+/// when held repository state and target/integration tips were read cleanly,
+/// every direct and chained successor object is present locally, and every
+/// `gitio::ancestry` probe returned `Ancestry::NotAncestor` (or every mapping
+/// dropped its commit); and `None` (unknown) whenever evidence is incomplete —
+/// including for any incoming map whose successors are not positively landed
+/// here, missing/unreadable objects, store read failures, or `Ancestry::Unanswered`.
 pub fn successors_landed(
     cwd: &Path,
     store: Option<&Store>,
@@ -375,80 +377,138 @@ pub fn successors_landed(
     }
     let mut landed_tips = BTreeSet::new();
     let mut target_branches = BTreeSet::new();
+    let mut any_uncertain = false;
+
+    // Collect every successor reachable from `summary.successors` through active
+    // held rewrite mappings so a chained rewrite `A -> B -> C` with `C` landed
+    // is recognized as reaching landed history.
+    let mut candidates: BTreeSet<String> = summary.successors.iter().cloned().collect();
     if let Some(store) = store {
-        if let Ok(change_ids) = store.list_change_ids() {
-            for change_id in change_ids {
-                let Ok(events) = store.load_events(&change_id) else {
-                    continue;
-                };
-                for event in &events {
-                    match &event.payload {
-                        Payload::ChangeOpened { target_branch, .. } => {
-                            target_branches.insert(target_branch.clone());
-                        }
-                        Payload::ChangeIntegrated {
-                            integrated_commit,
-                            source_head,
-                            ..
-                        }
-                        | Payload::IntegrationAsserted {
-                            integrated_commit,
-                            source_head,
-                            ..
-                        } => {
-                            if !integrated_commit.is_empty() {
-                                landed_tips.insert(integrated_commit.clone());
+        match store.load_repository_events() {
+            Ok(repo_events) => {
+                let refs: Vec<&crate::model::Event> = repo_events.iter().collect();
+                match withdrawn_event_ids(&refs) {
+                    Ok(withdrawn) => {
+                        let mut edges: Vec<(String, String)> = Vec::new();
+                        for event in &repo_events {
+                            if withdrawn.contains(event.event_id.as_str()) {
+                                continue;
                             }
-                            if !source_head.is_empty() {
-                                landed_tips.insert(source_head.clone());
+                            if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
+                                if validate_mapping(mapping).is_err() {
+                                    any_uncertain = true;
+                                    continue;
+                                }
+                                for (old, new) in mapping {
+                                    if let Some(new) = new {
+                                        edges.push((
+                                            canonical_revision(old),
+                                            canonical_revision(new),
+                                        ));
+                                    }
+                                }
                             }
                         }
-                        Payload::ChangeClosed {
-                            outcome: crate::model::Closure::Integrated,
-                            integrated_commit: Some(commit),
-                            ..
-                        } => {
-                            landed_tips.insert(commit.clone());
+                        let mut queue: std::collections::VecDeque<String> =
+                            candidates.iter().cloned().collect();
+                        while let Some(current) = queue.pop_front() {
+                            for (old, new) in &edges {
+                                if names_one_commit(old, &current) && candidates.insert(new.clone())
+                                {
+                                    queue.push_back(new.clone());
+                                }
+                            }
                         }
-                        _ => {}
+                    }
+                    Err(_) => any_uncertain = true,
+                }
+            }
+            Err(_) => any_uncertain = true,
+        }
+
+        match store.list_change_ids() {
+            Ok(change_ids) => {
+                for change_id in change_ids {
+                    let Ok(events) = store.load_events(&change_id) else {
+                        any_uncertain = true;
+                        continue;
+                    };
+                    for event in &events {
+                        match &event.payload {
+                            Payload::ChangeOpened { target_branch, .. } => {
+                                target_branches.insert(target_branch.clone());
+                            }
+                            Payload::ChangeIntegrated {
+                                integrated_commit,
+                                source_head,
+                                ..
+                            }
+                            | Payload::IntegrationAsserted {
+                                integrated_commit,
+                                source_head,
+                                ..
+                            } => {
+                                if !integrated_commit.is_empty() {
+                                    landed_tips.insert(integrated_commit.clone());
+                                }
+                                if !source_head.is_empty() {
+                                    landed_tips.insert(source_head.clone());
+                                }
+                            }
+                            Payload::ChangeClosed {
+                                outcome: crate::model::Closure::Integrated,
+                                integrated_commit: Some(commit),
+                                ..
+                            } => {
+                                landed_tips.insert(commit.clone());
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
+            Err(_) => any_uncertain = true,
         }
+    } else {
+        any_uncertain = true;
     }
+
     for default_branch in ["master", "main"] {
-        if target_branches.is_empty() && crate::gitio::branch_exists(cwd, default_branch) {
+        if crate::gitio::branch_exists(cwd, default_branch) {
             target_branches.insert(default_branch.to_string());
         }
     }
     for branch in &target_branches {
-        if let Ok(tip) = crate::gitio::branch_head(cwd, branch) {
-            landed_tips.insert(tip);
+        match crate::gitio::branch_head(cwd, branch) {
+            Ok(tip) => {
+                landed_tips.insert(tip);
+            }
+            Err(_) if crate::gitio::branch_exists(cwd, branch) => {
+                any_uncertain = true;
+            }
+            Err(_) => {}
         }
     }
     if landed_tips.is_empty() {
         return None;
     }
-    let mut any_uncertain = false;
-    for successor in &summary.successors {
-        match crate::gitio::commit_exists(cwd, successor) {
-            Ok(true) => {}
-            _ => {
-                any_uncertain = true;
-                continue;
-            }
-        }
+    for candidate in &candidates {
         for tip in &landed_tips {
-            match crate::gitio::is_ancestor(cwd, successor, tip) {
-                Ok(true) => return Some(true),
-                Ok(false) => {}
-                Err(_) => any_uncertain = true,
+            if names_one_commit(candidate, tip) {
+                return Some(true);
+            }
+            match crate::gitio::ancestry(cwd, candidate, tip) {
+                Ok(crate::gitio::Ancestry::Ancestor) => return Some(true),
+                Ok(crate::gitio::Ancestry::NotAncestor) => {}
+                Ok(crate::gitio::Ancestry::Unanswered(_)) | Err(_) => {
+                    any_uncertain = true;
+                }
             }
         }
     }
     // Local ref reachability cannot establish that an incoming map never
-    // landed on its source replica; missing objects or failed ancestry probes
-    // also leave landing state unknown.
+    // landed on its source replica; missing objects, unreadable history, or
+    // unanswered ancestry probes also leave landing state unknown.
     if incoming || any_uncertain {
         None
     } else {
