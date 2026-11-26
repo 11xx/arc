@@ -5768,7 +5768,7 @@ fn recorded_anchor_journal(cfg: &config::Config, canonical_cwd: &Path) -> Result
 /// happens to be, which is the one input that can still send the primary and
 /// a linked worktree to different journals. Outside a repository there is no
 /// shared root, so the cwd is the only anchor available.
-fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Result<PathBuf> {
+pub(crate) fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Result<PathBuf> {
     if directory.is_absolute() {
         return Ok(directory);
     }
@@ -6316,13 +6316,34 @@ fn artifact_evidence_count(events: &[JournalEvent], filename: &str) -> usize {
         .count()
 }
 
-/// Find the newest open (unconsumed, hot, settled) feedback artifact in `dir`
-/// matching `key` either by recorded `feedback_key` or by filename topic.
+/// Whether a hot `feedback` artifact is open and eligible for the feedback
+/// queue (`arc feedback --list` and `--key` dedup), matching `arc journal open`
+/// eligibility: unconsumed, unpinned, settled (not a pending transition), and
+/// not relocated.
+fn is_open_feedback_eligible(
+    dir: &Path,
+    events: &[JournalEvent],
+    pinned: &BTreeSet<String>,
+    filename: &str,
+) -> bool {
+    !is_consumed(events, filename)
+        && !pinned.contains(filename)
+        && !pending_transition(dir, events, filename)
+        && relocation(events, filename).is_none()
+}
+
+/// Find the newest open, eligible feedback artifact in `dir` matching `key`.
+///
+/// An explicit `feedback_key` match always wins over a filename-topic fallback
+/// so a newer unkeyed report whose derived topic happens to match `key` never
+/// steals appends from an explicitly keyed report.
 fn find_open_feedback_by_key(
     dir: &Path,
     events: &[JournalEvent],
     key: &str,
 ) -> Result<Option<(String, String)>> {
+    let pinned = pins::pinned_files(events);
+    let mut topic_fallback: Option<(String, String)> = None;
     for name in sorted_artifact_names(dir)? {
         let Some((_, topic, kind)) = parse_artifact_name(&name) else {
             continue;
@@ -6330,23 +6351,24 @@ fn find_open_feedback_by_key(
         if kind != FEEDBACK_KIND {
             continue;
         }
-        if is_consumed(events, &name)
-            || pending_transition(dir, events, &name)
-            || relocation(events, &name).is_some()
-        {
+        if !is_open_feedback_eligible(dir, events, &pinned, &name) {
             continue;
         }
         let recorded_key = artifact_feedback_key(events, &name);
-        if recorded_key.as_deref() == Some(key) || (recorded_key.is_none() && topic == key) {
+        if recorded_key.as_deref() == Some(key) {
             return Ok(Some((name, topic)));
         }
+        if recorded_key.is_none() && topic == key && topic_fallback.is_none() {
+            topic_fallback = Some((name, topic));
+        }
     }
-    Ok(None)
+    Ok(topic_fallback)
 }
 
-/// List open (unconsumed, hot) feedback reports in `dir`, newest first.
+/// List open, eligible feedback reports in `dir`, newest first.
 pub(crate) fn feedback_list(dir: &Path) -> Result<Vec<FeedbackListRow>> {
     let events = read_events(dir)?;
+    let pinned = pins::pinned_files(&events);
     let mut rows = Vec::new();
     for name in sorted_artifact_names(dir)? {
         let Some((ts, topic, kind)) = parse_artifact_name(&name) else {
@@ -6355,10 +6377,7 @@ pub(crate) fn feedback_list(dir: &Path) -> Result<Vec<FeedbackListRow>> {
         if kind != FEEDBACK_KIND {
             continue;
         }
-        if is_consumed(&events, &name)
-            || pending_transition(dir, &events, &name)
-            || relocation(&events, &name).is_some()
-        {
+        if !is_open_feedback_eligible(dir, &events, &pinned, &name) {
             continue;
         }
         let key = artifact_feedback_key(&events, &name).unwrap_or_else(|| topic.clone());
@@ -6378,6 +6397,61 @@ pub(crate) fn feedback_list(dir: &Path) -> Result<Vec<FeedbackListRow>> {
         });
     }
     Ok(rows)
+}
+
+/// Atomically publish one hot artifact body (new or updated) and its journal
+/// event through the recoverable journal transaction under the caller's
+/// transition lock and the journal events lock (`transition` -> `events`).
+///
+/// Acquiring `events.lock` and checking event-log writability before writing
+/// the artifact body prevents lock timeouts or unwritable logs from leaving
+/// unrecorded files or evidence blocks behind, and `exchange/pending.json`
+/// makes an interrupted commit recoverable without duplicating content.
+fn commit_body_and_event(
+    ctx: &Ctx,
+    dir: &Path,
+    filename: &str,
+    existing_body_digest: Option<String>,
+    new_body: String,
+    event: &JournalEvent,
+) -> Result<()> {
+    let _events = lock_journal_events(dir)?;
+    if let Err(error) = ensure_bound(ctx, dir) {
+        eprintln!("warning: could not record this journal's project binding: {error:#}");
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
+    let path = dir.join(filename);
+    if existing_body_digest.is_none() && path.exists() {
+        bail!(
+            "cannot create {} (an artifact with this second's timestamp already exists)",
+            path.display()
+        );
+    }
+    writable_event_log(dir)?;
+    let basis = event_log_bytes(dir)?;
+    check_event_tail(dir, basis.as_bytes())?;
+    let mut events = basis.clone();
+    events.push_str(&serde_json::to_string(event)?);
+    events.push('\n');
+
+    let artifact = crate::journal_exchange::BundledArtifact {
+        file: filename.to_string(),
+        storage: crate::journal_exchange::HOT_STORAGE.to_string(),
+        digest: crate::journal_exchange::body_digest(&new_body),
+        body: new_body,
+        events: Vec::new(),
+    };
+    let pending = ExchangeTransaction {
+        bodies: vec![artifact],
+        body_bases: Some(vec![existing_body_digest]),
+        events,
+        events_basis: Some(basis),
+        receipt: None,
+        promotion: None,
+    };
+    publish_exchange_file(&exchange_pending_path(dir), &serde_json::to_vec(&pending)?)?;
+    finish_exchange_transaction(dir)
 }
 
 /// File a feedback report into `write.dir`, deduplicating across sessions when
@@ -6459,7 +6533,10 @@ pub(crate) fn feedback_file(ctx: &Ctx, write: &FeedbackWrite<'_>) -> Result<Feed
                     .unwrap_or_default()
             );
             let path = write.dir.join(&existing_file);
-            append_block(&path, &heading, &content)?;
+            let existing_body = std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            let existing_digest = crate::journal_exchange::body_digest(&existing_body);
+            let new_body = format!("{existing_body}{}", block_bytes(&heading, &content));
 
             let mut event = JournalEvent::base(ctx, now, &existing_topic, "evidence");
             event.file = Some(existing_file.clone());
@@ -6470,7 +6547,14 @@ pub(crate) fn feedback_file(ctx: &Ctx, write: &FeedbackWrite<'_>) -> Result<Feed
             event.item_key = item_key;
             event.feedback_key = Some(key.to_string());
             event.feedback_route = write.route.map(|r| r.as_str().to_string());
-            append_event(ctx, write.dir, &event)?;
+            commit_body_and_event(
+                ctx,
+                write.dir,
+                &existing_file,
+                Some(existing_digest),
+                new_body,
+                &event,
+            )?;
 
             let route = write
                 .route
@@ -6512,8 +6596,7 @@ pub(crate) fn feedback_file(ctx: &Ctx, write: &FeedbackWrite<'_>) -> Result<Feed
     event.feedback_key = write.key.map(str::to_string);
     event.feedback_route = Some(route.as_str().to_string());
 
-    create_artifact(write.dir, &path, &contents)?;
-    append_event(ctx, write.dir, &event)?;
+    commit_body_and_event(ctx, write.dir, &filename, None, contents, &event)?;
 
     Ok(FeedbackOutcome::Created {
         file: filename,

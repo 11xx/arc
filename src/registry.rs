@@ -148,12 +148,30 @@ pub(crate) fn journal_directories(cfg: &Config) -> Result<Vec<(String, PathBuf)>
     Ok(dirs)
 }
 
+/// Resolve a configured `[journals.dirs]` destination against its configured
+/// scope anchor, matching normal journal resolution: absolute destinations stay
+/// as given, and relative destinations anchor against the existing absolute
+/// scope's repository root (or the scope itself outside Git). A relative
+/// destination whose scope is non-absolute or absent stays relative so callers
+/// that require an anchored destination can refuse cleanly.
+fn configured_journal_dir(raw_anchor: &str, raw_directory: &str) -> Result<PathBuf> {
+    let directory = crate::config::expand_tilde(raw_directory)?;
+    if directory.is_absolute() {
+        return Ok(directory);
+    }
+    let anchor = crate::config::expand_tilde(raw_anchor)?;
+    if !anchor.is_absolute() || !anchor.is_dir() {
+        return Ok(directory);
+    }
+    crate::journal::anchor_journal_destination(&anchor, directory)
+}
+
 /// Every hot journal directory arc knows about, with its slug, sorted: those
 /// under the default root and those `[journals] dirs` routes elsewhere.
 pub(crate) fn known_journals(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
     let mut dirs = journal_directories(cfg)?;
-    for directory in cfg.journal_dirs.values() {
-        let path = crate::config::expand_tilde(directory)?;
+    for (raw_anchor, raw_directory) in &cfg.journal_dirs {
+        let path = configured_journal_dir(raw_anchor, raw_directory)?;
         if dirs.iter().any(|(_, known)| known == &path) {
             continue;
         }
@@ -196,7 +214,12 @@ pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
     let mut projects = Vec::new();
     for (slug, journal_dir) in known_journals(cfg)? {
         let configured = configured_anchor(cfg, &journal_dir)?;
-        let (anchor, anchor_source) = match crate::journal::recorded_anchor(&journal_dir)? {
+        let recorded = if journal_dir.is_absolute() {
+            crate::journal::recorded_anchor(&journal_dir)?
+        } else {
+            None
+        };
+        let (anchor, anchor_source) = match recorded {
             Some(recorded) => (Some(PathBuf::from(recorded)), AnchorSource::Binding),
             None => match configured {
                 Some(path) => (Some(path), AnchorSource::Configured),
@@ -207,7 +230,11 @@ pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
             },
         };
         let reachable = anchor.as_deref().is_some_and(Path::is_dir);
-        let retired = crate::journal::registration_retirement(&journal_dir)?;
+        let retired = if journal_dir.is_absolute() {
+            crate::journal::registration_retirement(&journal_dir)?
+        } else {
+            None
+        };
         projects.push(Project {
             slug,
             journal_dir,
@@ -236,7 +263,7 @@ fn is_cold_archive(name: &str, siblings: &[String]) -> bool {
 fn configured_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>> {
     let mut best: Option<(usize, PathBuf)> = None;
     for (anchor, directory) in &cfg.journal_dirs {
-        if crate::config::expand_tilde(directory)? != journal_dir {
+        if configured_journal_dir(anchor, directory)? != journal_dir {
             continue;
         }
         let path = crate::config::expand_tilde(anchor)?;

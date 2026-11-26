@@ -560,3 +560,468 @@ fn feedback_routes_list_journal_open_tier_and_triage_workflow() {
         .assert()
         .success();
 }
+
+#[test]
+fn feedback_anchors_relative_configured_journal_dirs_and_refuses_unanchorable_ones() {
+    let repo = Repo::new();
+    let rel_tool = repo.home.join("projects").join("rel-tool");
+    fs::create_dir_all(&rel_tool).unwrap();
+    git(&rel_tool, &["init", "-b", "master"]);
+    git(&rel_tool, &["config", "user.name", "Fixture"]);
+    git(
+        &rel_tool,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(rel_tool.join("README.md"), "# rel-tool\n").unwrap();
+    git(&rel_tool, &["add", "."]);
+    git(&rel_tool, &["commit", "-m", "initial"]);
+
+    let missing_tool = repo.home.join("projects").join("missing-tool");
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&rel_tool.display().to_string()).unwrap(),
+        serde_json::to_string(&missing_tool.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // A normal journal write inside `rel-tool` anchors the relative destination to `<rel-tool>/relative-journal`.
+    repo.arc(&rel_tool)
+        .args(["journal", "log", "bootstrap", "init relative journal"])
+        .assert()
+        .success();
+    let expected_journal = rel_tool.canonicalize().unwrap().join("relative-journal");
+    assert!(expected_journal.is_dir());
+
+    let scratch = repo.home.join("caller-outside-git");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "rel-tool",
+                "--key",
+                "rel-path-bug",
+                "--title",
+                "Relative path check",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Must land inside rel-tool/relative-journal.\n"),
+    );
+    let filed_path = PathBuf::from(created["path"].as_str().unwrap());
+    assert_eq!(filed_path.parent().unwrap(), expected_journal.as_path());
+    assert!(filed_path.is_file());
+    assert!(
+        !scratch.join("relative-journal").exists(),
+        "feedback must never write into caller's cwd"
+    );
+
+    let open = json_stdout(repo.arc(&rel_tool).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "rel-path-bug");
+
+    // A relative destination whose configured project root does not exist must be refused cleanly.
+    for args in [
+        vec!["feedback", "missing-tool", "--list"],
+        vec![
+            "feedback",
+            "missing-tool",
+            "--key",
+            "nope",
+            "--title",
+            "Unanchored",
+            "--body-file",
+            "-",
+        ],
+    ] {
+        let mut cmd = repo.arc(&scratch);
+        cmd.args(&args);
+        if args.contains(&"--body-file") {
+            cmd.write_stdin("should fail\n");
+        }
+        let stderr =
+            String::from_utf8_lossy(&cmd.assert().failure().get_output().stderr).to_string();
+        assert!(
+            stderr.contains("relative journal path"),
+            "expected refusal naming relative journal path: {stderr}"
+        );
+    }
+    assert!(!scratch.join("relative-journal").exists());
+}
+
+#[test]
+fn feedback_atomic_commit_avoids_unrecorded_evidence_and_duplicates_on_retry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let target = init_registered_repo(&repo, "atomic-tool");
+    let scratch = repo.home.join("outside-atomic");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "--actor",
+                "agent-one",
+                "--harness",
+                "claude",
+                "--session",
+                "sess-1",
+                "feedback",
+                "atomic-tool",
+                "--key",
+                "flaky-lock",
+                "--title",
+                "Flaky lock",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Initial report.\n"),
+    );
+    let file = created["file"].as_str().unwrap().to_string();
+    let file_path = PathBuf::from(created["path"].as_str().unwrap());
+    let target_journal = file_path.parent().unwrap().to_path_buf();
+    let events_path = target_journal.join("events.jsonl");
+
+    // 1. Hold events.lock while spawning an append: the body must remain untouched while waiting
+    // on events.lock, then commit atomically once the lock is released.
+    let before_lock_body = fs::read_to_string(&file_path).unwrap();
+    let lock_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target_journal.join(".locks/events.lock"))
+        .unwrap();
+    lock_file.lock().unwrap();
+
+    let mut child = repo.spawn_arc_piped(
+        &scratch,
+        &[
+            "--actor",
+            "agent-two",
+            "--harness",
+            "codex",
+            "--session",
+            "sess-2",
+            "feedback",
+            "atomic-tool",
+            "--key",
+            "flaky-lock",
+            "--source",
+            "harness=codex session=sess-2 ts=2026-11-26T12:00:00Z",
+            "--item-key",
+            "lock-obs-1",
+            "--body-file",
+            "-",
+        ],
+    );
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Observed while events lock was held.\n")
+            .unwrap();
+    }
+    thread::sleep(Duration::from_millis(400));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "append must wait for events.lock before committing"
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        before_lock_body,
+        "body must not be written before events.lock is acquired"
+    );
+    lock_file.unlock().unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "append should succeed after unlock");
+    assert_eq!(
+        fs::read_to_string(&file_path)
+            .unwrap()
+            .matches("Observed while events lock was held.")
+            .count(),
+        1
+    );
+
+    // 2. Make events.jsonl read-only so both append and create fail cleanly without touching bodies.
+    let before_ro_body = fs::read_to_string(&file_path).unwrap();
+    fs::set_permissions(&events_path, fs::Permissions::from_mode(0o444)).unwrap();
+
+    repo.arc(&scratch)
+        .args([
+            "--actor",
+            "agent-three",
+            "--harness",
+            "codex",
+            "--session",
+            "sess-3",
+            "feedback",
+            "atomic-tool",
+            "--key",
+            "flaky-lock",
+            "--source",
+            "harness=codex session=sess-3 ts=2026-11-26T12:05:00Z",
+            "--item-key",
+            "ro-obs-1",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must not be left unrecorded on failure.\n")
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        before_ro_body,
+        "failed append must leave the artifact body unchanged"
+    );
+
+    repo.arc(&scratch)
+        .args([
+            "--actor",
+            "agent-three",
+            "--harness",
+            "codex",
+            "--session",
+            "sess-3",
+            "feedback",
+            "atomic-tool",
+            "--key",
+            "never-created",
+            "--title",
+            "Should not exist",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must not leave an unrecorded file.\n")
+        .assert()
+        .failure();
+    let stray: Vec<_> = fs::read_dir(&target_journal)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains("never-created"))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "failed create left unrecorded file: {stray:?}"
+    );
+
+    // Restore permissions and retry the same source item: must land exactly once with clean doctor.
+    fs::set_permissions(&events_path, fs::Permissions::from_mode(0o644)).unwrap();
+    repo.arc(&scratch)
+        .args([
+            "--actor",
+            "agent-three",
+            "--harness",
+            "codex",
+            "--session",
+            "sess-3",
+            "feedback",
+            "atomic-tool",
+            "--key",
+            "flaky-lock",
+            "--source",
+            "harness=codex session=sess-3 ts=2026-11-26T12:05:00Z",
+            "--item-key",
+            "ro-obs-1",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must not be left unrecorded on failure.\n")
+        .assert()
+        .success();
+
+    let final_body = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(
+        final_body
+            .matches("Must not be left unrecorded on failure.")
+            .count(),
+        1,
+        "retry must not duplicate evidence:\n{final_body}"
+    );
+    let listed =
+        json_stdout(
+            repo.arc(&scratch)
+                .args(["feedback", "atomic-tool", "--list", "--json"]),
+        );
+    assert_eq!(listed["items"][0]["file"], file);
+    assert_eq!(listed["items"][0]["evidence_count"], 2);
+
+    repo.arc(&target)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn feedback_explicit_key_takes_precedence_over_newer_unkeyed_matching_topic() {
+    let repo = Repo::new();
+    let _target = init_registered_repo(&repo, "key-precedence");
+    let scratch = repo.home.join("outside-precedence");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // 1. Explicitly keyed report with `--route upstream`.
+    let keyed = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "key-precedence",
+                "--key",
+                "finding",
+                "--route",
+                "upstream",
+                "--title",
+                "Original keyed finding",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Explicitly keyed observation.\n"),
+    );
+    let keyed_file = keyed["file"].as_str().unwrap().to_string();
+
+    // Ensure the unkeyed report has a strictly newer timestamp filename.
+    thread::sleep(Duration::from_millis(1_100));
+
+    // 2. Unrelated unkeyed report whose derived topic is also `finding`, with `--route delegate`.
+    let unkeyed = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "key-precedence",
+                "--title",
+                "Finding",
+                "--route",
+                "delegate",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Unrelated unkeyed report.\n"),
+    );
+    let unkeyed_file = unkeyed["file"].as_str().unwrap().to_string();
+    assert_ne!(keyed_file, unkeyed_file);
+    assert!(
+        unkeyed_file > keyed_file,
+        "expected newer filename: {unkeyed_file} > {keyed_file}"
+    );
+
+    // 3. Subsequent `--key finding` must append to the explicitly keyed report and preserve `upstream`.
+    let appended = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "key-precedence",
+                "--key",
+                "finding",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Second observation for keyed finding.\n"),
+    );
+    assert_eq!(appended["action"], "appended");
+    assert_eq!(appended["file"], keyed_file);
+    assert_eq!(appended["route"], "upstream");
+
+    let listed =
+        json_stdout(
+            repo.arc(&scratch)
+                .args(["feedback", "key-precedence", "--list", "--json"]),
+        );
+    let items = listed["items"].as_array().unwrap();
+    let keyed_row = items.iter().find(|r| r["file"] == keyed_file).unwrap();
+    let unkeyed_row = items.iter().find(|r| r["file"] == unkeyed_file).unwrap();
+    assert_eq!(keyed_row["evidence_count"], 1);
+    assert_eq!(keyed_row["route"], "upstream");
+    assert_eq!(unkeyed_row["evidence_count"], 0);
+    assert_eq!(unkeyed_row["route"], "delegate");
+}
+
+#[test]
+fn feedback_pinned_reports_leave_list_and_do_not_capture_keyed_appends() {
+    let repo = Repo::new();
+    let target = init_registered_repo(&repo, "pin-tool");
+    let scratch = repo.home.join("outside-pin");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let first = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "pin-tool",
+                "--key",
+                "standing-issue",
+                "--title",
+                "Standing reference report",
+                "--route",
+                "operator",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Pinned reference observation.\n"),
+    );
+    let first_file = first["file"].as_str().unwrap().to_string();
+    let first_path = PathBuf::from(first["path"].as_str().unwrap());
+
+    // Pin the feedback report: it must leave both `journal open` and `feedback --list`.
+    repo.arc(&target)
+        .args([
+            "journal",
+            "pin",
+            &first_file,
+            "--reason",
+            "standing reference",
+        ])
+        .assert()
+        .success();
+
+    let open = json_stdout(repo.arc(&target).args(["journal", "open", "--json"]));
+    assert!(open["feedback"].as_array().unwrap().is_empty(), "{open}");
+    let listed = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "pin-tool", "--list", "--json"]),
+    );
+    assert!(listed["items"].as_array().unwrap().is_empty(), "{listed}");
+
+    // Filing under the same `--key` must create a fresh report rather than appending to the pinned one.
+    let before_pin_body = fs::read_to_string(&first_path).unwrap();
+    let second = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "pin-tool",
+                "--key",
+                "standing-issue",
+                "--title",
+                "Fresh report after pin",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("New friction occurrence.\n"),
+    );
+    assert_eq!(second["action"], "created");
+    assert_ne!(second["file"].as_str().unwrap(), first_file);
+    assert_eq!(
+        fs::read_to_string(&first_path).unwrap(),
+        before_pin_body,
+        "pinned feedback report must not receive new keyed appends"
+    );
+
+    let listed_after = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "pin-tool", "--list", "--json"]),
+    );
+    let items = listed_after["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["file"], second["file"]);
+}

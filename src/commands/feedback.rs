@@ -153,6 +153,12 @@ fn resolve_project(name: &str) -> Result<Project> {
 pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
     let project = resolve_project(&args.project)?;
     let label = project.label();
+    if !project.journal_dir.is_absolute() {
+        bail!(
+            "project {label:?} resolves to relative journal path {} which cannot be anchored without an existing absolute project root",
+            project.journal_dir.display()
+        );
+    }
     if args.list {
         let items = feedback_list(&project.journal_dir)?;
         if args.json {
