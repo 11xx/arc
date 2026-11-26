@@ -576,4 +576,71 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     let (mut command, _) = shell(&existing, "true", &["target"]);
     assert!(command.status().unwrap().success());
     assert!(!existing.join("target/CACHEDIR.TAG").exists());
+
+    // Workspace member `member/target` is not Cargo's workspace target root and stays unmarked.
+    let scratch_ws = scratch();
+    let ws = scratch_ws.path().join("workspace");
+    fs::create_dir_all(ws.join("member")).unwrap();
+    init_git(&ws);
+    fs::write(ws.join(".gitignore"), "target/\n").unwrap();
+    fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"member\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        ws.join("member/Cargo.toml"),
+        "[package]\nname='member'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&ws, "true", &["member/target"]);
+    assert!(command.status().unwrap().success());
+    assert!(ws.join("member/target").is_dir());
+    assert!(!ws.join("member/target/CACHEDIR.TAG").exists());
+
+    // Literal pathspec-magic directory names work without aborting Git ignore checks.
+    let scratch_magic = scratch();
+    let magic = scratch_magic.path().join("magic");
+    fs::create_dir(&magic).unwrap();
+    init_git(&magic);
+    fs::write(magic.join(".gitignore"), ":(glob)/\n").unwrap();
+    assert!(is_git_ignored(&magic, Path::new(":(glob)/target/CACHEDIR.TAG")).unwrap());
+    let (mut command, _) = shell(&magic, "true", &[":(glob)/sub"]);
+    assert!(command.status().unwrap().success());
+    assert!(magic.join(":(glob)/sub").is_dir());
+
+    // Marker creation is bound to the opened directory handle even if the path is replaced.
+    let scratch_pin = scratch();
+    let pinned_dir = scratch_pin.path().join("orig");
+    let swapped_dir = scratch_pin.path().join("swapped");
+    fs::create_dir(&pinned_dir).unwrap();
+    fs::create_dir(&swapped_dir).unwrap();
+    let fd = open_dir_path(&pinned_dir).unwrap();
+    let moved_orig = scratch_pin.path().join("moved-orig");
+    fs::rename(&pinned_dir, &moved_orig).unwrap();
+    std::os::unix::fs::symlink(&swapped_dir, &pinned_dir).unwrap();
+    write_cachedir_tag_in_dir(&fd, &pinned_dir).unwrap();
+    assert!(moved_orig.join("CACHEDIR.TAG").is_file());
+    assert!(!swapped_dir.join("CACHEDIR.TAG").exists());
+
+    // Symlink in the created root chain is rejected without writing through it.
+    let scratch_sym = scratch();
+    let sym_checkout = scratch_sym.path().join("checkout");
+    let outside = scratch_sym.path().join("outside");
+    fs::create_dir(&sym_checkout).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(
+        sym_checkout.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, sym_checkout.join("target")).unwrap();
+    let err = create_checkout_root(&sym_checkout, &sym_checkout.join("target/nested"), false)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not a real directory"),
+        "unexpected error: {err:#}"
+    );
+    assert!(!outside.join("CACHEDIR.TAG").exists());
+    assert!(!outside.join("nested").exists());
 }

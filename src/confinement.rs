@@ -5,10 +5,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -292,18 +293,15 @@ fn apply_with_abi_and_storage(
             false,
         )?;
         if !resolved.exists() {
-            if !resolved.starts_with(&checkout)
-                && !owned.iter().any(|root| resolved.starts_with(root))
-            {
+            if resolved.starts_with(&checkout) {
+                create_checkout_root(&checkout, &resolved, common.is_some())?;
+            } else if owned.iter().any(|root| resolved.starts_with(root)) {
+                fs::create_dir_all(&resolved)?;
+            } else {
                 bail!(
                     "confinement writable root {} does not exist; external roots must exist",
                     resolved.display()
                 );
-            }
-            let cargo_targets = absent_cargo_targets(&checkout, &resolved);
-            fs::create_dir_all(&resolved)?;
-            for target in cargo_targets {
-                mark_cargo_target(&checkout, &target, common.is_some())?;
             }
         }
         roots.push(fs::canonicalize(resolved)?);
@@ -580,71 +578,155 @@ fn resolve_missing(path: &Path) -> Result<PathBuf> {
     Ok(resolve_missing(parent)?.join(name))
 }
 
-fn absent_cargo_targets(checkout: &Path, resolved: &Path) -> Vec<PathBuf> {
-    if !resolved.starts_with(checkout) {
-        return Vec::new();
-    }
-    let mut targets = Vec::new();
-    let mut current = Some(resolved);
-    while let Some(dir) = current {
-        if dir == checkout || !dir.starts_with(checkout) {
-            break;
-        }
-        match fs::symlink_metadata(dir) {
-            Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if dir.file_name() == Some(OsStr::new("target"))
-                    && dir
-                        .parent()
-                        .is_some_and(|parent| parent.join("Cargo.toml").is_file())
-                {
-                    targets.push(dir.to_path_buf());
+fn create_checkout_root(checkout: &Path, resolved: &Path, in_git: bool) -> Result<()> {
+    let relative = resolved.strip_prefix(checkout).with_context(|| {
+        format!(
+            "{} is outside checkout {}",
+            resolved.display(),
+            checkout.display()
+        )
+    })?;
+    let checkout_fd = open_dir_path(checkout)?;
+    let first_is_root_target = matches!(
+        relative.components().next(),
+        Some(std::path::Component::Normal(name)) if name == OsStr::new("target")
+    );
+    // Only the checkout root's `target` directory is Cargo's default build root
+    // for a package or workspace; member subdirectories keep their own data
+    // untagged so artifact cleanup never misclassifies them.
+    let should_mark_target = first_is_root_target
+        && is_regular_file_at(&checkout_fd, c"Cargo.toml")?
+        && (!in_git || is_git_ignored(checkout, Path::new("target/CACHEDIR.TAG"))?);
+
+    let mut current = checkout_fd;
+    let mut current_path = checkout.to_path_buf();
+    for (depth, component) in relative.components().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            bail!(
+                "invalid component in confinement writable root {}",
+                resolved.display()
+            );
+        };
+        let c_name = CString::new(name.as_bytes()).with_context(|| {
+            format!(
+                "invalid NUL byte in confinement writable root {}",
+                resolved.display()
+            )
+        })?;
+        current_path.push(name);
+        // SAFETY: `current` is an open directory fd and `c_name` is a valid NUL-terminated path component.
+        let created = match unsafe { libc::mkdirat(current.as_raw_fd(), c_name.as_ptr(), 0o777) } {
+            0 => true,
+            _ => {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    false
+                } else {
+                    return Err(error)
+                        .with_context(|| format!("cannot create {}", current_path.display()));
                 }
             }
-            Err(_) => break,
+        };
+        let child = open_dir_at(&current, &c_name, &current_path)?;
+        if depth == 0 && created && should_mark_target {
+            write_cachedir_tag_in_dir(&child, &current_path)?;
         }
-        current = dir.parent();
-    }
-    targets
-}
-
-fn mark_cargo_target(checkout: &Path, target: &Path, in_git: bool) -> Result<()> {
-    if !fs::symlink_metadata(target)?.file_type().is_dir() || fs::canonicalize(target)? != target {
-        bail!(
-            "confinement writable root {} changed identity while creating",
-            target.display()
-        );
-    }
-    let tag = target.join("CACHEDIR.TAG");
-    if in_git && !is_git_ignored(checkout, &tag)? {
-        return Ok(());
-    }
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&tag)
-    {
-        Ok(mut file) => {
-            file.write_all(CARGO_CACHEDIR_TAG)
-                .with_context(|| format!("cannot write {}", tag.display()))?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot create {}", tag.display()));
-        }
+        current = child;
     }
     Ok(())
 }
 
-fn is_git_ignored(checkout: &Path, path: &Path) -> Result<bool> {
-    let Ok(relative) = path.strip_prefix(checkout) else {
-        return Ok(false);
+fn open_dir_path(path: &Path) -> Result<OwnedFd> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("invalid path {}", path.display()))?;
+    // SAFETY: `c_path` is a valid NUL-terminated path; the returned fd is checked for `< 0`.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
     };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot open directory {}", path.display()));
+    }
+    // SAFETY: `fd` is a freshly opened valid descriptor owned by this function.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn open_dir_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<OwnedFd> {
+    // SAFETY: `parent` is an open directory fd and `name` is a valid NUL-terminated entry name.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "confinement writable root {} is not a real directory",
+                display.display()
+            )
+        });
+    }
+    // SAFETY: `fd` is a freshly opened valid descriptor owned by this function.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn is_regular_file_at(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<bool> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `parent` is an open directory fd, `name` is NUL-terminated, and `stat` is valid for writes.
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+        return Err(error).context("cannot inspect Cargo manifest in checkout");
+    }
+    // SAFETY: `fstatat` succeeded and initialized `stat`.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFREG)
+}
+
+fn write_cachedir_tag_in_dir(dir: &OwnedFd, dir_path: &Path) -> Result<()> {
+    // SAFETY: `dir` is a pinned directory fd and `"CACHEDIR.TAG"` is a static C string.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c"CACHEDIR.TAG".as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Ok(());
+        }
+        return Err(error)
+            .with_context(|| format!("cannot create {}/CACHEDIR.TAG", dir_path.display()));
+    }
+    // SAFETY: `fd` is a freshly opened valid descriptor owned by this File.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(CARGO_CACHEDIR_TAG)
+        .with_context(|| format!("cannot write {}/CACHEDIR.TAG", dir_path.display()))
+}
+
+fn is_git_ignored(checkout: &Path, relative: &Path) -> Result<bool> {
+    let literal = Path::new(".").join(relative);
     let output = crate::gitio::git_command()
         .args(["check-ignore", "-q", "--"])
-        .arg(relative)
+        .arg(&literal)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .current_dir(checkout)
         .counted_output()?;
