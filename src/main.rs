@@ -2278,7 +2278,13 @@ enum Cmd {
         /// Run every gate required for the selected event and change profile
         #[arg(long)]
         all: bool,
-        /// Run all declared gates concurrently and append evidence in name order
+        /// Run all declared gates concurrently, each in its own isolated
+        /// detached worktree at HEAD, and append evidence in name order.
+        ///
+        /// Requires a clean change worktree at HEAD and refuses --waive-dirty.
+        /// Each gate's isolated checkout observes cleanliness and post-run
+        /// state independently, so clean passing runs produce green gating
+        /// evidence. Temporary worktrees are removed on exit.
         #[arg(long)]
         parallel: bool,
         /// Run each declared gate even where a pass would be reused.

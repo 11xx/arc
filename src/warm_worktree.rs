@@ -399,6 +399,12 @@ pub fn configure_command(command: &mut Command, path: &Path) -> Result<CommandLe
     configure(command, path, Use::Probe)
 }
 
+/// Configure a gate whose checkout was just prepared, retaining its storage lease
+/// without re-running preparation or contending on the shared cache lease.
+pub fn configure_prepared_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
+    configure(command, path, Use::Probe)
+}
+
 /// What a configured command does with prepared storage.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Use {

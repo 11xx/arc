@@ -95,8 +95,16 @@ fn verify_all_parallel_overlaps_gates_and_appends_evidence_in_name_order() {
     fs::create_dir_all(&markers).unwrap();
     write_two_gates(
         &repo,
-        &rendezvous_gate(&markers, "alpha", "beta"),
-        &rendezvous_gate(&markers, "beta", "alpha"),
+        &format!(
+            "pwd > '{}/alpha.pwd'; {}",
+            markers.display(),
+            rendezvous_gate(&markers, "alpha", "beta")
+        ),
+        &format!(
+            "pwd > '{}/beta.pwd'; {}",
+            markers.display(),
+            rendezvous_gate(&markers, "beta", "alpha")
+        ),
     );
     git(&repo.root, &["add", ".arc/gates.toml"]);
     git(&repo.root, &["commit", "-m", "test: add parallel gates"]);
@@ -104,6 +112,9 @@ fn verify_all_parallel_overlaps_gates_and_appends_evidence_in_name_order() {
         repo.arc(&repo.root)
             .args(["begin", "parallel-gates", "--no-worktree"]),
     );
+    repo.commit(&repo.root, "feature.txt", "ready\n", "feat: parallel ready");
+    stdout(repo.arc(&repo.root).args(["snapshot", "parallel-gates"]));
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
 
     repo.arc(&repo.root)
         .args(["verify", "parallel-gates", "--all", "--parallel"])
@@ -117,6 +128,26 @@ fn verify_all_parallel_overlaps_gates_and_appends_evidence_in_name_order() {
     assert!(
         markers.join("beta-saw-alpha").exists(),
         "beta never saw alpha start"
+    );
+    let alpha_pwd = fs::read_to_string(markers.join("alpha.pwd")).unwrap();
+    let beta_pwd = fs::read_to_string(markers.join("beta.pwd")).unwrap();
+    assert_ne!(
+        alpha_pwd.trim(),
+        beta_pwd.trim(),
+        "parallel gates ran in the same directory"
+    );
+    assert_ne!(
+        Path::new(alpha_pwd.trim()),
+        repo.root.as_path(),
+        "parallel gate ran directly in the change checkout"
+    );
+    assert!(
+        !Path::new(alpha_pwd.trim()).exists() && !Path::new(beta_pwd.trim()).exists(),
+        "temporary parallel worktrees were left behind"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
     );
 
     let events = stdout(repo.arc(&repo.root).args([
@@ -142,7 +173,7 @@ fn verify_all_parallel_overlaps_gates_and_appends_evidence_in_name_order() {
                 .is_some_and(|tree| tree.len() == 40),
             "{event}"
         );
-        assert!(event["worktree_dirty"].is_null(), "{event}");
+        assert_eq!(event["worktree_dirty"], false, "{event}");
         assert!(!event["tree_moved"].as_bool().unwrap_or(false), "{event}");
     }
     let status = json_stdout(
@@ -154,41 +185,70 @@ fn verify_all_parallel_overlaps_gates_and_appends_evidence_in_name_order() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|gate| gate["green_at_head"] == false),
+            .all(|gate| gate["green_at_head"] == true),
         "{status}"
     );
-    // The tree was recorded; what a shared-worktree parallel run cannot
-    // establish is whether it was clean. Saying the tree went unrecorded
-    // would point at the wrong recovery.
-    let resume = stdout(repo.arc(&repo.root).args(["resume", "parallel-gates"]));
-    assert!(
-        resume.contains("not green at head: the worktree's cleanliness was not recorded"),
-        "{resume}"
-    );
-    assert!(
-        !resume.contains("the tested tree was not recorded"),
-        "{resume}"
-    );
-    // Cleaning cannot fix evidence whose cleanliness was never observed; only
-    // a sequential rerun can.
-    stdout(repo.arc(&repo.root).args(["snapshot", "parallel-gates"]));
-    let status = json_stdout(
+    // Clean isolated parallel passes genuinely satisfy GatesNotGreen so review
+    // + check + integrate succeed without a sequential rerun.
+    stdout(
         repo.arc(&repo.root)
-            .args(["status", "parallel-gates", "--json"]),
+            .args(["review", "parallel-gates", "--verdict", "approved"]),
     );
-    assert!(
-        status["next_action"]
-            .as_str()
-            .unwrap()
-            .starts_with("run_gate:"),
-        "{status}"
+    repo.arc(&repo.root)
+        .args(["check", "parallel-gates"])
+        .assert()
+        .success();
+
+    // A second --parallel invocation reuses the already-green passes without
+    // rerunning commands, while --rerun executes them again.
+    let reused =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["verify", "parallel-gates", "--all", "--parallel"]),
+        );
+    assert!(reused.contains("gate alpha: skipped"), "{reused}");
+    assert!(reused.contains("gate beta: skipped"), "{reused}");
+    assert!(reused.contains("gates: 2/2 pass"), "{reused}");
+
+    let rerun = stdout(repo.arc(&repo.root).args([
+        "verify",
+        "parallel-gates",
+        "--all",
+        "--parallel",
+        "--rerun",
+    ]));
+    assert!(!rerun.contains("skipped"), "{rerun}");
+    assert!(rerun.contains("gates: 2/2 pass"), "{rerun}");
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
     );
+    repo.arc(&repo.root)
+        .args(["integrate", "parallel-gates"])
+        .assert()
+        .success();
 }
 
 #[test]
-fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
+fn verify_all_parallel_isolates_mutating_gate_without_contaminating_siblings() {
     let repo = Repo::new();
-    write_two_gates(&repo, "touch parallel-side-effect", "true");
+    let markers = repo.home.join("isolation-markers");
+    fs::create_dir_all(&markers).unwrap();
+    write_two_gates(
+        &repo,
+        &format!(
+            "touch parallel-side-effect; touch '{}/alpha-wrote'; n=0; \
+             until [ -e '{}/beta-checked' ]; do n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done",
+            markers.display(),
+            markers.display(),
+        ),
+        &format!(
+            "n=0; until [ -e '{}/alpha-wrote' ]; do n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done; \
+             test ! -e parallel-side-effect; touch '{}/beta-checked'",
+            markers.display(),
+            markers.display(),
+        ),
+    );
     git(&repo.root, &["add", ".arc/gates.toml"]);
     git(
         &repo.root,
@@ -198,12 +258,21 @@ fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
         repo.arc(&repo.root)
             .args(["begin", "parallel-mutates", "--no-worktree"]),
     );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
 
     repo.arc(&repo.root)
         .args(["verify", "parallel-mutates", "--all", "--parallel"])
         .assert()
         .success()
         .stdout(predicates::str::contains("gates: 2/2 pass"));
+    assert!(
+        !repo.root.join("parallel-side-effect").exists(),
+        "mutating parallel gate polluted the change checkout"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
 
     let events = stdout(repo.arc(&repo.root).args([
         "events",
@@ -217,31 +286,25 @@ fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(values.len(), 2);
-    for event in &values {
-        assert!(
-            event["tested_tree"]
-                .as_str()
-                .is_some_and(|tree| tree.len() == 40),
-            "{event}"
-        );
-        assert!(event["worktree_dirty"].is_null(), "{event}");
-        assert_eq!(event["tree_moved"], true, "{event}");
-    }
+    let alpha = values.iter().find(|e| e["gate"] == "alpha").unwrap();
+    let beta = values.iter().find(|e| e["gate"] == "beta").unwrap();
+    assert_eq!(alpha["worktree_dirty"], false, "{alpha}");
+    assert_eq!(alpha["tree_moved"], true, "{alpha}");
+    assert_eq!(beta["worktree_dirty"], false, "{beta}");
+    assert!(!beta["tree_moved"].as_bool().unwrap_or(false), "{beta}");
+
     let status = json_stdout(
         repo.arc(&repo.root)
             .args(["status", "parallel-mutates", "--json"]),
     );
-    assert!(
-        status["gates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|gate| gate["green_at_head"] == false),
-        "{status}"
-    );
+    let gates = status["gates"].as_array().unwrap();
+    let alpha_status = gates.iter().find(|g| g["name"] == "alpha").unwrap();
+    let beta_status = gates.iter().find(|g| g["name"] == "beta").unwrap();
+    assert_eq!(alpha_status["green_at_head"], false, "{status}");
+    assert_eq!(beta_status["green_at_head"], true, "{status}");
 
-    // A passing result from a moved tree is not reusable: --skip-green must
-    // rerun the gates that produced the non-reproducible evidence.
+    // A passing result from a moved isolated tree is not reusable, while the
+    // clean unmoved sibling is reused on the next run.
     let rerun = stdout(repo.arc(&repo.root).args([
         "verify",
         "parallel-mutates",
@@ -249,63 +312,111 @@ fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
         "--parallel",
         "--skip-green",
     ]));
-    assert!(!rerun.contains("skipped"), "{rerun}");
-    let events = stdout(repo.arc(&repo.root).args([
+    assert!(!rerun.contains("gate alpha: skipped"), "{rerun}");
+    assert!(rerun.contains("gate beta: skipped"), "{rerun}");
+    let reuses = stdout(repo.arc(&repo.root).args([
         "events",
         "--change",
         "parallel-mutates",
         "--type",
         "verification-reused",
     ]));
-    assert!(events.trim().is_empty(), "{events}");
+    let reused_gates: Vec<_> = reuses
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["gate"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(reused_gates, ["beta"]);
 }
 
 #[test]
-fn verify_all_parallel_stays_not_green_when_a_transient_change_is_restored() {
+fn verify_all_parallel_cleans_up_temporary_worktrees_after_failing_gates_and_reuses_warm_prep() {
     let repo = Repo::new();
+    let markers = repo.home.join("fail-markers");
+    fs::create_dir_all(&markers).unwrap();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        format!(
+            "[prepare]\nmode = \"path-stable\"\ncommand = \"printf prepared >> \\\"$ARC_WORKTREE_BUILD/count\\\" && printf '%s\\\\n' \\\"$ARC_WORKTREE_BUILD\\\" >> \\\"{}/builds\\\"\"\ntimeout = \"10s\"\n",
+            markers.display()
+        ),
+    )
+    .unwrap();
     write_two_gates(
         &repo,
-        "touch parallel-transient; sleep 0.1; rm parallel-transient",
-        "sleep 0.2",
+        &format!(
+            "pwd > '{}/alpha.pwd'; test -f \"$ARC_WORKTREE_BUILD/count\"; exit 1",
+            markers.display()
+        ),
+        &format!(
+            "pwd > '{}/beta.pwd'; test -f \"$ARC_WORKTREE_BUILD/count\"",
+            markers.display()
+        ),
     );
-    git(&repo.root, &["add", ".arc/gates.toml"]);
     git(
         &repo.root,
-        &["commit", "-m", "test: add transient parallel gates"],
+        &["add", ".arc/gates.toml", ".arc/worktrees.toml"],
+    );
+    git(
+        &repo.root,
+        &[
+            "commit",
+            "-m",
+            "test: add failing parallel gates with path-stable prep",
+        ],
     );
     stdout(
         repo.arc(&repo.root)
-            .args(["begin", "parallel-transient", "--no-worktree"]),
+            .args(["begin", "parallel-fails", "--no-worktree"]),
     );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
 
     repo.arc(&repo.root)
-        .args(["verify", "parallel-transient", "--all", "--parallel"])
+        .args(["verify", "parallel-fails", "--all", "--parallel"])
         .assert()
-        .success();
+        .code(1)
+        .stdout(predicates::str::contains("gates: 1/2 pass"));
 
-    let events = stdout(repo.arc(&repo.root).args([
-        "events",
-        "--change",
-        "parallel-transient",
-        "--type",
-        "verification-recorded",
-    ]));
-    for line in events.lines() {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert!(event["worktree_dirty"].is_null(), "{event}");
-        assert!(!event["tree_moved"].as_bool().unwrap_or(false), "{event}");
-    }
-    let status = json_stdout(
-        repo.arc(&repo.root)
-            .args(["status", "parallel-transient", "--json"]),
-    );
+    let alpha_pwd = fs::read_to_string(markers.join("alpha.pwd")).unwrap();
+    let beta_pwd = fs::read_to_string(markers.join("beta.pwd")).unwrap();
     assert!(
-        status["gates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|gate| gate["green_at_head"] == false),
-        "{status}"
+        !Path::new(alpha_pwd.trim()).exists() && !Path::new(beta_pwd.trim()).exists(),
+        "temporary parallel worktrees remained after failing gate"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+
+    // A second --parallel run reuses the same per-gate path-stable build
+    // directory for the gate that reruns.
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-fails", "--all", "--parallel"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("gate beta: skipped"));
+    let builds: Vec<String> = fs::read_to_string(markers.join("builds"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        builds.len(),
+        3,
+        "expected 2 initial preps + 1 rerun prep: {builds:?}"
+    );
+    assert_eq!(
+        builds[0], builds[2],
+        "path-stable build storage was not reused: {builds:?}"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
     );
 }
 
@@ -1906,12 +2017,12 @@ fn a_dirty_tree_waiver_lets_evidence_count_and_dies_at_the_next_commit() {
     assert!(status["dirty_tree_waiver"].is_null(), "{status}");
 }
 
-/// A waiver excuses dirt somebody observed. A parallel batch records
-/// cleanliness as unknown on purpose — a shared batch cannot tell whether one
-/// gate changed and restored a file while another was still running — and a
-/// waiver that covered that would vouch for a tree nobody saw.
+/// Parallel verification requires a clean change worktree and refuses
+/// `--waive-dirty`; a dirty worktree (tracked or untracked) is refused cleanly
+/// without recording a run or creating temporary worktrees, and a standing
+/// dirty-tree waiver never greens evidence whose cleanliness is unknown.
 #[test]
-fn a_waiver_cannot_green_evidence_whose_cleanliness_is_unknown() {
+fn parallel_refuses_dirty_worktree_and_waiver_cannot_green_unknown_cleanliness() {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
@@ -1921,13 +2032,18 @@ fn a_waiver_cannot_green_evidence_whose_cleanliness_is_unknown() {
     .unwrap();
     git(&repo.root, &["add", ".arc/gates.toml"]);
     git(&repo.root, &["commit", "-m", "test: add gate"]);
-    stdout(repo.arc(&repo.root).args(["begin", "unknown-prov"]));
+    let begin = stdout(repo.arc(&repo.root).args(["begin", "unknown-prov"]));
+    let change_id = begin
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_string();
     let wt = repo.home.join(".worktrees/repo-unknown-prov");
     repo.commit(&wt, "work.rs", "done\n", "feat: work");
     fs::write(wt.join("scratch.rs"), "not committed\n").unwrap();
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
 
-    // Asking for both is refused rather than silently recording a waiver that
-    // could never make anything green.
+    // Asking for --waive-dirty with --parallel is refused cleanly.
     repo.arc(&wt)
         .args([
             "verify",
@@ -1943,8 +2059,30 @@ fn a_waiver_cannot_green_evidence_whose_cleanliness_is_unknown() {
             "--waive-dirty cannot be combined with --parallel",
         ));
 
-    // And a waiver already standing at this revision does not rescue evidence
-    // the parallel path recorded with unknown provenance.
+    // Running --parallel on a dirty worktree (untracked file) is refused cleanly
+    // before creating temporary worktrees or recording a verification run.
+    repo.arc(&wt)
+        .args(["verify", "unknown-prov", "--all", "--parallel"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--parallel requires a clean worktree at HEAD",
+        ));
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+    let runs = stdout(repo.arc(&wt).args([
+        "events",
+        "--change",
+        "unknown-prov",
+        "--type",
+        "verification-run-started",
+    ]));
+    assert!(runs.trim().is_empty(), "{runs}");
+
+    // Even with a standing dirty-tree waiver at HEAD, --parallel still refuses
+    // a dirty worktree (tracked or untracked).
     repo.arc(&wt)
         .args([
             "verify",
@@ -1959,11 +2097,34 @@ fn a_waiver_cannot_green_evidence_whose_cleanliness_is_unknown() {
     repo.arc(&wt)
         .args(["verify", "unknown-prov", "--all", "--parallel", "--rerun"])
         .assert()
-        .success();
+        .failure()
+        .stderr(predicates::str::contains(
+            "--parallel requires a clean worktree at HEAD",
+        ));
+    fs::remove_file(wt.join("scratch.rs")).unwrap();
+    fs::write(wt.join("work.rs"), "modified\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "unknown-prov", "--all", "--parallel", "--rerun"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--parallel requires a clean worktree at HEAD",
+        ));
+
+    // And a standing waiver never greens legacy evidence whose recorded
+    // cleanliness is unknown (`worktree_dirty: null`).
+    rewrite_event(&repo, &change_id, "verification-recorded", |value| {
+        value["worktree_dirty"] = serde_json::Value::Null;
+    });
     let status = json_stdout(repo.arc(&wt).args(["status", "unknown-prov", "--json"]));
     let gate = &status["gates"][0];
     assert!(gate["worktree_dirty"].is_null(), "{status}");
     assert_eq!(gate["green_at_head"], false, "{status}");
+    let resume = stdout(repo.arc(&wt).args(["resume", "unknown-prov"]));
+    assert!(
+        resume.contains("not green at head: the worktree's cleanliness was not recorded"),
+        "{resume}"
+    );
 }
 
 /// One bool could not say which kind of dirt wedged the gate, so the premise

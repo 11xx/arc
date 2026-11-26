@@ -347,13 +347,9 @@ impl GateStatus {
                     "evidence recorded on a dirty worktree, so no checkout of this revision \
                      reproduces it"
                 }
-                // Parallel gates share one worktree, so no boundary comparison can
-                // prove that a gate did not change a tracked file and restore it.
-                // The tree was recorded; what is missing is whether it was clean.
-                _ if self.tested_tree.is_some() => {
-                    "the worktree's cleanliness was not recorded, which is what a shared-worktree \
-                     parallel run can never establish"
-                }
+                // Local evidence with a retained tree but no recorded
+                // cleanliness cannot establish whether the tree was clean.
+                _ if self.tested_tree.is_some() => "the worktree's cleanliness was not recorded",
                 _ => "the tested tree was not recorded, so the evidence has no provenance",
             }
             .into(),

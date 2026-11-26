@@ -5859,8 +5859,7 @@ GATES
   A command outcome remains pass in the ledger even when its run_ms exceeds
   the budget in force. Clock equality passes. An overrun passes only under
   the busy-host rule of `arc guide gate-costs` or a budget suspension, below. Ordinary
-  verify exits 1 for a budget refusal, including parallel preflight whose
-  receipts retain unknown cleanliness. Status, check and show project current
+  verify exits 1 for a budget refusal, including --parallel runs. Status, check and show project current
   budget applicability beside the raw result. Show JSON adds gate_status beside
   raw verifications; status gate rows carry budget.verdict, budget_ms, run_ms,
   excess_ms, sources and any busy-host excuse or suspension. budget_rules.total is milliseconds in JSON.
@@ -6171,8 +6170,8 @@ GATE COSTS
   excuse. Other arc invocations' parallel lanes qualify
   only through the before condition.
 
-  A reference is a clean, unmoved, unexcused direct pass, outside parallel
-  probes, of the same gate and declaration on the same known hostname,
+  A reference is a clean, unmoved, unexcused direct pass, outside --parallel
+  batches and acceptance probes, of the same gate and declaration on the same known hostname,
   logical CPU count and CPU model. Its tree is this run's tree or its revision
   leads to this run's destination. Its clock must fit the budget in force.
   Cached receipts never supply references.
@@ -6528,8 +6527,11 @@ GATES TOGETHER
   the total, execution refuses; --rerun can run the full accepted batch.
   Verification runs name this scheduler as mode declared; individual batch
   receipts identify actual concurrent execution. --rerun disables reuse but
-  never bypasses measurement. --parallel remains
-  the separate unqualified preflight probe with unknown cleanliness.
+  never bypasses measurement. --parallel instead
+  isolates each gate in its own temporary detached worktree at HEAD (requiring
+  a clean change worktree), observing cleanliness per gate so clean passes
+  gate integration without concurrent-batch measurement; temporary worktrees
+  are removed on exit.
 
   A batch pass is green only with a retained tested tree, a worktree observed
   clean before the batch, unchanged worktree and head afterward, and current

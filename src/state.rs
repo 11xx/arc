@@ -1330,13 +1330,10 @@ impl VerificationEntry {
     /// attestation remains eligible.
     ///
     /// A waiver excuses dirt that was *observed*, and only at the revision it
-    /// names. Cleanliness recorded as unknown is not dirt somebody looked at
-    /// and accepted — the parallel path records it that way precisely because
-    /// a shared batch cannot tell whether a gate changed and restored a file
-    /// while another was still running. Letting a waiver cover that would
-    /// vouch for a tree nobody saw. A tree that moved mid-run is never
-    /// excused either: that evidence describes no single tree, so there is
-    /// nothing to vouch for.
+    /// names. Evidence whose cleanliness was never observed (`None`) cannot be
+    /// vouched for by a waiver. A tree that moved mid-run is never excused
+    /// either: that evidence describes no single tree, so there is nothing to
+    /// vouch for.
     pub fn green_at_head(&self, waiver: Option<&DirtyTreeWaiver>) -> bool {
         let dirt_excused = match self.worktree_dirty {
             Some(false) => true,

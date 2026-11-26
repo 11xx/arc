@@ -275,8 +275,9 @@ fn timeout_and_fractional_execution_limit_round_trip_separately() {
     assert_eq!(raw["execution_limit_origin"], "timeout");
 }
 
-/// Claim: parallel preflight exits nonzero for an over-budget raw pass while its
-/// provenance stays unknown. Rejects raw pass counting masking the budget refusal.
+/// Claim: parallel verification exits nonzero for an over-budget raw pass
+/// without conferring green even when its isolated worktree was clean. Rejects
+/// raw pass counting masking the budget refusal.
 #[test]
 fn parallel_preflight_refuses_over_budget_without_conferring_green() {
     let repo = Repo::new();
@@ -288,7 +289,7 @@ fn parallel_preflight_refuses_over_budget_without_conferring_green() {
         .assert()
         .code(1);
     assert_eq!(evidence(&repo, &wt, &id)["result"], "pass");
-    assert!(evidence(&repo, &wt, &id)["worktree_dirty"].is_null());
+    assert_eq!(evidence(&repo, &wt, &id)["worktree_dirty"], false);
     assert_eq!(status(&repo, &wt, &id)["gates"][0]["green_at_head"], false);
 }
 
