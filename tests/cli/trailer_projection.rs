@@ -912,3 +912,219 @@ fn instructions_git_check_reports_single_participant_advisory() {
         .stdout(predicates::str::contains("single-participant: Planned-by"))
         .stdout(predicates::str::contains("placeholder: Reviewed-by"));
 }
+
+/// An open change whose branch was deleted has no live head to match against
+/// `approved_head`, so `arc trailers` must omit `Reviewed-by` and record a
+/// note rather than manufacturing a match from `patchset.head`.
+#[test]
+fn an_open_change_with_a_deleted_branch_omits_reviewed_by() {
+    let repo = Repo::new();
+    let (change, wt) = open(&repo, "deleted-branch-review");
+    commit_file(&wt, "work.txt", "feat: approved work");
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "worker-model#medium",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "reviewer-model#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let (before_lines, _) = trailers(&repo, &change);
+    assert!(
+        before_lines
+            .iter()
+            .any(|line| line == "Reviewed-by: claude:reviewer-model#high"),
+        "{before_lines:?}"
+    );
+
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", wt.to_str().unwrap()],
+    );
+    git(&repo.root, &["branch", "-D", "arc/deleted-branch-review"]);
+
+    let (after_lines, notes) = trailers(&repo, &change);
+    assert!(
+        !after_lines
+            .iter()
+            .any(|line| line.starts_with("Reviewed-by:")),
+        "deleted branch must not project Reviewed-by: {after_lines:?}"
+    );
+    note_with(&notes, &["Reviewed-by omitted", "unreadable"]);
+}
+
+/// `arc rewrite trailers --sync` and `missing-contribution-trailers` apply the
+/// single-participant rule against each commit's resulting trailer block so
+/// solo `Planned-by`/`Orchestrated-by` assertions are never stamped or advised.
+#[test]
+fn sync_and_missing_advisory_omit_single_participant_planning_and_orchestration() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    // Solo change: planner, orchestrator, and sole implementer are the same
+    // participant. Neither `--sync` nor `missing-contribution-trailers` may
+    // stamp or request `Planned-by`/`Orchestrated-by`.
+    let (solo, solo_wt) = open(&repo, "solo-sync");
+    stdout(repo.arc(&solo_wt).args([
+        "roles",
+        &solo,
+        "--planned-by",
+        "codex:solo-model#high",
+        "--orchestrated-by",
+        "codex:solo-model#high",
+    ]));
+    commit_file(&solo_wt, "solo.txt", "feat: solo work");
+    stdout(
+        repo.arc(&solo_wt)
+            .args(["snapshot", &solo, "--solo", "--model", "solo-model#high"])
+            .env("ARC_HARNESS", "codex"),
+    );
+
+    let before_report = json_stdout_any_status(repo.arc(&solo_wt).args(["check", &solo, "--json"]));
+    let detail = advisory(&before_report, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing Implemented-by advisory: {before_report}"));
+    assert!(
+        detail.contains("Implemented-by: codex:solo-model#high"),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains("Planned-by: codex:solo-model#high"),
+        "solo Planned-by must not be advised: {detail}"
+    );
+    assert!(
+        !detail.contains("Orchestrated-by: codex:solo-model#high"),
+        "solo Orchestrated-by must not be advised: {detail}"
+    );
+
+    stdout(
+        repo.arc(&solo_wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    let solo_msg = git_out(&solo_wt, &["show", "-s", "--format=%B", "HEAD"]);
+    assert!(
+        solo_msg.contains("Implemented-by: codex:solo-model#high"),
+        "{solo_msg}"
+    );
+    assert!(
+        !solo_msg.contains("Planned-by:"),
+        "solo --sync must not stamp Planned-by:\n{solo_msg}"
+    );
+    assert!(
+        !solo_msg.contains("Orchestrated-by:"),
+        "solo --sync must not stamp Orchestrated-by:\n{solo_msg}"
+    );
+    let check_solo = repo
+        .arc(&solo_wt)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(solo_msg)
+        .output()
+        .unwrap();
+    assert_eq!(check_solo.status.code(), Some(0));
+    assert!(
+        check_solo.stdout.is_empty(),
+        "synced solo commit must produce zero convention issues: {}",
+        String::from_utf8_lossy(&check_solo.stdout)
+    );
+    let after_report = json_stdout_any_status(repo.arc(&solo_wt).args(["check", &solo, "--json"]));
+    assert_eq!(
+        advisory(&after_report, "missing-contribution-trailers"),
+        None,
+        "{after_report}"
+    );
+    let synced_head = repo.head(&solo_wt);
+    let noop = stdout(
+        repo.arc(&solo_wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    assert!(noop.contains("changed none of them"), "{noop}");
+    assert_eq!(repo.head(&solo_wt), synced_head);
+
+    // Mixed-commit branch: commit 1 is solely implemented by the lead, while
+    // commit 2 is implemented by another participant. `--sync` and the
+    // advisory apply `Planned-by`/`Orchestrated-by` only to commit 2.
+    let (mixed, mixed_wt) = open(&repo, "mixed-sync");
+    stdout(repo.arc(&mixed_wt).args([
+        "roles",
+        &mixed,
+        "--planned-by",
+        "claude:lead#high",
+        "--orchestrated-by",
+        "claude:lead#high",
+    ]));
+    commit_file(
+        &mixed_wt,
+        "lead.txt",
+        "feat: lead prep\n\nImplemented-by: claude:lead#high",
+    );
+    let lead_commit = repo.head(&mixed_wt);
+    commit_file(
+        &mixed_wt,
+        "worker.txt",
+        "feat: worker change\n\nImplemented-by: codex:worker#medium",
+    );
+    let worker_commit = repo.head(&mixed_wt);
+    stdout(repo.arc(&mixed_wt).args(["snapshot", &mixed]));
+
+    let mixed_before =
+        json_stdout_any_status(repo.arc(&mixed_wt).args(["check", &mixed, "--json"]));
+    let mixed_detail = advisory(&mixed_before, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing advisory on worker commit: {mixed_before}"));
+    assert!(mixed_detail.contains(&worker_commit), "{mixed_detail}");
+    assert!(
+        !mixed_detail.contains(&lead_commit),
+        "lead's own solo commit must not be asked for Planned-by/Orchestrated-by: {mixed_detail}"
+    );
+
+    stdout(
+        repo.arc(&mixed_wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    let first_msg = git_out(&mixed_wt, &["show", "-s", "--format=%B", "HEAD~1"]);
+    let second_msg = git_out(&mixed_wt, &["show", "-s", "--format=%B", "HEAD"]);
+    assert!(
+        !first_msg.contains("Planned-by:") && !first_msg.contains("Orchestrated-by:"),
+        "lead's solo commit must not gain Planned-by/Orchestrated-by:\n{first_msg}"
+    );
+    assert!(
+        second_msg.contains("Planned-by: claude:lead#high")
+            && second_msg.contains("Orchestrated-by: claude:lead#high"),
+        "worker commit must gain Planned-by and Orchestrated-by:\n{second_msg}"
+    );
+    for msg in [first_msg, second_msg] {
+        let checked = repo
+            .arc(&mixed_wt)
+            .args(["instructions", "git", "--check", "-"])
+            .write_stdin(msg)
+            .output()
+            .unwrap();
+        assert_eq!(checked.status.code(), Some(0));
+        assert!(
+            checked.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+    }
+    let mixed_after = json_stdout_any_status(repo.arc(&mixed_wt).args(["check", &mixed, "--json"]));
+    assert_eq!(
+        advisory(&mixed_after, "missing-contribution-trailers"),
+        None,
+        "{mixed_after}"
+    );
+}

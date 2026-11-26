@@ -223,13 +223,15 @@ pub(crate) fn sync_change_trailers(
     for note in &projected.notes {
         eprintln!("note: {note}");
     }
-    let mut append = projected.trailers.clone();
+    let mut all_candidates = projected.trailers.clone();
     for line in options.extra_append {
-        if !append.contains(line) {
-            append.push(line.clone());
+        if !all_candidates.contains(line) {
+            all_candidates.push(line.clone());
         }
     }
-    if let Some(issue) = crate::trailers::first_unrecordable_role(&append, ctx.session.as_deref()) {
+    if let Some(issue) =
+        crate::trailers::first_unrecordable_role(&all_candidates, ctx.session.as_deref())
+    {
         bail!(
             "--append \"{}: {}\": {}; write a fresh coordinate or omit the line",
             issue.key,
@@ -237,7 +239,7 @@ pub(crate) fn sync_change_trailers(
             issue.detail
         );
     }
-    if append.is_empty() {
+    if all_candidates.is_empty() {
         println!(
             "no projected contribution trailers to append for {}; nothing to do",
             state.change_id
@@ -299,23 +301,34 @@ pub(crate) fn sync_change_trailers(
         "arc rewrite trailers",
         options.from.is_some(),
     );
-    walked.reason = format!(
-        "synced {}, on {} from {}",
-        plural(append.len(), "trailer line"),
-        walked.branch,
-        short(&walked.from)
-    );
+    let mut applied_lines = BTreeSet::new();
     let revisions: Vec<_> = range.iter().map(String::as_str).collect();
     for (old, mut commit) in range.iter().zip(gitio::read_commits(&cwd, &revisions)?) {
-        let message = crate::trailers::edit(&commit.message, &[], &append);
+        let per_commit = crate::trailers::applicable_for_commit(
+            &commit.message,
+            &projected.trailers,
+            options.extra_append,
+        );
+        let message = crate::trailers::edit(&commit.message, &[], &per_commit);
         let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
         if message == commit.message && parents == commit.parents {
             continue;
+        }
+        for line in &per_commit {
+            if !crate::trailers::contains(&commit.message, line) {
+                applied_lines.insert(line.clone());
+            }
         }
         commit.message = message;
         commit.parents = parents;
         walked.recreated(&cwd, old, &commit, sign)?;
     }
+    walked.reason = format!(
+        "synced {}, on {} from {}",
+        plural(applied_lines.len(), "trailer line"),
+        walked.branch,
+        short(&walked.from)
+    );
     if !options.include_shared {
         protect_shared(&cwd, targets, &walked, walked.mapping.keys(), options.retag)?;
     }

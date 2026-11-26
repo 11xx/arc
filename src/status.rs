@@ -1379,6 +1379,11 @@ pub fn build_at_with_shape(
             &danger,
         )
     };
+    let commit_destination = if state.is_closed() {
+        CommitDestination::None
+    } else {
+        CommitDestination::Target(target_head.as_deref())
+    };
     let mut report = build_report(
         state,
         gates,
@@ -1393,6 +1398,7 @@ pub fn build_at_with_shape(
             create: evaluate,
         },
         current_head,
+        commit_destination,
         needs_rebase,
         reserved,
         merged_tree,
@@ -1444,6 +1450,7 @@ pub fn build_as_of(
         repo,
         ProbeSite::Replay,
         current_head.clone(),
+        CommitDestination::None,
         false,
         None,
         None,
@@ -1478,6 +1485,7 @@ fn build_report(
     cwd: Option<&Path>,
     probe_site: ProbeSite<'_>,
     current_head: Option<String>,
+    commit_destination: CommitDestination<'_>,
     needs_rebase: bool,
     reserved: Option<crate::git_health::ReservedCommit>,
     merged_tree: Option<String>,
@@ -1718,9 +1726,9 @@ fn build_report(
     for (name, gate) in gates.required_for(&state.profile) {
         let _confinement = crate::confinement::Scope::new(&gate.confine);
         let bound = |entry: &state::VerificationEntry| {
-            current_head
-                .as_deref()
-                .is_some_and(|head| answers_for_commit(entry, gate, head, cwd))
+            current_head.as_deref().is_some_and(|head| {
+                answers_for_commit(entry, gate, head, commit_destination, &state.rewrites, cwd)
+            })
         };
         let evidence_at = |matches: &dyn Fn(&state::VerificationEntry) -> bool| match (
             &lookup_tree,
@@ -2651,31 +2659,86 @@ pub fn matches_declaration(
         })
 }
 
-/// Whether evidence answers for the change at `head` under the gate's binding.
-///
-/// A tree-bound gate takes evidence from any commit holding the tree. A
+/// Destination context against which commit-bound gate evidence is judged.
+#[derive(Debug, Clone, Copy)]
+pub enum CommitDestination<'a> {
+    /// Live open-change check or head verification against the change's target
+    /// branch (`None` when the target head cannot be resolved).
+    Target(Option<&'a str>),
+    /// Explicit synthesized-merge verification (`verify --against <target>`),
+    /// pinned to a specific target commit.
+    AgainstTarget(&'a str),
+    /// Closed change, ledger replay (`--at`), or target-less composed run with
+    /// no separate moving target branch.
+    None,
+}
+
 /// Whether `evidence` answers for `head` under `gate`'s binding.
 ///
 /// A tree-bound gate accepts any evidence matching the evaluated tree. A
-/// commit-bound one accepts a run whose `approved_revision` matches `head`
-/// (following `signature_only` and `role_additions` rewrites, while stopping
-/// before any content-changing or non-role rewrite), or a run at the merge of
-/// `head` into the target that the evidence names; telling that merge apart
-/// reads its parents from `cwd`, and without one only `head` itself answers.
+/// commit-bound one accepts:
+/// - synthesized-merge evidence (`against_target` recorded) whose original
+///   first parent equals the recorded and selected destination and whose
+///   second (source) parent reaches `head` through `signature_only` and
+///   `role_additions` rewrites;
+/// - direct head evidence recorded at `head` itself (for `--against`, only
+///   when the selected destination is already an ancestor of `head`);
+/// - carried direct head evidence whose `approved_revision` matches `head`
+///   through `signature_only` and `role_additions` rewrites, provided the
+///   selected destination is proven to be an ancestor of `head` (stopping a
+///   same-tree target move from carrying stale evidence).
 pub fn answers_for_commit(
     evidence: &crate::state::VerificationEntry,
     gate: &crate::gates::Gate,
     head: &str,
+    destination: CommitDestination<'_>,
+    rewrites: &crate::rewrite::RewriteMap,
     cwd: Option<&Path>,
 ) -> bool {
-    if gate.binds == crate::gates::Binding::Tree || evidence.approved_revision == head {
+    if gate.binds == crate::gates::Binding::Tree {
         return true;
     }
-    let (Some(target), Some(cwd)) = (evidence.against_target.as_deref(), cwd) else {
+    if let Some(original_target) = evidence.recorded_against_target.as_deref() {
+        let Some(cwd) = cwd else {
+            return false;
+        };
+        let target_matches = match destination {
+            CommitDestination::Target(Some(selected))
+            | CommitDestination::AgainstTarget(selected) => selected == original_target,
+            CommitDestination::Target(None) => false,
+            CommitDestination::None => true,
+        };
+        if !target_matches {
+            return false;
+        }
+        let Ok(parents) = gitio::commit_parents(cwd, &evidence.recorded_revision) else {
+            return false;
+        };
+        if parents.len() != 2 || parents[0] != original_target {
+            return false;
+        }
+        return rewrites
+            .approved_successor(&parents[1])
+            .is_ok_and(|approved| approved == head);
+    }
+    if evidence.recorded_revision == head {
+        return match destination {
+            CommitDestination::AgainstTarget(selected) => {
+                cwd.is_some_and(|cwd| gitio::is_ancestor(cwd, selected, head).unwrap_or(false))
+            }
+            CommitDestination::Target(_) | CommitDestination::None => true,
+        };
+    }
+    if evidence.approved_revision != head {
         return false;
-    };
-    gitio::commit_parents(cwd, &evidence.approved_revision)
-        .is_ok_and(|parents| parents == [target, head])
+    }
+    match destination {
+        CommitDestination::Target(Some(selected)) | CommitDestination::AgainstTarget(selected) => {
+            cwd.is_some_and(|cwd| gitio::is_ancestor(cwd, selected, head).unwrap_or(false))
+        }
+        CommitDestination::Target(None) => false,
+        CommitDestination::None => true,
+    }
 }
 
 /// Whether evidence was produced in the environment a gate declares.
@@ -2851,7 +2914,10 @@ fn missing_role_trailers_advisory(
     if missing.is_empty() {
         return None;
     }
-    let first = &messages.first()?.0;
+    let first = messages
+        .iter()
+        .find(|(commit, _)| missing.iter().any(|(_, commits)| commits.contains(commit)))
+        .map(|(commit, _)| commit.as_str())?;
     let details = missing
         .iter()
         .map(|(line, commits)| format!("{line} (missing on {})", commits.join(", ")))

@@ -629,6 +629,7 @@ fn verify_with_landing(
             &run_ctx.cwd,
             required.iter().map(|(name, gate)| (name.as_str(), *gate)),
         )?;
+        let target_head = gitio::branch_head(&run_ctx.cwd, &st.target_branch).ok();
         let Partition {
             budget_refused,
             mut reused,
@@ -644,6 +645,7 @@ fn verify_with_landing(
                 head: &head,
                 label: "green at head",
                 against_target: None,
+                destination: status::CommitDestination::Target(target_head.as_deref()),
             },
             &environments,
             event,
@@ -925,6 +927,7 @@ fn reuse_named_gate(
     let legacy_trees = status::legacy_evidence_trees(st, &run_ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
     let label = "green at head";
+    let target_head = gitio::branch_head(&run_ctx.cwd, &st.target_branch).ok();
     let evidence = reusable_evidence_for_event(
         &run_ctx.cwd,
         st,
@@ -935,6 +938,7 @@ fn reuse_named_gate(
             head: &head,
             label,
             against_target: None,
+            destination: status::CommitDestination::Target(target_head.as_deref()),
         },
         &resolve_tree,
         environment,
@@ -1175,6 +1179,7 @@ fn verify_against(
         head: &change_head,
         label: "green at the merged tree",
         against_target: Some(&target_head),
+        destination: status::CommitDestination::AgainstTarget(&target_head),
     };
     // A checkout exists only to run a command or a declared probe in, and a
     // probe reads the merged content: applicability is a property of the tree
@@ -1367,6 +1372,7 @@ pub(crate) fn verify_landing_head(
         head: run.commit,
         label: "green at the composed head",
         against_target: None,
+        destination: status::CommitDestination::None,
     };
     let environments = gate_environments(
         run.checkout,
@@ -1694,6 +1700,8 @@ struct Answering<'a> {
     label: &'a str,
     /// The target head a synthesized merge of `head` was computed against.
     against_target: Option<&'a str>,
+    /// Destination context for commit-bound gate carry and provenance checks.
+    destination: status::CommitDestination<'a>,
 }
 
 /// Which of a run's gates are answered by evidence already recorded, and
@@ -1890,7 +1898,14 @@ fn reusable_evidence_for_event<'a>(
     let tree = answering.tree;
     st.gate_evidence_at_tree_matching(name, tree, resolve_tree, |evidence| {
         state::verification_event(st, evidence) == event
-            && status::answers_for_commit(evidence, gate, answering.head, Some(cwd))
+            && status::answers_for_commit(
+                evidence,
+                gate,
+                answering.head,
+                answering.destination,
+                &st.rewrites,
+                Some(cwd),
+            )
             && status::matches_declaration(evidence, gate)
             && status::matches_environment(evidence, gate, environment)
     })
@@ -2222,6 +2237,7 @@ fn verify_recorded(
             selected.iter().map(|(name, gate)| (name.as_str(), *gate)),
         )?;
         let total = selected.len();
+        let target_head = gitio::branch_head(&run_ctx.cwd, &st.target_branch).ok();
         let Partition {
             budget_refused,
             reused,
@@ -2237,6 +2253,7 @@ fn verify_recorded(
                 head: &revision,
                 label: "green at head",
                 against_target: None,
+                destination: status::CommitDestination::Target(target_head.as_deref()),
             },
             &environments,
             GateEvent::Integration,

@@ -1198,6 +1198,11 @@ pub struct VerificationEntry {
     /// different merge, and this evidence is about the earlier one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub against_target: Option<String>,
+    /// The immutable target head recorded when this synthesized-merge evidence
+    /// was created. `against_target` follows recorded rewrites for display;
+    /// this keeps the original destination parent for commit-bound provenance.
+    #[serde(skip)]
+    pub recorded_against_target: Option<String>,
     /// The recorded failure this evidence answers, absent when the check was
     /// never seen to fail before it passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1849,6 +1854,11 @@ pub struct ChangeState {
     pub closure: Option<ClosureState>,
     pub forge: crate::forge::ForgeState,
     pub round_trip: crate::forge_round_trip::RoundTrip,
+    /// Recorded rewrites applied to this state, retained in memory so live Git
+    /// readers can follow commit parents through `signature_only` and
+    /// `role_additions` rewrites.
+    #[serde(skip)]
+    pub(crate) rewrites: crate::rewrite::RewriteMap,
 }
 
 impl ChangeState {
@@ -1987,6 +1997,7 @@ impl ChangeState {
         if rewrites.is_empty() {
             return Ok(());
         }
+        self.rewrites = rewrites.clone();
         for event in &self.provisional_integrations {
             if let Payload::ChangeProvisionallyIntegrated {
                 source_head,
@@ -2564,6 +2575,7 @@ pub fn reduce_with_repository(
                     kept: Vec::new(),
                     forge: crate::forge::ForgeState::default(),
                     round_trip: crate::forge_round_trip::RoundTrip::default(),
+                    rewrites: crate::rewrite::RewriteMap::default(),
                 },
                 ev,
             ),
@@ -3841,6 +3853,7 @@ pub fn reduce_with_repository(
                     tree_moved: *tree_moved,
                     tree: tree.clone(),
                     against_target: against_target.clone(),
+                    recorded_against_target: against_target.clone(),
                     run_id: run_id.clone(),
                     probe: probe.clone(),
                     gate: gate.clone(),
@@ -3905,6 +3918,7 @@ pub fn reduce_with_repository(
                     tree_moved: false,
                     tree: Some(tree.clone()),
                     against_target: None,
+                    recorded_against_target: None,
                     falsification: None,
                     falsification_inferred: None,
                     environment: None,
@@ -4026,6 +4040,7 @@ pub fn reduce_with_repository(
                     derived.approved_revision = revision.clone();
                     derived.tree = tree.clone();
                     derived.against_target = delta.against_target.clone();
+                    derived.recorded_against_target = delta.against_target.clone();
                     derived.delta = Some(delta.clone());
                     derived.created_at = ev.created_at;
                     derived.falsification = None;

@@ -459,3 +459,201 @@ fn a_commit_bound_gate_carries_across_signature_only_rewrites() {
         .success();
     assert_eq!(runs(&repo, "history"), 1);
 }
+
+fn check_gate_row(repo: &Repo, worktree: &Path, change: &str, gate: &str) -> serde_json::Value {
+    let check = json_stdout_any_status(repo.arc(worktree).args(["check", change, "--json"]));
+    check["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == gate)
+        .unwrap_or_else(|| panic!("no gate {gate} in {check}"))
+        .clone()
+}
+
+/// Claim: carried commit-bound head evidence requires destination provenance,
+/// so a same-tree empty commit on the target stops a role-addition rewrite
+/// from carrying the stale head pass.
+#[test]
+fn a_commit_bound_carry_rejects_a_same_tree_target_move() {
+    let repo = Repo::new();
+    declare(
+        &repo,
+        &[
+            ("build", command(&repo, "build", "true")),
+            (
+                "history",
+                format!(
+                    "command = {:?}\nbinds = \"commit\"",
+                    counting(&repo, "history", "true")
+                ),
+            ),
+        ],
+    );
+    let (id, worktree, _) = change_with_patchset(&repo, "target-empty-move");
+    repo.arc(&worktree)
+        .args(["snapshot", &id, "--solo", "--model", "worker#medium"])
+        .env("ARC_HARNESS", "codex")
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 1));
+
+    // Move target without changing its tree, then rewrite the change head with
+    // a role-only sync so the merged tree still equals the head tree.
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "chore: empty target move"],
+    );
+    repo.arc(&worktree)
+        .args(["rewrite", "trailers", "--sync", "--no-sign"])
+        .assert()
+        .success();
+
+    let build = check_gate_row(&repo, &worktree, &id, "build");
+    assert_eq!(build["result"], "pass", "{build}");
+    assert_eq!(build["green_at_head"], true, "{build}");
+
+    let history = check_gate_row(&repo, &worktree, &id, "history");
+    assert_eq!(
+        history["result"], "pending",
+        "same-tree target move must invalidate carried commit-bound evidence: {history}"
+    );
+    assert_eq!(history["green_at_head"], false, "{history}");
+
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 2));
+}
+
+/// Claim: a commit-bound synthesized-merge pass (`verify --against <target>`)
+/// carries across a `role_additions` rewrite of the change head while the
+/// destination stays fixed, and invalidates on a non-role rewrite or any
+/// target move (including a same-tree empty commit).
+#[test]
+fn a_commit_bound_synthesized_merge_carries_across_role_additions_only_for_unchanged_target() {
+    let repo = Repo::new();
+    declare(
+        &repo,
+        &[
+            ("build", command(&repo, "build", "true")),
+            (
+                "history",
+                format!(
+                    "command = {:?}\nbinds = \"commit\"",
+                    counting(&repo, "history", "true")
+                ),
+            ),
+        ],
+    );
+    let (id, worktree, verified_head) = change_with_patchset(&repo, "merge-carry");
+
+    // Advance the target with a real content change and verify the merge.
+    repo.commit(&repo.root, "other.txt", "target\n", "feat: target content");
+    repo.arc(&worktree)
+        .args(["verify", "--against", "master"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 1));
+    assert_eq!(
+        check_gate_row(&repo, &worktree, &id, "history")["green_at_head"],
+        true
+    );
+
+    // With master held fixed, append a complete role trailer at the source head:
+    // the merged tree is unchanged, so both check and verify --against reuse
+    // must keep the commit-bound synthesized-merge pass green.
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>",
+            "--from",
+            &verified_head,
+        ])
+        .assert()
+        .success();
+    let after_role = repo.head(&worktree);
+    assert_ne!(after_role, verified_head);
+
+    let history = check_gate_row(&repo, &worktree, &id, "history");
+    assert_eq!(history["result"], "pass", "{history}");
+    assert_eq!(
+        history["green_at_head"], true,
+        "role-addition rewrite with fixed target must preserve synthesized-merge pass: {history}"
+    );
+    repo.arc(&worktree)
+        .args(["verify", "--against", "master", "--skip-green"])
+        .assert()
+        .success();
+    assert_eq!(
+        (runs(&repo, "build"), runs(&repo, "history")),
+        (1, 1),
+        "verify --against --skip-green must reuse carried synthesized-merge pass"
+    );
+
+    // A non-role rewrite with master held fixed invalidates the commit-bound
+    // synthesized-merge pass while keeping the tree-bound pass green.
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Assisted-by: helper:editor#high",
+            "--from",
+            &after_role,
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        check_gate_row(&repo, &worktree, &id, "build")["green_at_head"],
+        true
+    );
+    let after_non_role = check_gate_row(&repo, &worktree, &id, "history");
+    assert_eq!(after_non_role["result"], "pending", "{after_non_role}");
+    assert_eq!(after_non_role["green_at_head"], false, "{after_non_role}");
+    repo.arc(&worktree)
+        .args(["verify", "--against", "master", "--skip-green"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 2));
+
+    // A same-tree empty commit on master moves the destination without moving
+    // the merged tree: the tree-bound gate stays green, while the commit-bound
+    // synthesized-merge pass invalidates and reruns.
+    git(
+        &repo.root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "chore: empty target advance",
+        ],
+    );
+    assert_eq!(
+        check_gate_row(&repo, &worktree, &id, "build")["green_at_head"],
+        true
+    );
+    let after_target_move = check_gate_row(&repo, &worktree, &id, "history");
+    assert_eq!(
+        after_target_move["result"], "pending",
+        "empty target advance must invalidate commit-bound merge evidence: {after_target_move}"
+    );
+    assert_eq!(
+        after_target_move["green_at_head"], false,
+        "{after_target_move}"
+    );
+    repo.arc(&worktree)
+        .args(["verify", "--against", "master", "--skip-green"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 3));
+}

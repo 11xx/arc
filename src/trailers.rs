@@ -122,39 +122,50 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
             issues.push(issue);
             continue;
         }
-        let Some(key) = trailer_key(line) else {
-            continue;
-        };
-        let key_str = String::from_utf8_lossy(&key).into_owned();
-        let value = String::from_utf8_lossy(&line[key.len() + 1..])
-            .trim()
-            .to_string();
-        if same_key(&key, "Planned-by")
-            && !implementers.is_empty()
-            && implementers
-                .iter()
-                .all(|implementer| same_participant(implementer, &value))
-        {
-            issues.push(ContributionIssue {
-                kind: "single-participant",
-                key: key_str,
-                value,
-                detail: "Planned-by credits a plan another participant implemented; omit when sole implementer",
-            });
-        } else if same_key(&key, "Orchestrated-by")
-            && !implementers
-                .iter()
-                .any(|implementer| !same_participant(implementer, &value))
-        {
-            issues.push(ContributionIssue {
-                kind: "single-participant",
-                key: key_str,
-                value,
-                detail: "Orchestrated-by requires an Implemented-by from a different participant",
-            });
+        if let Some(issue) = single_participant_line_issue(line, &implementers) {
+            issues.push(issue);
         }
     }
     issues
+}
+
+/// Whether one valid role line violates the single-participant rule against
+/// the valid `Implemented-by` coordinates in its trailer block.
+fn single_participant_line_issue(
+    line: &[u8],
+    implementers: &[String],
+) -> Option<ContributionIssue> {
+    let key = trailer_key(line)?;
+    let key_str = String::from_utf8_lossy(&key).into_owned();
+    let value = String::from_utf8_lossy(&line[key.len() + 1..])
+        .trim()
+        .to_string();
+    if same_key(&key, "Planned-by")
+        && !implementers.is_empty()
+        && implementers
+            .iter()
+            .all(|implementer| same_participant(implementer, &value))
+    {
+        return Some(ContributionIssue {
+            kind: "single-participant",
+            key: key_str,
+            value,
+            detail: "Planned-by credits a plan another participant implemented; omit when sole implementer",
+        });
+    }
+    if same_key(&key, "Orchestrated-by")
+        && !implementers
+            .iter()
+            .any(|implementer| !same_participant(implementer, &value))
+    {
+        return Some(ContributionIssue {
+            kind: "single-participant",
+            key: key_str,
+            value,
+            detail: "Orchestrated-by requires an Implemented-by from a different participant",
+        });
+    }
+    None
 }
 
 /// Whether two valid coordinates name the same participant in a trailer block.
@@ -800,18 +811,79 @@ pub(crate) struct ReviewProjection<'a> {
     pub danger: &'a crate::status::DangerScope,
 }
 
-/// Projected trailer lines absent from one or more commits in `messages`, in
-/// the order `projected` supplies them, each paired with the commits missing it.
+/// Projected trailer lines applicable to one commit's resulting trailer block.
+///
+/// Filters projected `Planned-by` and `Orchestrated-by` lines that would
+/// violate the single-participant rule against the commit's resulting
+/// `Implemented-by` participants (existing commit lines plus projected and
+/// extra lines), matching [`check_contribution`]. Explicit `extra` lines are
+/// kept after applicable projected lines, deduplicated verbatim.
+pub(crate) fn applicable_for_commit(
+    message: &[u8],
+    projected: &[String],
+    extra: &[String],
+) -> Vec<String> {
+    let mut implementers: Vec<String> = block_values(message, "Implemented-by")
+        .into_iter()
+        .filter(|value| crate::coordinate::coordinate_defect(value, None).is_none())
+        .collect();
+    for line in projected.iter().chain(extra.iter()) {
+        let bytes = line.as_bytes();
+        if let Some(key) = trailer_key(bytes) {
+            if same_key(&key, "Implemented-by") {
+                let value = String::from_utf8_lossy(&bytes[key.len() + 1..])
+                    .trim()
+                    .to_string();
+                if crate::coordinate::coordinate_defect(&value, None).is_none()
+                    && !implementers.contains(&value)
+                {
+                    implementers.push(value);
+                }
+            }
+        }
+    }
+    let mut kept = Vec::new();
+    for line in projected {
+        if single_participant_line_issue(line.as_bytes(), &implementers).is_some() {
+            continue;
+        }
+        if !kept.contains(line) {
+            kept.push(line.clone());
+        }
+    }
+    for line in extra {
+        if !kept.contains(line) {
+            kept.push(line.clone());
+        }
+    }
+    kept
+}
+
+/// Projected trailer lines applicable to and absent from one or more commits
+/// in `messages`, in the order `projected` supplies them, each paired with the
+/// commits missing it.
 pub(crate) fn missing_in_range(
     projected: &[String],
     messages: &[(String, Vec<u8>)],
 ) -> Vec<(String, Vec<String>)> {
+    let per_commit: Vec<(&str, &[u8], Vec<String>)> = messages
+        .iter()
+        .map(|(commit, message)| {
+            (
+                commit.as_str(),
+                message.as_slice(),
+                applicable_for_commit(message, projected, &[]),
+            )
+        })
+        .collect();
     let mut missing = Vec::new();
     for line in projected {
-        let commits: Vec<String> = messages
+        let commits: Vec<String> = per_commit
             .iter()
-            .filter(|(_, message)| !contains(message, line))
-            .map(|(commit, _)| commit.clone())
+            .filter(|(_, message, applicable)| {
+                applicable.contains(line) && !contains(message, line)
+            })
+            .map(|(commit, _, _)| (*commit).to_string())
             .collect();
         if !commits.is_empty() {
             missing.push((line.clone(), commits));
@@ -853,6 +925,16 @@ pub(crate) fn for_change(
                         )),
                     }
                 }
+            } else if !state.is_closed()
+                && review.current_head.is_none()
+                && state.latest_patchset().is_some_and(|patchset| {
+                    !qualifying_approvals(state, patchset, review.policy, review.danger).is_empty()
+                })
+            {
+                notes.push(format!(
+                    "Reviewed-by omitted: change branch {} head is unreadable",
+                    state.branch
+                ));
             }
             continue;
         }
@@ -913,8 +995,8 @@ pub(crate) fn for_change(
 }
 
 /// The patchset whose pre-integration approvals still cover the current or
-/// shipped head, or `None` when the head moved past the patchset's
-/// `approved_head`.
+/// shipped head, or `None` when the head cannot be resolved or moved past the
+/// patchset's `approved_head`.
 fn review_subject_patchset<'a>(
     state: &'a crate::state::ChangeState,
     current_head: Option<&str>,
@@ -923,11 +1005,9 @@ fn review_subject_patchset<'a>(
         .debt_subject_patchset()
         .or_else(|| state.latest_patchset())?;
     let expected_head = if state.is_closed() {
-        current_head
-            .or_else(|| state.closed_head())
-            .unwrap_or(&patchset.head)
+        current_head.or_else(|| state.closed_head())?
     } else {
-        current_head.unwrap_or(&patchset.head)
+        current_head?
     };
     (patchset.approved_head == expected_head).then_some(patchset)
 }

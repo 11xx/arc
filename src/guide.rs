@@ -3801,9 +3801,11 @@ CONTRIBUTION TRAILERS
                        configuration is not credited, since who ran snapshot
                        is not proof of who wrote the diff.
                        Pre-integration qualifying Approved verdicts whose
-                       patchset `approved_head` matches the current or
-                       shipped head project `Reviewed-by: <coordinate>` from
-                       `on_behalf_of`, a declared person, or `harness:model`.
+                       patchset `approved_head` matches the resolved current
+                       (for an open change) or shipped head project
+                       `Reviewed-by: <coordinate>` from `on_behalf_of`, a
+                       declared person, or `harness:model`; an open change
+                       whose branch head is unreadable omits `Reviewed-by`.
                        `comment-only`, `changes-requested`, findings-only
                        non-approvals, rejected self-approvals, debt waivers,
                        and post-integration `arc audit` discharges never
@@ -3823,9 +3825,12 @@ CONTRIBUTION TRAILERS
                        --json emits arc-trailers/1 with trailers and notes.
     check and integrate advise when a commit in target..head lacks any
     projected contribution trailer (`Planned-by`, `Implemented-by`,
-    `Reviewed-by`, `Orchestrated-by`), under missing-contribution-trailers,
-    naming `arc rewrite trailers --sync` (or `--from <rev> --append <line>`);
-    only fresh coordinates are advised. They advise when a commit's role line
+    `Reviewed-by`, `Orchestrated-by`) applicable to that commit's resulting
+    block, under missing-contribution-trailers, naming `arc rewrite trailers
+    --sync` (or `--from <rev> --append <line>`); only fresh coordinates are
+    advised, and both `--sync` and the advisory omit `Planned-by` and
+    `Orchestrated-by` lines that would violate the single-participant rule on
+    that commit. They advise when a commit's role line
     carries a placeholder or a session id, or a person without an email, under
     placeholder-contribution-trailers, naming each commit and line and arc
     rewrite trailers --from <rev> --edits <file>, whose `arc-trailer-edits/1`
@@ -4572,10 +4577,12 @@ RULES THAT CHANGE WHAT YOU DO
     messages or history declares `binds = "commit"`, which no other
     declaration of that gate withdraws: a run answers for its recorded commit
     (or its merge into the named target), and follows only `signature_only`
-    and `role_additions` rewrites (`arc guide rewrites-evidence`); any
-    content-changing or non-role message edit leaves it stale and forces a
-    fresh run; `publication --skip-green` reuses its pass only at the target
-    revision it ran on. An arc that predates the key ignores it and treats the
+    and `role_additions` rewrites (`arc guide rewrites-evidence`) when the
+    destination is unchanged (including synthesized `--against` merges whose
+    source parent followed an approved rewrite against the same target); any
+    target move, content-changing edit, or non-role message edit leaves it
+    stale and forces a fresh run; `publication --skip-green` reuses its pass
+    only at the target revision it ran on. An arc that predates the key ignores it and treats the
     gate as tree-bound. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer

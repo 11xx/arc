@@ -1708,6 +1708,7 @@ mod tests {
         ChangeState {
             budget_raises: Vec::new(),
             budget_suspensions: Vec::new(),
+            rewrites: Default::default(),
             direct_executions: BTreeMap::new(),
             provisional_signature_successors: BTreeMap::new(),
             recovered_falsification_revisions: BTreeSet::new(),
