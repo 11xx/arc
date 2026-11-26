@@ -612,3 +612,93 @@ fn a_confined_measured_gate_still_records_instructions() {
         "confined gate recorded no instructions: {confined}"
     );
 }
+
+/// Claim: `arc begin --worktree` with path-stable Cargo preparation under write
+/// confinement leaves the fresh worktree's `target/` marked with `CACHEDIR.TAG`
+/// while keeping the checkout clean. Rejects pre-creating `target/` unmarked so
+/// Cargo skips writing `CACHEDIR.TAG`.
+#[test]
+fn path_stable_cargo_preparation_marks_confined_target_directory() {
+    if !supported() {
+        return;
+    }
+    let (repo, scratch) = fixture();
+    let cargo_home = scratch.path().join("cargo-home");
+    fs::create_dir_all(cargo_home.join("registry")).unwrap();
+    fs::create_dir_all(cargo_home.join("git")).unwrap();
+    fs::write(cargo_home.join(".package-cache"), "").unwrap();
+    fs::write(cargo_home.join(".package-cache-mutate"), "").unwrap();
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::create_dir_all(repo.root.join("tests")).unwrap();
+    fs::write(repo.root.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        repo.root.join("Cargo.toml"),
+        "[package]\nname='confined-cargo'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = 'confined-cargo'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("src/lib.rs"),
+        "pub fn ok() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("tests/it.rs"),
+        "#[test]\nfn passes() { assert!(confined_cargo::ok()); }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[confine]\nwrites = [\n  \"target\",\n  \"{home}/registry\",\n  \"{home}/git\",\n  \"{home}/.package-cache\",\n  \"{home}/.package-cache-mutate\",\n]\n[gates.check]\ncommand = \"cargo test --offline --locked\"\n",
+            home = cargo_home.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        "[prepare]\nmode = \"path-stable\"\ncommand = \"cargo test --offline --locked --profile dev --no-run --manifest-path \\\"$ARC_WORKTREE_PATH/Cargo.toml\\\"\"\ntimeout = \"2m\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "."]);
+    git(
+        &repo.root,
+        &[
+            "commit",
+            "-m",
+            "test: confined path-stable cargo preparation",
+        ],
+    );
+
+    let worktree = scratch.path().join("prepared-wt");
+    repo.arc(&repo.root)
+        .env("TMPDIR", "/tmp")
+        .env("CARGO_HOME", &cargo_home)
+        .args([
+            "begin",
+            "prepared-cargo",
+            "--worktree",
+            worktree.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let tag = worktree.join("target/CACHEDIR.TAG");
+    assert!(
+        fs::symlink_metadata(&tag).is_ok_and(|meta| meta.file_type().is_file()),
+        "fresh worktree target/ is missing CACHEDIR.TAG after confined path-stable preparation"
+    );
+    assert!(
+        fs::read(&tag)
+            .unwrap()
+            .starts_with(b"Signature: 8a477f597d28d172789f06886806bc55"),
+        "CACHEDIR.TAG does not carry the standard cache directory signature"
+    );
+    assert!(worktree.join("target/debug").is_dir());
+    assert_eq!(git_out(&worktree, &["status", "--porcelain"]), "");
+}

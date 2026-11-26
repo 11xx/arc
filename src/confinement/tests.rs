@@ -466,3 +466,114 @@ fn home_temporary_roots_name_the_actual_overlap() {
     );
     assert!(!result.contains("top level or an ancestor"), "{result}");
 }
+
+/// Claim: creating an absent ignored Cargo `target` directory for confinement
+/// writes a standard `CACHEDIR.TAG` without marking pre-existing, unignored, or
+/// non-Cargo directories. Rejects pre-creating `target/` unmarked before Cargo.
+#[test]
+fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
+    if !supported() {
+        return;
+    }
+    let init_git = |cwd: &Path| {
+        let status = crate::child_command::command("git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.org",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "init",
+                "-q",
+                "-b",
+                "master",
+            ])
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+
+    // Absent ignored Cargo target gets CACHEDIR.TAG and leaves git status clean.
+    let scratch_marked = scratch();
+    let checkout = scratch_marked.path().join("marked");
+    fs::create_dir(&checkout).unwrap();
+    init_git(&checkout);
+    fs::write(checkout.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        checkout.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&checkout, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    let tag = checkout.join("target/CACHEDIR.TAG");
+    assert!(
+        fs::symlink_metadata(&tag).is_ok_and(|meta| meta.file_type().is_file()),
+        "expected regular CACHEDIR.TAG at {}",
+        tag.display()
+    );
+    assert!(fs::read(&tag)
+        .unwrap()
+        .starts_with(crate::artifacts::CACHE_SIGNATURE));
+    let status = crate::gitio::git(&checkout, &["status", "--porcelain"]).unwrap();
+    assert!(!status.contains("target"), "{status}");
+
+    // Nested root under an absent Cargo target marks `target/`, not the child.
+    let scratch_nested = scratch();
+    let nested = scratch_nested.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    init_git(&nested);
+    fs::write(nested.join(".gitignore"), "target/\n").unwrap();
+    fs::write(
+        nested.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&nested, "true", &["target/nested"]);
+    assert!(command.status().unwrap().success());
+    assert!(nested.join("target/CACHEDIR.TAG").is_file());
+    assert!(!nested.join("target/nested/CACHEDIR.TAG").exists());
+
+    // Unignored Cargo target is not marked, preserving untracked cleanliness.
+    let scratch_unignored = scratch();
+    let unignored = scratch_unignored.path().join("unignored");
+    fs::create_dir(&unignored).unwrap();
+    init_git(&unignored);
+    fs::write(
+        unignored.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&unignored, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(!unignored.join("target/CACHEDIR.TAG").exists());
+
+    // Non-Cargo checkout is not marked.
+    let scratch_plain = scratch();
+    let plain = scratch_plain.path().join("plain");
+    fs::create_dir(&plain).unwrap();
+    init_git(&plain);
+    fs::write(plain.join(".gitignore"), "/target\n").unwrap();
+    let (mut command, _) = shell(&plain, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(!plain.join("target/CACHEDIR.TAG").exists());
+
+    // Pre-existing unmarked target directory is left untouched.
+    let scratch_existing = scratch();
+    let existing = scratch_existing.path().join("existing");
+    fs::create_dir_all(existing.join("target")).unwrap();
+    init_git(&existing);
+    fs::write(existing.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        existing.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&existing, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(!existing.join("target/CACHEDIR.TAG").exists());
+}

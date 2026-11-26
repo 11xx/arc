@@ -1,15 +1,24 @@
 //! Kernel-enforced writable roots for commands supplied by a project.
 
+use crate::perf::Counted;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const CARGO_CACHEDIR_TAG: &[u8] = b"\
+Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag created by arc for a confined Cargo target directory.
+# For information about cache directory tags see https://bford.info/cachedir/
+";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -291,7 +300,11 @@ fn apply_with_abi_and_storage(
                     resolved.display()
                 );
             }
+            let cargo_targets = absent_cargo_targets(&checkout, &resolved);
             fs::create_dir_all(&resolved)?;
+            for target in cargo_targets {
+                mark_cargo_target(&checkout, &target, common.is_some())?;
+            }
         }
         roots.push(fs::canonicalize(resolved)?);
     }
@@ -565,6 +578,85 @@ fn resolve_missing(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().context("writable root has no parent")?;
     let name = path.file_name().context("invalid writable root")?;
     Ok(resolve_missing(parent)?.join(name))
+}
+
+fn absent_cargo_targets(checkout: &Path, resolved: &Path) -> Vec<PathBuf> {
+    if !resolved.starts_with(checkout) {
+        return Vec::new();
+    }
+    let mut targets = Vec::new();
+    let mut current = Some(resolved);
+    while let Some(dir) = current {
+        if dir == checkout || !dir.starts_with(checkout) {
+            break;
+        }
+        match fs::symlink_metadata(dir) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if dir.file_name() == Some(OsStr::new("target"))
+                    && dir
+                        .parent()
+                        .is_some_and(|parent| parent.join("Cargo.toml").is_file())
+                {
+                    targets.push(dir.to_path_buf());
+                }
+            }
+            Err(_) => break,
+        }
+        current = dir.parent();
+    }
+    targets
+}
+
+fn mark_cargo_target(checkout: &Path, target: &Path, in_git: bool) -> Result<()> {
+    if !fs::symlink_metadata(target)?.file_type().is_dir() || fs::canonicalize(target)? != target {
+        bail!(
+            "confinement writable root {} changed identity while creating",
+            target.display()
+        );
+    }
+    let tag = target.join("CACHEDIR.TAG");
+    if in_git && !is_git_ignored(checkout, &tag)? {
+        return Ok(());
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tag)
+    {
+        Ok(mut file) => {
+            file.write_all(CARGO_CACHEDIR_TAG)
+                .with_context(|| format!("cannot write {}", tag.display()))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot create {}", tag.display()));
+        }
+    }
+    Ok(())
+}
+
+fn is_git_ignored(checkout: &Path, path: &Path) -> Result<bool> {
+    let Ok(relative) = path.strip_prefix(checkout) else {
+        return Ok(false);
+    };
+    let output = crate::gitio::git_command()
+        .args(["check-ignore", "-q", "--"])
+        .arg(relative)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .current_dir(checkout)
+        .counted_output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "cannot check ignore rules for {}: {}",
+            relative.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
 }
 
 fn check_abi(abi: u32) -> Result<u32> {

@@ -9,7 +9,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-const CACHE_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+pub(crate) const CACHE_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
 /// A recognizer every checkout gets. Its marker is a file the tool writes at a
 /// fixed place inside the directory, beginning with the bytes its format fixes.
