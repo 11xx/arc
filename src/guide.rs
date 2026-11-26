@@ -3291,6 +3291,12 @@ REVIEW COVERAGE AND DEBT
   only for `owed`, which is why a declared debt is absent from `arc inbox`,
   `arc query --debt` and the workspace backlog.
 
+  When a guarded integration records an independent approval of the
+  shipped patchset as its authorization, a waiver bound to an earlier
+  patchset stays in the event history and creates no shipped obligation.
+  A waiver used to authorize integration remains an obligation of the
+  shipped patchset, with its declared extent.
+
   An independent read of the revision that shipped, recorded after the debt
   was declared, that approves it or requests changes discharges it — whether
   it came from `arc review` before the merge or `arc audit` after. The debt

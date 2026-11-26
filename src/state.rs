@@ -4119,6 +4119,9 @@ pub fn reduce_with_repository(
                     .and_then(|basis| basis.external_verdict.as_ref())
                     .map(|verdict| verdict.reference.clone());
                 state.closure = Some(closure);
+                if state.has_superseded_debt() {
+                    state.debt = None;
+                }
             }
             Payload::IntegrationAsserted {
                 integrated_commit,
@@ -4715,7 +4718,7 @@ impl ChangeState {
         self.debt_standing() == Some(DebtStanding::Owed)
     }
 
-    /// Where the held debt stands, `None` when no debt was declared.
+    /// Where the held debt stands, `None` when there is no current obligation.
     pub fn debt_standing(&self) -> Option<DebtStanding> {
         let debt = self.debt.as_ref()?;
         let integrated = self
@@ -4771,6 +4774,50 @@ impl ChangeState {
             .iter()
             .rev()
             .find(|patchset| patchset.created_at <= closure.created_at)
+    }
+
+    /// An unused waiver on an earlier draft stays in the event history. It
+    /// does not enter the shipped obligation when a recorded independent
+    /// approval authorized the integration.
+    fn has_superseded_debt(&self) -> bool {
+        let Some(declared_for) = self
+            .debt
+            .as_ref()
+            .and_then(|debt| debt.patchset_id.as_deref())
+        else {
+            return false;
+        };
+        let (Some(shipped), Some(basis)) = (
+            self.closure_shipped_patchset()
+                .filter(|patchset| patchset.id != declared_for),
+            self.closure
+                .as_ref()
+                .and_then(|closure| closure.authorization.as_ref())
+                .filter(|basis| basis.audit_debt_event_id.is_none()),
+        ) else {
+            return false;
+        };
+        let Some(verdict_id) = basis.verdict_event_id.as_deref() else {
+            return false;
+        };
+        self.verdicts.iter().any(|verdict| {
+            verdict.event_id == verdict_id
+                && verdict.patchset_id == shipped.id
+                && verdict.verdict == Verdict::Approved
+                && !verdict.author_assumed()
+                && !verdict
+                    .assessment
+                    .as_ref()
+                    .is_some_and(|assessment| assessment.independence == Independence::Ineligible)
+                && self
+                    .authorship_match(
+                        shipped,
+                        None,
+                        verdict.effective_author(),
+                        &verdict.judged_models(),
+                    )
+                    .is_none()
+        })
     }
 
     /// The head a closed change is judged at, read from the ledger alone: the

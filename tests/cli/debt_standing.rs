@@ -139,6 +139,192 @@ fn audit_independently(repo: &Repo, slug: &str) {
         .success();
 }
 
+fn declare_whole_debt(repo: &Repo, worktree: &Path, slug: &str) {
+    stdout(repo.arc(worktree).args([
+        "debt",
+        slug,
+        "--reason",
+        "independent review deferred",
+        "--extent",
+        "whole",
+    ]));
+}
+
+fn assert_newer_approval_leaves_no_debt(rebase: bool) {
+    let repo = repo_forbidding_self_approval();
+    let slug = "reviewed-successor";
+    let (_, worktree, first_head) = change_with_patchset(&repo, slug);
+    let first_base = repo.head(&repo.root);
+    declare_whole_debt(&repo, &worktree, slug);
+    let second_base = if rebase {
+        repo.commit(&repo.root, "target.txt", "target\n", "move target");
+        stdout(repo.arc(&repo.root).args(["rebase", slug]));
+        repo.head(&repo.root)
+    } else {
+        repo.commit(&worktree, "new.txt", "second edit\n", "extend change");
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+        first_base.clone()
+    };
+    let second_head = repo.head(&worktree);
+    assert_ne!(first_head, second_head);
+    assert_eq!(first_base != second_base, rebase);
+
+    let draft = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+    assert_eq!(draft["debt"]["patchset_id"], "ps-01", "{draft}");
+    assert_eq!(draft["debt"]["extent"]["base"], first_base, "{draft}");
+    assert_eq!(draft["debt"]["extent"]["revision"], first_head, "{draft}");
+    assert_eq!(draft["patchsets"][1]["id"], "ps-02", "{draft}");
+    assert_eq!(draft["patchsets"][1]["base"], second_base, "{draft}");
+    assert_eq!(draft["patchsets"][1]["head"], second_head, "{draft}");
+
+    stdout(repo.arc(&worktree).env("ARC_ACTOR", "Reviewer").args([
+        "review",
+        slug,
+        "--verdict",
+        "approved",
+    ]));
+    integrate(&repo, slug);
+    let state = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+    let closure = &state["closure"];
+    assert_eq!(closure["source_patchset_id"], "ps-02", "{state}");
+    assert_eq!(
+        closure["authorization"]["verdict_event_id"], state["verdicts"][0]["event_id"],
+        "{state}"
+    );
+    assert!(
+        closure["authorization"]["verdict_event_id"].is_string(),
+        "{state}"
+    );
+    assert!(
+        closure["authorization"]["audit_debt_event_id"].is_null(),
+        "{state}"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(status["debt_outstanding"], false, "{status}");
+    assert!(status["debt_standing"].is_null(), "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--debt"]))
+        .trim()
+        .is_empty());
+    let debt_event = draft["debt"]["event_id"].as_str().unwrap();
+    let history = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", slug, "--at", debt_event, "--json"]),
+    );
+    assert_eq!(history["debt"]["event_id"], debt_event, "{history}");
+    assert_eq!(history["debt"]["standing"], "declared", "{history}");
+}
+
+#[test]
+fn independent_approval_of_a_new_revision_leaves_no_draft_debt() {
+    assert_newer_approval_leaves_no_debt(false);
+}
+
+#[test]
+fn independent_approval_after_a_rebase_leaves_no_draft_debt() {
+    assert_newer_approval_leaves_no_debt(true);
+}
+
+#[test]
+fn debt_that_authorized_its_patchset_is_owed_until_a_whole_audit() {
+    let repo = repo_forbidding_self_approval();
+    let slug = "shipped-waiver";
+    let (_, worktree, head) = change_with_patchset(&repo, slug);
+    declare_whole_debt(&repo, &worktree, slug);
+    integrate(&repo, slug);
+    let state = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+    assert_eq!(state["debt"]["standing"], "owed", "{state}");
+    assert_eq!(state["closure"]["source_patchset_id"], "ps-01", "{state}");
+    assert_eq!(state["debt"]["extent"]["revision"], head, "{state}");
+    assert_eq!(
+        state["closure"]["authorization"]["audit_debt_event_id"], state["debt"]["event_id"],
+        "{state}"
+    );
+    let audit = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Auditor").args([
+        "audit",
+        slug,
+        "--verdict",
+        "approved",
+        "--extent",
+        "whole",
+    ]));
+    assert!(audit.contains("debt discharged"), "{audit}");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(status["debt_standing"], "discharged", "{status}");
+    assert_eq!(status["debt_outstanding"], false, "{status}");
+}
+
+#[test]
+fn a_new_patchset_requires_its_own_waiver_without_independent_approval() {
+    let repo = repo_forbidding_self_approval();
+    let slug = "stale-debt";
+    let (_, worktree, _) = change_with_patchset(&repo, slug);
+    declare_whole_debt(&repo, &worktree, slug);
+    let target = repo.head(&repo.root);
+    repo.commit(&worktree, "new.txt", "second edit\n", "extend change");
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&repo.root)
+        .args(["integrate", slug])
+        .assert()
+        .code(3);
+    assert_eq!(repo.head(&repo.root), target);
+    let unread = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(unread["ready_reason"], "no-valid-approval", "{unread}");
+
+    stdout(
+        repo.arc(&worktree)
+            .args(["review", slug, "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", slug])
+        .assert()
+        .code(3);
+    assert_eq!(repo.head(&repo.root), target);
+    let self_reviewed = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(
+        self_reviewed["verdict"]["valid_for_current_head"], false,
+        "{self_reviewed}"
+    );
+
+    declare_whole_debt(&repo, &worktree, slug);
+    integrate(&repo, slug);
+    let state = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+    assert_eq!(state["debt"]["standing"], "owed", "{state}");
+    assert_eq!(state["debt"]["patchset_id"], "ps-02", "{state}");
+    assert_eq!(state["closure"]["source_patchset_id"], "ps-02", "{state}");
+    assert_eq!(
+        state["closure"]["authorization"]["audit_debt_event_id"], state["debt"]["event_id"],
+        "{state}"
+    );
+    let audit = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Auditor").args([
+        "audit",
+        slug,
+        "--verdict",
+        "approved",
+        "--extent",
+        "whole",
+    ]));
+    assert!(audit.contains("debt discharged"), "{audit}");
+}
+
+#[test]
+fn a_contributor_approval_cannot_retire_an_earlier_waiver() {
+    let repo = Repo::new();
+    let slug = "contributor-successor";
+    let (_, worktree, _) = change_with_patchset(&repo, slug);
+    declare_whole_debt(&repo, &worktree, slug);
+    repo.commit(&worktree, "new.txt", "second edit\n", "extend change");
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    stdout(
+        repo.arc(&worktree)
+            .args(["review", slug, "--verdict", "approved"]),
+    );
+    integrate(&repo, slug);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(status["debt_standing"], "owed", "{status}");
+    assert_eq!(status["debt_outstanding"], true, "{status}");
+    assert_eq!(status["debt"]["patchset_id"], "ps-01", "{status}");
+}
+
 /// The backlog project row for the fixture repository, as JSON and text. A
 /// repository with nothing in its backlog has no row.
 fn backlog(repo: &Repo) -> (serde_json::Value, String) {
