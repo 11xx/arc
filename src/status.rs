@@ -2681,12 +2681,14 @@ pub enum CommitDestination<'a> {
 ///   first parent equals the recorded and selected destination and whose
 ///   second (source) parent reaches `head` through `signature_only` and
 ///   `role_additions` rewrites;
-/// - direct head evidence recorded at `head` itself (for `--against`, only
-///   when the selected destination is already an ancestor of `head`);
+/// - direct head evidence recorded at `head` itself (matching its recorded
+///   destination when present, and for `--against`, requiring the recorded
+///   destination to equal the selected target and be an ancestor of `head`);
 /// - carried direct head evidence whose `approved_revision` matches `head`
-///   through `signature_only` and `role_additions` rewrites, provided the
-///   selected destination is proven to be an ancestor of `head` (stopping a
-///   same-tree target move from carrying stale evidence).
+///   through `signature_only` and `role_additions` rewrites, provided its
+///   recorded destination equals the selected destination and is an ancestor
+///   of `head` (conservatively refusing older records lacking destination
+///   provenance when a live destination is selected).
 pub fn answers_for_commit(
     evidence: &crate::state::VerificationEntry,
     gate: &crate::gates::Gate,
@@ -2724,9 +2726,15 @@ pub fn answers_for_commit(
     if evidence.recorded_revision == head {
         return match destination {
             CommitDestination::AgainstTarget(selected) => {
-                cwd.is_some_and(|cwd| gitio::is_ancestor(cwd, selected, head).unwrap_or(false))
+                evidence.recorded_target_revision.as_deref() == Some(selected)
+                    && cwd
+                        .is_some_and(|cwd| gitio::is_ancestor(cwd, selected, head).unwrap_or(false))
             }
-            CommitDestination::Target(_) | CommitDestination::None => true,
+            CommitDestination::Target(Some(selected)) => evidence
+                .recorded_target_revision
+                .as_deref()
+                .is_none_or(|recorded| recorded == selected),
+            CommitDestination::Target(None) | CommitDestination::None => true,
         };
     }
     if evidence.approved_revision != head {
@@ -2734,7 +2742,8 @@ pub fn answers_for_commit(
     }
     match destination {
         CommitDestination::Target(Some(selected)) | CommitDestination::AgainstTarget(selected) => {
-            cwd.is_some_and(|cwd| gitio::is_ancestor(cwd, selected, head).unwrap_or(false))
+            evidence.recorded_target_revision.as_deref() == Some(selected)
+                && cwd.is_some_and(|cwd| gitio::is_ancestor(cwd, selected, head).unwrap_or(false))
         }
         CommitDestination::Target(None) => false,
         CommitDestination::None => true,
@@ -2914,25 +2923,37 @@ fn missing_role_trailers_advisory(
     if missing.is_empty() {
         return None;
     }
-    let first = messages
+    let first_index = messages
         .iter()
-        .find(|(commit, _)| missing.iter().any(|(_, commits)| commits.contains(commit)))
-        .map(|(commit, _)| commit.as_str())?;
+        .position(|(commit, _)| missing.iter().any(|(_, commits)| commits.contains(commit)))?;
+    let first = messages[first_index].0.as_str();
     let details = missing
         .iter()
         .map(|(line, commits)| format!("{line} (missing on {})", commits.join(", ")))
         .collect::<Vec<_>>()
         .join("; ");
-    let append = missing
-        .iter()
-        .map(|(line, _)| format!(" --append {}", crate::context::shell_quote(line)))
-        .collect::<String>();
+    // A bulk `arc rewrite trailers --from <first> --append ...` touches every
+    // commit from `first` through `head`, so offer it only when every missing
+    // line is applicable to every commit in that suffix.
+    let bulk_safe = messages[first_index..].iter().all(|(_, message)| {
+        let applicable = crate::trailers::applicable_for_commit(message, &projected.trailers, &[]);
+        missing.iter().all(|(line, _)| applicable.contains(line))
+    });
+    let remedy = if bulk_safe {
+        let append = missing
+            .iter()
+            .map(|(line, _)| format!(" --append {}", crate::context::shell_quote(line)))
+            .collect::<String>();
+        format!("`arc rewrite trailers --sync` (or `arc rewrite trailers --from {first}{append}`)")
+    } else {
+        "`arc rewrite trailers --sync`".to_string()
+    };
     Some(Advisory {
         code: "missing-contribution-trailers",
         detail: format!(
             "projected contribution trailers missing: {details}; before integration run \
-             `arc rewrite trailers --sync` (or `arc rewrite trailers --from {first}{append}`); \
-             appending complete role trailers preserves approvals, debt waivers, and gates"
+             {remedy}; appending complete role trailers preserves approvals, debt waivers, \
+             and gates"
         ),
     })
 }

@@ -1924,6 +1924,13 @@ pub enum Payload {
         /// is about and when it stops applying.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         against_target: Option<String>,
+        /// The change's target head observed when direct (non-merge)
+        /// verification ran. Carried commit-bound evidence compares this exact
+        /// destination against the selected destination rather than relying on
+        /// ancestry alone. Absent on older records, attestations, and runs
+        /// without a separate target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_revision: Option<String>,
         /// The landing attempt whose single gate run at its top head this
         /// evidence is. Absent on every run outside a landing.
         #[serde(default, skip_serializing_if = "Option::is_none")]

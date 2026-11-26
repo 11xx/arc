@@ -1128,3 +1128,86 @@ fn sync_and_missing_advisory_omit_single_participant_planning_and_orchestration(
         "{mixed_after}"
     );
 }
+
+/// On a mixed two-commit range where commit 1 is multi-participant and commit 2
+/// is solo, `missing-contribution-trailers` must omit the bulk `--from ... --append`
+/// alternative (which would stamp single-participant lines onto commit 2) and
+/// recommend `arc rewrite trailers --sync`, leaving zero convention issues.
+#[test]
+fn missing_advisory_omits_unsafe_bulk_append_on_mixed_range() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "mixed-bulk-safety");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "claude:lead#high",
+        "--orchestrated-by",
+        "claude:lead#high",
+    ]));
+    commit_file(
+        &wt,
+        "first.txt",
+        "feat: multi-participant first\n\nImplemented-by: claude:lead#high\nImplemented-by: codex:worker#medium",
+    );
+    let first_commit = repo.head(&wt);
+    commit_file(
+        &wt,
+        "second.txt",
+        "feat: solo second\n\nImplemented-by: claude:lead#high",
+    );
+    let second_commit = repo.head(&wt);
+    stdout(repo.arc(&wt).args(["snapshot", &change]));
+
+    let before = json_stdout_any_status(repo.arc(&wt).args(["check", &change, "--json"]));
+    let detail = advisory(&before, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing advisory on first commit: {before}"));
+    assert!(detail.contains(&first_commit), "{detail}");
+    assert!(
+        !detail.contains(&second_commit),
+        "solo second commit must not be reported missing Planned-by/Orchestrated-by: {detail}"
+    );
+    assert!(detail.contains("arc rewrite trailers --sync"), "{detail}");
+    assert!(
+        !detail.contains("--from") && !detail.contains("--append"),
+        "advisory must omit unsafe bulk --from/--append when a later commit in the range is solo: {detail}"
+    );
+
+    stdout(
+        repo.arc(&wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    let first_msg = git_out(&wt, &["show", "-s", "--format=%B", "HEAD~1"]);
+    let second_msg = git_out(&wt, &["show", "-s", "--format=%B", "HEAD"]);
+    assert!(
+        first_msg.contains("Planned-by: claude:lead#high")
+            && first_msg.contains("Orchestrated-by: claude:lead#high"),
+        "first commit must gain Planned-by and Orchestrated-by:\n{first_msg}"
+    );
+    assert!(
+        !second_msg.contains("Planned-by:") && !second_msg.contains("Orchestrated-by:"),
+        "solo second commit must not gain Planned-by or Orchestrated-by:\n{second_msg}"
+    );
+    for msg in [first_msg, second_msg] {
+        let checked = repo
+            .arc(&wt)
+            .args(["instructions", "git", "--check", "-"])
+            .write_stdin(msg)
+            .output()
+            .unwrap();
+        assert_eq!(checked.status.code(), Some(0));
+        assert!(
+            checked.stdout.is_empty(),
+            "synced commit must have zero convention issues: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+    }
+    let after = json_stdout_any_status(repo.arc(&wt).args(["check", &change, "--json"]));
+    assert_eq!(
+        advisory(&after, "missing-contribution-trailers"),
+        None,
+        "{after}"
+    );
+}

@@ -3827,7 +3827,8 @@ CONTRIBUTION TRAILERS
     projected contribution trailer (`Planned-by`, `Implemented-by`,
     `Reviewed-by`, `Orchestrated-by`) applicable to that commit's resulting
     block, under missing-contribution-trailers, naming `arc rewrite trailers
-    --sync` (or `--from <rev> --append <line>`); only fresh coordinates are
+    --sync` (and `--from <rev> --append <line>` only when every advised line
+    applies to every commit that bulk rewrite would touch); only fresh coordinates are
     advised, and both `--sync` and the advisory omit `Planned-by` and
     `Orchestrated-by` lines that would violate the single-participant rule on
     that commit. They advise when a commit's role line

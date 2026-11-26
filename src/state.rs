@@ -1203,6 +1203,15 @@ pub struct VerificationEntry {
     /// this keeps the original destination parent for commit-bound provenance.
     #[serde(skip)]
     pub recorded_against_target: Option<String>,
+    /// The change's target head observed when direct (non-merge) verification
+    /// ran. Absent on older records, attestations, and runs without a separate
+    /// target branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<String>,
+    /// Immutable copy of `target_revision` as recorded, used to prove exact
+    /// destination equality when carrying commit-bound direct evidence.
+    #[serde(skip)]
+    pub recorded_target_revision: Option<String>,
     /// The recorded failure this evidence answers, absent when the check was
     /// never seen to fail before it passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1905,6 +1914,9 @@ impl ChangeState {
             if let Some(target) = verification.against_target.as_deref() {
                 note(target, "verification target".to_string());
             }
+            if let Some(target) = verification.target_revision.as_deref() {
+                note(target, "verification destination".to_string());
+            }
             if let Some(falsification) = &verification.falsification {
                 note(&falsification.revision, "falsification".to_string());
             }
@@ -2073,6 +2085,7 @@ impl ChangeState {
                 rewrites.advance_opt(&mut tree.revision)?;
             }
             rewrites.advance_opt(&mut verification.against_target)?;
+            rewrites.advance_opt(&mut verification.target_revision)?;
             if let Some(falsification) = &mut verification.falsification {
                 rewrites.advance(&mut falsification.revision)?;
             }
@@ -3710,6 +3723,7 @@ pub fn reduce_with_repository(
                 tree_moved,
                 tree,
                 against_target,
+                target_revision,
                 falsification,
                 falsification_inferred,
                 ..
@@ -3854,6 +3868,8 @@ pub fn reduce_with_repository(
                     tree: tree.clone(),
                     against_target: against_target.clone(),
                     recorded_against_target: against_target.clone(),
+                    target_revision: target_revision.clone(),
+                    recorded_target_revision: target_revision.clone(),
                     run_id: run_id.clone(),
                     probe: probe.clone(),
                     gate: gate.clone(),
@@ -3919,6 +3935,8 @@ pub fn reduce_with_repository(
                     tree: Some(tree.clone()),
                     against_target: None,
                     recorded_against_target: None,
+                    target_revision: None,
+                    recorded_target_revision: None,
                     falsification: None,
                     falsification_inferred: None,
                     environment: None,
@@ -4041,6 +4059,8 @@ pub fn reduce_with_repository(
                     derived.tree = tree.clone();
                     derived.against_target = delta.against_target.clone();
                     derived.recorded_against_target = delta.against_target.clone();
+                    derived.target_revision = None;
+                    derived.recorded_target_revision = None;
                     derived.delta = Some(delta.clone());
                     derived.created_at = ev.created_at;
                     derived.falsification = None;
@@ -7091,6 +7111,7 @@ mod tests {
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
+                target_revision: None,
                 landing: None,
                 gate: Some("unit".into()),
                 command: "true".into(),

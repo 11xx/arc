@@ -126,6 +126,8 @@ struct VerificationInput {
     /// The target head a synthesized merge was computed against, on a run
     /// evaluating that merge rather than a commit either branch holds.
     against_target: Option<String>,
+    /// The change's target branch head observed for a direct (non-merge) run.
+    target_revision: Option<String>,
     /// The landing attempt this run gates.
     landing: Option<String>,
 }
@@ -158,6 +160,7 @@ struct CompletedVerification {
     worktree_dirty_untracked: Option<bool>,
     tree_moved: bool,
     against_target: Option<String>,
+    target_revision: Option<String>,
     landing: Option<String>,
 }
 
@@ -561,6 +564,7 @@ fn verify_with_landing(
                 note,
                 falsification,
                 against_target: None,
+                target_revision: None,
                 landing: None,
             },
         );
@@ -698,6 +702,7 @@ fn verify_with_landing(
                 &environments,
                 preparation_ms,
                 note,
+                target_head.as_deref(),
                 landing,
             );
         }
@@ -725,6 +730,7 @@ fn verify_with_landing(
                     note: note.clone(),
                     falsification: None,
                     against_target: None,
+                    target_revision: target_head.clone(),
                     landing: landing.clone(),
                 }
             })?;
@@ -844,6 +850,9 @@ fn verify_with_landing(
             note,
             falsification,
             against_target: None,
+            target_revision: (!attest)
+                .then(|| gitio::branch_head(&run_ctx.cwd, &st.target_branch).ok())
+                .flatten(),
             landing: None,
         },
     )
@@ -1310,6 +1319,7 @@ fn verify_against(
                 note: note.clone(),
                 falsification: None,
                 against_target: Some(target_head.clone()),
+                target_revision: None,
                 landing: None,
             }
         })?;
@@ -1444,6 +1454,7 @@ pub(crate) fn verify_landing_head(
                 note: None,
                 falsification: None,
                 against_target: None,
+                target_revision: None,
                 landing: Some(run.attempt.to_string()),
             }
         })?;
@@ -2306,6 +2317,7 @@ fn verify_recorded(
                     note: None,
                     falsification: None,
                     against_target: None,
+                    target_revision: target_head.clone(),
                     landing: None,
                 },
             )?;
@@ -2679,6 +2691,7 @@ fn verify_all_parallel(
     environments: &DeclaredEnvironments,
     preparation_ms: u64,
     note: Option<String>,
+    target_revision: Option<&str>,
     landing: Option<String>,
 ) -> Result<i32> {
     if required.iter().any(|(_, gate)| gate.budget.is_some()) {
@@ -2715,6 +2728,7 @@ fn verify_all_parallel(
             note: note.clone(),
             falsification: None,
             against_target: None,
+            target_revision: target_revision.map(str::to_owned),
             landing: landing.clone(),
         })
         .collect::<Vec<_>>();
@@ -3218,6 +3232,7 @@ fn execute_verification(
         note,
         falsification,
         against_target,
+        target_revision,
         landing,
     } = input;
     let _confinement = crate::confinement::Scope::new(&confine);
@@ -3326,6 +3341,7 @@ fn execute_verification(
         note,
         falsification,
         against_target,
+        target_revision,
         landing,
         // Filled in by the caller, which is what sees the worktree on both
         // sides of the run.
@@ -3484,6 +3500,7 @@ fn record_verifications(
             // naming a revision this repository does not have.
             tree: gitio::commit_tree(&ctx.cwd, &revision).ok(),
             against_target: item.against_target,
+            target_revision: item.target_revision,
             landing: item.landing,
             // Set below, once the tree is pinned.
             tested_tree: None,

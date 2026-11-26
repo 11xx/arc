@@ -657,3 +657,141 @@ fn a_commit_bound_synthesized_merge_carries_across_role_additions_only_for_uncha
         .success();
     assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 3));
 }
+
+/// Claim: carried direct commit-bound evidence compares exact recorded
+/// destination equality rather than ancestry alone, so moving `master` back to
+/// an older ancestor `A` stales the carried pass, `verify --against older`
+/// executes rather than skipping, and records without destination provenance
+/// (such as attested passes) conservatively do not carry across rewrites.
+#[test]
+fn a_commit_bound_carry_rejects_target_rollback_and_against_older_ancestor() {
+    let repo = Repo::new();
+    declare(
+        &repo,
+        &[
+            ("build", command(&repo, "build", "true")),
+            (
+                "history",
+                format!(
+                    "command = {:?}\nbinds = \"commit\"",
+                    counting(&repo, "history", "true")
+                ),
+            ),
+        ],
+    );
+    let rev_a = repo.head(&repo.root);
+    git(&repo.root, &["branch", "older", &rev_a]);
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "chore: empty B on master"],
+    );
+    let rev_b = repo.head(&repo.root);
+    assert_ne!(rev_a, rev_b);
+
+    let (id, worktree, verified_head) = change_with_patchset(&repo, "target-rollback");
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 1));
+    repo.arc(&worktree)
+        .args(["review", &id, "--verdict", "approved"])
+        .env("ARC_ACTOR", "Reviewer <reviewer@example.invalid>")
+        .assert()
+        .success();
+
+    // Append a complete role trailer so the commit-bound pass is carried.
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>",
+            "--from",
+            &verified_head,
+        ])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&worktree), verified_head);
+
+    // At the original destination B, the carried pass answers and check is ready.
+    assert!(gate_green(&repo, &worktree, &id, "history"));
+    let ready_at_b = json_stdout(repo.arc(&worktree).args(["check", &id, "--json"]));
+    assert_eq!(ready_at_b["ready"], true, "{ready_at_b}");
+
+    // Moving master backwards to older ancestor A must stale the carried pass.
+    git(&repo.root, &["reset", "--hard", &rev_a]);
+    assert_eq!(repo.head(&repo.root), rev_a);
+    assert!(
+        !gate_green(&repo, &worktree, &id, "history"),
+        "rolling master back to older ancestor A must stale carried commit-bound pass"
+    );
+    let check_at_a = repo
+        .arc(&worktree)
+        .args(["check", &id, "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let check_at_a: serde_json::Value = serde_json::from_slice(&check_at_a).unwrap();
+    assert_eq!(check_at_a["ready"], false, "{check_at_a}");
+    let history_at_a = check_gate_row(&repo, &worktree, &id, "history");
+    assert_eq!(history_at_a["result"], "pending", "{history_at_a}");
+    assert_eq!(history_at_a["green_at_head"], false, "{history_at_a}");
+
+    // Restore master to B: carried pass answers at B, but `verify --against older --skip-green`
+    // (selecting ancestor A) must execute rather than reusing the pass recorded against B.
+    git(&repo.root, &["reset", "--hard", &rev_b]);
+    assert!(gate_green(&repo, &worktree, &id, "history"));
+    repo.arc(&worktree)
+        .args(["verify", "--against", "older", "--skip-green"])
+        .assert()
+        .success();
+    assert_eq!(
+        (runs(&repo, "build"), runs(&repo, "history")),
+        (1, 2),
+        "verify --against older must execute commit-bound gate instead of reusing pass recorded at B"
+    );
+
+    // Conservative fallback: attested evidence carries no observed destination
+    // revision, so it does not carry across a role-addition rewrite.
+    let (attested_id, attested_wt, attested_head) =
+        change_with_patchset(&repo, "attested-no-carry");
+    repo.arc(&attested_wt)
+        .args([
+            "verify",
+            &attested_id,
+            "--gate",
+            "history",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &attested_head,
+            "--execution-host",
+            "ci-host",
+            "--runner",
+            "ci-runner",
+        ])
+        .assert()
+        .success();
+    assert!(gate_green(&repo, &attested_wt, &attested_id, "history"));
+    repo.arc(&attested_wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>",
+            "--from",
+            &attested_head,
+        ])
+        .assert()
+        .success();
+    assert!(
+        !gate_green(&repo, &attested_wt, &attested_id, "history"),
+        "evidence without recorded destination provenance must not carry across rewrites"
+    );
+}

@@ -912,6 +912,8 @@ pub fn derive(
         tree: Some(witness.tree.clone()),
         against_target: witness.against_target.clone(),
         recorded_against_target: witness.against_target.clone(),
+        target_revision: None,
+        recorded_target_revision: None,
         falsification: None,
         falsification_inferred: None,
         environment: source.environment.clone(),
