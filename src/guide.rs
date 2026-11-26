@@ -5941,10 +5941,11 @@ GATE CONFINEMENT
   uses PATH when VAR is unset or empty; its default can contain `~` and other
   expansions. No shell is run. An unset variable without a default refuses.
   An absent root is created as a directory only inside the checkout or owned
-  build storage. When that exclusively creates an absent checkout-root Cargo
-  `target` directory beside a root `Cargo.toml` and Git ignores its tag (or
-  outside Git), arc writes a standard `CACHEDIR.TAG` through the created
-  directory handle so Cargo builds into it stay marked. External roots must
+  build storage. When that creates an absent checkout-root Cargo `target`
+  directory beside a root `Cargo.toml` without a `target-dir` override and Git
+  ignores its tag (or outside Git), arc atomically stages and publishes the
+  directory with a standard `CACHEDIR.TAG` (which never authorizes artifact
+  cleanup on its own) so Cargo builds into it stay marked. External roots must
   exist; a file root grants file writes.
 
   A root cannot be the home directory, its immediate entries, or an ancestor

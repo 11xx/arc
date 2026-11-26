@@ -10,6 +10,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub(crate) const CACHE_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+pub(crate) const CONFINEMENT_CACHEDIR_NOTICE: &[u8] =
+    b"# Created by arc write confinement; does not authorize artifact cleanup alone.";
 
 /// A recognizer every checkout gets. Its marker is a file the tool writes at a
 /// fixed place inside the directory, beginning with the bytes its format fixes.
@@ -109,6 +111,7 @@ pub fn recognize(root: &Path, entries: &[String], rules: &[Rule]) -> Vec<Artifac
             }
             let directory = real_directory(root, path)?;
             let identified_by = if marker_matches(&directory, "CACHEDIR.TAG", Some(CACHE_SIGNATURE))
+                && !is_confinement_cachedir_tag(&directory)
             {
                 "CACHEDIR.TAG".to_string()
             } else if let Some(builtin) = BUILTIN.iter().find(|builtin| {
@@ -178,6 +181,26 @@ fn real_directory(root: &Path, relative: &str) -> Option<PathBuf> {
         }
     }
     Some(directory)
+}
+
+fn is_confinement_cachedir_tag(directory: &Path) -> bool {
+    let path = directory.join("CACHEDIR.TAG");
+    let Ok(meta) = fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !meta.file_type().is_file() {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 256];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    head[..read]
+        .windows(CONFINEMENT_CACHEDIR_NOTICE.len())
+        .any(|window| window == CONFINEMENT_CACHEDIR_NOTICE)
 }
 
 fn marker_matches(directory: &Path, marker: &str, signature: Option<&[u8]>) -> bool {

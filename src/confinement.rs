@@ -17,7 +17,7 @@ use std::process::Command;
 
 const CARGO_CACHEDIR_TAG: &[u8] = b"\
 Signature: 8a477f597d28d172789f06886806bc55
-# This file is a cache directory tag created by arc for a confined Cargo target directory.
+# Created by arc write confinement; does not authorize artifact cleanup alone.
 # For information about cache directory tags see https://bford.info/cachedir/
 ";
 
@@ -294,7 +294,7 @@ fn apply_with_abi_and_storage(
         )?;
         if !resolved.exists() {
             if resolved.starts_with(&checkout) {
-                create_checkout_root(&checkout, &resolved, common.is_some())?;
+                create_checkout_root(command, &checkout, &resolved, common.is_some())?;
             } else if owned.iter().any(|root| resolved.starts_with(root)) {
                 fs::create_dir_all(&resolved)?;
             } else {
@@ -578,7 +578,12 @@ fn resolve_missing(path: &Path) -> Result<PathBuf> {
     Ok(resolve_missing(parent)?.join(name))
 }
 
-fn create_checkout_root(checkout: &Path, resolved: &Path, in_git: bool) -> Result<()> {
+fn create_checkout_root(
+    command: &Command,
+    checkout: &Path,
+    resolved: &Path,
+    in_git: bool,
+) -> Result<()> {
     let relative = resolved.strip_prefix(checkout).with_context(|| {
         format!(
             "{} is outside checkout {}",
@@ -592,10 +597,10 @@ fn create_checkout_root(checkout: &Path, resolved: &Path, in_git: bool) -> Resul
         Some(std::path::Component::Normal(name)) if name == OsStr::new("target")
     );
     // Only the checkout root's `target` directory is Cargo's default build root
-    // for a package or workspace; member subdirectories keep their own data
-    // untagged so artifact cleanup never misclassifies them.
+    // when neither environment nor Cargo config overrides `target-dir`.
     let should_mark_target = first_is_root_target
         && is_regular_file_at(&checkout_fd, c"Cargo.toml")?
+        && cargo_uses_default_root_target(command, checkout)
         && (!in_git || is_git_ignored(checkout, Path::new("target/CACHEDIR.TAG"))?);
 
     let mut current = checkout_fd;
@@ -614,26 +619,153 @@ fn create_checkout_root(checkout: &Path, resolved: &Path, in_git: bool) -> Resul
             )
         })?;
         current_path.push(name);
-        // SAFETY: `current` is an open directory fd and `c_name` is a valid NUL-terminated path component.
-        let created = match unsafe { libc::mkdirat(current.as_raw_fd(), c_name.as_ptr(), 0o777) } {
-            0 => true,
-            _ => {
+        if depth == 0 && should_mark_target {
+            publish_tagged_target_at(&current, &c_name, &current_path)?;
+        } else {
+            // SAFETY: `current` is an open directory fd and `c_name` is a valid NUL-terminated path component.
+            if unsafe { libc::mkdirat(current.as_raw_fd(), c_name.as_ptr(), 0o777) } != 0 {
                 let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    false
-                } else {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
                     return Err(error)
                         .with_context(|| format!("cannot create {}", current_path.display()));
                 }
             }
-        };
-        let child = open_dir_at(&current, &c_name, &current_path)?;
-        if depth == 0 && created && should_mark_target {
-            write_cachedir_tag_in_dir(&child, &current_path)?;
         }
-        current = child;
+        // Use `O_PATH | O_DIRECTORY | O_NOFOLLOW` so write+search-only (0300)
+        // directories remain traversable without following symlinks.
+        current = open_dir_at(&current, &c_name, &current_path, libc::O_PATH)?;
     }
     Ok(())
+}
+
+/// Atomically publish a new directory already carrying `CACHEDIR.TAG` using
+/// `renameat2(RENAME_NOREPLACE)`. If `name` already exists (or appears
+/// concurrently), the staging directory is removed and the existing directory
+/// is left untouched, eliminating any window where `CACHEDIR.TAG` could be
+/// written into a substituted directory.
+fn publish_tagged_target_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<()> {
+    let stage_name = format!(".arc-target-stage-{}", crate::ids::new_identifier());
+    let c_stage = CString::new(stage_name.as_bytes()).context("invalid staging directory name")?;
+    // SAFETY: `parent` is an open directory fd and `c_stage` is a valid NUL-terminated entry name.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), c_stage.as_ptr(), 0o777) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot stage {}", display.display()));
+    }
+    let stage_result = (|| -> Result<()> {
+        let stage_fd = open_dir_at(parent, &c_stage, display, libc::O_RDONLY)?;
+        write_cachedir_tag_in_dir(&stage_fd, display)?;
+        // SAFETY: `parent` is an open directory fd, `c_stage` and `name` are valid NUL-terminated names.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                parent.as_raw_fd(),
+                c_stage.as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            cleanup_staged_target(parent, Some(&stage_fd), &c_stage);
+            return Ok(());
+        }
+        cleanup_staged_target(parent, Some(&stage_fd), &c_stage);
+        Err(error).with_context(|| format!("cannot publish {}", display.display()))
+    })();
+    if stage_result.is_err() {
+        cleanup_staged_target(parent, None, &c_stage);
+    }
+    stage_result
+}
+
+fn cleanup_staged_target(parent: &OwnedFd, stage_fd: Option<&OwnedFd>, c_stage: &CString) {
+    if let Some(fd) = stage_fd {
+        // SAFETY: `fd` is an open directory fd and `"CACHEDIR.TAG"` is a static C string.
+        unsafe {
+            libc::unlinkat(fd.as_raw_fd(), c"CACHEDIR.TAG".as_ptr(), 0);
+        }
+    } else if let Ok(fd) = open_dir_at(parent, c_stage, Path::new("."), libc::O_RDONLY) {
+        // SAFETY: `fd` is an open directory fd and `"CACHEDIR.TAG"` is a static C string.
+        unsafe {
+            libc::unlinkat(fd.as_raw_fd(), c"CACHEDIR.TAG".as_ptr(), 0);
+        }
+    }
+    // SAFETY: `parent` is an open directory fd and `c_stage` is a valid NUL-terminated name.
+    unsafe {
+        libc::unlinkat(parent.as_raw_fd(), c_stage.as_ptr(), libc::AT_REMOVEDIR);
+    }
+}
+
+fn effective_env_value(command: &Command, key: &str) -> Option<std::ffi::OsString> {
+    if let Some((_, value)) = command.get_envs().find(|(k, _)| *k == OsStr::new(key)) {
+        return value.map(std::ffi::OsStr::to_os_string);
+    }
+    std::env::var_os(key)
+}
+
+/// Returns `true` only when neither command/process environment nor Cargo
+/// configuration files redirect Cargo's target directory away from
+/// `<checkout>/target`. Fails closed (returns `false`) on unreadable or
+/// unparseable Cargo configuration.
+fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
+    let default_target = checkout.join("target");
+    for var in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
+        if let Some(value) = effective_env_value(command, var) {
+            if !value.is_empty() {
+                let candidate = PathBuf::from(&value);
+                let resolved = if candidate.is_absolute() {
+                    candidate
+                } else {
+                    checkout.join(candidate)
+                };
+                if resolved != default_target {
+                    return false;
+                }
+            }
+        }
+    }
+    let mut config_dirs: Vec<PathBuf> = checkout
+        .ancestors()
+        .map(|ancestor| ancestor.join(".cargo"))
+        .collect();
+    if let Some(cargo_home) = effective_env_value(command, "CARGO_HOME").filter(|v| !v.is_empty()) {
+        config_dirs.push(PathBuf::from(cargo_home));
+    } else if let Some(home) = effective_env_value(command, "HOME").filter(|v| !v.is_empty()) {
+        config_dirs.push(PathBuf::from(home).join(".cargo"));
+    }
+    for dir in config_dirs {
+        for filename in ["config.toml", "config"] {
+            let path = dir.join(filename);
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(contents) = fs::read_to_string(&path) else {
+                return false;
+            };
+            let Ok(parsed) = contents.parse::<toml::Value>() else {
+                return false;
+            };
+            if let Some(target_dir) = parsed
+                .get("build")
+                .and_then(|build| build.get("target-dir"))
+                .and_then(|value| value.as_str())
+            {
+                let base = dir.parent().unwrap_or(checkout);
+                let candidate = Path::new(target_dir);
+                let resolved = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    base.join(candidate)
+                };
+                return resolved == default_target;
+            }
+        }
+    }
+    true
 }
 
 fn open_dir_path(path: &Path) -> Result<OwnedFd> {
@@ -643,7 +775,7 @@ fn open_dir_path(path: &Path) -> Result<OwnedFd> {
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -654,13 +786,18 @@ fn open_dir_path(path: &Path) -> Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn open_dir_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<OwnedFd> {
+fn open_dir_at(
+    parent: &OwnedFd,
+    name: &CString,
+    display: &Path,
+    access: libc::c_int,
+) -> Result<OwnedFd> {
     // SAFETY: `parent` is an open directory fd and `name` is a valid NUL-terminated entry name.
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {

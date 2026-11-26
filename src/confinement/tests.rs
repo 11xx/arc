@@ -609,19 +609,76 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     assert!(command.status().unwrap().success());
     assert!(magic.join(":(glob)/sub").is_dir());
 
-    // Marker creation is bound to the opened directory handle even if the path is replaced.
-    let scratch_pin = scratch();
-    let pinned_dir = scratch_pin.path().join("orig");
-    let swapped_dir = scratch_pin.path().join("swapped");
-    fs::create_dir(&pinned_dir).unwrap();
-    fs::create_dir(&swapped_dir).unwrap();
-    let fd = open_dir_path(&pinned_dir).unwrap();
-    let moved_orig = scratch_pin.path().join("moved-orig");
-    fs::rename(&pinned_dir, &moved_orig).unwrap();
-    std::os::unix::fs::symlink(&swapped_dir, &pinned_dir).unwrap();
-    write_cachedir_tag_in_dir(&fd, &pinned_dir).unwrap();
-    assert!(moved_orig.join("CACHEDIR.TAG").is_file());
-    assert!(!swapped_dir.join("CACHEDIR.TAG").exists());
+    // Marker publication via renameat2(RENAME_NOREPLACE) leaves an existing real
+    // directory untouched and cleans up staging with no window to write into a replacement.
+    let scratch_pub = scratch();
+    let pub_checkout = scratch_pub.path().join("pub-existing");
+    fs::create_dir_all(pub_checkout.join("target")).unwrap();
+    let pub_fd = open_dir_path(&pub_checkout).unwrap();
+    let target_name = CString::new("target").unwrap();
+    publish_tagged_target_at(&pub_fd, &target_name, &pub_checkout.join("target")).unwrap();
+    assert!(!pub_checkout.join("target/CACHEDIR.TAG").exists());
+    let leftovers: Vec<_> = fs::read_dir(&pub_checkout)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".arc-target-stage-")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "leftover stage dirs: {leftovers:?}");
+
+    // Configured Cargo build.target-dir override prevents tagging `target/`, and
+    // arc-written confinement markers never authorize `artifacts::recognize` cleanup.
+    let scratch_override = scratch();
+    let overridden = scratch_override.path().join("overridden");
+    fs::create_dir_all(overridden.join(".cargo")).unwrap();
+    init_git(&overridden);
+    fs::write(overridden.join(".gitignore"), "/target\n/cargo-out\n").unwrap();
+    fs::write(
+        overridden.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        overridden.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"cargo-out\"\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&overridden, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(overridden.join("target").is_dir());
+    assert!(!overridden.join("target/CACHEDIR.TAG").exists());
+    assert!(
+        crate::artifacts::recognize(&checkout, &["!! target/".to_string()], &[]).is_empty(),
+        "confinement-written CACHEDIR.TAG must not authorize artifact cleanup alone"
+    );
+
+    // Write+search-only (0300) parent directory stays traversable when creating nested roots.
+    use std::os::unix::fs::PermissionsExt;
+    let scratch_mode = scratch();
+    let mode_checkout = scratch_mode.path().join("mode-0300");
+    fs::create_dir_all(mode_checkout.join("opaque")).unwrap();
+    fs::set_permissions(
+        mode_checkout.join("opaque"),
+        fs::Permissions::from_mode(0o300),
+    )
+    .unwrap();
+    let mode_cmd = Command::new("true");
+    let res = create_checkout_root(
+        &mode_cmd,
+        &mode_checkout,
+        &mode_checkout.join("opaque/child"),
+        false,
+    );
+    fs::set_permissions(
+        mode_checkout.join("opaque"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    res.unwrap();
+    assert!(mode_checkout.join("opaque/child").is_dir());
 
     // Symlink in the created root chain is rejected without writing through it.
     let scratch_sym = scratch();
@@ -635,8 +692,14 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     )
     .unwrap();
     std::os::unix::fs::symlink(&outside, sym_checkout.join("target")).unwrap();
-    let err = create_checkout_root(&sym_checkout, &sym_checkout.join("target/nested"), false)
-        .unwrap_err();
+    let sym_cmd = Command::new("true");
+    let err = create_checkout_root(
+        &sym_cmd,
+        &sym_checkout,
+        &sym_checkout.join("target/nested"),
+        false,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("not a real directory"),
         "unexpected error: {err:#}"
