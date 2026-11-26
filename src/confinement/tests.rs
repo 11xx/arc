@@ -817,6 +817,65 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
         cargo_target.display()
     );
 
+    // Symlinked CARGO_HOME preserves its lexical parent when resolving relative
+    // `build.target-dir` (matching `cargo metadata`), so a symlink to `<real>/cargo-home`
+    // does not falsely match `<real>/wt/target`.
+    let scratch_sym_ch = scratch();
+    let real_parent = scratch_sym_ch.path().join("real");
+    let real_ch = real_parent.join("cargo-home");
+    let sym_ch_wt = real_parent.join("wt");
+    fs::create_dir_all(&real_ch).unwrap();
+    fs::create_dir_all(sym_ch_wt.join("src")).unwrap();
+    init_git(&sym_ch_wt);
+    fs::write(sym_ch_wt.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        sym_ch_wt.join("Cargo.toml"),
+        "[package]\nname='symchpkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(sym_ch_wt.join("src/lib.rs"), "").unwrap();
+    fs::write(
+        real_ch.join("config"),
+        "[build]\ntarget-dir = \"wt/target\"\n",
+    )
+    .unwrap();
+    let linked_ch = scratch_sym_ch.path().join("cargo-home");
+    std::os::unix::fs::symlink(&real_ch, &linked_ch).unwrap();
+    let sym_meta_out = crate::child_command::command("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(&sym_ch_wt)
+        .env("CARGO_HOME", &linked_ch)
+        .output()
+        .unwrap();
+    assert!(sym_meta_out.status.success());
+    let sym_meta_json: serde_json::Value = serde_json::from_slice(&sym_meta_out.stdout).unwrap();
+    let sym_cargo_target = PathBuf::from(sym_meta_json["target_directory"].as_str().unwrap());
+    assert_ne!(
+        fs::canonicalize(&sym_ch_wt).unwrap().join("target"),
+        sym_cargo_target,
+        "fixture must make cargo resolve symlinked CARGO_HOME relative target-dir outside real/wt/target"
+    );
+    let mut sym_ch_cmd = crate::child_command::command("true");
+    sym_ch_cmd
+        .current_dir(&sym_ch_wt)
+        .env("CARGO_HOME", &linked_ch);
+    apply_declared(
+        &mut sym_ch_cmd,
+        &sym_ch_wt,
+        &Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        },
+    )
+    .unwrap();
+    assert!(sym_ch_cmd.status().unwrap().success());
+    assert!(sym_ch_wt.join("target").is_dir());
+    assert!(
+        !sym_ch_wt.join("target/CACHEDIR.TAG").exists(),
+        "symlinked CARGO_HOME must not tag real/wt/target when Cargo targets {}",
+        sym_cargo_target.display()
+    );
+
     // A FIFO at `.cargo/config` never blocks confinement; it fails closed and leaves
     // `target/` unmarked while still shadowing `.cargo/config.toml`.
     let scratch_fifo = scratch();

@@ -862,12 +862,14 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         .collect();
     if let Some(cargo_home) = effective_env_value(command, "CARGO_HOME").filter(|v| !v.is_empty()) {
         let candidate = PathBuf::from(cargo_home);
+        // Preserve the lexical config directory so relative `build.target-dir`
+        // resolves from `dir.parent()` even when `CARGO_HOME` is a symlink.
         let dir = if candidate.is_absolute() {
             candidate
         } else {
             checkout.join(candidate)
         };
-        config_dirs.push(fs::canonicalize(&dir).unwrap_or(dir));
+        config_dirs.push(dir);
     } else if let Some(home) = effective_env_value(command, "HOME").filter(|v| !v.is_empty()) {
         let candidate = PathBuf::from(home).join(".cargo");
         let dir = if candidate.is_absolute() {
@@ -875,7 +877,7 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         } else {
             checkout.join(candidate)
         };
-        config_dirs.push(fs::canonicalize(&dir).unwrap_or(dir));
+        config_dirs.push(dir);
     }
     for dir in config_dirs {
         // Cargo checks `config` before `config.toml` in each directory and
@@ -902,8 +904,8 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
             let Some(target_dir) = value.as_str() else {
                 return false;
             };
-            // Cargo resolves relative `build.target-dir` from the parent of
-            // the config directory regardless of whether it is named `.cargo`.
+            // Cargo resolves relative `build.target-dir` from the lexical parent
+            // of the config directory regardless of whether it is named `.cargo`.
             let base = dir.parent().unwrap_or(checkout);
             let candidate = Path::new(target_dir);
             let resolved = if candidate.is_absolute() {
@@ -911,7 +913,8 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
             } else {
                 base.join(candidate)
             };
-            return resolved == default_target;
+            let normalized = resolve_missing(&resolved).unwrap_or(resolved);
+            return normalized == default_target;
         }
     }
     true
