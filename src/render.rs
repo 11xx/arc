@@ -1724,9 +1724,18 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     .iter()
                     .filter(|finding| report.open_blocking_findings.contains(&finding.id))
                 {
+                    let missing_commit = match &finding.resolution_commit_status {
+                        Some(crate::status::ResolutionCommitStatus::NotInHead(commit)) => {
+                            format!(
+                                " (resolution commit {} not in head)",
+                                &commit[..commit.len().min(8)]
+                            )
+                        }
+                        _ => String::new(),
+                    };
                     let _ = writeln!(
                         out,
-                        "  - `{}` [{:?}] {}{}",
+                        "  - `{}` [{:?}] {}{}{missing_commit}",
                         finding.id,
                         finding.severity,
                         finding.summary,
@@ -3366,8 +3375,17 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .iter()
             .filter(|finding| report.open_blocking_findings.contains(&finding.id))
             .map(|finding| {
+                let missing_commit = match &finding.resolution_commit_status {
+                    Some(crate::status::ResolutionCommitStatus::NotInHead(commit)) => {
+                        format!(
+                            " (resolution commit {} not in head)",
+                            &commit[..commit.len().min(8)]
+                        )
+                    }
+                    _ => String::new(),
+                };
                 format!(
-                    "`{}` [{:?}] {}{}",
+                    "`{}` [{:?}] {}{}{missing_commit}",
                     finding.id,
                     finding.severity,
                     finding.summary,

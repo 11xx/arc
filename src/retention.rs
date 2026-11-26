@@ -109,6 +109,13 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
                 Payload::AuditVerdictRecorded { revision, .. } => {
                     add(&event.event_id, "audit".to_string(), revision)
                 }
+                Payload::DispositionRecorded {
+                    finding_id,
+                    commit: Some(commit),
+                    ..
+                } if matches!(commit.len(), 40 | 64) => {
+                    add(&event.event_id, format!("{finding_id} disposition"), commit)
+                }
                 _ => {}
             }
         }

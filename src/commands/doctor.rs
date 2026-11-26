@@ -186,7 +186,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
                 Vec::new()
             }
         };
-    inspect_repository_events(&store, &mut problems);
+    inspect_repository_events(&ctx.cwd, &store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_retention(ctx, &store, &mut problems, &mut advice)?;
@@ -1302,7 +1302,7 @@ fn inspect_hold_releases(readable: &BTreeMap<String, Vec<Event>>, advice: &mut V
 /// Repository-scoped events, checked the way a change's events are: a
 /// malformed one must be reported as a problem rather than surfacing as a
 /// failure inside whatever first tried to read it.
-fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
+fn inspect_repository_events(cwd: &Path, store: &Store, problems: &mut Vec<Finding>) {
     let files = match store.repository_event_files() {
         Ok(files) => files,
         Err(error) => {
@@ -1380,9 +1380,11 @@ fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
         .load_repository_events()
         .and_then(|events| crate::rewrite::RewriteMap::from_events(events.iter()))
     {
+        let enriched =
+            crate::rewrite::format_rewrite_error(error, Some(cwd), Some(store), &BTreeSet::new());
         problems.push(Finding {
             code: "invalid-rewrite-mapping",
-            detail: error.to_string(),
+            detail: enriched.to_string(),
         });
     }
 }

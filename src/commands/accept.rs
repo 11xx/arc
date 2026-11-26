@@ -323,9 +323,11 @@ fn plan_acceptance(
                 }
             }
             events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+            let planned_repo = bundle_io::plan_repository_events(&ctx.cwd, Some(&store), &bundle)?;
             let mut repository = store.load_repository_events()?;
-            for value in &bundle.bundle.repository_events {
-                let event: Event = serde_json::from_value(value.clone())?;
+            let incoming_repo_ids: BTreeSet<String> = planned_repo.keys().cloned().collect();
+            for bytes in planned_repo.values() {
+                let event: Event = serde_json::from_slice(bytes)?;
                 if !repository
                     .iter()
                     .any(|held| held.event_id == event.event_id)
@@ -334,7 +336,14 @@ fn plan_acceptance(
                 }
             }
             repository.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-            let rewrites = RewriteMap::from_events(repository.iter())?;
+            let rewrites = RewriteMap::from_events(repository.iter()).map_err(|error| {
+                crate::rewrite::format_rewrite_error(
+                    error,
+                    Some(&ctx.cwd),
+                    Some(&store),
+                    &incoming_repo_ids,
+                )
+            })?;
             let events = crate::landing::joined(&events, &repository);
             let mut state =
                 state::reduce_following_with_repository(&events, &rewrites, &repository)?;

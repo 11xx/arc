@@ -3692,3 +3692,289 @@ fn withdrawals_refuse_other_event_types_and_empty_reasons() {
         .stderr(predicates::str::contains("non-empty reason"));
     assert!(repository_events(&repo).is_empty(), "{events}");
 }
+
+#[test]
+fn contradictory_bundle_refusal_names_both_events_and_suggests_withdraw() {
+    let source = repo_with_gates();
+    let (change_a, source_wt_a, original_a) = change_with_patchset(&source, "alpha-conflict");
+
+    // Export change A before signing so receiver holds the original commit and change.
+    let initial_bundle = source.home.join("alpha-initial.json");
+    source
+        .arc(&source_wt_a)
+        .args([
+            "export",
+            &change_a,
+            "--output",
+            initial_bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let receiver = Repo::new();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+    git(
+        &receiver.root,
+        &["branch", "arc/alpha-conflict", &original_a],
+    );
+    receiver
+        .arc(&receiver.root)
+        .args(["import", initial_bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Receiver creates an unlanded local rewrite on change A's branch.
+    let receiver_wt_a = receiver.home.join("wt-alpha");
+    git(
+        &receiver.root,
+        &[
+            "worktree",
+            "add",
+            receiver_wt_a.to_str().unwrap(),
+            "arc/alpha-conflict",
+        ],
+    );
+    receiver
+        .arc(&receiver_wt_a)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &original_a,
+            "--no-sign",
+            "--append",
+            "Planned-by: Local <local@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let local_event_id = rewrite_event_id(&receiver);
+
+    // Source rewrites the same original commit to a different successor.
+    source
+        .arc(&source_wt_a)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &original_a,
+            "--no-sign",
+            "--append",
+            "Planned-by: Replica <replica@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let incoming_event_id = rewrite_event_id(&source);
+
+    let updated_bundle = source.home.join("alpha-updated.json");
+    source
+        .arc(&source_wt_a)
+        .args([
+            "export",
+            &change_a,
+            "--output",
+            updated_bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+
+    // Importing change A must refuse with full actionable diagnostics.
+    let refusal = receiver
+        .arc(&receiver.root)
+        .args(["import", updated_bundle.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !refusal.status.success(),
+        "conflicting bundle for same change must refuse"
+    );
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    for needle in [
+        &original_a,
+        &local_event_id,
+        &incoming_event_id,
+        &change_a,
+        "arc rewrite trailers",
+        "successors never landed",
+        &format!("arc history withdraw {local_event_id}"),
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "missing {needle:?} in stderr:\n{stderr}"
+        );
+    }
+
+    // Withdrawing the unlanded local map unblocks importing change A.
+    receiver
+        .arc(&receiver.root)
+        .args([
+            "history",
+            "withdraw",
+            &local_event_id,
+            "--reason",
+            "superseded unlanded rewrite",
+        ])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["import", updated_bundle.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn unlanded_rewrite_conflict_on_one_change_does_not_block_unrelated_bundle() {
+    let source = repo_with_gates();
+    let (change_a, source_wt_a, original_a) = change_with_patchset(&source, "alpha-unlanded");
+    let (change_b, source_wt_b, _) = change_with_patchset(&source, "beta-unrelated");
+
+    let initial_a = source.home.join("alpha-initial.json");
+    source
+        .arc(&source_wt_a)
+        .args(["export", &change_a, "--output", initial_a.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let receiver = Repo::new();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+    git(
+        &receiver.root,
+        &["branch", "arc/alpha-unlanded", &original_a],
+    );
+    receiver
+        .arc(&receiver.root)
+        .args(["import", initial_a.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Receiver records an unlanded local rewrite for change A.
+    let receiver_wt_a = receiver.home.join("wt-alpha-unlanded");
+    git(
+        &receiver.root,
+        &[
+            "worktree",
+            "add",
+            receiver_wt_a.to_str().unwrap(),
+            "arc/alpha-unlanded",
+        ],
+    );
+    receiver
+        .arc(&receiver_wt_a)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &original_a,
+            "--no-sign",
+            "--append",
+            "Planned-by: Local <local@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let local_event_id = rewrite_event_id(&receiver);
+
+    // Source records a contradicting rewrite for change A.
+    source
+        .arc(&source_wt_a)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &original_a,
+            "--no-sign",
+            "--append",
+            "Planned-by: Replica <replica@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let source_rewrite_event: serde_json::Value = {
+        let path = repository_events(&source).into_iter().next().unwrap();
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    };
+    let incoming_event_id = source_rewrite_event["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 1. Fresh export of unrelated change B omits change A's scoped rewrite event.
+    let bundle_b = source.home.join("beta.json");
+    source
+        .arc(&source_wt_b)
+        .args(["export", &change_b, "--output", bundle_b.to_str().unwrap()])
+        .assert()
+        .success();
+    let parsed_b: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_b).unwrap()).unwrap();
+    let exported_repo_events = parsed_b
+        .get("repository_events")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert!(
+        !exported_repo_events
+            .iter()
+            .any(|event| event["event_id"] == incoming_event_id),
+        "export of unrelated change B should omit change A's scoped rewrite: {parsed_b}"
+    );
+
+    // 2. Even if a bundle for change B still carries the contradicting unrelated
+    // rewrite event (e.g. from an older exporter), import skips it with a warning
+    // rather than blocking change B.
+    let mut legacy_b = parsed_b.clone();
+    legacy_b["repository_events"] = serde_json::json!([source_rewrite_event]);
+    let legacy_b_path = source.home.join("beta-legacy.json");
+    fs::write(&legacy_b_path, json_file_bytes(&legacy_b)).unwrap();
+    copy_objects(
+        &source.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+
+    let dry = stdout(receiver.arc(&receiver.root).args([
+        "import",
+        legacy_b_path.to_str().unwrap(),
+        "--dry-run",
+    ]));
+    assert!(
+        dry.contains("skipped unrelated conflicting rewrite")
+            && dry.contains(&incoming_event_id)
+            && dry.contains(&local_event_id),
+        "dry-run should warn about skipped unrelated rewrite:\n{dry}"
+    );
+    let imported = stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", legacy_b_path.to_str().unwrap()]),
+    );
+    assert!(
+        imported.contains("skipped unrelated conflicting rewrite"),
+        "import should warn about skipped unrelated rewrite:\n{imported}"
+    );
+
+    // Change B is present and readable, and receiver's repository ledger stays consistent.
+    receiver
+        .arc(&receiver.root)
+        .args(["show", &change_b, "--json"])
+        .assert()
+        .success();
+    let receiver_repo_events: Vec<String> = repository_events(&receiver)
+        .into_iter()
+        .map(|path| path.file_stem().unwrap().to_str().unwrap().to_string())
+        .collect();
+    assert!(receiver_repo_events.contains(&local_event_id));
+    assert!(
+        !receiver_repo_events.contains(&incoming_event_id),
+        "skipped unrelated rewrite must not be written into receiver store"
+    );
+    let doctor = json_stdout(receiver.arc(&receiver.root).args(["doctor", "--json"]));
+    assert_eq!(doctor["problems"], serde_json::json!([]), "{doctor}");
+}

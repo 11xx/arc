@@ -1045,6 +1045,12 @@ RUN A CHANGE
                                      `arc findings` lists findings, and no
                                      command reads a single one.
     --evidence-event <id>            Cite the verification run that justifies it.
+                                     A `resolved` disposition citing `--commit`
+                                     stands when that commit (after recorded
+                                     rewrites) is an ancestor of the head or
+                                     matches a non-merge commit in `base..head`
+                                     by exact Git patch-id; otherwise the
+                                     finding remains open.
   Nothing submits or marks a change ready: `arc snapshot` records a patchset
   and `arc check` computes readiness. `arc close <change> --abandoned` abandons.
   arc check                          Integration preflight; exit code names the blocker.
@@ -1109,7 +1115,14 @@ RUN A CHANGE
   already stands, and printing `retained: <ref> <commit>` for each. A
   rebase's retention refs, which no event names, are held again this way. A
   dry run creates none, and a bundle without an object list delivers
-  nothing to hold.
+  nothing to hold. Export omits `history-rewritten` events (and withdrawals
+  naming only omitted maps) that are strictly scoped to other changes and whose
+  revisions are uncited by the exported change or its repository events. On
+  import and `arc accept`, an incoming `history-rewritten` event contradicting
+  a locally held rewrite is skipped with a warning when unrelated to the
+  imported change; relevant or intra-bundle contradictions refuse, naming both
+  events and suggesting `arc history withdraw` for maps whose successors never
+  landed.
 
   Retained forge content, and the receipt file each read ingested from one
   cites by digest and length, travel beside the bundle as an optional sidecar,
@@ -4079,7 +4092,8 @@ HISTORY REWRITES
   signed.
 
   A commit that any recorded verdict or audit read, that a patchset recorded
-  as its head, that a forge fact records as the provider's own (a full
+  as its head, that a finding disposition cites by full object ID, that a forge
+  fact records as the provider's own (a full
   object ID, from an observation, link, checks or lifecycle fact), that a
   candidate's received source, tested or report evidence names, that a
   disclosure selects as Git support, or that a checkpoint names as its
@@ -4154,7 +4168,10 @@ HISTORY REWRITES
   answers; an ambiguous one is refused naming the candidates. Rewrite records
   that contradict each other make the map unreadable, which every projection
   refuses rather than reading as no rewrite at all — `arc doctor` reports it
-  as `invalid-rewrite-mapping`. A branch with commits of its own on top of the rewritten
+  as `invalid-rewrite-mapping`. Conflict diagnostics name both events (event
+  ID, change when known, tool, reason, conflicting revision, and mapped
+  successors) and suggest `arc history withdraw` for any map whose successors
+  never landed. A branch with commits of its own on top of the rewritten
   range shares no commit with the branch it was cut from — the rewrite names
   each one and the `git rebase --onto` that replays it, and until then no
   comparison between the two has an answer. An approval, declared debt waiver,

@@ -592,3 +592,124 @@ fn blocking_findings_name_the_patchset_they_predate() {
         "{check}"
     );
 }
+
+#[test]
+fn finding_resolution_survives_rebase_via_patch_id_and_blocks_when_dropped() {
+    let repo = Repo::new();
+    let begin = stdout(repo.arc(&repo.root).args(["begin", "rebase-finding"]));
+    let change_id = opened_change_id(&begin);
+    let wt = repo.home.join(".worktrees/repo-rebase-finding");
+    repo.commit(&wt, "feature.rs", "broken\n", "feat: initial change");
+    stdout(repo.arc(&wt).args(["snapshot", "rebase-finding"]));
+    let finding_out = stdout(repo.arc(&wt).args([
+        "finding",
+        "rebase-finding",
+        "--summary",
+        "fix edge case",
+        "--blocking",
+        "--severity",
+        "major",
+    ]));
+    let finding_id = finding_out
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+
+    // Fix the finding in a commit and resolve citing that commit.
+    repo.commit(&wt, "feature.rs", "fixed\n", "fix: handle edge case");
+    let fix_commit = repo.head(&wt);
+    stdout(repo.arc(&wt).args([
+        "resolve",
+        "rebase-finding",
+        &finding_id,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix_commit,
+    ]));
+    stdout(repo.arc(&wt).args(["snapshot", "rebase-finding"]));
+
+    // Advance master with an unrelated commit and rebase the branch so the fix
+    // commit is carried forward with a new SHA and identical Git patch-id.
+    repo.commit(&repo.root, "unrelated.txt", "target\n", "feat: target move");
+    stdout(repo.arc(&wt).args(["rebase", "rebase-finding"]));
+    let carried_commit = repo.head(&wt);
+    assert_ne!(carried_commit, fix_commit);
+
+    // Status and check must recognize the carried fix via patch-id (no open blockers).
+    let status = json_stdout(repo.arc(&wt).args(["status", "rebase-finding", "--json"]));
+    assert_eq!(
+        status["open_blocking_findings"],
+        serde_json::json!([]),
+        "carried resolution commit must not reopen blocking finding: {status}"
+    );
+    assert_eq!(status["findings"][0]["status"], "resolved", "{status}");
+
+    // Approval + integration must succeed without re-resolving the finding.
+    stdout(repo.arc(&wt).args([
+        "--actor",
+        "reviewer",
+        "review",
+        "rebase-finding",
+        "--verdict",
+        "approved",
+    ]));
+    repo.arc(&wt)
+        .args(["check", "rebase-finding"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &change_id])
+        .assert()
+        .success();
+
+    // Contrast: if the cited fix commit is dropped (not in head and no matching
+    // patch-id in base..head), the blocking finding stays open and blocks integration.
+    let begin2 = stdout(repo.arc(&repo.root).args(["begin", "dropped-finding"]));
+    let change_id2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-dropped-finding");
+    repo.commit(&wt2, "other.rs", "v1\n", "feat: base change");
+    stdout(repo.arc(&wt2).args(["snapshot", "dropped-finding"]));
+    let finding_out2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "dropped-finding",
+        "--summary",
+        "must keep fix",
+        "--blocking",
+        "--severity",
+        "major",
+    ]));
+    let finding_id2 = finding_out2
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+    repo.commit(&wt2, "other.rs", "v2-fixed\n", "fix: resolve issue");
+    let dropped_fix = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "dropped-finding",
+        &finding_id2,
+        "--status",
+        "resolved",
+        "--commit",
+        &dropped_fix,
+    ]));
+    // Drop the fix commit by resetting back one commit and re-snapshotting.
+    git(&wt2, &["reset", "--hard", "HEAD~1"]);
+    stdout(repo.arc(&wt2).args(["snapshot", "dropped-finding"]));
+    let status2 = json_stdout(repo.arc(&wt2).args(["status", "dropped-finding", "--json"]));
+    assert_eq!(
+        status2["open_blocking_findings"],
+        serde_json::json!([finding_id2]),
+        "dropped fix commit must keep blocking finding open: {status2}"
+    );
+    assert_eq!(status2["findings"][0]["status"], "open", "{status2}");
+    let check2 = repo.arc(&wt2).args(["check", &change_id2]).assert().code(2);
+    let out2 = String::from_utf8_lossy(&check2.get_output().stdout);
+    assert!(
+        out2.contains("not in head"),
+        "check should explain missing resolution commit:\n{out2}"
+    );
+}

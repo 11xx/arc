@@ -137,8 +137,13 @@ pub(super) fn prepare_mapping(
             retained,
         },
     )?;
-    combined.push(event.preview_after(&combined)?);
+    let preview = event.preview_after(&combined)?;
+    let incoming_ids = BTreeSet::from([preview.event_id.clone()]);
+    combined.push(preview);
     let rewrites = RewriteMap::from_events(combined.iter())
+        .map_err(|error| {
+            crate::rewrite::format_rewrite_error(error, Some(&ctx.cwd), Some(store), &incoming_ids)
+        })
         .context("this rewrite contradicts one already recorded; nothing was written")?;
     // Judged here, while the old commits still exist: an approval follows a
     // rewrite only when this says the successor differs by signature alone,

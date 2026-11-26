@@ -422,6 +422,21 @@ pub fn probe_base_dischargeable(base: Option<&str>, head: &str) -> bool {
     base.is_some_and(|base| !base.is_empty() && base != head)
 }
 
+/// How a finding's cited resolution commit relates to the change's current head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionCommitStatus {
+    /// No commit was cited on the disposition, or the finding is not resolved.
+    Unbound,
+    /// The cited commit (after following recorded rewrites) is an ancestor of `head`.
+    Contained(String),
+    /// The cited commit is not an ancestor of `head`, but a commit in `base..head`
+    /// carries the exact same Git patch-id.
+    CarriedByPatchId { recorded: String, carried: String },
+    /// The cited commit is neither an ancestor of `head` nor carried by patch-id
+    /// in `base..head`.
+    NotInHead(String),
+}
+
 #[derive(Debug, Serialize)]
 pub struct FindingSummary {
     pub id: String,
@@ -443,6 +458,154 @@ pub struct FindingSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patchset_id: Option<String>,
     pub reported_by: String,
+    /// Git-time verification of a `Resolved` disposition's cited commit against
+    /// the current head and `base..head` patch-ids. Omitted from JSON to keep
+    /// `arc-status/27` stable.
+    #[serde(skip)]
+    pub resolution_commit_status: Option<ResolutionCommitStatus>,
+}
+
+/// Verify each open finding's cited resolution commit against `current_head`
+/// and the change's own commit range (`base..head`).
+///
+/// A `Resolved` disposition citing commit `C1` stands when:
+/// - `C1` (already advanced through recorded rewrites) is an ancestor of
+///   `current_head`, or
+/// - `C1` is a non-merge commit with a non-empty Git patch-id and some
+///   non-merge commit `C2` in `base..head` carries that exact patch-id.
+///
+/// When neither holds, the disposition's cited commit is missing from the
+/// change's head (`ResolutionCommitStatus::NotInHead`), leaving the finding
+/// open. Range patch-ids are computed lazily only when a cited commit is not
+/// already an ancestor of `current_head`.
+pub(crate) fn evaluate_finding_resolutions(
+    cwd: Option<&Path>,
+    state: &ChangeState,
+    current_head: Option<&str>,
+) -> BTreeMap<String, ResolutionCommitStatus> {
+    let mut statuses = BTreeMap::new();
+    let (Some(cwd), Some(head)) = (cwd, current_head) else {
+        return statuses;
+    };
+    if state.is_closed() {
+        return statuses;
+    }
+    let mut range_patch_ids: Option<Vec<(String, String)>> = None;
+    for finding in state.findings.values() {
+        let tips = finding.tips();
+        let [tip] = tips.as_slice() else {
+            continue;
+        };
+        if tip.status != crate::model::DispositionStatus::Resolved {
+            continue;
+        }
+        let Some(recorded) = tip.commit.as_deref() else {
+            statuses.insert(finding.id.clone(), ResolutionCommitStatus::Unbound);
+            continue;
+        };
+        if gitio::is_ancestor(cwd, recorded, head).unwrap_or(false) {
+            statuses.insert(
+                finding.id.clone(),
+                ResolutionCommitStatus::Contained(recorded.to_string()),
+            );
+            continue;
+        }
+        let entries = range_patch_ids
+            .get_or_insert_with(|| change_range_patch_ids(cwd, state, head).unwrap_or_default());
+        let carried = gitio::commit_exists(cwd, recorded)
+            .unwrap_or(false)
+            .then(|| {
+                let parents = gitio::commit_parents(cwd, recorded).ok()?;
+                if parents.len() > 1 {
+                    return None;
+                }
+                let expected_pid = gitio::patch_id(cwd, recorded).ok().flatten()?;
+                entries
+                    .iter()
+                    .find(|(_, pid)| pid == &expected_pid)
+                    .map(|(commit, _)| commit.clone())
+            })
+            .flatten();
+        match carried {
+            Some(carried) => {
+                statuses.insert(
+                    finding.id.clone(),
+                    ResolutionCommitStatus::CarriedByPatchId {
+                        recorded: recorded.to_string(),
+                        carried,
+                    },
+                );
+            }
+            None => {
+                statuses.insert(
+                    finding.id.clone(),
+                    ResolutionCommitStatus::NotInHead(recorded.to_string()),
+                );
+            }
+        }
+    }
+    statuses
+}
+
+/// Open blocking finding IDs for `state` at `current_head`, combining
+/// ledger disposition state with Git resolution-commit matching.
+pub(crate) fn open_blocking_finding_ids(
+    cwd: Option<&Path>,
+    state: &ChangeState,
+    current_head: Option<&str>,
+) -> Vec<String> {
+    let resolution_statuses = evaluate_finding_resolutions(cwd, state, current_head);
+    state
+        .findings
+        .values()
+        .filter(|f| {
+            f.blocks_integration()
+                || (f.blocking
+                    && matches!(
+                        resolution_statuses.get(&f.id),
+                        Some(ResolutionCommitStatus::NotInHead(_))
+                    ))
+        })
+        .map(|f| f.id.clone())
+        .collect()
+}
+
+/// Non-merge commits in the change's own `base..head` range paired with their
+/// stable Git patch-ids.
+fn change_range_patch_ids(
+    cwd: &Path,
+    state: &ChangeState,
+    head: &str,
+) -> Result<Vec<(String, String)>> {
+    let ps_base = state
+        .latest_patchset()
+        .map(|p| p.base.as_str())
+        .filter(|base| gitio::is_ancestor(cwd, base, head).unwrap_or(false));
+    let target_mb = gitio::branch_head(cwd, &state.target_branch)
+        .ok()
+        .and_then(|target| gitio::merge_base(cwd, &target, head).ok());
+    let state_base = gitio::is_ancestor(cwd, &state.base, head)
+        .unwrap_or(false)
+        .then_some(state.base.as_str());
+    let range_base = match (ps_base, target_mb.as_deref()) {
+        (Some(pb), Some(tmb)) if gitio::is_ancestor(cwd, pb, tmb).unwrap_or(false) => Some(tmb),
+        (Some(pb), _) => Some(pb),
+        (None, Some(tmb)) => Some(tmb),
+        (None, None) => state_base,
+    };
+    let Some(base) = range_base else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for commit in gitio::range_commits(cwd, base, head)? {
+        if gitio::commit_parents(cwd, &commit)?.len() > 1 {
+            continue;
+        }
+        if let Some(pid) = gitio::patch_id(cwd, &commit)? {
+            entries.push((commit, pid));
+        }
+    }
+    Ok(entries)
 }
 
 #[derive(Debug, Serialize)]
@@ -1661,35 +1824,56 @@ fn build_report(
         .cloned()
         .filter(|waiver| Some(&waiver.revision) == current_head.as_ref());
 
+    let resolution_statuses = evaluate_finding_resolutions(cwd, state, current_head.as_deref());
     let findings: Vec<FindingSummary> = state
         .findings
         .values()
-        .map(|f| FindingSummary {
-            id: f.id.clone(),
-            blocking: f.blocking,
-            severity: f.severity,
-            summary: f.summary.clone(),
-            status: f
-                .effective_status()
-                .map(|s| format!("{s:?}").to_lowercase())
-                .unwrap_or_else(|| {
-                    if f.contested() {
-                        "contested".into()
-                    } else {
-                        "open".into()
-                    }
-                }),
-            contested: f.contested(),
-            body: f.body.clone(),
-            anchor: f.anchor.clone(),
-            patchset_id: f.patchset_id.clone(),
-            reported_by: f.reported_by.clone(),
+        .map(|f| {
+            let resolution_commit_status = resolution_statuses.get(&f.id).cloned();
+            let missing_commit = matches!(
+                resolution_commit_status,
+                Some(ResolutionCommitStatus::NotInHead(_))
+            );
+            let status = if missing_commit {
+                "open".into()
+            } else {
+                f.effective_status()
+                    .map(|s| format!("{s:?}").to_lowercase())
+                    .unwrap_or_else(|| {
+                        if f.contested() {
+                            "contested".into()
+                        } else {
+                            "open".into()
+                        }
+                    })
+            };
+            FindingSummary {
+                id: f.id.clone(),
+                blocking: f.blocking,
+                severity: f.severity,
+                summary: f.summary.clone(),
+                status,
+                contested: f.contested(),
+                body: f.body.clone(),
+                anchor: f.anchor.clone(),
+                patchset_id: f.patchset_id.clone(),
+                reported_by: f.reported_by.clone(),
+                resolution_commit_status,
+            }
         })
         .collect();
 
     let open_blocking: Vec<String> = state
-        .open_blocking_findings()
-        .iter()
+        .findings
+        .values()
+        .filter(|f| {
+            f.blocks_integration()
+                || (f.blocking
+                    && matches!(
+                        resolution_statuses.get(&f.id),
+                        Some(ResolutionCommitStatus::NotInHead(_))
+                    ))
+        })
         .map(|f| f.id.clone())
         .collect();
 

@@ -1052,11 +1052,9 @@ fn observe(
             continue;
         };
         let patchset = state.latest_patchset();
-        let mut findings: Vec<String> = state
-            .open_blocking_findings()
-            .iter()
-            .map(|finding| finding.id.clone())
-            .collect();
+        let branch_head = gitio::fresh_read(|| gitio::branch_head(&ctx.cwd, &state.branch)).ok();
+        let mut findings =
+            crate::status::open_blocking_finding_ids(Some(&ctx.cwd), state, branch_head.as_deref());
         findings.sort();
         observed.insert(
             id.clone(),

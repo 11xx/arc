@@ -273,6 +273,8 @@ impl Bundle {
                         .is_some_and(|attempt| finished.contains(attempt))
             })
             .collect();
+        let repository_events =
+            filter_exported_rewrites(store, change_id, &raw, repository_events)?;
         for value in &repository_events {
             if matches!(
                 value["event_type"].as_str(),
@@ -620,6 +622,229 @@ impl Bundle {
 
 pub(crate) fn valid_object_id(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Omit `history-rewritten` events (and withdrawals naming only omitted maps)
+/// that are strictly scoped to other changes and whose revisions are uncited
+/// by `change_id` or any other exported repository event.
+///
+/// Unscoped maps (for example manual `arc history rewrite --map` records with
+/// no refs or retained entries), target-branch rewrites, repository-scoped
+/// retention maps, and any rewrite transitively connected to a cited revision
+/// stay in the export so revision resolution never loses a needed link.
+fn filter_exported_rewrites(
+    store: &Store,
+    change_id: &str,
+    change_raw: &[(String, Value)],
+    repository_events: Vec<Value>,
+) -> Result<Vec<Value>> {
+    let parsed: Vec<Option<Event>> = repository_events
+        .iter()
+        .map(parse_typed_event)
+        .collect::<Result<_>>()?;
+    if !parsed
+        .iter()
+        .flatten()
+        .any(|event| matches!(event.payload, Payload::HistoryRewritten { .. }))
+    {
+        return Ok(repository_events);
+    }
+
+    let mut own_branches = BTreeSet::new();
+    let mut target_branches = BTreeSet::new();
+    let mut other_change_branches = BTreeSet::new();
+    for (_, value) in change_raw {
+        if let Some(branch) = value.get("branch").and_then(Value::as_str) {
+            own_branches.insert(branch.to_string());
+        }
+        if let Some(target) = value.get("target_branch").and_then(Value::as_str) {
+            target_branches.insert(target.to_string());
+        }
+    }
+    if let Ok(change_ids) = store.list_change_ids() {
+        for other_id in change_ids {
+            let Ok(events) = store.load_events(&other_id) else {
+                continue;
+            };
+            for event in &events {
+                if let Payload::ChangeOpened {
+                    branch,
+                    target_branch,
+                    ..
+                } = &event.payload
+                {
+                    target_branches.insert(target_branch.clone());
+                    if other_id != change_id {
+                        other_change_branches.insert(branch.clone());
+                    } else {
+                        own_branches.insert(branch.clone());
+                    }
+                }
+            }
+        }
+    }
+    other_change_branches
+        .retain(|branch| !target_branches.contains(branch) && !own_branches.contains(branch));
+
+    // Revisions cited by the exported change or any non-rewrite repository event.
+    let mut cited = BTreeSet::new();
+    for (_, value) in change_raw {
+        collect_cited_revisions(value, &mut cited);
+    }
+    for (value, typed) in repository_events.iter().zip(&parsed) {
+        if !matches!(
+            typed.as_ref().map(|event| &event.payload),
+            Some(Payload::HistoryRewritten { .. } | Payload::HistoryRewriteWithdrawn { .. })
+        ) {
+            collect_cited_revisions(value, &mut cited);
+        }
+    }
+
+    let mut rewrite_entries: Vec<(String, Vec<String>, bool)> = Vec::new();
+    for event in parsed.iter().flatten() {
+        let Payload::HistoryRewritten {
+            mapping,
+            refs,
+            retained,
+            ..
+        } = &event.payload
+        else {
+            continue;
+        };
+        let scoped_changes = crate::rewrite::event_change_ids(refs, retained);
+        let branches = crate::rewrite::event_branches(refs);
+        let retains_repo = crate::rewrite::event_retains_repository_scope(retained);
+        let strictly_other_change = !retains_repo
+            && ((!scoped_changes.is_empty() && !scoped_changes.contains(change_id))
+                || (scoped_changes.is_empty()
+                    && !branches.is_empty()
+                    && branches
+                        .iter()
+                        .all(|branch| other_change_branches.contains(branch))));
+        let revisions: Vec<String> = mapping
+            .iter()
+            .flat_map(|(old, new)| {
+                std::iter::once(crate::rewrite::canonical_revision(old))
+                    .chain(new.as_deref().map(crate::rewrite::canonical_revision))
+            })
+            .collect();
+        let directly_cited = revisions.iter().any(|rev| {
+            cited
+                .iter()
+                .any(|c| crate::rewrite::names_one_commit(rev, c))
+        });
+        let included = !strictly_other_change || directly_cited;
+        rewrite_entries.push((event.event_id.clone(), revisions, included));
+    }
+
+    // Transitive closure: keep any rewrite chained with an included rewrite.
+    loop {
+        let included_revs: Vec<String> = rewrite_entries
+            .iter()
+            .filter(|(_, _, included)| *included)
+            .flat_map(|(_, revs, _)| revs.iter().cloned())
+            .collect();
+        let mut changed = false;
+        for (_, revs, included) in &mut rewrite_entries {
+            if *included {
+                continue;
+            }
+            if revs.iter().any(|rev| {
+                included_revs
+                    .iter()
+                    .any(|other| crate::rewrite::names_one_commit(rev, other))
+            }) {
+                *included = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let excluded_rewrites: BTreeSet<String> = rewrite_entries
+        .into_iter()
+        .filter(|(_, _, included)| !*included)
+        .map(|(event_id, _, _)| event_id)
+        .collect();
+    if excluded_rewrites.is_empty() {
+        return Ok(repository_events);
+    }
+    Ok(repository_events
+        .into_iter()
+        .zip(parsed)
+        .filter(
+            |(_, typed)| match typed.as_ref().map(|event| &event.payload) {
+                Some(Payload::HistoryRewritten { .. }) => {
+                    !excluded_rewrites.contains(&typed.as_ref().unwrap().event_id)
+                }
+                Some(Payload::HistoryRewriteWithdrawn {
+                    rewrite_event_id, ..
+                }) => !excluded_rewrites.contains(rewrite_event_id),
+                _ => true,
+            },
+        )
+        .map(|(value, _)| value)
+        .collect())
+}
+
+/// Collect hex revision tokens from commit-bearing fields of a JSON event.
+pub(crate) fn collect_cited_revisions(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for item in values {
+                collect_cited_revisions(item, out);
+            }
+        }
+        Value::Object(fields) => {
+            for (field, child) in fields {
+                if matches!(field.as_str(), "metadata" | "mapping" | "refs") {
+                    continue;
+                }
+                if matches!(
+                    field.as_str(),
+                    "base"
+                        | "head"
+                        | "merge_base"
+                        | "base_revision"
+                        | "revision"
+                        | "commit"
+                        | "source_head"
+                        | "reviewed_head"
+                        | "head_sha"
+                        | "pr_head"
+                        | "observed_head_sha"
+                        | "observed_pr_head"
+                        | "observed_merge_sha"
+                        | "provisional_commit"
+                        | "staging_before"
+                        | "integrated_commit"
+                        | "merge_sha"
+                        | "against_target"
+                        | "target_before"
+                        | "target_revision"
+                        | "target"
+                        | "compared_at"
+                        | "at"
+                        | "failure_revision"
+                        | "landed"
+                        | "source"
+                ) {
+                    if let Some(token) = child.as_str() {
+                        if token.len() >= crate::rewrite::ABBREVIATION_FLOOR
+                            && token.len() <= 64
+                            && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        {
+                            out.insert(crate::rewrite::canonical_revision(token));
+                        }
+                    }
+                }
+                collect_cited_revisions(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The closure covers the transported events, including repository facts,

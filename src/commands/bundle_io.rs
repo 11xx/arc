@@ -694,15 +694,20 @@ fn import_events(
         received_sha256,
     )?;
     let rewrites = admitted_rewrites(
+        Some(&ctx.cwd),
         local_store.as_ref(),
         &repository,
         initial_authorization.as_ref(),
     )?;
     validated.validate_replay(&rewrites)?;
     if let Some(store) = &local_store {
-        if let Some(contest) =
-            claim_contest_for_import(store, validated, &preflight.new_events, &rewrites)?
-        {
+        if let Some(contest) = claim_contest_for_import(
+            store,
+            validated,
+            &preflight.new_events,
+            &repository,
+            &rewrites,
+        )? {
             println!("{}", contest.render(&validated.bundle.change_id));
             println!("aborted: no events or refs written");
             return Ok(crate::model::OperationResult::unpublished(1));
@@ -722,8 +727,13 @@ fn import_events(
         if plan.conflicts.is_empty() {
             let store = local_store.as_ref();
             if let Some(store) = store {
-                claim_contest =
-                    claim_contest_for_import(store, validated, &plan.new_events, &rewrites)?;
+                claim_contest = claim_contest_for_import(
+                    store,
+                    validated,
+                    &plan.new_events,
+                    &repository,
+                    &rewrites,
+                )?;
             }
             if claim_contest.is_none() {
                 validate_import_candidate(
@@ -821,7 +831,7 @@ fn import_events(
     // local transition could land between validation and the raw appends.
     let plan = classify_import_events(&root, validated)?;
     let claim_contest = if plan.conflicts.is_empty() {
-        claim_contest_for_import(&store, validated, &plan.new_events, &rewrites)?
+        claim_contest_for_import(&store, validated, &plan.new_events, &repository, &rewrites)?
     } else {
         None
     };
@@ -900,9 +910,15 @@ fn import_events(
         publisher,
         received_sha256,
     )?;
-    let rewrites = admitted_rewrites(Some(&store), &incoming, authorization.as_ref())?;
+    let rewrites = admitted_rewrites(
+        Some(&ctx.cwd),
+        Some(&store),
+        &incoming,
+        authorization.as_ref(),
+    )?;
     validated.validate_replay(&rewrites)?;
-    if let Some(contest) = claim_contest_for_import(&store, validated, &plan.new_events, &rewrites)?
+    if let Some(contest) =
+        claim_contest_for_import(&store, validated, &plan.new_events, &incoming, &rewrites)?
     {
         println!("{}", contest.render(&validated.bundle.change_id));
         println!("aborted: no events or refs written");
@@ -1199,6 +1215,7 @@ fn claim_contest_for_import(
     store: &Store,
     validated: &ValidatedBundle,
     new_event_ids: &[String],
+    repository: &BTreeMap<String, Vec<u8>>,
     rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<Option<crate::replica::ClaimContest>> {
     let mut incoming = validated
@@ -1218,17 +1235,7 @@ fn claim_contest_for_import(
         }
     }
     let new_event_ids = new_event_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut repository = store.load_repository_events()?;
-    for value in &validated.bundle.repository_events {
-        if let Some(event) = crate::bundle::parse_typed_event(value)? {
-            if !repository
-                .iter()
-                .any(|held| held.event_id == event.event_id)
-            {
-                repository.push(event);
-            }
-        }
-    }
+    let repository = combined_repository_events(Some(store), repository)?;
     crate::replica::live_claim_contest(
         store,
         &validated.bundle.change_id,
@@ -1258,12 +1265,14 @@ fn combined_repository_events(
 /// the authorization this publication will record. Legacy transport grants
 /// no rewrite capability for falsification identity.
 fn admitted_rewrites(
+    cwd: Option<&Path>,
     store: Option<&Store>,
     incoming: &BTreeMap<String, Vec<u8>>,
     authorization: Option<&crate::import_authorization::ImportAuthorization>,
 ) -> Result<crate::rewrite::RewriteMap> {
     let events = combined_repository_events(store, incoming)?;
     let scope = store.map(Store::privilege_scope).transpose()?;
+    let incoming_ids: BTreeSet<String> = incoming.keys().cloned().collect();
     crate::rewrite::RewriteMap::from_permitted_events(events.iter(), |event| {
         if incoming.contains_key(&event.event_id) {
             authorization.is_some_and(|authorization| {
@@ -1286,12 +1295,18 @@ fn admitted_rewrites(
             })
         }
     })
+    .map_err(|error| crate::rewrite::format_rewrite_error(error, cwd, store, &incoming_ids))
 }
 
 /// The repository events an import would write, refusing every contradiction
 /// before the first is written — including two bundled events sharing an ID,
 /// which no check against the destination can see.
-fn plan_repository_events(
+///
+/// An incoming `history-rewritten` event that contradicts a locally held
+/// rewrite map but is completely unrelated to the imported change (its events,
+/// related changes, and non-rewrite repository events) is skipped with a
+/// warning rather than blocking unrelated deliveries.
+pub(super) fn plan_repository_events(
     cwd: &Path,
     store: Option<&Store>,
     validated: &ValidatedBundle,
@@ -1340,9 +1355,11 @@ fn plan_repository_events(
             .collect(),
         None => BTreeSet::new(),
     };
+    let mut bundle_only = Vec::new();
     let mut novel = Vec::new();
     for value in &validated.bundle.repository_events {
         if let Some(mut event) = crate::bundle::parse_typed_event(value)? {
+            bundle_only.push(event.clone());
             if !held.contains(&event.event_id) {
                 novel.push(event.clone());
                 // What the sender judged is no link here: the map that
@@ -1360,6 +1377,7 @@ fn plan_repository_events(
             }
         }
     }
+    let novel_ids: BTreeSet<String> = novel.iter().map(|event| event.event_id.clone()).collect();
     // Only what the bundle adds is judged against the objects held here.
     // Evidence already held was admitted earlier, and a later contradiction
     // of it is a read-time diagnostic, never a reason to refuse an import.
@@ -1379,9 +1397,69 @@ fn plan_repository_events(
             })?;
         }
     }
+    // A bundle that contradicts itself is always refused before consulting
+    // unrelated-conflict filtering.
+    bundle_only.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    bundle_only.dedup_by(|a, b| a.event_id == b.event_id);
+    // Validate intra-bundle rewrites only when every withdrawal target is in
+    // the bundle itself; delta bundles may carry a withdrawal targeting a
+    // rewrite already held locally.
+    let bundle_ids: BTreeSet<&str> = bundle_only.iter().map(|e| e.event_id.as_str()).collect();
+    let self_contained_bundle: Vec<&Event> = bundle_only
+        .iter()
+        .filter(|event| match &event.payload {
+            Payload::HistoryRewriteWithdrawn {
+                rewrite_event_id, ..
+            } => bundle_ids.contains(rewrite_event_id.as_str()),
+            _ => true,
+        })
+        .collect();
+    if let Err(error) = crate::rewrite::RewriteMap::from_events(self_contained_bundle.into_iter()) {
+        return Err(crate::rewrite::format_rewrite_error(
+            error,
+            Some(cwd),
+            store,
+            &novel_ids,
+        ))
+        .context("the bundle's rewrites contradict this repository's; nothing was imported");
+    }
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-    let mut rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())
-        .context("the bundle's rewrites contradict this repository's; nothing was imported")?;
+    let mut rewrites = match crate::rewrite::RewriteMap::from_events(combined.iter()) {
+        Ok(map) => map,
+        Err(error) => {
+            if let Some(skipped) =
+                skip_unrelated_conflicting_rewrites(cwd, store, validated, &held, &combined)?
+            {
+                incoming.retain(|id, _| !skipped.contains(id));
+                novel.retain(|event| !skipped.contains(&event.event_id));
+                combined.retain(|event| !skipped.contains(&event.event_id));
+                let remaining_novel: BTreeSet<String> =
+                    novel.iter().map(|event| event.event_id.clone()).collect();
+                crate::rewrite::RewriteMap::from_events(combined.iter())
+                    .map_err(|err| {
+                        crate::rewrite::format_rewrite_error(
+                            err,
+                            Some(cwd),
+                            store,
+                            &remaining_novel,
+                        )
+                    })
+                    .context(
+                        "the bundle's rewrites contradict this repository's; nothing was imported",
+                    )?
+            } else {
+                return Err(crate::rewrite::format_rewrite_error(
+                    error,
+                    Some(cwd),
+                    store,
+                    &novel_ids,
+                ))
+                .context(
+                    "the bundle's rewrites contradict this repository's; nothing was imported",
+                );
+            }
+        }
+    };
     // Candidate events are judged with the ledger they join, by every rule
     // that needs no local object: a parent or an adoption may arrive in the
     // same bundle or already be here, and a tree this object store lacks is
@@ -1506,6 +1584,230 @@ fn plan_repository_events(
     }
     incoming.retain(|id, _| !held.contains(id));
     Ok(incoming)
+}
+
+/// Identify novel incoming `history-rewritten` events that contradict locally
+/// held active rewrites and are completely unrelated to the imported bundle.
+///
+/// Returns `Ok(Some(skipped))` when every conflicting incoming rewrite is
+/// unrelated to the bundle (and at least one was found), after printing a
+/// warning for each skipped event. Returns `Ok(None)` if any conflicting
+/// incoming rewrite touches this bundle's change, related changes, or
+/// non-rewrite repository events, or if the local store itself is contradictory.
+fn skip_unrelated_conflicting_rewrites(
+    cwd: &Path,
+    store: Option<&Store>,
+    validated: &ValidatedBundle,
+    held_ids: &BTreeSet<String>,
+    combined: &[Event],
+) -> Result<Option<BTreeSet<String>>> {
+    let borrowed: Vec<&Event> = combined.iter().collect();
+    let Ok(withdrawn) = crate::rewrite::withdrawn_event_ids(&borrowed) else {
+        return Ok(None);
+    };
+    // Verify the held local rewrites are internally consistent first; if the
+    // local store already contradicts itself, skipping incoming events cannot
+    // fix it.
+    let mut held_steps: BTreeMap<String, (Option<String>, &Event)> = BTreeMap::new();
+    for event in combined {
+        if !held_ids.contains(&event.event_id) || withdrawn.contains(event.event_id.as_str()) {
+            continue;
+        }
+        let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
+            continue;
+        };
+        if crate::rewrite::validate_mapping(mapping).is_err() {
+            continue;
+        }
+        for (old, new) in mapping {
+            let old = crate::rewrite::canonical_revision(old);
+            let new = new.as_deref().map(crate::rewrite::canonical_revision);
+            if let Some((existing, _)) = held_steps.get(&old) {
+                if existing != &new {
+                    return Ok(None);
+                }
+            } else {
+                held_steps.insert(old, (new, event));
+            }
+        }
+    }
+
+    // Collect every active novel incoming rewrite that disagrees with held_steps.
+    let mut conflicting: Vec<(&Event, String, &Event)> = Vec::new();
+    let mut active_novel: Vec<&Event> = Vec::new();
+    for event in combined {
+        if held_ids.contains(&event.event_id) || withdrawn.contains(event.event_id.as_str()) {
+            continue;
+        }
+        let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
+            continue;
+        };
+        if crate::rewrite::validate_mapping(mapping).is_err() {
+            continue;
+        }
+        active_novel.push(event);
+        for (old, new) in mapping {
+            let old = crate::rewrite::canonical_revision(old);
+            let new = new.as_deref().map(crate::rewrite::canonical_revision);
+            if let Some((existing, local_event)) = held_steps.get(&old) {
+                if existing != &new {
+                    conflicting.push((event, old, local_event));
+                    break;
+                }
+            }
+        }
+    }
+    if conflicting.is_empty() {
+        return Ok(None);
+    }
+
+    // Gather every change ID, branch, and commit revision relevant to this bundle.
+    let mut bundle_changes = BTreeSet::from([validated.bundle.change_id.clone()]);
+    let mut bundle_branches = BTreeSet::new();
+    let mut cited_revisions = BTreeSet::new();
+    for event in &validated.events {
+        crate::bundle::collect_cited_revisions(&event.value, &mut cited_revisions);
+        if let Some(branch) = event
+            .value
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+        {
+            bundle_branches.insert(branch.to_string());
+        }
+    }
+    if let Some(store) = store {
+        if store
+            .list_change_ids()?
+            .iter()
+            .any(|id| id == &validated.bundle.change_id)
+        {
+            for (_, value) in store.raw_events(&validated.bundle.change_id)? {
+                crate::bundle::collect_cited_revisions(&value, &mut cited_revisions);
+                if let Some(branch) = value.get("branch").and_then(serde_json::Value::as_str) {
+                    bundle_branches.insert(branch.to_string());
+                }
+            }
+        }
+    }
+    for related in &validated.bundle.related_changes {
+        bundle_changes.insert(related.change_id.clone());
+        for value in &related.events {
+            crate::bundle::collect_cited_revisions(value, &mut cited_revisions);
+            if let Some(branch) = value.get("branch").and_then(serde_json::Value::as_str) {
+                bundle_branches.insert(branch.to_string());
+            }
+        }
+    }
+    for value in &validated.bundle.repository_events {
+        let kind = value.get("event_type").and_then(serde_json::Value::as_str);
+        if !matches!(
+            kind,
+            Some("history-rewritten" | "history-rewrite-withdrawn")
+        ) {
+            crate::bundle::collect_cited_revisions(value, &mut cited_revisions);
+        }
+    }
+
+    // Determine which active novel rewrites are relevant (directly or transitively).
+    let mut relevant: BTreeSet<String> = BTreeSet::new();
+    let mut novel_revs: Vec<(&str, Vec<String>)> = Vec::new();
+    for event in &active_novel {
+        let Payload::HistoryRewritten {
+            mapping,
+            refs,
+            retained,
+            ..
+        } = &event.payload
+        else {
+            continue;
+        };
+        let changes = crate::rewrite::event_change_ids(refs, retained);
+        let branches = crate::rewrite::event_branches(refs);
+        let revs: Vec<String> = mapping
+            .iter()
+            .flat_map(|(old, new)| {
+                std::iter::once(crate::rewrite::canonical_revision(old))
+                    .chain(new.as_deref().map(crate::rewrite::canonical_revision))
+            })
+            .collect();
+        let touches_change = changes.iter().any(|c| bundle_changes.contains(c))
+            || branches.iter().any(|b| bundle_branches.contains(b))
+            || revs.iter().any(|rev| {
+                cited_revisions
+                    .iter()
+                    .any(|cited| crate::rewrite::names_one_commit(rev, cited))
+            });
+        if touches_change {
+            relevant.insert(event.event_id.clone());
+        }
+        novel_revs.push((event.event_id.as_str(), revs));
+    }
+    loop {
+        let relevant_revs: Vec<&str> = novel_revs
+            .iter()
+            .filter(|(id, _)| relevant.contains(*id))
+            .flat_map(|(_, revs)| revs.iter().map(String::as_str))
+            .collect();
+        let mut grew = false;
+        for (id, revs) in &novel_revs {
+            if relevant.contains(*id) {
+                continue;
+            }
+            if revs.iter().any(|rev| {
+                relevant_revs
+                    .iter()
+                    .any(|other| crate::rewrite::names_one_commit(rev, other))
+            }) {
+                relevant.insert((*id).to_string());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    if conflicting
+        .iter()
+        .any(|(incoming_ev, _, _)| relevant.contains(&incoming_ev.event_id))
+    {
+        return Ok(None);
+    }
+
+    let mut skipped = BTreeSet::new();
+    let incoming_set: BTreeSet<String> = active_novel
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    for (incoming_ev, rev, local_ev) in &conflicting {
+        skipped.insert(incoming_ev.event_id.clone());
+        let local_successor = match &local_ev.payload {
+            Payload::HistoryRewritten { mapping, .. } => mapping
+                .iter()
+                .find(|(k, _)| crate::rewrite::canonical_revision(k) == *rev)
+                .and_then(|(_, v)| v.as_deref().map(crate::rewrite::canonical_revision)),
+            _ => None,
+        };
+        let incoming_successor = match &incoming_ev.payload {
+            Payload::HistoryRewritten { mapping, .. } => mapping
+                .iter()
+                .find(|(k, _)| crate::rewrite::canonical_revision(k) == *rev)
+                .and_then(|(_, v)| v.as_deref().map(crate::rewrite::canonical_revision)),
+            _ => None,
+        };
+        let conflict = crate::rewrite::RewriteConflict {
+            revision: rev.clone(),
+            first: crate::rewrite::summarize_event(local_ev, &local_successor),
+            second: crate::rewrite::summarize_event(incoming_ev, &incoming_successor),
+        };
+        println!(
+            "warning: skipped unrelated conflicting rewrite {} from bundle for {}:\n{}",
+            incoming_ev.event_id,
+            validated.bundle.change_id,
+            conflict.render_with_context(Some(cwd), store, &incoming_set)
+        );
+    }
+    Ok(Some(skipped))
 }
 
 /// Each pass returns changed judgments, or `None` when they are stable.

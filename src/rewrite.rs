@@ -64,13 +64,396 @@ pub(crate) fn canonical_revision(revision: &str) -> String {
 
 /// Whether two spellings name one commit: equal once canonical, or one
 /// abbreviating the other from the length at which an abbreviation names one.
-fn names_one_commit(left: &str, right: &str) -> bool {
+pub(crate) fn names_one_commit(left: &str, right: &str) -> bool {
     let (left, right) = (canonical_revision(left), canonical_revision(right));
     if left == right {
         return !left.is_empty();
     }
     left.len().min(right.len()) >= ABBREVIATION_FLOOR
         && (left.starts_with(&right) || right.starts_with(&left))
+}
+
+/// Summary of one `history-rewritten` event participating in a contradiction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewriteEventSummary {
+    pub event_id: String,
+    pub repository_id: String,
+    pub change: Option<String>,
+    pub branch: Option<String>,
+    pub tool: Option<String>,
+    pub reason: String,
+    pub successor: Option<String>,
+    /// All non-dropped successors named by this event's mapping.
+    pub successors: Vec<String>,
+}
+
+/// Two active rewrite events disagree on the successor of one revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewriteConflict {
+    pub revision: String,
+    pub first: RewriteEventSummary,
+    pub second: RewriteEventSummary,
+}
+
+impl std::fmt::Display for RewriteConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}",
+            self.render_with_context(None, None, &BTreeSet::new())
+        )
+    }
+}
+
+impl std::error::Error for RewriteConflict {}
+
+impl RewriteConflict {
+    /// Render both conflicting events with full metadata and actionable
+    /// `arc history withdraw` suggestions. When `cwd` and `store` are
+    /// supplied, missing change IDs are inferred from held changes and each
+    /// event's successors are checked against landed targets so suggestions
+    /// point directly at maps whose successors never landed.
+    pub fn render_with_context(
+        &self,
+        cwd: Option<&Path>,
+        store: Option<&Store>,
+        incoming_ids: &BTreeSet<String>,
+    ) -> String {
+        let mut first = self.first.clone();
+        let mut second = self.second.clone();
+        if let Some(store) = store {
+            enrich_summary_change(&mut first, &self.revision, store);
+            enrich_summary_change(&mut second, &self.revision, store);
+        }
+        let landed_first = cwd.and_then(|cwd| successors_landed(cwd, store, &first));
+        let landed_second = cwd.and_then(|cwd| successors_landed(cwd, store, &second));
+        let format_entry = |summary: &RewriteEventSummary,
+                            landed: Option<bool>,
+                            incoming: bool|
+         -> String {
+            let origin = if incoming_ids.is_empty() {
+                ""
+            } else if incoming {
+                " [incoming]"
+            } else {
+                " [local]"
+            };
+            let change = summary.change.as_deref().unwrap_or("(none)");
+            let branch = summary
+                .branch
+                .as_deref()
+                .map(|branch| format!(", branch: {branch}"))
+                .unwrap_or_default();
+            let tool = summary.tool.as_deref().unwrap_or("(none)");
+            let landed_note = match landed {
+                Some(true) => ", successors landed",
+                Some(false) => ", successors never landed",
+                None => "",
+            };
+            format!(
+                    "  - event {}{origin} (change: {change}{branch}, tool: {tool}, reason: {:?}{landed_note}) maps {} -> {}",
+                    summary.event_id,
+                    summary.reason,
+                    self.revision,
+                    describe(&summary.successor),
+                )
+        };
+        let first_incoming = incoming_ids.contains(&first.event_id);
+        let second_incoming = incoming_ids.contains(&second.event_id);
+        let mut lines = vec![
+            format!("recorded rewrites disagree about {}:", self.revision),
+            format_entry(&first, landed_first, first_incoming),
+            format_entry(&second, landed_second, second_incoming),
+        ];
+        let mut suggestions = Vec::new();
+        for (summary, landed, incoming) in [
+            (&first, landed_first, first_incoming),
+            (&second, landed_second, second_incoming),
+        ] {
+            if landed == Some(false) {
+                if incoming {
+                    suggestions.push(format!(
+                        "withdraw the unlanded incoming map on its source replica with: \
+                         arc history withdraw {} --reason \"superseded unlanded rewrite\"",
+                        summary.event_id
+                    ));
+                } else {
+                    suggestions.push(format!(
+                        "withdraw the unlanded local map with: \
+                         arc history withdraw {} --reason \"superseded unlanded rewrite\"",
+                        summary.event_id
+                    ));
+                }
+            }
+        }
+        if suggestions.is_empty() {
+            let local_candidates: Vec<&str> =
+                [(&first, first_incoming), (&second, second_incoming)]
+                    .into_iter()
+                    .filter(|(_, incoming)| !*incoming)
+                    .map(|(summary, _)| summary.event_id.as_str())
+                    .collect();
+            if let [only] = local_candidates.as_slice() {
+                suggestions.push(format!(
+                    "if its successors never landed, withdraw it with: \
+                     arc history withdraw {only} --reason \"superseded unlanded rewrite\""
+                ));
+            } else {
+                suggestions.push(format!(
+                    "withdraw the map whose successors never landed with: \
+                     arc history withdraw <event-id> --reason \"superseded unlanded rewrite\" \
+                     ({} or {})",
+                    first.event_id, second.event_id
+                ));
+            }
+        }
+        lines.extend(suggestions);
+        lines.join("\n")
+    }
+}
+
+/// Format an error from `RewriteMap::from_events` or `from_permitted_events`,
+/// enriching `RewriteConflict` with local context when present.
+pub fn format_rewrite_error(
+    error: anyhow::Error,
+    cwd: Option<&Path>,
+    store: Option<&Store>,
+    incoming_ids: &BTreeSet<String>,
+) -> anyhow::Error {
+    if let Some(conflict) = error.downcast_ref::<RewriteConflict>() {
+        anyhow::anyhow!("{}", conflict.render_with_context(cwd, store, incoming_ids))
+    } else {
+        error
+    }
+}
+
+/// Change IDs named in a rewrite event's `refs` or `retained` maps.
+pub fn event_change_ids(
+    refs: &BTreeMap<String, RefMove>,
+    retained: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut changes = BTreeSet::new();
+    for name in refs.keys().chain(retained.keys()) {
+        for prefix in [
+            crate::gitio::KEEP_PREFIX,
+            crate::gitio::RETAINED_PREFIX,
+            "refs/arc/tree/",
+            "refs/arc/merge/",
+            "refs/arc/landing/",
+            "refs/arc/provisional/",
+        ] {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                if let Some((change_id, _)) = rest.split_once('/') {
+                    if !change_id.is_empty() && change_id != Store::REPOSITORY_SCOPE {
+                        changes.insert(change_id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    changes
+}
+
+/// Branch names (`refs/heads/<branch>`) moved by a rewrite event.
+pub fn event_branches(refs: &BTreeMap<String, RefMove>) -> Vec<String> {
+    refs.keys()
+        .filter_map(|name| name.strip_prefix("refs/heads/").map(str::to_string))
+        .collect()
+}
+
+/// Whether a rewrite event's `retained` map holds a repository-scoped commit.
+pub fn event_retains_repository_scope(retained: &BTreeMap<String, String>) -> bool {
+    let prefix = format!(
+        "{}{}/",
+        crate::gitio::RETAINED_PREFIX,
+        Store::REPOSITORY_SCOPE
+    );
+    retained.keys().any(|name| name.starts_with(&prefix))
+}
+
+pub(crate) fn summarize_event(
+    event: &crate::model::Event,
+    successor: &Option<String>,
+) -> RewriteEventSummary {
+    match &event.payload {
+        Payload::HistoryRewritten {
+            mapping,
+            reason,
+            tool,
+            refs,
+            retained,
+            ..
+        } => {
+            let changes = event_change_ids(refs, retained);
+            let change =
+                (!changes.is_empty()).then(|| changes.into_iter().collect::<Vec<_>>().join(", "));
+            let branch = event_branches(refs).into_iter().next();
+            let successors = mapping
+                .values()
+                .filter_map(|new| new.as_deref().map(canonical_revision))
+                .collect();
+            RewriteEventSummary {
+                event_id: event.event_id.clone(),
+                repository_id: event.repository_id.clone(),
+                change,
+                branch,
+                tool: tool.clone(),
+                reason: reason.clone(),
+                successor: successor.clone(),
+                successors,
+            }
+        }
+        _ => RewriteEventSummary {
+            event_id: event.event_id.clone(),
+            repository_id: event.repository_id.clone(),
+            change: None,
+            branch: None,
+            tool: None,
+            reason: String::new(),
+            successor: successor.clone(),
+            successors: Vec::new(),
+        },
+    }
+}
+
+fn enrich_summary_change(summary: &mut RewriteEventSummary, revision: &str, store: &Store) {
+    if summary.change.is_some() {
+        return;
+    }
+    let Ok(change_ids) = store.list_change_ids() else {
+        return;
+    };
+    let mut matched_by_branch = BTreeSet::new();
+    let mut matched_by_revision = BTreeSet::new();
+    for change_id in change_ids {
+        let Ok(events) = store.load_events(&change_id) else {
+            continue;
+        };
+        let mut branch_match = false;
+        let mut rev_match = false;
+        for event in &events {
+            match &event.payload {
+                Payload::ChangeOpened { branch, base, .. } => {
+                    if summary.branch.as_deref() == Some(branch.as_str()) {
+                        branch_match = true;
+                    }
+                    if names_one_commit(base, revision) {
+                        rev_match = true;
+                    }
+                }
+                Payload::PatchsetAdded { base, head, .. } => {
+                    if names_one_commit(head, revision) || names_one_commit(base, revision) {
+                        rev_match = true;
+                    }
+                }
+                Payload::DispositionRecorded {
+                    commit: Some(commit),
+                    ..
+                } if names_one_commit(commit, revision) => {
+                    rev_match = true;
+                }
+                _ => {}
+            }
+        }
+        if branch_match {
+            matched_by_branch.insert(change_id.clone());
+        }
+        if rev_match {
+            matched_by_revision.insert(change_id);
+        }
+    }
+    let chosen = if !matched_by_branch.is_empty() {
+        matched_by_branch
+    } else {
+        matched_by_revision
+    };
+    if !chosen.is_empty() {
+        summary.change = Some(chosen.into_iter().collect::<Vec<_>>().join(", "));
+    }
+}
+
+/// Whether any successor named by `summary` reached a target branch or an
+/// integrated change closure in this repository.
+///
+/// Returns `Some(true)` if at least one successor is reachable from a target
+/// branch or recorded integration commit, `Some(false)` if target/integration
+/// tips were observed and none of the successors reached them (or none exist
+/// here), and `None` when no target history can be inspected.
+pub fn successors_landed(
+    cwd: &Path,
+    store: Option<&Store>,
+    summary: &RewriteEventSummary,
+) -> Option<bool> {
+    if summary.successors.is_empty() {
+        return Some(false);
+    }
+    let mut landed_tips = BTreeSet::new();
+    let mut target_branches = BTreeSet::new();
+    if let Some(store) = store {
+        if let Ok(change_ids) = store.list_change_ids() {
+            for change_id in change_ids {
+                let Ok(events) = store.load_events(&change_id) else {
+                    continue;
+                };
+                for event in &events {
+                    match &event.payload {
+                        Payload::ChangeOpened { target_branch, .. } => {
+                            target_branches.insert(target_branch.clone());
+                        }
+                        Payload::ChangeIntegrated {
+                            integrated_commit,
+                            source_head,
+                            ..
+                        }
+                        | Payload::IntegrationAsserted {
+                            integrated_commit,
+                            source_head,
+                            ..
+                        } => {
+                            if !integrated_commit.is_empty() {
+                                landed_tips.insert(integrated_commit.clone());
+                            }
+                            if !source_head.is_empty() {
+                                landed_tips.insert(source_head.clone());
+                            }
+                        }
+                        Payload::ChangeClosed {
+                            outcome: crate::model::Closure::Integrated,
+                            integrated_commit: Some(commit),
+                            ..
+                        } => {
+                            landed_tips.insert(commit.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    for default_branch in ["master", "main"] {
+        if target_branches.is_empty() && crate::gitio::branch_exists(cwd, default_branch) {
+            target_branches.insert(default_branch.to_string());
+        }
+    }
+    for branch in &target_branches {
+        if let Ok(tip) = crate::gitio::branch_head(cwd, branch) {
+            landed_tips.insert(tip);
+        }
+    }
+    if landed_tips.is_empty() {
+        return None;
+    }
+    for successor in &summary.successors {
+        if !crate::gitio::commit_exists(cwd, successor).unwrap_or(false) {
+            continue;
+        }
+        for tip in &landed_tips {
+            if crate::gitio::is_ancestor(cwd, successor, tip).unwrap_or(false) {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
 }
 
 /// One ref move a rewrite has planned: the value the ref held when the
@@ -194,6 +577,7 @@ impl RewriteMap {
             .collect();
         let withdrawn = withdrawn_event_ids(&active_withdrawals)?;
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut step_sources: BTreeMap<String, &crate::model::Event> = BTreeMap::new();
         let mut signature_only: BTreeSet<String> = BTreeSet::new();
         let mut role_additions: BTreeSet<String> = BTreeSet::new();
         let mut withdrawn_steps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -243,13 +627,19 @@ impl RewriteMap {
                     // ledger cannot answer.
                     if let Some(existing) = steps.get(&old) {
                         if existing != &new {
-                            anyhow::bail!(
-                                "recorded rewrites disagree about {old}: {} and {}",
-                                describe(existing),
-                                describe(&new)
-                            );
+                            let first_event = step_sources
+                                .get(&old)
+                                .copied()
+                                .expect("recorded step has source event");
+                            return Err(RewriteConflict {
+                                revision: old,
+                                first: summarize_event(first_event, existing),
+                                second: summarize_event(event, &new),
+                            }
+                            .into());
                         }
                     }
+                    step_sources.entry(old.clone()).or_insert(event);
                     steps.insert(old, new);
                 }
                 // A claim about a revision the event does not map is not a
@@ -1317,5 +1707,74 @@ mod tests {
         assert!(parse_commit_map("\n# nothing\n").is_err());
         assert!(parse_commit_map("old new\n").is_err());
         assert!(parse_commit_map("not-a-revision bbbbbbbbbb\n").is_err());
+    }
+
+    #[test]
+    fn contradicting_events_report_both_event_details_and_withdraw_suggestion() {
+        let mut first = rewrite_event("01FIRST", "aaaaaaaaaa", "bbbbbbbbbb", &[]);
+        if let Payload::HistoryRewritten {
+            reason, tool, refs, ..
+        } = &mut first.payload
+        {
+            *reason = "re-signed local branch".into();
+            *tool = Some("arc rewrite sign".into());
+            refs.insert(
+                "refs/arc/keep/change-alpha/ps-01".into(),
+                RefMove {
+                    old: "aaaaaaaaaa".into(),
+                    new: "bbbbbbbbbb".into(),
+                },
+            );
+            refs.insert(
+                "refs/heads/arc/alpha".into(),
+                RefMove {
+                    old: "aaaaaaaaaa".into(),
+                    new: "bbbbbbbbbb".into(),
+                },
+            );
+        }
+        let mut second = rewrite_event("01SECOND", "aaaaaaaaaa", "cccccccccc", &[]);
+        if let Payload::HistoryRewritten {
+            reason,
+            tool,
+            retained,
+            ..
+        } = &mut second.payload
+        {
+            *reason = "re-signed replica branch".into();
+            *tool = Some("git filter-repo".into());
+            retained.insert(
+                "refs/arc/retained/change-alpha/ps-01/aaaaaaaaaa".into(),
+                "aaaaaaaaaa".into(),
+            );
+        }
+        let error = RewriteMap::from_events([first, second].iter()).unwrap_err();
+        let conflict = error
+            .downcast_ref::<RewriteConflict>()
+            .expect("error should downcast to RewriteConflict");
+        assert_eq!(conflict.revision, "aaaaaaaaaa");
+        assert_eq!(conflict.first.event_id, "01FIRST");
+        assert_eq!(conflict.first.change.as_deref(), Some("change-alpha"));
+        assert_eq!(conflict.second.event_id, "01SECOND");
+        assert_eq!(conflict.second.change.as_deref(), Some("change-alpha"));
+        let rendered = error.to_string();
+        for needle in [
+            "recorded rewrites disagree about aaaaaaaaaa",
+            "01FIRST",
+            "01SECOND",
+            "change: change-alpha",
+            "tool: arc rewrite sign",
+            "tool: git filter-repo",
+            "re-signed local branch",
+            "re-signed replica branch",
+            "bbbbbbbbbb",
+            "cccccccccc",
+            "arc history withdraw",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "missing {needle:?} in:\n{rendered}"
+            );
+        }
     }
 }

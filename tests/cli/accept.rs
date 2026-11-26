@@ -2121,3 +2121,74 @@ fn accept_delivery_runs_fresh_accepted_concurrent_batch() {
         .iter()
         .all(|entry| entry["concurrent_batch"].is_object() && entry["result"] == "pass"));
 }
+
+#[test]
+fn accept_succeeds_for_unrelated_change_despite_unlanded_rewrite_conflict() {
+    let mut d = Delivery::new();
+    // Create an unlanded local rewrite on an unrelated change A on the receiver.
+    let local_opened = stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["begin", "other-local"]),
+    );
+    let other_change = opened_change_id(&local_opened);
+    let other_wt = d.receiver.home.join(".worktrees/repo-other-local");
+    d.receiver
+        .commit(&other_wt, "other.txt", "other\n", "feat: other local");
+    let other_original = d.receiver.head(&other_wt);
+    stdout(d.receiver.arc(&other_wt).args(["snapshot", &other_change]));
+    d.receiver
+        .arc(&other_wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &other_original,
+            "--no-sign",
+            "--append",
+            "Planned-by: Local <local@example.invalid>",
+        ])
+        .assert()
+        .success();
+
+    // Inject a contradicting rewrite for `other_original` into the unrelated
+    // delivery bundle (as an older exporter would carry).
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&d.input).unwrap()).unwrap();
+    let other_successor = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let source_id = bundle["source_replica_id"].as_str().unwrap().to_string();
+    bundle["repository_events"] = serde_json::json!([{
+        "schema_version": 7,
+        "event_id": "01ZZZCONFLICTINGOTHER00000",
+        "repository_id": source_id,
+        "change_id": "repository",
+        "actor": "worker",
+        "created_at": "2026-10-28T18:00:00Z",
+        "event_type": "history-rewritten",
+        "mapping": { other_original.clone(): other_successor },
+        "reason": "replica re-signed other change",
+        "tool": "arc rewrite sign",
+        "refs": {
+            "refs/heads/arc/other-local": {
+                "old": other_original,
+                "new": other_successor
+            }
+        }
+    }]);
+    let modified = d.source.home.join("delivery-with-unrelated-conflict.json");
+    fs::write(&modified, json_file_bytes(&bundle)).unwrap();
+    d.input = modified;
+
+    // `arc accept` for the unrelated delivery must succeed cleanly (exit 3: local review owed).
+    let result = d.result(3);
+    assert_eq!(result["preparation_complete"], true, "{result}");
+    let import_step = result["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "import")
+        .unwrap();
+    assert_eq!(import_step["exit_code"], 0, "{result}");
+    let doctor = json_stdout(d.receiver.arc(&d.receiver.root).args(["doctor", "--json"]));
+    assert_eq!(doctor["problems"], serde_json::json!([]), "{doctor}");
+}
