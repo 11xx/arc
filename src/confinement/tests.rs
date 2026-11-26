@@ -609,25 +609,88 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     assert!(command.status().unwrap().success());
     assert!(magic.join(":(glob)/sub").is_dir());
 
-    // Marker publication via renameat2(RENAME_NOREPLACE) leaves an existing real
-    // directory untouched and cleans up staging with no window to write into a replacement.
+    // Marker publication via renameat2(RENAME_NOREPLACE) stages under common_dir/arc
+    // when available, leaves an existing real directory untouched, and cleans up staging.
     let scratch_pub = scratch();
     let pub_checkout = scratch_pub.path().join("pub-existing");
     fs::create_dir_all(pub_checkout.join("target")).unwrap();
+    init_git(&pub_checkout);
+    let pub_common = crate::gitio::common_dir(&pub_checkout).unwrap();
     let pub_fd = open_dir_path(&pub_checkout).unwrap();
     let target_name = CString::new("target").unwrap();
-    publish_tagged_target_at(&pub_fd, &target_name, &pub_checkout.join("target")).unwrap();
+    publish_tagged_target_at(
+        &pub_fd,
+        Some(&pub_common),
+        &target_name,
+        &pub_checkout.join("target"),
+    )
+    .unwrap();
     assert!(!pub_checkout.join("target/CACHEDIR.TAG").exists());
-    let leftovers: Vec<_> = fs::read_dir(&pub_checkout)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(".arc-target-stage-")
-        })
-        .collect();
-    assert!(leftovers.is_empty(), "leftover stage dirs: {leftovers:?}");
+    for dir in [&pub_checkout, &pub_common.join("arc")] {
+        if dir.is_dir() {
+            let leftovers: Vec<_> = fs::read_dir(dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with(".arc-target-stage-")
+                })
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "leftover stage dirs in {}: {leftovers:?}",
+                dir.display()
+            );
+        }
+    }
+
+    // Legacy `.cargo/config` takes precedence over `.cargo/config.toml` just as Cargo does,
+    // both when `config` overrides `target-dir` and when `config` omits it (ignoring `config.toml`).
+    let scratch_prec = scratch();
+    let prec = scratch_prec.path().join("precedence");
+    fs::create_dir_all(prec.join(".cargo")).unwrap();
+    init_git(&prec);
+    fs::write(prec.join(".gitignore"), "/target\n/out\n").unwrap();
+    fs::write(
+        prec.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        prec.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"target\"\n",
+    )
+    .unwrap();
+    fs::write(
+        prec.join(".cargo/config"),
+        "[build]\ntarget-dir = \"out\"\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&prec, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(prec.join("target").is_dir());
+    assert!(!prec.join("target/CACHEDIR.TAG").exists());
+
+    let scratch_prec_shadow = scratch();
+    let prec_shadow = scratch_prec_shadow.path().join("precedence-shadow");
+    fs::create_dir_all(prec_shadow.join(".cargo")).unwrap();
+    init_git(&prec_shadow);
+    fs::write(prec_shadow.join(".gitignore"), "/target\n/out\n").unwrap();
+    fs::write(
+        prec_shadow.join("Cargo.toml"),
+        "[package]\nname='pkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        prec_shadow.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"out\"\n",
+    )
+    .unwrap();
+    fs::write(prec_shadow.join(".cargo/config"), "[term]\nquiet = true\n").unwrap();
+    let (mut command, _) = shell(&prec_shadow, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(prec_shadow.join("target/CACHEDIR.TAG").is_file());
 
     // Configured Cargo build.target-dir override prevents tagging `target/`, and
     // arc-written confinement markers never authorize `artifacts::recognize` cleanup.
@@ -670,7 +733,7 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
         &mode_cmd,
         &mode_checkout,
         &mode_checkout.join("opaque/child"),
-        false,
+        None,
     );
     fs::set_permissions(
         mode_checkout.join("opaque"),
@@ -697,7 +760,7 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
         &sym_cmd,
         &sym_checkout,
         &sym_checkout.join("target/nested"),
-        false,
+        None,
     )
     .unwrap_err();
     assert!(

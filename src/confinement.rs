@@ -294,7 +294,7 @@ fn apply_with_abi_and_storage(
         )?;
         if !resolved.exists() {
             if resolved.starts_with(&checkout) {
-                create_checkout_root(command, &checkout, &resolved, common.is_some())?;
+                create_checkout_root(command, &checkout, &resolved, common.as_deref())?;
             } else if owned.iter().any(|root| resolved.starts_with(root)) {
                 fs::create_dir_all(&resolved)?;
             } else {
@@ -582,7 +582,7 @@ fn create_checkout_root(
     command: &Command,
     checkout: &Path,
     resolved: &Path,
-    in_git: bool,
+    common: Option<&Path>,
 ) -> Result<()> {
     let relative = resolved.strip_prefix(checkout).with_context(|| {
         format!(
@@ -601,7 +601,8 @@ fn create_checkout_root(
     let should_mark_target = first_is_root_target
         && is_regular_file_at(&checkout_fd, c"Cargo.toml")?
         && cargo_uses_default_root_target(command, checkout)
-        && (!in_git || is_git_ignored(checkout, Path::new("target/CACHEDIR.TAG"))?);
+        && common.is_some()
+        && is_git_ignored(checkout, Path::new("target/CACHEDIR.TAG"))?;
 
     let mut current = checkout_fd;
     let mut current_path = checkout.to_path_buf();
@@ -620,7 +621,7 @@ fn create_checkout_root(
         })?;
         current_path.push(name);
         if depth == 0 && should_mark_target {
-            publish_tagged_target_at(&current, &c_name, &current_path)?;
+            publish_tagged_target_at(&current, common, &c_name, &current_path)?;
         } else {
             // SAFETY: `current` is an open directory fd and `c_name` is a valid NUL-terminated path component.
             if unsafe { libc::mkdirat(current.as_raw_fd(), c_name.as_ptr(), 0o777) } != 0 {
@@ -638,29 +639,99 @@ fn create_checkout_root(
     Ok(())
 }
 
+fn fd_device(fd: &OwnedFd) -> Result<libc::dev_t> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fd` is open (including `O_PATH`) and `stat` is valid for writes.
+    let rc = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot stat directory handle");
+    }
+    // SAFETY: `fstat` succeeded and initialized `stat`.
+    Ok(unsafe { stat.assume_init() }.st_dev)
+}
+
+/// Choose a staging parent directory on the same filesystem as `checkout_fd`,
+/// using `<git-common-dir>/arc` (which write confinement withholds from
+/// checkout writers) so sibling checkout processes cannot replace staging
+/// entries before `renameat2(RENAME_NOREPLACE)`.
+fn staging_parent_for(checkout_fd: &OwnedFd, common: Option<&Path>) -> Result<Option<OwnedFd>> {
+    let Some(common) = common else {
+        return Ok(None);
+    };
+    let Ok(common_fd) = open_dir_path(common) else {
+        return Ok(None);
+    };
+    // SAFETY: `common_fd` is an open directory fd and `"arc"` is a static C string.
+    if unsafe { libc::mkdirat(common_fd.as_raw_fd(), c"arc".as_ptr(), 0o777) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Ok(None);
+        }
+    }
+    let arc_dir = common.join("arc");
+    let Ok(arc_fd) = open_dir_at(&common_fd, c"arc", &arc_dir, libc::O_PATH) else {
+        return Ok(None);
+    };
+    if fd_device(&arc_fd)? == fd_device(checkout_fd)? {
+        Ok(Some(arc_fd))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Atomically publish a new directory already carrying `CACHEDIR.TAG` using
-/// `renameat2(RENAME_NOREPLACE)`. If `name` already exists (or appears
-/// concurrently), the staging directory is removed and the existing directory
-/// is left untouched, eliminating any window where `CACHEDIR.TAG` could be
-/// written into a substituted directory.
-fn publish_tagged_target_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<()> {
-    let stage_name = format!(".arc-target-stage-{}", crate::ids::new_identifier());
-    let c_stage = CString::new(stage_name.as_bytes()).context("invalid staging directory name")?;
-    // SAFETY: `parent` is an open directory fd and `c_stage` is a valid NUL-terminated entry name.
-    if unsafe { libc::mkdirat(parent.as_raw_fd(), c_stage.as_ptr(), 0o777) } != 0 {
+/// `renameat2(RENAME_NOREPLACE)`. All staging operations use `O_PATH` directory
+/// descriptors (working even under `umask 0477`) inside `<git-common-dir>/arc`
+/// on the same filesystem so checkout writers cannot replace staging entries;
+/// writing, publication, and cleanup stay bound to the opened handles. If
+/// `<git-common-dir>/arc` cannot stage on the same filesystem, creates the
+/// directory unmarked rather than staging inside the checkout. If `name`
+/// already exists, the staged directory is removed without touching it.
+fn publish_tagged_target_at(
+    checkout_fd: &OwnedFd,
+    common: Option<&Path>,
+    name: &CString,
+    display: &Path,
+) -> Result<()> {
+    let Some(stage_root) = staging_parent_for(checkout_fd, common)? else {
+        // SAFETY: `checkout_fd` is an open directory fd and `name` is a valid NUL-terminated component.
+        if unsafe { libc::mkdirat(checkout_fd.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(error).with_context(|| format!("cannot create {}", display.display()));
+            }
+        }
+        return Ok(());
+    };
+    let container_name = format!(".arc-target-stage-{}", crate::ids::new_identifier());
+    let c_container =
+        CString::new(container_name.as_bytes()).context("invalid staging container name")?;
+    // Create the staging container with mode 0o700 so other users cannot traverse it;
+    // the inner `target` directory uses 0o777 to respect the caller's umask.
+    // SAFETY: `stage_root` is an open directory fd and `c_container` is a valid NUL-terminated name.
+    if unsafe { libc::mkdirat(stage_root.as_raw_fd(), c_container.as_ptr(), 0o700) } != 0 {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("cannot stage {}", display.display()));
     }
     let stage_result = (|| -> Result<()> {
-        let stage_fd = open_dir_at(parent, &c_stage, display, libc::O_RDONLY)?;
-        write_cachedir_tag_in_dir(&stage_fd, display)?;
-        // SAFETY: `parent` is an open directory fd, `c_stage` and `name` are valid NUL-terminated names.
+        let container_fd = open_dir_at(&stage_root, &c_container, display, libc::O_PATH)?;
+        // SAFETY: `container_fd` is an open directory fd and `name` is a valid NUL-terminated name.
+        if unsafe { libc::mkdirat(container_fd.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("cannot create staged {}", display.display()));
+        }
+        let target_fd = open_dir_at(&container_fd, name, display, libc::O_PATH)?;
+        if let Err(error) = write_cachedir_tag_in_dir(&target_fd, display) {
+            cleanup_staged_inner(&container_fd, &target_fd, name);
+            return Err(error);
+        }
+        // SAFETY: `container_fd` and `checkout_fd` are open directory fds on the same device.
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
-                parent.as_raw_fd(),
-                c_stage.as_ptr(),
-                parent.as_raw_fd(),
+                container_fd.as_raw_fd(),
+                name.as_ptr(),
+                checkout_fd.as_raw_fd(),
                 name.as_ptr(),
                 libc::RENAME_NOREPLACE,
             )
@@ -669,34 +740,29 @@ fn publish_tagged_target_at(parent: &OwnedFd, name: &CString, display: &Path) ->
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
+        cleanup_staged_inner(&container_fd, &target_fd, name);
         if error.kind() == std::io::ErrorKind::AlreadyExists {
-            cleanup_staged_target(parent, Some(&stage_fd), &c_stage);
             return Ok(());
         }
-        cleanup_staged_target(parent, Some(&stage_fd), &c_stage);
         Err(error).with_context(|| format!("cannot publish {}", display.display()))
     })();
-    if stage_result.is_err() {
-        cleanup_staged_target(parent, None, &c_stage);
+    // Always remove the staging container using the same `stage_root` handle.
+    // SAFETY: `stage_root` is an open directory fd and `c_container` is a valid NUL-terminated name.
+    unsafe {
+        libc::unlinkat(
+            stage_root.as_raw_fd(),
+            c_container.as_ptr(),
+            libc::AT_REMOVEDIR,
+        );
     }
     stage_result
 }
 
-fn cleanup_staged_target(parent: &OwnedFd, stage_fd: Option<&OwnedFd>, c_stage: &CString) {
-    if let Some(fd) = stage_fd {
-        // SAFETY: `fd` is an open directory fd and `"CACHEDIR.TAG"` is a static C string.
-        unsafe {
-            libc::unlinkat(fd.as_raw_fd(), c"CACHEDIR.TAG".as_ptr(), 0);
-        }
-    } else if let Ok(fd) = open_dir_at(parent, c_stage, Path::new("."), libc::O_RDONLY) {
-        // SAFETY: `fd` is an open directory fd and `"CACHEDIR.TAG"` is a static C string.
-        unsafe {
-            libc::unlinkat(fd.as_raw_fd(), c"CACHEDIR.TAG".as_ptr(), 0);
-        }
-    }
-    // SAFETY: `parent` is an open directory fd and `c_stage` is a valid NUL-terminated name.
+fn cleanup_staged_inner(container_fd: &OwnedFd, target_fd: &OwnedFd, name: &CString) {
+    // SAFETY: `target_fd` is the pinned staged target descriptor, never reopened by path.
     unsafe {
-        libc::unlinkat(parent.as_raw_fd(), c_stage.as_ptr(), libc::AT_REMOVEDIR);
+        libc::unlinkat(target_fd.as_raw_fd(), c"CACHEDIR.TAG".as_ptr(), 0);
+        libc::unlinkat(container_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
     }
 }
 
@@ -709,7 +775,8 @@ fn effective_env_value(command: &Command, key: &str) -> Option<std::ffi::OsStrin
 
 /// Returns `true` only when neither command/process environment nor Cargo
 /// configuration files redirect Cargo's target directory away from
-/// `<checkout>/target`. Fails closed (returns `false`) on unreadable or
+/// `<checkout>/target`. Honors Cargo's precedence (`.cargo/config` before
+/// `.cargo/config.toml` in each directory) and fails closed on unreadable or
 /// unparseable Cargo configuration.
 fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
     let default_target = checkout.join("target");
@@ -738,31 +805,42 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         config_dirs.push(PathBuf::from(home).join(".cargo"));
     }
     for dir in config_dirs {
-        for filename in ["config.toml", "config"] {
-            let path = dir.join(filename);
-            if !path.is_file() {
-                continue;
-            }
-            let Ok(contents) = fs::read_to_string(&path) else {
+        // Cargo checks `config` before `config.toml` in each directory and
+        // ignores `config.toml` when `config` is present in the same directory.
+        let config_path = dir.join("config");
+        let toml_path = dir.join("config.toml");
+        let path = if fs::symlink_metadata(&config_path).is_ok() {
+            config_path
+        } else if fs::symlink_metadata(&toml_path).is_ok() {
+            toml_path
+        } else {
+            continue;
+        };
+        let Ok(contents) = fs::read_to_string(&path) else {
+            return false;
+        };
+        let Ok(parsed) = contents.parse::<toml::Value>() else {
+            return false;
+        };
+        if let Some(value) = parsed
+            .get("build")
+            .and_then(|build| build.get("target-dir"))
+        {
+            let Some(target_dir) = value.as_str() else {
                 return false;
             };
-            let Ok(parsed) = contents.parse::<toml::Value>() else {
-                return false;
+            let base = if dir.file_name() == Some(OsStr::new(".cargo")) {
+                dir.parent().unwrap_or(checkout)
+            } else {
+                dir.as_path()
             };
-            if let Some(target_dir) = parsed
-                .get("build")
-                .and_then(|build| build.get("target-dir"))
-                .and_then(|value| value.as_str())
-            {
-                let base = dir.parent().unwrap_or(checkout);
-                let candidate = Path::new(target_dir);
-                let resolved = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    base.join(candidate)
-                };
-                return resolved == default_target;
-            }
+            let candidate = Path::new(target_dir);
+            let resolved = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base.join(candidate)
+            };
+            return resolved == default_target;
         }
     }
     true
@@ -788,7 +866,7 @@ fn open_dir_path(path: &Path) -> Result<OwnedFd> {
 
 fn open_dir_at(
     parent: &OwnedFd,
-    name: &CString,
+    name: &std::ffi::CStr,
     display: &Path,
     access: libc::c_int,
 ) -> Result<OwnedFd> {

@@ -701,4 +701,78 @@ fn path_stable_cargo_preparation_marks_confined_target_directory() {
     );
     assert!(worktree.join("target/debug").is_dir());
     assert_eq!(git_out(&worktree, &["status", "--porcelain"]), "");
+
+    // Fresh tagged target creation also succeeds under umask 0477 (mode 0300 directories)
+    // so confined preparation runs and writes inside the freshly tagged `target/` root.
+    let (umask_repo, umask_scratch) = fixture();
+    fs::write(umask_repo.root.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        umask_repo.root.join("Cargo.toml"),
+        "[package]\nname='confined-umask'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::create_dir_all(umask_repo.root.join(".arc")).unwrap();
+    fs::write(
+        umask_repo.root.join(".arc/gates.toml"),
+        "[confine]\nwrites = [\"target\"]\n[gates.check]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    fs::write(
+        umask_repo.root.join(".arc/worktrees.toml"),
+        "[prepare]\nmode = \"path-stable\"\ncommand = \"printf ran > \\\"$ARC_WORKTREE_PATH/target/prep-ran\\\"\"\ntimeout = \"1m\"\n",
+    )
+    .unwrap();
+    git(&umask_repo.root, &["add", "."]);
+    git(&umask_repo.root, &["commit", "-m", "test: umask 0477 prep"]);
+    // Create the worktree under a normal umask, then remove `target/` and run
+    // `arc verify --all` under `umask 0477` so staging and `target/` inherit mode 0300.
+    // Confined preparation must stage, publish `target/CACHEDIR.TAG`, and execute
+    // its command (writing `target/prep-ran`) instead of failing on `target` before start.
+    let umask_wt = umask_scratch.path().join("prepared-umask-wt");
+    umask_repo
+        .arc(&umask_repo.root)
+        .env("TMPDIR", "/tmp")
+        .args([
+            "begin",
+            "prepared-umask",
+            "--worktree",
+            umask_wt.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    fs::remove_dir_all(umask_wt.join("target")).unwrap();
+    let umask_out = umask_repo
+        .arc_under_umask(&umask_wt, "0477")
+        .env("TMPDIR", "/tmp")
+        .args(["verify", "--all"])
+        .output()
+        .unwrap();
+    let umask_stderr = String::from_utf8_lossy(&umask_out.stderr);
+    assert!(
+        umask_stderr.contains("worktree preparation: path-stable storage")
+            && umask_stderr.contains("running: true"),
+        "preparation did not succeed under umask 0477:\n{umask_stderr}"
+    );
+    let umask_tag = umask_wt.join("target/CACHEDIR.TAG");
+    let umask_prep = umask_wt.join("target/prep-ran");
+    assert!(
+        fs::symlink_metadata(&umask_tag).is_ok_and(|m| m.file_type().is_file()),
+        "fresh target/CACHEDIR.TAG missing under umask 0477"
+    );
+    assert!(
+        fs::symlink_metadata(&umask_prep).is_ok_and(|m| m.file_type().is_file()),
+        "confined preparation command did not write target/prep-ran under umask 0477"
+    );
+    // Restore permissions so signature inspection and TempDir cleanup succeed.
+    let _ = Command::new("chmod")
+        .args(["-R", "u+rwX", "--"])
+        .arg(umask_scratch.path())
+        .status();
+    assert!(
+        fs::read(&umask_tag)
+            .unwrap()
+            .starts_with(b"Signature: 8a477f597d28d172789f06886806bc55"),
+        "CACHEDIR.TAG created under umask 0477 missing standard signature"
+    );
+    assert_eq!(fs::read_to_string(&umask_prep).unwrap(), "ran");
 }
