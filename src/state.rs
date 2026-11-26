@@ -1790,9 +1790,13 @@ pub struct ChangeState {
     pub audit_verdicts: Vec<AuditVerdictEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub audit_findings: BTreeMap<String, FindingState>,
-    /// The latest declared review obligation, if one was ever declared.
+    /// The latest review obligation applicable under the receiver's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debt: Option<Debt>,
+    /// A declaration excluded from the current projection. It is retained
+    /// so that a different privilege scope or clearance context can restore it.
+    #[serde(skip)]
+    pub(crate) superseded_debt: Option<Box<Debt>>,
     /// The latest dirty-tree waiver, which counts only while it names the
     /// current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2030,7 +2034,12 @@ impl ChangeState {
             .audit_verdicts
             .iter_mut()
             .filter_map(|audit| audit.extent.as_mut())
-            .chain(self.debt.as_mut().and_then(|debt| debt.extent.as_mut()));
+            .chain(self.debt.as_mut().and_then(|debt| debt.extent.as_mut()))
+            .chain(
+                self.superseded_debt
+                    .as_mut()
+                    .and_then(|debt| debt.extent.as_mut()),
+            );
         for extent in extents {
             for revision in extent.subject.revisions_mut() {
                 *revision = rewrites.approved_successor(revision)?;
@@ -2526,6 +2535,7 @@ pub fn reduce_with_repository(
                     audit_verdicts: Vec::new(),
                     audit_findings: BTreeMap::new(),
                     debt: None,
+                    superseded_debt: None,
                     blocked_on_stages: Vec::new(),
                     lands_with: Vec::new(),
                     pending_landing: None,
@@ -4119,9 +4129,6 @@ pub fn reduce_with_repository(
                     .and_then(|basis| basis.external_verdict.as_ref())
                     .map(|verdict| verdict.reference.clone());
                 state.closure = Some(closure);
-                if state.has_superseded_debt() {
-                    state.debt = None;
-                }
             }
             Payload::IntegrationAsserted {
                 integrated_commit,
@@ -4777,22 +4784,28 @@ impl ChangeState {
     }
 
     /// An unused waiver on an earlier draft stays in the event history. It
-    /// does not enter the shipped obligation when a recorded independent
-    /// approval authorized the integration.
+    /// does not enter the shipped obligation when the recorded authorizing
+    /// approval is independent and eligible under the receiver's review rules.
     fn has_superseded_debt(&self) -> bool {
-        let Some(declared_for) = self
-            .debt
-            .as_ref()
-            .and_then(|debt| debt.patchset_id.as_deref())
-        else {
+        // Structural replay has no authority to retire a declaration.
+        if self.privilege_scope.is_none() {
+            return false;
+        }
+        let (Some(debt), Some(closure)) = (self.debt.as_ref(), self.closure.as_ref()) else {
             return false;
         };
+        let Some(declared_for) = debt.patchset_id.as_deref() else {
+            return false;
+        };
+        if closure.outcome != Closure::Integrated || debt.event_id >= closure.event_id {
+            return false;
+        }
         let (Some(shipped), Some(basis)) = (
             self.closure_shipped_patchset()
                 .filter(|patchset| patchset.id != declared_for),
-            self.closure
+            closure
+                .authorization
                 .as_ref()
-                .and_then(|closure| closure.authorization.as_ref())
                 .filter(|basis| basis.audit_debt_event_id.is_none()),
         ) else {
             return false;
@@ -4800,24 +4813,29 @@ impl ChangeState {
         let Some(verdict_id) = basis.verdict_event_id.as_deref() else {
             return false;
         };
-        self.verdicts.iter().any(|verdict| {
-            verdict.event_id == verdict_id
-                && verdict.patchset_id == shipped.id
-                && verdict.verdict == Verdict::Approved
-                && !verdict.author_assumed()
-                && !verdict
-                    .assessment
-                    .as_ref()
-                    .is_some_and(|assessment| assessment.independence == Independence::Ineligible)
-                && self
-                    .authorship_match(
-                        shipped,
-                        None,
-                        verdict.effective_author(),
-                        &verdict.judged_models(),
-                    )
-                    .is_none()
-        })
+        self.authoritative_verdict_history()
+            .into_iter()
+            .any(|verdict| {
+                verdict.event_id == verdict_id
+                    && verdict.event_id < closure.event_id
+                    && verdict.patchset_id == shipped.id
+                    && verdict.verdict == Verdict::Approved
+                    && !verdict.author_assumed()
+                    && !verdict.assessment.as_ref().is_some_and(|assessment| {
+                        assessment.independence == Independence::Ineligible
+                            || assessment.clears == Some(false)
+                    })
+                    && (!self.verdict_uses_assessed(verdict, self.review_clearance)
+                        || self.verdict_clearance_gap(verdict).is_none())
+                    && self
+                        .authorship_match(
+                            shipped,
+                            None,
+                            verdict.effective_author(),
+                            &verdict.judged_models(),
+                        )
+                        .is_none()
+            })
     }
 
     /// The head a closed change is judged at, read from the ledger alone: the
@@ -5424,6 +5442,13 @@ impl ChangeState {
     /// what discharged it, and for an `ineligible-review` debt the read it
     /// names and the audits since that left it open.
     pub(crate) fn settle_debt(&mut self) {
+        if let Some(debt) = self.superseded_debt.take() {
+            self.debt = Some(*debt);
+        }
+        if self.has_superseded_debt() {
+            self.superseded_debt = self.debt.take().map(Box::new);
+            return;
+        }
         let Some(debt) = self.debt.clone() else {
             return;
         };
@@ -7318,6 +7343,152 @@ mod tests {
 
     fn standing_of(state: &ChangeState) -> Option<DebtStanding> {
         state.debt_standing()
+    }
+
+    fn stale_debt_history(configure_approval: impl FnOnce(&mut Event)) -> Vec<Event> {
+        let patch = |id, head| {
+            ev(
+                "fix",
+                serde_json::from_value(serde_json::json!({
+                    "event_type": "patchset-added", "patchset_id": id, "base": "b0", "head": head
+                }))
+                .unwrap(),
+            )
+        };
+        let open = opened("fix");
+        let first = patch("ps-01", "h1");
+        let mut debt = versioned_debt();
+        if let Payload::DebtDeclared { extent, .. } = &mut debt.payload {
+            *extent = Some(scoped_extent("b0", "h1"));
+        }
+        let second = patch("ps-02", "h2");
+        let mut approval = verdict("fix", "ps-02", None);
+        approval.actor = "fixture:reader".into();
+        approval.model = Some("reader#high".into());
+        configure_approval(&mut approval);
+        let integrated = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "change-integrated",
+                "source_patchset_id": "ps-02", "source_head": "h2", "integrated_commit": "h2",
+                "target_branch": "master", "target_before": "b0",
+                "authorization": {
+                    "verdict_event_id": approval.event_id,
+                    "gate_evidence": {}, "prerequisites": [], "blocking_findings": [],
+                    "holds": [], "gates": {},
+                    "policy": {
+                        "forbid_self_approval": true, "require_declared_actor": false,
+                        "provenance_git_identity": "per-actor"
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        vec![open, first, debt, second, approval, integrated]
+    }
+
+    fn debt_test_scope(origin: &str) -> crate::import_authorization::PrivilegeScope {
+        crate::import_authorization::PrivilegeScope {
+            local_origin: origin.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_unauthorized_foreign_approval_cannot_retire_debt_on_an_earlier_patchset() {
+        use crate::import_authorization::{canonical_event_digest, EventAuthorization, Role};
+
+        let events = stale_debt_history(|approval| approval.repository_id = "foreign".into());
+        let approval = &events[4];
+        let approval_id = &approval.event_id;
+        let mut state = reduce(&events).unwrap();
+        let mut scope = debt_test_scope("repo");
+        scope.imported_event_ids.insert(approval_id.clone());
+        let event_sha256 =
+            canonical_event_digest(&serde_json::to_value(approval).unwrap()).unwrap();
+        scope.bound_events.insert(
+            approval_id.clone(),
+            ("fix".into(), "foreign".into(), event_sha256.clone()),
+        );
+        scope.admissions.insert(
+            approval_id.clone(),
+            EventAuthorization {
+                event_id: approval_id.clone(),
+                scope: "fix".into(),
+                origin_replica_id: "foreign".into(),
+                event_sha256,
+                authorized_roles: vec![Role::ReviewInput],
+            },
+        );
+
+        state.apply_privilege_scope(std::sync::Arc::new(scope.clone()), &events);
+        assert!(!state.review_eligible(approval_id, "foreign"));
+        assert_eq!(standing_of(&state), Some(DebtStanding::Owed));
+
+        scope
+            .admissions
+            .get_mut(approval_id)
+            .unwrap()
+            .authorized_roles
+            .push(Role::ReviewAuthority);
+        scope.trusted_review_replicas.push("foreign".into());
+        state.apply_privilege_scope(std::sync::Arc::new(scope.clone()), &events);
+        assert!(state.review_eligible(approval_id, "foreign"));
+        assert_eq!(standing_of(&state), None);
+
+        scope.trusted_review_replicas.clear();
+        state.apply_privilege_scope(std::sync::Arc::new(scope), &events);
+        assert_eq!(standing_of(&state), Some(DebtStanding::Owed));
+        assert_eq!(state.debt.as_ref().unwrap().event_id, events[2].event_id);
+    }
+
+    #[test]
+    fn a_below_clearance_approval_cannot_retire_debt_on_an_earlier_patchset() {
+        let events = stale_debt_history(|approval| {
+            let Payload::VerdictRecorded { assessment, .. } = &mut approval.payload else {
+                unreachable!();
+            };
+            *assessment = Some(AuditAssessment {
+                independence: Independence::Eligible,
+                findings: Some(Independence::Eligible),
+                clears: Some(false),
+                qualifiers: vec![crate::model::ReviewQualifier::BelowClearance],
+                route_version: None,
+                binding: Some(AuditorBinding::Bound),
+                uncovered_authors: Vec::new(),
+            });
+        });
+        for clearance in [
+            crate::policy::ReviewClearance::Legacy,
+            crate::policy::ReviewClearance::Assessed,
+        ] {
+            let mut state = reduce(&events).unwrap();
+            state.review_clearance = clearance;
+            state.apply_privilege_scope(std::sync::Arc::new(debt_test_scope("repo")), &events);
+            assert_eq!(
+                standing_of(&state),
+                Some(DebtStanding::Owed),
+                "{clearance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn applying_assessed_clearance_restores_debt_when_the_approval_lacks_an_assessment() {
+        let events = stale_debt_history(|_| {});
+        let mut state = reduce(&events).unwrap();
+        let scope = std::sync::Arc::new(debt_test_scope("repo"));
+        state.apply_privilege_scope(scope.clone(), &events);
+        assert_eq!(standing_of(&state), None);
+
+        state.review_clearance = crate::policy::ReviewClearance::Assessed;
+        state.apply_privilege_scope(scope, &events);
+        assert_eq!(standing_of(&state), Some(DebtStanding::Owed));
+        let read = &state.verdicts[0];
+        assert_eq!(
+            state.verdict_clearance_gap(read),
+            Some(FindingsReason::NoAssessment)
+        );
     }
 
     #[test]

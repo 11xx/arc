@@ -3294,8 +3294,10 @@ REVIEW COVERAGE AND DEBT
   When a guarded integration records an independent approval of the
   shipped patchset as its authorization, a waiver bound to an earlier
   patchset stays in the event history and creates no shipped obligation.
-  A waiver used to authorize integration remains an obligation of the
-  shipped patchset, with its declared extent.
+  The approval must have receiver review authority and satisfy applicable
+  clearance. An assessment that explicitly denies clearance cannot retire
+  the earlier waiver. A waiver used to authorize integration remains an
+  obligation of the shipped patchset, with its declared extent.
 
   An independent read of the revision that shipped, recorded after the debt
   was declared, that approves it or requests changes discharges it — whether

@@ -1760,6 +1760,7 @@ mod tests {
             audit_verdicts: Vec::new(),
             audit_findings: Default::default(),
             debt: None,
+            superseded_debt: None,
             blocked_on_stages: Vec::new(),
             verifications: Vec::new(),
             post_integration_verifications: Vec::new(),
