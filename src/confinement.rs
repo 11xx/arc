@@ -850,7 +850,8 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
                 } else {
                     checkout.join(candidate)
                 };
-                if resolved != default_target {
+                let normalized = resolve_missing(&resolved).unwrap_or(resolved);
+                if normalized != default_target {
                     return false;
                 }
             }
@@ -897,6 +898,11 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         let Ok(parsed) = contents.parse::<toml::Value>() else {
             return false;
         };
+        // Conservatively skip tagging whenever a selected Cargo config uses
+        // `include`, since included files can redirect `build.target-dir`.
+        if parsed.get("include").is_some() {
+            return false;
+        }
         if let Some(value) = parsed
             .get("build")
             .and_then(|build| build.get("target-dir"))

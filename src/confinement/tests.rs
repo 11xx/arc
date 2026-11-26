@@ -876,6 +876,53 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
         sym_cargo_target.display()
     );
 
+    // Cargo config `include` conservatively leaves `target/` unmarked (both in
+    // checkout `.cargo/config.toml` and in `CARGO_HOME`), while a direct config
+    // selecting the expected `<checkout>/target` still marks `target/`.
+    let scratch_inc = scratch();
+    let inc_wt = scratch_inc.path().join("inc-override");
+    fs::create_dir_all(inc_wt.join(".cargo")).unwrap();
+    init_git(&inc_wt);
+    fs::write(inc_wt.join(".gitignore"), "/target\n/out\n").unwrap();
+    fs::write(
+        inc_wt.join("Cargo.toml"),
+        "[package]\nname='incpkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        inc_wt.join(".cargo/extra.toml"),
+        "[build]\ntarget-dir = \"out\"\n",
+    )
+    .unwrap();
+    fs::write(
+        inc_wt.join(".cargo/config.toml"),
+        "include = [\"extra.toml\"]\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&inc_wt, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(inc_wt.join("target").is_dir());
+    assert!(!inc_wt.join("target/CACHEDIR.TAG").exists());
+
+    let scratch_exp = scratch();
+    let exp_wt = scratch_exp.path().join("explicit-default");
+    fs::create_dir_all(exp_wt.join(".cargo")).unwrap();
+    init_git(&exp_wt);
+    fs::write(exp_wt.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        exp_wt.join("Cargo.toml"),
+        "[package]\nname='exppkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        exp_wt.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"target\"\n",
+    )
+    .unwrap();
+    let (mut command, _) = shell(&exp_wt, "true", &["target"]);
+    assert!(command.status().unwrap().success());
+    assert!(exp_wt.join("target/CACHEDIR.TAG").is_file());
+
     // A FIFO at `.cargo/config` never blocks confinement; it fails closed and leaves
     // `target/` unmarked while still shadowing `.cargo/config.toml`.
     let scratch_fifo = scratch();
