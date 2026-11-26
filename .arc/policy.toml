@@ -349,8 +349,10 @@ acknowledged_safe = [
   # CLI acceptance probes write only isolated fixture journals.
   "tests/cli/guide_topics.rs",
   # The journal and the liveness signals over it are advisory by construction:
-  # claims, lanes, and messages never gate, and the ledger stays authoritative.
+  # claims, lanes, feedback reports, and messages never gate, and the ledger
+  # stays authoritative.
   "src/commands/claims.rs",
+  "src/commands/feedback.rs",
   "src/commands/messaging.rs",
   "src/intake.rs",
   "src/journal/page.css",

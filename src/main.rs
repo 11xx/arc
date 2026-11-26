@@ -3675,6 +3675,22 @@ enum Cmd {
         #[command(flatten)]
         write: journal::KindWrite,
     },
+    /// File or list tool and workflow feedback reports for a registered project.
+    ///
+    /// Resolves `<project>` through the workspace registry from any directory,
+    /// including outside any Git repository. Unknown projects refuse and list
+    /// registered project names. Uses the `feedback` journal kind (private by
+    /// construction, carried by journal exchange) with the default `feedback`
+    /// scaffold unless `--no-scaffold` is given.
+    ///
+    /// With `--key <slug>`, an open feedback report matching that key receives
+    /// an appended evidence block instead of creating a duplicate. `--list`
+    /// prints open feedback keys, routes, and evidence counts for `<project>`
+    /// without writing. `--route` classifies where the finding belongs
+    /// (`local`, `upstream`, `operator`, or `delegate`; default `local` on
+    /// creation). Triage with `arc journal transition` or `arc journal consume
+    /// --outcome discarded`.
+    Feedback(commands::feedback::FeedbackArgs),
     /// Where each series of work stands: its items, their stages, and what
     /// waits on a person. Read on request; nothing else prints it.
     ///
@@ -6650,9 +6666,13 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
         .subcommand_matches("forge")
         .and_then(|forge| forge.subcommand_matches("observe"))
         .is_some_and(|observe| observe.get_flag("example"));
+    let feedback_list = matches
+        .subcommand_matches("feedback")
+        .is_some_and(|feedback| feedback.get_flag("list"));
     let reads_only = (commands::READ_ONLY_COMMANDS.contains(&path.as_str())
         && !concurrent_measurement)
-        || forge_observe_example;
+        || forge_observe_example
+        || feedback_list;
     if reads_only && commands::SHARED_READ_COMMANDS.contains(&path.as_str()) {
         store::share_reads();
     }
@@ -9421,6 +9441,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             json,
         } => commands::catchup(&ctx, limit, sessions, json),
         Cmd::Fr { write } => journal::feature_request(&ctx, write),
+        Cmd::Feedback(args) => commands::feedback::run(&ctx, args),
         Cmd::Progress(args) => commands::progress::run(&ctx, args),
         Cmd::Milestone(args) => commands::milestone::run(&ctx, args),
         Cmd::Journal { cmd, global } => journal::run(&ctx, cmd, global),
@@ -9524,6 +9545,7 @@ mod tests {
             "hooks uninstall",
             "hook-run",
             "fr",
+            "feedback",
             "progress start",
             "progress add",
             "progress rename",
@@ -9575,6 +9597,7 @@ mod tests {
             "journal memory",
             "journal later",
             "journal review",
+            "journal feedback",
             "journal log",
             "journal source-attach",
             "journal position",

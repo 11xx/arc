@@ -12,14 +12,23 @@ const SCAFFOLD_SOL_LOW: &str = include_str!("scaffolds/sol-low.md");
 const SCAFFOLD_SOL_HIGH: &str = include_str!("scaffolds/sol-high.md");
 const SCAFFOLD_REVIEWER: &str = include_str!("scaffolds/reviewer.md");
 /// Built-in journal scaffolds. They seed the discussion conventions (position
-/// headings, stance lines, resolution vocabulary) at artifact birth.
+/// headings, stance lines, resolution vocabulary) and feedback report shape at
+/// artifact birth.
 const SCAFFOLD_DISCUSSION: &str = include_str!("scaffolds/discussion.md");
+const SCAFFOLD_FEEDBACK: &str = include_str!("scaffolds/feedback.md");
 
 /// Resolve a scaffold template: a repo-local `.arc/templates/<name>.md` wins,
 /// otherwise a compiled-in default (`sol-low`, `sol-high`, `reviewer`,
-/// `discussion`).
+/// `discussion`, `feedback`).
 pub(crate) fn resolve(ctx: &Ctx, name: &str) -> Result<String> {
-    let repo_template = gitio::toplevel(&ctx.cwd).ok().map(|top| {
+    resolve_in(&ctx.cwd, name)
+}
+
+/// [`resolve`] with an explicit directory for repo-local template lookup, so a
+/// cross-project write can honor the target project's `.arc/templates/<name>.md`
+/// when reachable and otherwise use the compiled-in default.
+pub(crate) fn resolve_in(dir: &std::path::Path, name: &str) -> Result<String> {
+    let repo_template = gitio::toplevel(dir).ok().map(|top| {
         top.join(".arc")
             .join("templates")
             .join(format!("{name}.md"))
@@ -35,15 +44,16 @@ pub(crate) fn resolve(ctx: &Ctx, name: &str) -> Result<String> {
         "sol-high" => Ok(SCAFFOLD_SOL_HIGH.to_string()),
         "reviewer" => Ok(SCAFFOLD_REVIEWER.to_string()),
         "discussion" => Ok(SCAFFOLD_DISCUSSION.to_string()),
+        "feedback" => Ok(SCAFFOLD_FEEDBACK.to_string()),
         other => bail!(
             "unknown scaffold {other:?}; provide .arc/templates/{other}.md or use \
-             a built-in (sol-low, sol-high, reviewer, discussion)"
+             a built-in (sol-low, sol-high, reviewer, discussion, feedback)"
         ),
     }
 }
 
 /// Every compiled-in scaffold, with the one line each exists to serve.
-pub(crate) const BUILT_IN: [(&str, &str); 4] = [
+pub(crate) const BUILT_IN: [(&str, &str); 5] = [
     ("sol-low", "brief: a fully specified executor task"),
     (
         "sol-high",
@@ -57,13 +67,19 @@ pub(crate) const BUILT_IN: [(&str, &str); 4] = [
         "discussion",
         "journal: position headings, stance lines, resolution",
     ),
+    (
+        "feedback",
+        "journal: tool friction report shape (tool, commands, expected/actual, cost)",
+    ),
 ];
 
 /// The scaffold a kind prepends when the caller names none.
 pub(crate) fn default_for_kind(kind: &str) -> Option<&'static str> {
-    // Only a discussion has one. A kind whose artifacts have no conventions
-    // to seed is better off with the body the caller wrote and nothing else.
-    (kind == "discussion").then_some("discussion")
+    match kind {
+        "discussion" => Some("discussion"),
+        "feedback" => Some("feedback"),
+        _ => None,
+    }
 }
 
 /// Names resolvable here: the built-ins, plus any `.arc/templates/<name>.md`,

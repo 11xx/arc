@@ -19,6 +19,7 @@ mod cost_table;
 mod diff;
 mod doctor;
 mod external;
+pub mod feedback;
 mod findings;
 mod forge_cmd;
 pub(crate) mod fork;

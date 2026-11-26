@@ -2208,6 +2208,22 @@ KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   Selectivity is the point. Filing everything rebuilds the transcript this
   exists to replace, at higher cost and in an append-only record.
 
+  Tool and workflow friction discovered during work is filed where it happens
+  into the owning project's journal, from any directory (including outside Git):
+    arc feedback <project> --body-file - [--key <slug>] [--title TEXT]
+                           [--route local|upstream|operator|delegate]
+    arc feedback <project> --list [--json]
+  `<project>` resolves through the workspace registry; an unknown name refuses
+  and lists registered projects. Reports use the `feedback` journal kind with
+  the default `feedback` scaffold unless `--no-scaffold` is given, remain
+  private, and travel through journal exchange. When `--key <slug>` matches an
+  open `feedback` item in `<project>`'s journal, an evidence block is appended
+  instead of filing a duplicate. `--route` records where the finding belongs
+  (`local` default on creation, `upstream`, `operator`, or `delegate`).
+  `arc journal open` lists `feedback` apart from open work and unbuilt
+  proposals; triage with `arc journal transition` into `feature-request` or
+  `todo`, or `arc journal consume --outcome discarded`.
+
 STANDING REFERENCES (what a project keeps coming back to)
   A research note, a finished plan or an argued discussion can outlive the
   work that produced it. Pin it to keep it in view and out of the queues.
@@ -7180,6 +7196,8 @@ SCHEMAS
     `arc-journal-artifact/3`         arc journal show --json
     `arc-journal-entry/1`            arc journal show <entry address> --json
     `arc-journal-open/1`             arc journal open --json
+    `arc-feedback/1`                 arc feedback <project> --json
+    `arc-feedback-list/1`            arc feedback <project> --list --json
     `arc-journal-pins/1`             arc journal pins --json
     `arc-journal-workbenches/1`      arc journal workbench list --json
     `arc-journal-render/1`           arc journal render --json
@@ -7297,10 +7315,11 @@ SCHEMAS
   Their absent model provenance stays absent.
 
   A `pinned` event may carry an optional `guide` topic name, a `consumed`
-  event may carry an optional `promoted_to_global` memory filename, and a
-  `reopened` event may carry an optional `reopens` consumption digest. These
-  additive input fields keep `journal-events/2`; events without them remain
-  valid.
+  event may carry an optional `promoted_to_global` memory filename, a
+  `reopened` event may carry an optional `reopens` consumption digest, and
+  `note` and `evidence` events may carry optional `feedback_key` and
+  `feedback_route` fields. These additive input fields keep
+  `journal-events/2`; events without them remain valid.
 
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;
@@ -7588,7 +7607,7 @@ WORK BESIDE OTHERS
 
 KEEP WHAT YOU LEARN
   arc keep                       a checked premise or rejected approach, as it arises
-  arc journal todo, arc fr       separate work, filed when you notice it
+  arc journal todo, arc fr       separate work; arc feedback <project> for tool friction
   arc journal memory             project facts; --global for operator practices
   arc journal workbench <slug>   working material a later session or lane reads;
                                  a cache directory holds only what can be rebuilt

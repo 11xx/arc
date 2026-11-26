@@ -256,6 +256,7 @@ pub enum JournalKind {
     Decision,
     Incident,
     FeatureRequest,
+    Feedback,
 }
 
 impl JournalKind {
@@ -273,6 +274,42 @@ impl JournalKind {
             JournalKind::Decision => "decision",
             JournalKind::Incident => "incident",
             JournalKind::FeatureRequest => "feature-request",
+            JournalKind::Feedback => "feedback",
+        }
+    }
+}
+
+/// Where a feedback report belongs based on what caused the friction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedbackRoute {
+    /// Local Arc-managed tool or repository journal.
+    Local,
+    /// External or upstream tool issue or PR draft.
+    Upstream,
+    /// Operator attention or policy decision.
+    Operator,
+    /// Actionable follow-up suitable for delegation.
+    Delegate,
+}
+
+impl FeedbackRoute {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Upstream => "upstream",
+            Self::Operator => "operator",
+            Self::Delegate => "delegate",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "local" => Some(Self::Local),
+            "upstream" => Some(Self::Upstream),
+            "operator" => Some(Self::Operator),
+            "delegate" => Some(Self::Delegate),
+            _ => None,
         }
     }
 }
@@ -310,9 +347,13 @@ fn parse_journal_kind_filter(value: &str) -> Result<String, String> {
 const PRIMARY_ACTIONABLE_KINDS: [&str; 5] = ["todo", "handoff", "inbox", "plan", "discussion"];
 const LATER_KIND: &str = "later";
 const FEATURE_REQUEST_KIND: &str = "feature-request";
+const FEEDBACK_KIND: &str = "feedback";
 
 fn is_actionable_kind(kind: &str) -> bool {
-    PRIMARY_ACTIONABLE_KINDS.contains(&kind) || kind == LATER_KIND || kind == FEATURE_REQUEST_KIND
+    PRIMARY_ACTIONABLE_KINDS.contains(&kind)
+        || kind == LATER_KIND
+        || kind == FEATURE_REQUEST_KIND
+        || kind == FEEDBACK_KIND
 }
 
 /// How a consumed artifact was discharged. Advisory vocabulary recorded in
@@ -727,9 +768,10 @@ pub struct KindWrite {
     #[arg(long)]
     pub title: Option<String>,
     /// Scaffold template around the body (.arc/templates/<name>.md or a
-    /// built-in: sol-low, sol-high, reviewer, discussion). The body takes the
-    /// place of the template's `{{body}}` line, or follows a template without
-    /// one; a heading the body opens with stays the artifact's first line
+    /// built-in: sol-low, sol-high, reviewer, discussion, feedback). The body
+    /// takes the place of the template's `{{body}}` line, or follows a
+    /// template without one; a heading the body opens with stays the
+    /// artifact's first line
     #[arg(long, conflicts_with = "no_scaffold")]
     pub scaffold: Option<String>,
     /// Record the body alone, without the kind's default scaffold
@@ -900,6 +942,11 @@ pub enum JournalCmd {
     },
     /// Record a review performed outside the ledger
     Review {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record tool or workflow friction observed in this project
+    Feedback {
         #[command(flatten)]
         write: KindWrite,
     },
@@ -1498,7 +1545,7 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List actionable artifacts in primary, later, and feature-request tiers
+    /// List actionable artifacts in primary, later, feature-request, and feedback tiers
     ///
     /// Incomplete successors appear separately as pending transitions; they
     /// supply no actionable counts and cannot be promoted. A pinned artifact
@@ -2202,6 +2249,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Memory { write } => write_kind(ctx, JournalKind::Memory, write),
         JournalCmd::Later { write } => write_kind(ctx, JournalKind::Later, write),
         JournalCmd::Review { write } => write_kind(ctx, JournalKind::Review, write),
+        JournalCmd::Feedback { write } => write_kind(ctx, JournalKind::Feedback, write),
         JournalCmd::Log {
             topic,
             message,
@@ -5891,6 +5939,7 @@ fn opening_position_stance(body: &str) -> Option<String> {
 fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
     match kind {
         JournalKind::Discussion => Some("discussion"),
+        JournalKind::Feedback => Some("feedback"),
         _ => None,
     }
 }
@@ -6167,6 +6216,311 @@ fn installed_label(cwd: &Path) -> String {
 /// owner and the alias can never drift from it.
 pub fn feature_request(ctx: &Ctx, write: KindWrite) -> Result<i32> {
     write_kind(ctx, JournalKind::FeatureRequest, write)
+}
+
+/// Inputs for filing a feedback report into a target project's journal.
+pub(crate) struct FeedbackWrite<'a> {
+    pub(crate) dir: &'a Path,
+    pub(crate) anchor: Option<&'a Path>,
+    pub(crate) body_file: Option<&'a str>,
+    pub(crate) key: Option<&'a str>,
+    pub(crate) title: Option<&'a str>,
+    pub(crate) route: Option<FeedbackRoute>,
+    pub(crate) scaffold: Option<&'a str>,
+    pub(crate) no_scaffold: bool,
+    pub(crate) source: &'a SourceArgs,
+}
+
+/// Outcome of a feedback write: a new artifact, evidence appended to an open
+/// artifact matching `--key`, or an idempotent hit on `(source, item_key)`.
+pub(crate) enum FeedbackOutcome {
+    Created {
+        file: String,
+        path: PathBuf,
+        key: String,
+        route: String,
+    },
+    Appended {
+        file: String,
+        path: PathBuf,
+        key: String,
+        route: Option<String>,
+        evidence_id: String,
+    },
+    Existing {
+        summary: String,
+    },
+}
+
+/// One open feedback report in a project's journal, for `arc feedback --list`.
+#[derive(Clone, Serialize)]
+pub(crate) struct FeedbackListRow {
+    pub(crate) key: String,
+    pub(crate) file: String,
+    pub(crate) title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route: Option<String>,
+    pub(crate) evidence_count: usize,
+    pub(crate) filed_at: Option<String>,
+}
+
+/// Derive a kebab-case topic slug from a human title when `--key` is omitted.
+fn slugify_feedback_topic(title: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = true;
+    for ch in title.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
+            slug.push(lower);
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "report".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The dedup key recorded on a feedback artifact, if any event carried one.
+fn artifact_feedback_key(events: &[JournalEvent], filename: &str) -> Option<String> {
+    events
+        .iter()
+        .filter(|event| event.known() && event.file.as_deref() == Some(filename))
+        .find_map(|event| event.feedback_key.clone())
+}
+
+/// The latest routing classification recorded on a feedback artifact.
+fn artifact_feedback_route(events: &[JournalEvent], filename: &str) -> Option<String> {
+    events
+        .iter()
+        .rev()
+        .filter(|event| event.known() && event.file.as_deref() == Some(filename))
+        .find_map(|event| event.feedback_route.clone())
+}
+
+/// Count recorded `evidence` blocks on an artifact.
+fn artifact_evidence_count(events: &[JournalEvent], filename: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event.known() && event.event == "evidence" && event.file.as_deref() == Some(filename)
+        })
+        .count()
+}
+
+/// Find the newest open (unconsumed, hot, settled) feedback artifact in `dir`
+/// matching `key` either by recorded `feedback_key` or by filename topic.
+fn find_open_feedback_by_key(
+    dir: &Path,
+    events: &[JournalEvent],
+    key: &str,
+) -> Result<Option<(String, String)>> {
+    for name in sorted_artifact_names(dir)? {
+        let Some((_, topic, kind)) = parse_artifact_name(&name) else {
+            continue;
+        };
+        if kind != FEEDBACK_KIND {
+            continue;
+        }
+        if is_consumed(events, &name)
+            || pending_transition(dir, events, &name)
+            || relocation(events, &name).is_some()
+        {
+            continue;
+        }
+        let recorded_key = artifact_feedback_key(events, &name);
+        if recorded_key.as_deref() == Some(key) || (recorded_key.is_none() && topic == key) {
+            return Ok(Some((name, topic)));
+        }
+    }
+    Ok(None)
+}
+
+/// List open (unconsumed, hot) feedback reports in `dir`, newest first.
+pub(crate) fn feedback_list(dir: &Path) -> Result<Vec<FeedbackListRow>> {
+    let events = read_events(dir)?;
+    let mut rows = Vec::new();
+    for name in sorted_artifact_names(dir)? {
+        let Some((ts, topic, kind)) = parse_artifact_name(&name) else {
+            continue;
+        };
+        if kind != FEEDBACK_KIND {
+            continue;
+        }
+        if is_consumed(&events, &name)
+            || pending_transition(dir, &events, &name)
+            || relocation(&events, &name).is_some()
+        {
+            continue;
+        }
+        let key = artifact_feedback_key(&events, &name).unwrap_or_else(|| topic.clone());
+        let route = artifact_feedback_route(&events, &name);
+        let evidence_count = artifact_evidence_count(&events, &name);
+        let title = amended_heading(&events, dir, &name)
+            .map(|heading| heading.trim_start_matches('#').trim().to_string())
+            .filter(|heading| !heading.is_empty())
+            .unwrap_or_else(|| heading_from_topic(&topic));
+        rows.push(FeedbackListRow {
+            key,
+            file: name,
+            title,
+            route,
+            evidence_count,
+            filed_at: filed_at_of(&ts),
+        });
+    }
+    Ok(rows)
+}
+
+/// File a feedback report into `write.dir`, deduplicating across sessions when
+/// `--key` matches an open feedback item in that journal.
+pub(crate) fn feedback_file(ctx: &Ctx, write: &FeedbackWrite<'_>) -> Result<FeedbackOutcome> {
+    if let Some(key) = write.key {
+        if !valid_topic(key) {
+            bail!("--key {key:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
+        }
+    }
+    let (source, item_key) = declared_source(write.source)?;
+    if write.dir.is_dir() {
+        if let Some(existing) = already_recorded(
+            &read_events(write.dir)?,
+            source.as_ref(),
+            item_key.as_deref(),
+        ) {
+            return Ok(FeedbackOutcome::Existing { summary: existing });
+        }
+    }
+    let scaffold_name = match (write.scaffold, write.no_scaffold) {
+        (Some(name), _) => Some(name),
+        (None, true) => None,
+        (None, false) => Some("feedback"),
+    };
+    let template_dir = write
+        .anchor
+        .filter(|path| path.is_dir())
+        .unwrap_or(&ctx.cwd);
+    let template = match scaffold_name {
+        Some(name) => crate::commands::scaffold::resolve_in(template_dir, name)?,
+        None => String::new(),
+    };
+    let content = match write.body_file {
+        Some(source) => read_body_verbatim(source)?,
+        None => String::new(),
+    };
+
+    let _transition = lock_journal_transition(write.dir)?;
+    let events = read_events(write.dir)?;
+    if let Some(existing) = already_recorded(&events, source.as_ref(), item_key.as_deref()) {
+        return Ok(FeedbackOutcome::Existing { summary: existing });
+    }
+
+    if let Some(key) = write.key {
+        if let Some((existing_file, existing_topic)) =
+            find_open_feedback_by_key(write.dir, &events, key)?
+        {
+            ensure_storage_settled(write.dir, &events, &existing_file)?;
+            let block_title = write.title.map(block_title).transpose()?;
+            let mut scan = EntryScan::after_recorded(&events, &existing_file);
+            for line in content.lines() {
+                if !quoted_entry_line(line, &mut scan, &events, &existing_file)
+                    && is_position_heading(line)
+                {
+                    bail!(
+                        "feedback evidence cannot contain a structural position heading; \
+                         quote the example or use journal position"
+                    );
+                }
+            }
+            if content.trim().is_empty() {
+                bail!(
+                    "feedback key {key:?} matches open item {existing_file}; \
+                     pass --body-file to append evidence"
+                );
+            }
+
+            let now = Utc::now();
+            let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+            let evidence_id = format!("evd-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
+            let (harness, _) = identity(ctx);
+            let heading = format!(
+                "### Evidence {evidence_id} ({}){}",
+                heading_stamp(attribution(ctx, harness.as_deref()), &ts),
+                block_title
+                    .as_deref()
+                    .map(|title| format!(": {title}"))
+                    .unwrap_or_default()
+            );
+            let path = write.dir.join(&existing_file);
+            append_block(&path, &heading, &content)?;
+
+            let mut event = JournalEvent::base(ctx, now, &existing_topic, "evidence");
+            event.file = Some(existing_file.clone());
+            event.title = block_title;
+            event.evidence_id = Some(evidence_id.clone());
+            event.storage_at_write = Some("hot".to_string());
+            event.source = source;
+            event.item_key = item_key;
+            event.feedback_key = Some(key.to_string());
+            event.feedback_route = write.route.map(|r| r.as_str().to_string());
+            append_event(ctx, write.dir, &event)?;
+
+            let route = write
+                .route
+                .map(|r| r.as_str().to_string())
+                .or_else(|| artifact_feedback_route(&events, &existing_file));
+            return Ok(FeedbackOutcome::Appended {
+                file: existing_file,
+                path,
+                key: key.to_string(),
+                route,
+                evidence_id,
+            });
+        }
+    }
+
+    let topic = match (write.key, write.title) {
+        (Some(key), _) => key.to_string(),
+        (None, Some(title)) => slugify_feedback_topic(title),
+        (None, None) => "report".to_string(),
+    };
+    let route = write.route.unwrap_or(FeedbackRoute::Local);
+    let body = scaffolded(&template, &content);
+    if body.trim().is_empty() && write.title.is_none_or(|t| t.trim().is_empty()) {
+        bail!("nothing to record: pass --body-file, --scaffold, or --title");
+    }
+
+    let now = Utc::now();
+    let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let filename =
+        allocate_artifact_name(write.dir, &format!("{stamp}-{topic}-{FEEDBACK_KIND}.md"))?;
+    let path = write.dir.join(&filename);
+    let contents = headed(&topic, write.title, None, &body);
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "note");
+    event.file = Some(filename.clone());
+    event.title = write.title.map(str::to_string);
+    event.source = source;
+    event.item_key = item_key;
+    event.feedback_key = write.key.map(str::to_string);
+    event.feedback_route = Some(route.as_str().to_string());
+
+    create_artifact(write.dir, &path, &contents)?;
+    append_event(ctx, write.dir, &event)?;
+
+    Ok(FeedbackOutcome::Created {
+        file: filename,
+        path,
+        key: write.key.map(str::to_string).unwrap_or(topic),
+        route: route.as_str().to_string(),
+    })
 }
 
 /// Whether an authored body opens on a Markdown heading.
@@ -9532,6 +9886,13 @@ pub(crate) struct JournalEvent {
     /// Where an adopted workbench's material lay before adoption moved it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopted_from: Option<String>,
+    /// Cross-session dedup key recorded by `arc feedback --key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feedback_key: Option<String>,
+    /// Routing classification recorded by `arc feedback --route`:
+    /// `local`, `upstream`, `operator`, or `delegate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feedback_route: Option<String>,
     /// Optional progress series item targeted by a `lane-opened` event, so
     /// pre-change lanes appear on the item before `arc begin` runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9865,6 +10226,8 @@ impl JournalEvent {
             files: None,
             bytes: None,
             adopted_from: None,
+            feedback_key: None,
+            feedback_route: None,
             lane_item: None,
             series: series::SeriesFields::default(),
             milestone: milestone::MilestoneFields::default(),
@@ -9985,6 +10348,16 @@ impl JournalEvent {
             .promotion
             .as_ref()
             .is_some_and(|promotion| !promotion.well_formed())
+        {
+            return false;
+        }
+        if !self.feedback_key.as_deref().is_none_or(valid_topic) {
+            return false;
+        }
+        if !self
+            .feedback_route
+            .as_deref()
+            .is_none_or(|route| FeedbackRoute::parse(route).is_some())
         {
             return false;
         }
@@ -13123,6 +13496,13 @@ pub(crate) struct ArtifactEntry {
     /// promoted and on one with work still open, which stay ordinary rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) promotion_state: Option<PromotionState>,
+    /// Cross-session dedup key recorded on a feedback artifact, when declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) feedback_key: Option<String>,
+    /// Routing classification recorded on a feedback artifact (`local`,
+    /// `upstream`, `operator`, or `delegate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route: Option<String>,
     #[serde(flatten)]
     facts: InventoryFacts,
 }
@@ -13573,6 +13953,8 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 questions: Vec::new(),
                 promotions: None,
                 promotion_state: None,
+                feedback_key: None,
+                route: None,
                 facts: InventoryFacts::default(),
             })
         })
@@ -14529,6 +14911,7 @@ pub(crate) struct OpenItems {
     open: Vec<ArtifactEntry>,
     later: Vec<ArtifactEntry>,
     feature_requests: Vec<ArtifactEntry>,
+    feedback: Vec<ArtifactEntry>,
     pending: Vec<ArtifactEntry>,
     #[serde(skip)]
     pub(crate) questions: Vec<WorkspaceQuestion>,
@@ -14594,6 +14977,8 @@ pub(crate) struct TierSelection<'a> {
     pub(crate) open: Vec<&'a ArtifactEntry>,
     pub(crate) later: Vec<&'a ArtifactEntry>,
     pub(crate) feature_requests: Vec<&'a ArtifactEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) feedback: Vec<&'a ArtifactEntry>,
     pub(crate) pending: Vec<&'a ArtifactEntry>,
     /// The selected rows whose filename stamp does not parse. They ride
     /// inside their tier — a selection that silently dropped what it could
@@ -14626,14 +15011,17 @@ impl<'a> TierSelection<'a> {
         let (open, mut open_unknown) = select(&items.open);
         let (later, mut later_unknown) = select(&items.later);
         let (feature_requests, mut fr_unknown) = select(&items.feature_requests);
+        let (feedback, mut feedback_unknown) = select(&items.feedback);
         let (pending, _) = select(&items.pending);
         let mut unknown_time = std::mem::take(&mut open_unknown);
         unknown_time.append(&mut later_unknown);
         unknown_time.append(&mut fr_unknown);
+        unknown_time.append(&mut feedback_unknown);
         Self {
             open,
             later,
             feature_requests,
+            feedback,
             pending,
             unknown_time,
             since: cutoff.map(|cutoff| cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
@@ -14646,7 +15034,7 @@ impl<'a> TierSelection<'a> {
     }
 }
 
-/// The actionable journal queue, split into its three tiers. Shared by
+/// The actionable journal queue, split into its four tiers. Shared by
 /// `journal open` and by every view that surfaces the backlog beside
 /// ledger state. `workbenches` adds the open workbenches, measured, from the
 /// same read of the events.
@@ -14671,6 +15059,7 @@ pub(crate) fn collect_open_in(
         open: Vec::new(),
         later: Vec::new(),
         feature_requests: Vec::new(),
+        feedback: Vec::new(),
         pending: Vec::new(),
         questions: report.questions,
         workbenches: if workbenches {
@@ -14687,6 +15076,7 @@ pub(crate) fn collect_open_in(
         match item.kind.as_deref() {
             Some(LATER_KIND) => result.later.push(item),
             Some(FEATURE_REQUEST_KIND) => result.feature_requests.push(item),
+            Some(FEEDBACK_KIND) => result.feedback.push(item),
             _ => result.open.push(item),
         }
     }
@@ -14741,6 +15131,13 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
             println!("  (none)");
         }
         for f in &items.feature_requests {
+            render_open_entry(f);
+        }
+        println!("feedback reports (newest first):");
+        if items.feedback.is_empty() {
+            println!("  (none)");
+        }
+        for f in &items.feedback {
             render_open_entry(f);
         }
         if kind.is_none() {
@@ -14983,7 +15380,7 @@ fn project_inventory(
 ) -> Result<JournalInventory> {
     if let Some(kind) = kind {
         if !is_actionable_kind(kind) {
-            bail!("--kind {kind} is not actionable; inventory accepts todo|handoff|plan|discussion|later|feature-request");
+            bail!("--kind {kind} is not actionable; inventory accepts todo|handoff|plan|discussion|later|feature-request|feedback");
         }
     }
     if let Some(file) = file {
@@ -15177,11 +15574,14 @@ fn project_inventory(
             questions,
             promotions,
             promotion_state,
+            feedback_key: artifact_feedback_key(&events, &name),
+            route: artifact_feedback_route(&events, &name),
             facts: InventoryFacts {
                 observed_at: Some(observed),
                 tier: Some(match file_kind.as_str() {
                     LATER_KIND => "later",
                     FEATURE_REQUEST_KIND => "feature-request",
+                    FEEDBACK_KIND => "feedback",
                     _ => "primary",
                 }),
                 ledger: Some(ledger.clone()),
@@ -15480,16 +15880,17 @@ fn inventory(
     Ok(0)
 }
 
-/// What the three tiers mean, printed above the queue so a reader who has
+/// What the four tiers mean, printed above the queue so a reader who has
 /// never seen the kind vocabulary can act on it. `open` carries work a future
-/// session is expected to pick up; `later` and `feature-request` are parked
-/// until someone chooses to spend on them.
+/// session is expected to pick up; `later`, `feature-request`, and `feedback`
+/// sit apart until someone chooses to triage or spend on them.
 const OPEN_TIER_LEGEND: &str =
     "tiers: open = todo|handoff|plan|discussion, plus artifacts of the retired \
 inbox kind (work awaiting a session); later = parked; \
-feature-request = unbuilt proposals. \
+feature-request = unbuilt proposals; feedback = tool/workflow observations. \
 A discussion argues a proposal to a decision and collects positions; \
-a feature-request is the unbuilt proposal itself. \
+a feature-request is the unbuilt proposal itself; \
+a feedback report is an observation to triage (`journal transition` or `consume --outcome discarded`). \
 Take one up with `arc begin <slug> --from-journal <file>`.";
 
 /// One `journal open` line: the artifact's filename and age, then its heading
@@ -15507,10 +15908,11 @@ pub(crate) fn render_open_entry_at(f: &ArtifactEntry, prefix: &str) {
         format!(" ({} old)", format_age(seconds))
     });
     println!(
-        "  {prefix}{}{}  {}{}{}{}{}{}",
+        "  {prefix}{}{}  {}{}{}{}{}{}{}",
         f.file,
         age,
         f.heading.as_deref().unwrap_or(""),
+        render_feedback_route(f.route.as_deref()),
         render_change(f.change.as_ref()),
         render_artifact_lane(f.lane.as_ref()),
         render_artifact_claims(&f.claims, f.facts.observed_at.unwrap_or_else(Utc::now)),
@@ -15582,6 +15984,10 @@ fn standing_amendments(events: &[JournalEvent], filename: &str, kind: &str) -> O
 
 fn render_amendments(amendments: Option<usize>) -> String {
     amendments.map_or_else(String::new, |count| format!(" [amended ×{count}]"))
+}
+
+fn render_feedback_route(route: Option<&str>) -> String {
+    route.map_or_else(String::new, |route| format!(" [route: {route}]"))
 }
 
 fn lane_for_topic(
@@ -15697,6 +16103,8 @@ struct ListEntry {
     kind: String,
     heading: Option<String>,
     consumed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -15724,6 +16132,7 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         }
         let heading = amended_heading(&events, &dir, &name);
         let consumed = consumption(&events, &name);
+        let route = artifact_feedback_route(&events, &name);
         artifacts.push(ListEntry {
             file: name,
             timestamp: ts,
@@ -15731,6 +16140,7 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
             kind: file_kind,
             heading,
             consumed,
+            route,
         });
     }
 
@@ -15748,12 +16158,13 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         }
         for entry in &artifacts {
             let heading = entry.heading.as_deref().unwrap_or("");
+            let route = render_feedback_route(entry.route.as_deref());
             let consumed = entry
                 .consumed
                 .as_deref()
                 .map(|outcome| format!("  [consumed: {outcome}]"))
                 .unwrap_or_default();
-            println!("  {}  {}{}", entry.file, heading, consumed);
+            println!("  {}  {}{}{}", entry.file, heading, route, consumed);
         }
     }
     Ok(0)
@@ -19800,9 +20211,11 @@ pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
     };
     if !is_actionable_kind(&kind) {
         bail!(
-            "{filename} is a {kind} artifact, not an actionable item ({}|{})",
+            "{filename} is a {kind} artifact, not an actionable item ({}|{}|{}|{})",
             PRIMARY_ACTIONABLE_KINDS.join("|"),
-            LATER_KIND
+            LATER_KIND,
+            FEATURE_REQUEST_KIND,
+            FEEDBACK_KIND
         );
     }
     let dir = &location.hot;
@@ -19999,6 +20412,7 @@ fn transition(
                 .copied()
                 .chain(std::iter::once(LATER_KIND))
                 .chain(std::iter::once(FEATURE_REQUEST_KIND))
+                .chain(std::iter::once(FEEDBACK_KIND))
                 .collect::<Vec<_>>()
                 .join("|")
         );
@@ -20929,6 +21343,7 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
                     open: Vec::new(),
                     later: Vec::new(),
                     feature_requests: Vec::new(),
+                    feedback: Vec::new(),
                     pending: Vec::new(),
                     questions: Vec::new(),
                     workbenches: Vec::new(),
@@ -21024,6 +21439,7 @@ impl Orientation {
             ("open", &self.queue.open),
             ("later", &self.queue.later),
             ("feature-request", &self.queue.feature_requests),
+            ("feedback", &self.queue.feedback),
             ("pending transition", &self.queue.pending),
         ] {
             println!("{label} ({}):", entries.len());
