@@ -21,22 +21,25 @@ const SCAFFOLD_FEEDBACK: &str = include_str!("scaffolds/feedback.md");
 /// otherwise a compiled-in default (`sol-low`, `sol-high`, `reviewer`,
 /// `discussion`, `feedback`).
 pub(crate) fn resolve(ctx: &Ctx, name: &str) -> Result<String> {
-    resolve_in(&ctx.cwd, name)
+    resolve_in(Some(&ctx.cwd), name)
 }
 
-/// [`resolve`] with an explicit directory for repo-local template lookup, so a
-/// cross-project write can honor the target project's `.arc/templates/<name>.md`
-/// when reachable and otherwise use the compiled-in default.
-pub(crate) fn resolve_in(dir: &std::path::Path, name: &str) -> Result<String> {
-    let repo_template = gitio::toplevel(dir).ok().map(|top| {
-        top.join(".arc")
-            .join("templates")
-            .join(format!("{name}.md"))
-    });
-    if let Some(path) = repo_template {
-        if path.is_file() {
-            return std::fs::read_to_string(&path)
-                .with_context(|| format!("cannot read scaffold {}", path.display()));
+/// [`resolve`] with an optional target directory for repo-local template
+/// lookup, so a cross-project write honors the target project's
+/// `.arc/templates/<name>.md` when its checkout is reachable and otherwise uses
+/// only compiled-in defaults — never falling back to the caller's checkout.
+pub(crate) fn resolve_in(dir: Option<&std::path::Path>, name: &str) -> Result<String> {
+    if let Some(dir) = dir.filter(|path| path.is_dir()) {
+        let repo_template = gitio::toplevel(dir).ok().map(|top| {
+            top.join(".arc")
+                .join("templates")
+                .join(format!("{name}.md"))
+        });
+        if let Some(path) = repo_template {
+            if path.is_file() {
+                return std::fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read scaffold {}", path.display()));
+            }
         }
     }
     match name {

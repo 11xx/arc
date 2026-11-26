@@ -1025,3 +1025,264 @@ fn feedback_pinned_reports_leave_list_and_do_not_capture_keyed_appends() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["file"], second["file"]);
 }
+
+#[test]
+fn feedback_overlong_key_refuses_cleanly_without_stranding_pending_transaction() {
+    let repo = Repo::new();
+    let target = init_registered_repo(&repo, "long-key-tool");
+    let target_journal = PathBuf::from(stdout(repo.arc(&target).args(["journal", "dir"])).trim());
+    let scratch = repo.home.join("outside-long-key");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let overlong_key = "x".repeat(256);
+    let output = repo
+        .arc(&scratch)
+        .args([
+            "feedback",
+            "long-key-tool",
+            "--key",
+            &overlong_key,
+            "--title",
+            "Overlong key",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Should be rejected before touching exchange/pending.json.\n")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&output);
+    assert!(stderr.contains("too long"), "{stderr}");
+    assert!(
+        !target_journal.join("exchange/pending.json").exists(),
+        "rejected overlong key must never strand exchange/pending.json"
+    );
+
+    // Subsequent short valid feedback write and ordinary journal write must both succeed cleanly.
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "long-key-tool",
+                "--key",
+                "short-valid",
+                "--title",
+                "Short valid key",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Valid feedback after rejected overlong key.\n"),
+    );
+    assert_eq!(created["action"], "created");
+    assert_eq!(created["key"], "short-valid");
+
+    repo.arc(&target)
+        .args(["journal", "log", "health", "ordinary journal write works"])
+        .assert()
+        .success();
+
+    repo.arc(&target)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn feedback_nested_configured_scope_inside_git_repo_does_not_target_unreachable_journal() {
+    let repo = Repo::new();
+    let tool = repo.home.join("projects").join("tool");
+    let nested = tool.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    git(&tool, &["init", "-b", "master"]);
+    git(&tool, &["config", "user.name", "Fixture"]);
+    git(&tool, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(tool.join("README.md"), "# tool\n").unwrap();
+    fs::write(nested.join("mod.rs"), "// nested\n").unwrap();
+    git(&tool, &["add", "."]);
+    git(&tool, &["commit", "-m", "initial"]);
+
+    let tool_canon = tool.canonicalize().unwrap();
+    let nested_canon = nested.canonicalize().unwrap();
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"main-journal\"\n{} = \"unused-journal\"\n",
+        serde_json::to_string(&tool_canon.display().to_string()).unwrap(),
+        serde_json::to_string(&nested_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // From `tool/nested`, ordinary journal resolution uses the Git root's `tool/main-journal`.
+    let resolved_from_nested =
+        PathBuf::from(stdout(repo.arc(&nested).args(["journal", "dir"])).trim());
+    let main_journal = tool_canon.join("main-journal");
+    assert_eq!(resolved_from_nested, main_journal);
+
+    let scratch = repo.home.join("outside-nested");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // `arc feedback nested` (write and --list) must refuse rather than targeting `tool/unused-journal`.
+    repo.arc(&scratch)
+        .args(["feedback", "nested", "--key", "scope", "--body-file", "-"])
+        .write_stdin("Must not land in unused-journal.\n")
+        .assert()
+        .failure();
+    repo.arc(&scratch)
+        .args(["feedback", "nested", "--list"])
+        .assert()
+        .failure();
+    assert!(
+        !tool_canon.join("unused-journal").exists(),
+        "unused-journal must never be created"
+    );
+
+    // Filing against `tool` lands in `tool/main-journal` and is visible from `tool/nested`.
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "tool",
+                "--key",
+                "scope",
+                "--title",
+                "Main scope report",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Lands in main-journal.\n"),
+    );
+    let filed_path = PathBuf::from(created["path"].as_str().unwrap());
+    assert_eq!(filed_path.parent().unwrap(), main_journal.as_path());
+
+    let open = json_stdout(repo.arc(&nested).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "scope");
+
+    let listed = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "tool", "--list", "--json"]),
+    );
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["items"][0]["key"], "scope");
+}
+
+#[test]
+fn feedback_never_copies_caller_repo_scaffold_into_different_target_journal() {
+    let repo = Repo::new();
+    let plain_target = init_registered_repo(&repo, "plain-target");
+
+    // Set up a caller Git repo carrying custom `.arc/templates/feedback.md` and `caller-custom.md`.
+    let caller_repo = repo.home.join("projects").join("caller-repo");
+    fs::create_dir_all(caller_repo.join(".arc/templates")).unwrap();
+    git(&caller_repo, &["init", "-b", "master"]);
+    git(&caller_repo, &["config", "user.name", "Fixture"]);
+    git(
+        &caller_repo,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(
+        caller_repo.join(".arc/templates/feedback.md"),
+        "CALLER-ONLY-FEEDBACK-MARKER\n\n{{body}}\n",
+    )
+    .unwrap();
+    fs::write(
+        caller_repo.join(".arc/templates/caller-custom.md"),
+        "CALLER-ONLY-CUSTOM-MARKER\n\n{{body}}\n",
+    )
+    .unwrap();
+    git(&caller_repo, &["add", "."]);
+    git(&caller_repo, &["commit", "-m", "add caller templates"]);
+
+    // Register an absent `offline-tool` scope with an absolute target journal.
+    let offline_anchor = repo.home.join("projects").join("offline-tool");
+    let offline_journal = repo.home.join("journals").join("offline-tool");
+    fs::create_dir_all(&offline_journal).unwrap();
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = {}\n",
+        serde_json::to_string(&offline_anchor.display().to_string()).unwrap(),
+        serde_json::to_string(&offline_journal.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // 1. Filing into `offline-tool` from `caller-repo` must use the built-in scaffold, never caller's.
+    let offline_created = json_stdout(
+        repo.arc(&caller_repo)
+            .args([
+                "feedback",
+                "offline-tool",
+                "--key",
+                "offline-bug",
+                "--title",
+                "Offline bug",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Explicit offline report body.\n"),
+    );
+    let offline_body = fs::read_to_string(offline_created["path"].as_str().unwrap()).unwrap();
+    assert!(
+        !offline_body.contains("CALLER-ONLY-FEEDBACK-MARKER"),
+        "caller template leaked into offline target:\n{offline_body}"
+    );
+    assert!(offline_body.contains("## Shape"), "{offline_body}");
+    assert!(
+        offline_body.contains("Explicit offline report body."),
+        "{offline_body}"
+    );
+
+    // 2. Requesting a caller-only custom scaffold for `offline-tool` must refuse.
+    repo.arc(&caller_repo)
+        .args([
+            "feedback",
+            "offline-tool",
+            "--key",
+            "offline-custom",
+            "--scaffold",
+            "caller-custom",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Should refuse caller-only scaffold.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown scaffold"));
+
+    // 3. Filing into a reachable target without its own template also must not inherit caller's template.
+    let plain_created = json_stdout(
+        repo.arc(&caller_repo)
+            .args([
+                "feedback",
+                "plain-target",
+                "--key",
+                "plain-bug",
+                "--title",
+                "Plain bug",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Explicit plain target body.\n"),
+    );
+    let plain_body = fs::read_to_string(plain_created["path"].as_str().unwrap()).unwrap();
+    assert!(
+        !plain_body.contains("CALLER-ONLY-FEEDBACK-MARKER"),
+        "caller template leaked into reachable target:\n{plain_body}"
+    );
+    assert!(plain_body.contains("## Shape"), "{plain_body}");
+    assert!(
+        plain_body.contains("Explicit plain target body."),
+        "{plain_body}"
+    );
+
+    repo.arc(&plain_target)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}

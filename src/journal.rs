@@ -5779,6 +5779,55 @@ pub(crate) fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Resu
     Ok(base.join(directory))
 }
 
+/// The shared Git repository root for `path`, when `path` lies inside a Git
+/// repository. Matches `resolve`'s scope-matching anchor.
+pub(crate) fn repo_root_if_git(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    repo_root(&canonical).ok()
+}
+
+/// Resolve the effective journal directory for an existing project path under
+/// `cfg`, matching `resolve` without honoring `ARC_JOURNAL_DIR`.
+pub(crate) fn resolve_project_dir_without_env(cfg: &config::Config, cwd: &Path) -> Result<PathBuf> {
+    let canonical_cwd = std::fs::canonicalize(cwd)
+        .with_context(|| format!("cannot canonicalize journal cwd {}", cwd.display()))?;
+    let repository = repo_root(&canonical_cwd).ok();
+    let prefix_path = repository.as_deref().unwrap_or(&canonical_cwd);
+    let mut configured = None;
+    for (raw_anchor, raw_directory) in &cfg.journal_dirs {
+        let anchor_path = config::expand_tilde(raw_anchor)?;
+        if !anchor_path.is_absolute() {
+            continue;
+        }
+        let Ok(anchor) = std::fs::canonicalize(&anchor_path) else {
+            continue;
+        };
+        if !prefix_path.starts_with(&anchor) {
+            continue;
+        }
+        let depth = anchor.components().count();
+        if configured
+            .as_ref()
+            .is_none_or(|(best_depth, _)| depth > *best_depth)
+        {
+            configured = Some((depth, config::expand_tilde(raw_directory)?));
+        }
+    }
+    if let Some((_, directory)) = configured {
+        return anchor_journal_destination(&canonical_cwd, directory);
+    }
+    if let Some(root) = repository {
+        return Ok(cfg.ai_home.join("journals").join(config::path_slug(&root)));
+    }
+    if let Some((directory, _)) = rootless_journal(cfg, &canonical_cwd)? {
+        return Ok(directory);
+    }
+    bail!(
+        "cannot resolve a stable journal anchor from {}",
+        canonical_cwd.display()
+    )
+}
+
 fn repo_root(cwd: &Path) -> Result<PathBuf> {
     let common = gitio::common_dir(cwd)?;
     let root = if common.file_name().is_some_and(|n| n == ".git") {
@@ -6399,14 +6448,25 @@ pub(crate) fn feedback_list(dir: &Path) -> Result<Vec<FeedbackListRow>> {
     Ok(rows)
 }
 
+/// Maximum byte length of a feedback `--key`, leaving room for the timestamp
+/// prefix, `-feedback`, numeric disambiguation suffix, and `.md` extension
+/// within standard filesystem filename limits (`NAME_MAX` = 255).
+const MAX_FEEDBACK_KEY_BYTES: usize = 200;
+
+/// Maximum byte length of a journal artifact filename before publishing a
+/// durable transaction intent.
+const MAX_ARTIFACT_FILENAME_BYTES: usize = 255;
+
 /// Atomically publish one hot artifact body (new or updated) and its journal
 /// event through the recoverable journal transaction under the caller's
 /// transition lock and the journal events lock (`transition` -> `events`).
 ///
-/// Acquiring `events.lock` and checking event-log writability before writing
-/// the artifact body prevents lock timeouts or unwritable logs from leaving
-/// unrecorded files or evidence blocks behind, and `exchange/pending.json`
-/// makes an interrupted commit recoverable without duplicating content.
+/// Acquiring `events.lock`, validating the filename bound, and checking
+/// event-log writability before writing the artifact body prevents lock
+/// timeouts, unwritable logs, or unpublishable filenames from leaving
+/// unrecorded files or stranding `exchange/pending.json`. If commit fails
+/// before either the body or `events.jsonl` changes from its baseline, the
+/// uncommittable intent is removed under the events lock.
 fn commit_body_and_event(
     ctx: &Ctx,
     dir: &Path,
@@ -6415,6 +6475,12 @@ fn commit_body_and_event(
     new_body: String,
     event: &JournalEvent,
 ) -> Result<()> {
+    if filename.len() > MAX_ARTIFACT_FILENAME_BYTES {
+        bail!(
+            "artifact filename is too long ({} bytes; maximum is {MAX_ARTIFACT_FILENAME_BYTES} bytes)",
+            filename.len()
+        );
+    }
     let _events = lock_journal_events(dir)?;
     if let Err(error) = ensure_bound(ctx, dir) {
         eprintln!("warning: could not record this journal's project binding: {error:#}");
@@ -6444,14 +6510,34 @@ fn commit_body_and_event(
     };
     let pending = ExchangeTransaction {
         bodies: vec![artifact],
-        body_bases: Some(vec![existing_body_digest]),
+        body_bases: Some(vec![existing_body_digest.clone()]),
         events,
-        events_basis: Some(basis),
+        events_basis: Some(basis.clone()),
         receipt: None,
         promotion: None,
     };
-    publish_exchange_file(&exchange_pending_path(dir), &serde_json::to_vec(&pending)?)?;
-    finish_exchange_transaction(dir)
+    let pending_path = exchange_pending_path(dir);
+    publish_exchange_file(&pending_path, &serde_json::to_vec(&pending)?)?;
+    match finish_exchange_transaction(dir) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // If neither the body nor events.jsonl moved off its baseline,
+            // nothing durable was published yet: discard the uncommittable
+            // intent so it cannot strand subsequent journal writes.
+            let log_unchanged = event_log_bytes(dir).ok().as_deref() == Some(basis.as_str());
+            let body_unchanged = match &existing_body_digest {
+                None => !path.exists(),
+                Some(expected) => body_digest(&path).ok().as_deref() == Some(expected.as_str()),
+            };
+            if log_unchanged && body_unchanged && pending_path.try_exists().unwrap_or(false) {
+                let _ = std::fs::remove_file(&pending_path);
+                if let Some(parent) = pending_path.parent() {
+                    let _ = File::open(parent).and_then(|dir_file| dir_file.sync_all());
+                }
+            }
+            Err(error)
+        }
+    }
 }
 
 /// File a feedback report into `write.dir`, deduplicating across sessions when
@@ -6460,6 +6546,12 @@ pub(crate) fn feedback_file(ctx: &Ctx, write: &FeedbackWrite<'_>) -> Result<Feed
     if let Some(key) = write.key {
         if !valid_topic(key) {
             bail!("--key {key:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
+        }
+        if key.len() > MAX_FEEDBACK_KEY_BYTES {
+            bail!(
+                "--key is too long ({} bytes; maximum is {MAX_FEEDBACK_KEY_BYTES} bytes)",
+                key.len()
+            );
         }
     }
     let (source, item_key) = declared_source(write.source)?;
@@ -6477,10 +6569,7 @@ pub(crate) fn feedback_file(ctx: &Ctx, write: &FeedbackWrite<'_>) -> Result<Feed
         (None, true) => None,
         (None, false) => Some("feedback"),
     };
-    let template_dir = write
-        .anchor
-        .filter(|path| path.is_dir())
-        .unwrap_or(&ctx.cwd);
+    let template_dir = write.anchor.filter(|path| path.is_dir());
     let template = match scaffold_name {
         Some(name) => crate::commands::scaffold::resolve_in(template_dir, name)?,
         None => String::new(),

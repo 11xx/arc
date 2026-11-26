@@ -148,6 +148,27 @@ pub(crate) fn journal_directories(cfg: &Config) -> Result<Vec<(String, PathBuf)>
     Ok(dirs)
 }
 
+/// Whether a configured `[journals.dirs]` scope can actually match under
+/// ordinary journal resolution.
+///
+/// Journal resolution matches `[journals.dirs]` prefixes against the shared
+/// Git repository root when standing inside a Git repository, so a configured
+/// scope naming a strict subdirectory or linked worktree of an existing Git
+/// repository can never own a journal of its own.
+fn configured_scope_is_effective(raw_anchor: &str) -> Result<bool> {
+    let anchor = crate::config::expand_tilde(raw_anchor)?;
+    if !anchor.is_absolute() || !anchor.is_dir() {
+        return Ok(true);
+    }
+    let Ok(canonical) = std::fs::canonicalize(&anchor) else {
+        return Ok(true);
+    };
+    Ok(match crate::journal::repo_root_if_git(&canonical) {
+        Some(root) => canonical == root,
+        None => true,
+    })
+}
+
 /// Resolve a configured `[journals.dirs]` destination against its configured
 /// scope anchor, matching normal journal resolution: absolute destinations stay
 /// as given, and relative destinations anchor against the existing absolute
@@ -171,6 +192,9 @@ fn configured_journal_dir(raw_anchor: &str, raw_directory: &str) -> Result<PathB
 pub(crate) fn known_journals(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
     let mut dirs = journal_directories(cfg)?;
     for (raw_anchor, raw_directory) in &cfg.journal_dirs {
+        if !configured_scope_is_effective(raw_anchor)? {
+            continue;
+        }
         let path = configured_journal_dir(raw_anchor, raw_directory)?;
         if dirs.iter().any(|(_, known)| known == &path) {
             continue;
@@ -263,6 +287,9 @@ fn is_cold_archive(name: &str, siblings: &[String]) -> bool {
 fn configured_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>> {
     let mut best: Option<(usize, PathBuf)> = None;
     for (anchor, directory) in &cfg.journal_dirs {
+        if !configured_scope_is_effective(anchor)? {
+            continue;
+        }
         if configured_journal_dir(anchor, directory)? != journal_dir {
             continue;
         }

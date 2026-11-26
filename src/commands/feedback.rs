@@ -12,6 +12,7 @@ use anyhow::{bail, Result};
 use clap::Args;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 pub const FEEDBACK_SCHEMA: &str = "arc-feedback/1";
 pub const FEEDBACK_LIST_SCHEMA: &str = "arc-feedback-list/1";
@@ -150,7 +151,29 @@ fn resolve_project(name: &str) -> Result<Project> {
     }
 }
 
+fn canonical_or_normalized(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut suffix = Vec::new();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        if let Some(name) = cursor.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        if let Ok(mut canonical) = std::fs::canonicalize(parent) {
+            for part in suffix.into_iter().rev() {
+                canonical.push(part);
+            }
+            return canonical;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
+}
+
 pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
+    let cfg = config::load()?;
     let project = resolve_project(&args.project)?;
     let label = project.label();
     if !project.journal_dir.is_absolute() {
@@ -158,6 +181,19 @@ pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
             "project {label:?} resolves to relative journal path {} which cannot be anchored without an existing absolute project root",
             project.journal_dir.display()
         );
+    }
+    if let Some(anchor) = project.anchor.as_deref().filter(|path| path.is_dir()) {
+        if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(&cfg, anchor) {
+            if canonical_or_normalized(&resolved) != canonical_or_normalized(&project.journal_dir) {
+                bail!(
+                    "project {label:?} at {} resolves to journal {} rather than {}; \
+                     refusing to target an unreachable journal",
+                    anchor.display(),
+                    resolved.display(),
+                    project.journal_dir.display()
+                );
+            }
+        }
     }
     if args.list {
         let items = feedback_list(&project.journal_dir)?;
