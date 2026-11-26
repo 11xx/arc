@@ -105,16 +105,17 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     if !args.include_shared {
         protect_shared(&cwd, &targets, &walked, range.iter(), args.retag)?;
     }
-    complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+    Ok(complete(ctx, &store, walked, sign, args.dry_run, args.retag)?.exit_code)
 }
 
 pub struct TrailerArgs {
     /// The key to sign a recreated commit with. Absent signs with the key Git
     /// is configured to use.
     pub key: Option<String>,
-    /// The oldest commit, itself included, whose trailers are edited. The mode has nothing to
-    /// infer a range from, so it is named rather than defaulted.
-    pub from: String,
+    /// The oldest commit, itself included, whose trailers are edited. Required
+    /// unless `sync` is set, in which case absence defaults to the first
+    /// commit in `target..head` on the tracked change branch.
+    pub from: Option<String>,
     /// Permit recreating commits reachable from the target or another branch.
     pub include_shared: bool,
     /// Files of per-commit trailer edits, in `arc-trailer-edits/1`: each
@@ -124,6 +125,9 @@ pub struct TrailerArgs {
     pub drop: Vec<String>,
     /// Whole trailer lines to add where the block does not carry them.
     pub append: Vec<String>,
+    /// Compute the open change's projected role trailers and append any
+    /// missing lines across `target..head`.
+    pub sync: bool,
     /// Compute and print the map, then stop.
     pub dry_run: bool,
     /// Recreate the edited commits without signing them.
@@ -131,6 +135,28 @@ pub struct TrailerArgs {
     /// Recreate each annotated tag whose target the rewrite moved, on the
     /// commit that replaced it, signed by the key the commits are signed with.
     pub retag: bool,
+}
+
+/// Options for syncing a change's projected contribution trailers onto its
+/// branch via the `role_additions` rewrite pipeline.
+pub(crate) struct SyncTrailersOptions<'a> {
+    pub from: Option<&'a str>,
+    pub extra_append: &'a [String],
+    pub include_shared: bool,
+    pub key: Option<&'a str>,
+    pub dry_run: bool,
+    pub no_sign: bool,
+    pub retag: bool,
+}
+
+/// Result of syncing projected contribution trailers on a change branch.
+#[allow(dead_code)]
+pub(crate) struct SyncTrailersResult {
+    pub exit_code: i32,
+    pub projected: crate::trailers::ChangeTrailers,
+    pub rewritten_commits: usize,
+    pub new_head: Option<String>,
+    pub rewrite_event_id: Option<String>,
 }
 
 /// The portable contribution-trailer specification, embedded at build time.
@@ -164,6 +190,145 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
     Ok(if failed { 1 } else { 0 })
 }
 
+/// Compute the missing projected role trailers for `state` and append them
+/// across `target..head` (or from `options.from`) via the `role_additions`
+/// rewrite pipeline.
+///
+/// The caller owns any slot or transition locking and worktree cleanliness
+/// checks appropriate for its command.
+pub(crate) fn sync_change_trailers(
+    ctx: &Ctx,
+    store: &Store,
+    state: &ChangeState,
+    targets: &BTreeSet<String>,
+    options: &SyncTrailersOptions<'_>,
+) -> Result<SyncTrailersResult> {
+    let cwd = ctx.cwd.clone();
+    let branch = state.branch.clone();
+    let head = gitio::branch_head(&cwd, &branch)?;
+    let target_head = gitio::branch_head(&cwd, &state.target_branch)?;
+    let declarations = crate::declarations::for_change(&cwd, state)?;
+    let mut state = state.clone();
+    state.set_review_context(declarations.review_context.clone());
+    let danger =
+        crate::status::DangerScope::resolve(&state, &declarations.policy, &cwd, Some(&head));
+    let projected = crate::trailers::for_change(
+        &state,
+        &crate::trailers::ReviewProjection {
+            current_head: Some(&head),
+            policy: &declarations.policy,
+            danger: &danger,
+        },
+    );
+    for note in &projected.notes {
+        eprintln!("note: {note}");
+    }
+    let mut append = projected.trailers.clone();
+    for line in options.extra_append {
+        if !append.contains(line) {
+            append.push(line.clone());
+        }
+    }
+    if let Some(issue) = crate::trailers::first_unrecordable_role(&append, ctx.session.as_deref()) {
+        bail!(
+            "--append \"{}: {}\": {}; write a fresh coordinate or omit the line",
+            issue.key,
+            issue.value,
+            issue.detail
+        );
+    }
+    if append.is_empty() {
+        println!(
+            "no projected contribution trailers to append for {}; nothing to do",
+            state.change_id
+        );
+        return Ok(SyncTrailersResult {
+            exit_code: 0,
+            projected,
+            rewritten_commits: 0,
+            new_head: None,
+            rewrite_event_id: None,
+        });
+    }
+    let own: Vec<String> = gitio::git(
+        &cwd,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            &head,
+            &format!("^{target_head}"),
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect();
+    let from = match options.from {
+        Some(from) => gitio::rev_parse(&cwd, from)?,
+        None => match own.first() {
+            Some(first) => first.clone(),
+            None => {
+                println!(
+                    "no commits in {}..{branch}; nothing to do",
+                    state.target_branch
+                );
+                return Ok(SyncTrailersResult {
+                    exit_code: 0,
+                    projected,
+                    rewritten_commits: 0,
+                    new_head: None,
+                    rewrite_event_id: None,
+                });
+            }
+        },
+    };
+    let mut range = gitio::commits_from(&cwd, &from, &head)?;
+    if options.from.is_none() {
+        let own_set: BTreeSet<&str> = own.iter().map(String::as_str).collect();
+        range.retain(|commit| own_set.contains(commit.as_str()));
+    }
+    if range.is_empty() {
+        bail!("{from} is not an ancestor of {branch}");
+    }
+    let sign = (!options.no_sign).then_some(options.key);
+    let mut walked = Walked::over(
+        &range,
+        branch,
+        from,
+        head,
+        "arc rewrite trailers",
+        options.from.is_some(),
+    );
+    walked.reason = format!(
+        "synced {}, on {} from {}",
+        plural(append.len(), "trailer line"),
+        walked.branch,
+        short(&walked.from)
+    );
+    let revisions: Vec<_> = range.iter().map(String::as_str).collect();
+    for (old, mut commit) in range.iter().zip(gitio::read_commits(&cwd, &revisions)?) {
+        let message = crate::trailers::edit(&commit.message, &[], &append);
+        let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
+        if message == commit.message && parents == commit.parents {
+            continue;
+        }
+        commit.message = message;
+        commit.parents = parents;
+        walked.recreated(&cwd, old, &commit, sign)?;
+    }
+    if !options.include_shared {
+        protect_shared(&cwd, targets, &walked, walked.mapping.keys(), options.retag)?;
+    }
+    let outcome = complete(ctx, store, walked, sign, options.dry_run, options.retag)?;
+    Ok(SyncTrailersResult {
+        exit_code: outcome.exit_code,
+        projected,
+        rewritten_commits: outcome.rewritten_commits,
+        new_head: outcome.new_head,
+        rewrite_event_id: outcome.rewrite_event_id,
+    })
+}
+
 /// Edit the trailers of this branch's commit messages, carrying every
 /// recorded revision forward.
 ///
@@ -174,8 +339,12 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
 ///
 /// The per-commit edits read each message as the commit carries it and apply
 /// first; `--drop` then removes keys from the result, and `--append` adds
-/// lines last.
+/// lines last. With `--sync`, projected contribution trailers for the open
+/// change on this branch are computed and appended across `target..head`.
 pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
+    if args.sync && (!args.edits.is_empty() || !args.drop.is_empty()) {
+        bail!("--sync cannot be combined with --edits or --drop");
+    }
     // An appended role line is a fresh write: a value that is no fresh
     // coordinate is refused before any commit is read, let alone recreated.
     if let Some(issue) =
@@ -207,14 +376,54 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         Opened::Finished(code) => return Ok(code),
         Opened::Branch(branch) => branch,
     };
-    let head = gitio::branch_head(&cwd, &branch)?;
-    let targets = ctx
-        .load_all_states(&store)?
+    let states = ctx.load_all_states(&store)?;
+    let targets: BTreeSet<String> = states
         .values()
         .filter(|state| state.branch == branch)
         .map(|state| state.target_branch.clone())
         .collect();
-    let from = gitio::rev_parse(&cwd, &args.from)?;
+    if args.sync {
+        let open_changes: Vec<&ChangeState> = states
+            .values()
+            .filter(|state| !state.is_closed() && state.branch == branch)
+            .collect();
+        let state = match open_changes.as_slice() {
+            [state] => *state,
+            [] => bail!(
+                "--sync requires checking out an open change's branch (no open change tracks {branch})"
+            ),
+            many => bail!(
+                "multiple open changes track {branch} ({}); cannot infer which change to sync",
+                many.iter()
+                    .map(|state| state.change_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        let result = sync_change_trailers(
+            ctx,
+            &store,
+            state,
+            &targets,
+            &SyncTrailersOptions {
+                from: args.from.as_deref(),
+                extra_append: &args.append,
+                include_shared: args.include_shared,
+                key: args.key.as_deref(),
+                dry_run: args.dry_run,
+                no_sign: args.no_sign,
+                retag: args.retag,
+            },
+        )?;
+        return Ok(result.exit_code);
+    }
+    let head = gitio::branch_head(&cwd, &branch)?;
+    let from = gitio::rev_parse(
+        &cwd,
+        args.from
+            .as_deref()
+            .context("--from is required unless --sync is given")?,
+    )?;
     let range = gitio::commits_from(&cwd, &from, &head)?;
     if range.is_empty() {
         bail!("{from} is not an ancestor of {branch}");
@@ -256,7 +465,7 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     if !args.include_shared {
         protect_shared(&cwd, &targets, &walked, walked.mapping.keys(), args.retag)?;
     }
-    complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+    Ok(complete(ctx, &store, walked, sign, args.dry_run, args.retag)?.exit_code)
 }
 
 /// Each commit the edits name, with the message the edits make of it.
@@ -560,6 +769,14 @@ impl Walked {
     }
 }
 
+/// Outcome of completing a rewrite walk.
+struct CompleteOutcome {
+    exit_code: i32,
+    rewritten_commits: usize,
+    new_head: Option<String>,
+    rewrite_event_id: Option<String>,
+}
+
 /// Everything a rewrite does once its commits exist: plan the ref moves,
 /// report a dry run, write the intent, apply it, and say what happened.
 ///
@@ -574,7 +791,7 @@ fn complete(
     sign: Option<Option<&str>>,
     dry_run: bool,
     retag: bool,
-) -> Result<i32> {
+) -> Result<CompleteOutcome> {
     let cwd = ctx.cwd.clone();
     let Walked {
         branch,
@@ -599,7 +816,12 @@ fn complete(
             "recreating {} changed none of them",
             plural(considered, "commit")
         );
-        return Ok(0);
+        return Ok(CompleteOutcome {
+            exit_code: 0,
+            rewritten_commits: 0,
+            new_head: None,
+            rewrite_event_id: None,
+        });
     }
 
     let mut moves = plan_ref_moves(&cwd, &branch, &from, &mapping, retag)?;
@@ -662,7 +884,12 @@ fn complete(
         for name in &moves.stranded {
             println!("would strand: {name} sits on the replaced line");
         }
-        return Ok(0);
+        return Ok(CompleteOutcome {
+            exit_code: 0,
+            rewritten_commits: mapping.len(),
+            new_head: Some(new_head),
+            rewrite_event_id: None,
+        });
     }
 
     let retagged = write_retags(&cwd, &mut moves, sign)?;
@@ -720,7 +947,12 @@ fn complete(
             name.trim_start_matches("refs/heads/")
         );
     }
-    Ok(0)
+    Ok(CompleteOutcome {
+        exit_code: 0,
+        rewritten_commits: mapping.len(),
+        new_head: Some(new_head),
+        rewrite_event_id: Some(event_id),
+    })
 }
 
 /// What a tag recreation says about its signature: that it is made, or that
@@ -900,16 +1132,21 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
     };
     // The branch moved under the checkout, whose index still describes the
     // commit it moved off. Nothing about the tree changed, so this only
-    // teaches the index which commit it is looking at.
+    // teaches the index which commit it is looking at when that branch is
+    // checked out here.
     let branch_ref = format!("refs/heads/{}", intent.branch);
-    if let Some(new_head) = intent.refs.get(&branch_ref) {
-        gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new]).with_context(|| {
-            format!(
-                "rewrite {event_id} is recorded and refs are applied; \
-                index refresh failed; retry using {}",
-                store.rewrite_intent_path().display()
-            )
-        })?;
+    if gitio::current_branch(cwd)?.as_deref() == Some(intent.branch.as_str()) {
+        if let Some(new_head) = intent.refs.get(&branch_ref) {
+            gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new]).with_context(
+                || {
+                    format!(
+                        "rewrite {event_id} is recorded and refs are applied; \
+                    index refresh failed; retry using {}",
+                        store.rewrite_intent_path().display()
+                    )
+                },
+            )?;
+        }
     }
     store.clear_rewrite_intent().with_context(|| format!(
         "rewrite {event_id} is recorded and refs are applied; intent cleanup failed; retry to finish"))?;

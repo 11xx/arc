@@ -13,10 +13,10 @@ service.
 
 | Key | What it asserts |
 | --- | --- |
-| `Planned-by` | Materially shaped the plan the change was built from. |
-| `Implemented-by` | Materially authored the change. |
+| `Planned-by` | Materially shaped the plan that at least one other participant implemented. |
+| `Implemented-by` | Materially authored part of the diff. Two harness coordinates running the same model are two participants. |
 | `Reviewed-by` | Examined the change's content and judged it acceptable. |
-| `Orchestrated-by` | Coordinated the effort materially. Merely dispatching work, or containing a process that ran, is not coordination. |
+| `Orchestrated-by` | Coordinated at least one other participant whose work landed. Merely dispatching work, containing a process that ran, or taking over another session's work is not coordination. |
 
 Casing is as written above. Keys are matched by Git without regard to case, so
 spelling a role key differently is a compatibility choice, not a second role.
@@ -25,6 +25,9 @@ One line per role and materially contributing identity. A participant serving
 several roles appears once under each key. Repeated lines are allowed: several
 people or agents may occupy any role. Exact `Key: value` pairs are written once;
 do not repeat an identical line.
+
+`Planned-by` and `Orchestrated-by` credit work done for at least one other
+participant. A single-participant commit carries only `Implemented-by`.
 
 Contribution comes from an explicit participant or source assertion. Process
 ancestry, a worker merely being spawned, and a plan merely being read do not
@@ -77,15 +80,18 @@ identity; the session is the local part.
 
 `Reviewed-by` asserts that the reviewed content was acceptable, not that
 somebody looked at something. It is never synthesized from a completed read, a
-negative audit, an unrelated review, or a discharged obligation. `Tested-by`,
-if a repository supports it, describes successful declared testing, not a
-review.
+negative audit, an unrelated review, a `comment-only` or `changes-requested`
+verdict, a findings-only non-approval, a rejected self-approval, or a
+discharged or waived obligation. `Tested-by`, if a repository supports it,
+describes successful declared testing, not a review.
 
-References to prior patchsets, integration commits, or review evidence say
-which content was reviewed. Review credit does not transfer to content that
-changed after it was given: an integration commit must not imply review of an
-unexamined merge result, and a later review is not backfilled by rewriting an
-already-reviewed commit, because a trailer changes the commit id.
+Pre-integration qualifying approvals covering the current or shipped patchset
+may project `Reviewed-by: <coordinate>` into the commit's trailer block before
+integration, because appending complete role entries preserves identical trees
+and recorded approvals. Review credit does not transfer to content that changed
+after it was given: an integration commit must not imply review of an
+unexamined merge result, and post-integration audits remain ledger-only and are
+never backfilled into already-integrated history.
 
 Importing these strings never grants approval, discharges an obligation, or
 waives a gate. A self-review does not become independent because its trailer
@@ -117,12 +123,15 @@ own order and are not moved.
 
     arc instructions git --check <message-file>
 
-reports three different things: a value a role key cannot read (malformed), a
+reports four different things: a value a role key cannot read (malformed), a
 readable value that is no coordinate because it carries a placeholder or a
-session id, or is a person without an email (placeholder), and a key outside
-this convention (unsupported, retained untouched). It never rewrites a
-message, and exits 1 when a role key carries a malformed or placeholder
-value.
+session id, or is a person without an email (placeholder), single-participant
+role misuse decidable from the trailer block alone — a `Planned-by` whose
+participant is the sole `Implemented-by`, or an `Orchestrated-by` with no
+`Implemented-by` from a different participant (single-participant, advisory),
+and a key outside this convention (unsupported, retained untouched). It never
+rewrites a message, and exits 1 when a role key carries a malformed or
+placeholder value.
 `arc instructions git` prints this specification.
 
 ## Not in this convention

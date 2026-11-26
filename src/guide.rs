@@ -3761,6 +3761,9 @@ CONTRIBUTION TRAILERS
                        at least one assertion or withdrawal is required.
                        --withdraw <role>=<value> withdraws an exact assertion.
                        Values use the convention's agent or person form.
+                       `Planned-by` and `Orchestrated-by` credit work done for
+                       at least one other participant; a single-participant
+                       commit carries only `Implemented-by`.
                        A flag with no value stands for the invoking
                        identity: a declared Name <email> actor's own form,
                        else harness:model from the resolved harness and
@@ -3781,9 +3784,11 @@ CONTRIBUTION TRAILERS
                        begin records the assertions directly
                        after opening, brief when writing a contract.
     arc trailers <change> [--json]
-                       Print Planned-by and Orchestrated-by assertions and
-                       Implemented-by from recorded patchset contributors,
-                       or the snapshot subject when none are listed, in
+                       Print Planned-by and Orchestrated-by assertions,
+                       Implemented-by from recorded patchset contributors
+                       (or the snapshot subject when none are listed), and
+                       Reviewed-by from qualifying pre-integration Approved
+                       verdicts covering the current or shipped patchset, in
                        convention order. Duplicate lines print once.
                        The subject is --on-behalf-of when set, else the actor.
                        A subject that is a fresh harness:model[#effort] or
@@ -3795,6 +3800,15 @@ CONTRIBUTION TRAILERS
                        recorder inferred from its harness session or Git
                        configuration is not credited, since who ran snapshot
                        is not proof of who wrote the diff.
+                       Pre-integration qualifying Approved verdicts whose
+                       patchset `approved_head` matches the current or
+                       shipped head project `Reviewed-by: <coordinate>` from
+                       `on_behalf_of`, a declared person, or `harness:model`.
+                       `comment-only`, `changes-requested`, findings-only
+                       non-approvals, rejected self-approvals, debt waivers,
+                       and post-integration `arc audit` discharges never
+                       project `Reviewed-by`; audits remain ledger-only and
+                       are never backfilled into already-integrated history.
                        No line carries a placeholder or a session id. What
                        cannot be attributed is omitted and named in a note
                        with the value, why (placeholder, session id,
@@ -3806,40 +3820,47 @@ CONTRIBUTION TRAILERS
                        a note naming arc roles --withdraw.
                        Review snapshots and squash use the same rule;
                        rewrites retain patchset attribution.
-                       Review credit stays in the ledger: Reviewed-by is
-                       never projected or backfilled into commits.
                        --json emits arc-trailers/1 with trailers and notes.
-    check and integrate advise when a commit in target..head lacks an
-    asserted line, under missing-contribution-trailers, naming arc rewrite
-    trailers --from <rev> --append <line>; only an assertion that is a fresh
-    coordinate is advised. They advise when a commit's role line carries a
-    placeholder or a session id, or a person without an email, under
+    check and integrate advise when a commit in target..head lacks any
+    projected contribution trailer (`Planned-by`, `Implemented-by`,
+    `Reviewed-by`, `Orchestrated-by`), under missing-contribution-trailers,
+    naming `arc rewrite trailers --sync` (or `--from <rev> --append <line>`);
+    only fresh coordinates are advised. They advise when a commit's role line
+    carries a placeholder or a session id, or a person without an email, under
     placeholder-contribution-trailers, naming each commit and line and arc
     rewrite trailers --from <rev> --edits <file>, whose `arc-trailer-edits/1`
     lines drop or replace exactly those lines and leave the valid lines under
     the same key. Neither advice blocks
     integration or changes ready or the exit code; rewrite before
-    integration. Appending complete role entries keeps the approval or
-    declared debt, and the appended text is a declaration, not a verdict;
-    any other message rewrite requires fresh snapshot and approval or
-    declared debt (`arc guide rewrites-evidence`). Post-integration audits
-    stay in the ledger.
+    integration. Appending complete role entries preserves approvals, debt
+    waivers, commit-bound gates, and matching budget raises, and the appended
+    text is a declaration, not a verdict; replacing or dropping trailers with
+    `--edits` or any other message rewrite requires fresh snapshot and
+    approval or declared debt (`arc guide rewrites-evidence`).
+    Post-integration audits stay in the ledger.
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
                        `arc-contribution-trailers/2`: `Planned-by`,
                        `Implemented-by`, `Reviewed-by`, and `Orchestrated-by`
                        name material contributions in agent
                        `harness:model[#effort]` or human `Name <email>` form.
+                       `Planned-by` and `Orchestrated-by` credit work done for
+                       at least one other participant; a single-participant
+                       commit carries only `Implemented-by`.
                        A placeholder or a session id is not a coordinate;
                        its line is omitted.
                        Agent harness, model and supplied effort segments
                        must be nonempty.
                        `--check <file>` reports malformed role values,
                        placeholder role values (a placeholder or session-id
-                       segment, or a person without an email), and keys
-                       outside the convention. It never rewrites a message,
-                       and exits 1 when a role key carries a malformed or
-                       placeholder value.
+                       segment, or a person without an email), advisory
+                       single-participant misuse (`Planned-by` whose
+                       participant is the sole `Implemented-by`, or
+                       `Orchestrated-by` with no `Implemented-by` from a
+                       different participant), and keys outside the
+                       convention. It never rewrites a message, and exits 1
+                       when a role key carries a malformed or placeholder
+                       value.
 
 HISTORY REWRITES
     arc rewrite sign [--key <id>] [--from <rev>] [--include-shared]
@@ -3890,17 +3911,23 @@ HISTORY REWRITES
                        recreates the annotated tags whose targets were
                        rewritten, signed like the commits. Run again to
                        finish one that was interrupted.
-    arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]
-                         [--edits <file>] [--include-shared]
+    arc rewrite trailers [--sync] [--from <rev>] [--drop <key>]
+                         [--append <line>] [--edits <file>] [--include-shared]
                        Edit the trailer block of every commit message from
                        --from through the branch head, and carry the result
-                       through the same map, refs and record. --drop removes
-                       every trailer with that key, matched without case;
-                       --append adds a `Key: value` line the block does not
-                       already carry; both repeat and apply to every commit
-                       in the range. --edits <file> replaces or drops one
-                       exact trailer line of one named commit (below); it
-                       repeats, and at least one of the three is required.
+                       through the same map, refs and record. --sync computes
+                       the open change's projected contribution trailers and
+                       appends any missing lines across target..head via the
+                       role-addition rewrite pipeline; it is mutually
+                       exclusive with --edits and --drop, and makes --from
+                       optional (defaulting to the first commit in
+                       target..head). --drop removes every trailer with that
+                       key, matched without case; --append adds a `Key: value`
+                       line the block does not already carry; both repeat and
+                       apply to every commit in the range. --edits <file>
+                       replaces or drops one exact trailer line of one named
+                       commit (below); it repeats, and at least one of the
+                       four modes is required.
                        Edits apply first, reading each commit's block as the
                        commit carries it, then --drop, then --append.
                        A role line, or an Assisted-by line read without its
@@ -4088,9 +4115,9 @@ HISTORY REWRITES
   as `invalid-rewrite-mapping`. A branch with commits of its own on top of the rewritten
   range shares no commit with the branch it was cut from — the rewrite names
   each one and the `git rebase --onto` that replays it, and until then no
-  comparison between the two has an answer. An approval follows a recorded
-  rewrite in two cases, judged per commit over every commit the rewrite
-  recreated:
+  comparison between the two has an answer. An approval, declared debt waiver,
+  commit-bound gate pass, and matching budget raise follow a recorded rewrite
+  in two cases, judged per commit over every commit the rewrite recreated:
 
   - signature-only: the successor differs in nothing but its signature —
     same tree, author, committer, message and every other header, with
@@ -4101,7 +4128,7 @@ HISTORY REWRITES
     final trailer block, or to a new block after one blank line when it had
     none; tree and every other header byte-identical, the signature aside,
     and parents reached only through rewrites of either kind. This is what
-    `arc rewrite trailers --append` with role lines produces.
+    `arc rewrite trailers --sync` or `--append` with role lines produces.
 
   Any other successor leaves the approval stale in `arc status` and `arc
   check`: a replaced, removed or reordered role entry, `Assisted-by` or any
@@ -4543,14 +4570,13 @@ RULES THAT CHANGE WHAT YOU DO
     repeating it, recording `verification-reused`, unless `--rerun` is
     given. Reuse claims content alone. A gate whose command reads commit
     messages or history declares `binds = "commit"`, which no other
-    declaration of that gate withdraws: only a run at the
-    head's own commit, or at the merge of that commit, answers for it, and a
-    recorded rewrite never carries its evidence to the successor;
-    `publication --skip-green` reuses its pass only at the target revision
-    it ran on. An arc that predates the key ignores it and treats the gate
-    as tree-bound. A rewrite that changed only messages, such as an appended
-    role entry, keeps every other gate's pass and leaves that one to run
-    again. A single `integrate` runs no
+    declaration of that gate withdraws: a run answers for its recorded commit
+    (or its merge into the named target), and follows only `signature_only`
+    and `role_additions` rewrites (`arc guide rewrites-evidence`); any
+    content-changing or non-role message edit leaves it stale and forces a
+    fresh run; `publication --skip-green` reuses its pass only at the target
+    revision it ran on. An arc that predates the key ignores it and treats the
+    gate as tree-bound. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
@@ -6530,10 +6556,13 @@ GATE RAISES
   The immutable gate-budget-raised event records change, destination revision,
   exact head/tree, counting algorithm and rule digest, per-file counts, old/new
   budgets, allowance, cited direct execution or total declaration sum, and reason.
-  Every head or destination change requires re-establishing the record, including
-  amend, rebase, squash and signature/trailer-only rewrites. No rewrite equivalence
-  is assumed. Current applicability is rederived from retained objects and receiver
-  policy; missing objects or changed counting, execution or policy inputs refuse it.
+  Head matching follows `signature_only` and `role_additions` rewrites when the
+  tree, diff, and destination are unchanged (`arc guide rewrites-evidence`).
+  Every content, destination, or non-role rewrite — including amend, rebase,
+  squash, and `--drop`/`--edits` trailer rewrites — requires re-establishing
+  the record. Current applicability is rederived from retained objects and
+  receiver policy; missing objects or changed counting, execution or policy
+  inputs refuse it.
 
   Snapshot captures the complete immutable raise set. Appending a record requires
   a fresh snapshot even at the same Git head, and fresh review or recorded debt

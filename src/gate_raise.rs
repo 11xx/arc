@@ -56,6 +56,11 @@ pub struct Raise {
 pub struct Record {
     pub event_id: String,
     pub raise: Raise,
+    /// `raise.head` followed only through `signature_only` and `role_additions`
+    /// rewrites. Omitted from serialization so the immutable `raise` stays as
+    /// recorded.
+    #[serde(skip)]
+    pub approved_head: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -562,7 +567,7 @@ pub fn propose(
                 .find(|e| {
                     st.direct_executions.contains_key(&e.event_id)
                         && e.gate.as_deref() == Some(name)
-                        && e.recorded_revision == head
+                        && e.approved_revision == head
                 })
                 .context("budget raise needs the newest direct execution at this exact head")?;
             let run = entry
@@ -714,7 +719,12 @@ pub fn apply(
             .iter()
             .map(|i| i.gate.clone())
             .collect::<Vec<_>>();
-        let result = if record.raise.head != head
+        let matched_head = if record.approved_head.is_empty() {
+            record.raise.head.as_str()
+        } else {
+            record.approved_head.as_str()
+        };
+        let result = if matched_head != head
             || record.raise.target_revision != target_revision
             || record.raise.target_branch != st.target_branch
             || record.raise.change_id != st.change_id
@@ -735,7 +745,12 @@ pub fn apply(
                 &subjects,
                 &record.raise.reason,
             )
-            .and_then(|fresh| {
+            .and_then(|mut fresh| {
+                // `matched_head == head` already established that `record.raise.head`
+                // reaches `head` only through `signature_only` or `role_additions`
+                // rewrites; compare every other field (including tree, diff,
+                // execution, and rule digest) against the immutable record.
+                fresh.head = record.raise.head.clone();
                 if fresh != record.raise {
                     bail!("budget raise counting, execution or policy basis changed");
                 }

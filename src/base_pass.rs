@@ -893,6 +893,7 @@ pub fn derive(
         timeout_seconds: source.timeout_seconds,
         revision: witness.revision.clone(),
         recorded_revision: witness.revision.clone(),
+        approved_revision: witness.revision.clone(),
         result: source.result,
         attested: false,
         duration_ms: source.timing.run_ms,

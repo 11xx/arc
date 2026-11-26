@@ -34,7 +34,7 @@ pub fn raise_budget(
                 let entry = state.verifications.iter().rev().find(|e| {
                     state.direct_executions.contains_key(&e.event_id)
                         && e.gate.as_ref() == Some(name)
-                        && e.recorded_revision == head
+                        && e.approved_revision == head
                 });
                 if observed.identity.is_none()
                     || entry
@@ -54,6 +54,7 @@ pub fn raise_budget(
     let mut proposed = state.clone();
     proposed.budget_raises.push(crate::gate_raise::Record {
         event_id: "proposal".into(),
+        approved_head: raise.head.clone(),
         raise: raise.clone(),
     });
     let mut declared = gates::load_at(&ctx.cwd, &target)?;

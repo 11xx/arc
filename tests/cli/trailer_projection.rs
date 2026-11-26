@@ -495,3 +495,420 @@ role_flag_test!(
     "--orchestrated-by"
 );
 role_flag_test!(optional_role_flags_brief_planner, "brief", "--planned-by");
+
+/// Pre-integration qualifying approvals project `Reviewed-by` in canonical
+/// order alongside `Planned-by`, `Implemented-by`, and `Orchestrated-by`,
+/// while unresolved/placeholder/session-only reviewers become notes.
+#[test]
+fn pre_integration_approvals_project_reviewed_by_and_sync_across_commits() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\nbinds = \"commit\"\n");
+    let (change, wt) = open(&repo, "reviewed-sync");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "lead:planner#high",
+        "--orchestrated-by",
+        "lead:coordinator#high",
+    ]));
+    commit_file(&wt, "one.txt", "feat: one");
+    commit_file(&wt, "two.txt", "feat: two");
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "worker-model#medium",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "reviewer-model#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    // Corroborating approval from a human reviewer also projects Reviewed-by.
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--relation",
+            "corroborates",
+        ])
+        .env("ARC_ACTOR", "Ada Example <ada@example.invalid>")
+        .assert()
+        .success();
+
+    let (projected, notes) = trailers(&repo, &change);
+    assert_eq!(
+        projected,
+        vec![
+            "Planned-by: lead:planner#high".to_string(),
+            "Implemented-by: codex:worker-model#medium".to_string(),
+            "Reviewed-by: claude:reviewer-model#high".to_string(),
+            "Reviewed-by: Ada Example <ada@example.invalid>".to_string(),
+            "Orchestrated-by: lead:coordinator#high".to_string(),
+        ],
+        "{notes:#?}"
+    );
+    assert!(notes.is_empty(), "{notes:#?}");
+
+    // Advisory covers all projected roles and recommends `--sync` without
+    // claiming that appending role trailers invalidates approvals or gates.
+    let report = json_stdout(repo.arc(&wt).args(["check", &change, "--json"]));
+    assert_eq!(report["ready"], true, "{report}");
+    let detail = advisory(&report, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("no missing advisory: {report}"));
+    assert!(detail.contains("Planned-by: lead:planner#high"), "{detail}");
+    assert!(
+        detail.contains("Implemented-by: codex:worker-model#medium"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("Reviewed-by: claude:reviewer-model#high"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("Reviewed-by: Ada Example <ada@example.invalid>"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("Orchestrated-by: lead:coordinator#high"),
+        "{detail}"
+    );
+    assert!(detail.contains("arc rewrite trailers --sync"), "{detail}");
+    assert!(
+        detail.contains("preserves approvals, debt waivers, and gates"),
+        "{detail}"
+    );
+
+    // Dry-run previews the sync without moving HEAD.
+    let before = repo.head(&wt);
+    let dry =
+        stdout(
+            repo.arc(&wt)
+                .args(["rewrite", "trailers", "--sync", "--dry-run", "--no-sign"]),
+        );
+    assert!(dry.contains("2 commits would be rewritten"), "{dry}");
+    assert_eq!(repo.head(&wt), before);
+
+    // Real `--sync` without `--from` defaults to target..head, stamps both
+    // commits, preserves approval and commit-bound gate, and clears advisory.
+    stdout(
+        repo.arc(&wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    assert_ne!(repo.head(&wt), before);
+    for rev in ["HEAD~1", "HEAD"] {
+        let message = git_out(&wt, &["show", "-s", "--format=%B", rev]);
+        for line in &projected {
+            assert!(message.contains(line), "{rev} missing {line}:\n{message}");
+        }
+    }
+    let after_check = json_stdout(repo.arc(&wt).args(["check", &change, "--json"]));
+    assert_eq!(after_check["ready"], true, "{after_check}");
+    assert_eq!(
+        advisory(&after_check, "missing-contribution-trailers"),
+        None,
+        "{after_check}"
+    );
+    // Syncing again is a no-op.
+    let synced_head = repo.head(&wt);
+    let noop = stdout(
+        repo.arc(&wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    assert!(noop.contains("changed none of them"), "{noop}");
+    assert_eq!(repo.head(&wt), synced_head);
+
+    // `--sync` refuses combination with `--drop` or `--edits`, and refuses
+    // branches with no open change.
+    repo.arc(&wt)
+        .args(["rewrite", "trailers", "--sync", "--drop", "Planned-by"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["rewrite", "trailers", "--sync", "--no-sign"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no open change tracks"));
+}
+
+/// Non-approvals, rejected self-approvals, findings-only non-approvals,
+/// debt waivers, and post-integration audits never project `Reviewed-by`.
+#[test]
+fn non_qualifying_verdicts_waivers_and_audits_never_project_reviewed_by() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n[danger]\npaths = [\"*.txt\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
+
+    let (change, wt) = open(&repo, "no-reviewed-by");
+    commit_file(&wt, "work.txt", "feat: work");
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "worker-model#high",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+
+    // comment-only never projects Reviewed-by.
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "comment-only",
+            "--model",
+            "reviewer-model#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    let (lines, _) = trailers(&repo, &change);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Reviewed-by:")),
+        "{lines:?}"
+    );
+
+    // changes-requested never projects Reviewed-by.
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--model",
+            "reviewer-model#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    let (lines, _) = trailers(&repo, &change);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Reviewed-by:")),
+        "{lines:?}"
+    );
+
+    // Rejected self-approval never projects Reviewed-by, even after a debt waiver.
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "worker-model#xhigh",
+        ])
+        .env("ARC_ACTOR", "self-reviewer")
+        .env("ARC_HARNESS", "codex")
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["debt", &change, "--reason", "waiving self-approval"])
+        .assert()
+        .success();
+    let (lines, _) = trailers(&repo, &change);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Reviewed-by:")),
+        "{lines:?}"
+    );
+
+    // Integrate under debt, then discharge with post-integration audit:
+    // audit stays ledger-only and never projects Reviewed-by.
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "audit",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "auditor-model#high",
+        ])
+        .env("ARC_ACTOR", "auditor")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    let (lines, notes) = trailers(&repo, &change);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Reviewed-by:")),
+        "{lines:?}"
+    );
+    note_with(&notes, &["post-integration audit", "never backfilled"]);
+}
+
+/// Findings-only approvals under `review_clearance = "assessed"` never project
+/// `Reviewed-by`, even when waived by debt; clearing approvals do.
+#[test]
+fn findings_only_verdicts_never_project_reviewed_by() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nreview_clearance = \"assessed\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: assessed clearance"]);
+
+    let (change, wt) = open(&repo, "assessed-reviewed-by");
+    commit_file(&wt, "work.txt", "feat: work");
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "worker-model#high",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+
+    // Unassessed agent approval is findings-only under assessed clearance.
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "reviewer-model#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["debt", &change, "--reason", "waiving findings-only"])
+        .assert()
+        .success();
+    let (lines, _) = trailers(&repo, &change);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Reviewed-by:")),
+        "findings-only approval must not project Reviewed-by: {lines:?}"
+    );
+}
+
+/// Session-only reviewers are omitted from `Reviewed-by` with an explanatory note.
+#[test]
+fn session_only_reviewer_is_omitted_with_note() {
+    let repo = Repo::new();
+    let (change, wt) = open(&repo, "session-reviewer");
+    commit_file(&wt, "work.txt", "feat: work");
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "worker-model#high",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--on-behalf-of",
+            &format!("codex:{EXECUTOR}"),
+        ])
+        .assert()
+        .success();
+    let (lines, notes) = trailers(&repo, &change);
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Reviewed-by:")),
+        "{lines:?}"
+    );
+    note_with(&notes, &["Reviewed-by omitted", EXECUTOR, "session id"]);
+}
+
+/// `arc instructions git --check` reports single-participant misuse as an
+/// advisory issue (exit 0) while preserving exit 1 for malformed/placeholder lines.
+#[test]
+fn instructions_git_check_reports_single_participant_advisory() {
+    let repo = Repo::new();
+    let output = repo
+        .arc(&repo.root)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(
+            "feat: solo\n\nPlanned-by: claude:opus#high\nImplemented-by: claude:opus#high\nOrchestrated-by: claude:opus#high\n",
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        out.contains("single-participant: Planned-by: claude:opus#high"),
+        "{out}"
+    );
+    assert!(
+        out.contains("single-participant: Orchestrated-by: claude:opus#high"),
+        "{out}"
+    );
+
+    // Multi-participant block passes with no issues.
+    let clean = repo
+        .arc(&repo.root)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(
+            "feat: multi\n\nPlanned-by: claude:opus#high\nImplemented-by: codex:gpt-6.1-sol#high\nOrchestrated-by: claude:opus#high\n",
+        )
+        .output()
+        .unwrap();
+    assert_eq!(clean.status.code(), Some(0));
+    assert!(
+        clean.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&clean.stdout)
+    );
+
+    // Malformed/placeholder lines still exit 1 alongside single-participant advice.
+    repo.arc(&repo.root)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(
+            "feat: mixed\n\nPlanned-by: claude:opus#high\nImplemented-by: claude:opus#high\nReviewed-by: codex:unknown\n",
+        )
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("single-participant: Planned-by"))
+        .stdout(predicates::str::contains("placeholder: Reviewed-by"));
+}

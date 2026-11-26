@@ -2579,6 +2579,8 @@ fn append_policy_has_a_single_authority() {
         "messaging.rs::collect_inbox_with_reports::ifstate.is_closed(){",
         "mod.rs::find_unblocked_changes::&&!candidate.is_closed()",
         "mod.rs::tiebreak_reviewer::letintegrated=state.is_closed();",
+        "rewrite.rs::trailers::.filter(|state|!state.is_closed()&&state.branch==branch)",
+        "roles.rs::print::letcurrent_head=ifstate.is_closed(){",
         "stats.rs::change_stats::state:ifstate.is_closed(){\"closed\"}else{\"open\"},",
         "workspace.rs::restack::.filter(|candidate|!candidate.is_closed()&&candidate.blocked_by.contains(&change_id))",
         "workspace.rs::restack::if!state.is_closed(){",

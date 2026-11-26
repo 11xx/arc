@@ -419,6 +419,9 @@ pub struct VerdictEntry {
     pub authority_observed: Option<crate::model::AuthorityObserved>,
     pub causes: Vec<ReviewCause>,
     pub body: Option<String>,
+    /// Harness identity recorded on the verdict event, when one was established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// Model identity recorded on the verdict event, when one was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1146,6 +1149,12 @@ pub struct VerificationEntry {
     /// recorded.
     #[serde(skip)]
     pub recorded_revision: String,
+    /// The commit this evidence still binds to for commit-bound gates:
+    /// `recorded_revision` followed only through `signature_only` and
+    /// `role_additions` rewrites. Content-changing or non-role message
+    /// rewrites stop here, leaving commit-bound gates stale.
+    #[serde(skip)]
+    pub approved_revision: String,
     pub result: VerifyResult,
     pub attested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2047,6 +2056,8 @@ impl ChangeState {
         }
         for verification in &mut self.verifications {
             rewrites.advance(&mut verification.revision)?;
+            verification.approved_revision =
+                rewrites.approved_successor(&verification.approved_revision)?;
             if let Some(tree) = &mut verification.timing.work_tree {
                 rewrites.advance_opt(&mut tree.revision)?;
             }
@@ -2057,6 +2068,9 @@ impl ChangeState {
             if let Some(inferred) = &mut verification.falsification_inferred {
                 rewrites.advance(&mut inferred.revision)?;
             }
+        }
+        for record in &mut self.budget_raises {
+            record.approved_head = rewrites.approved_successor(&record.approved_head)?;
         }
         for run in &mut self.verification_runs {
             rewrites.advance(&mut run.revision)?;
@@ -3216,6 +3230,7 @@ pub fn reduce_with_repository(
                     authority_observed: authority_observed.clone(),
                     causes: causes.clone(),
                     body: body.clone(),
+                    harness: ev.harness.clone(),
                     model: ev.model.clone(),
                     observed_model: ev.observed_model(),
                     session: ev.session.clone(),
@@ -3653,6 +3668,7 @@ pub fn reduce_with_repository(
                 }
                 state.budget_raises.push(crate::gate_raise::Record {
                     event_id: ev.event_id.clone(),
+                    approved_head: raise.head.clone(),
                     raise: raise.clone(),
                 });
             }
@@ -3831,6 +3847,7 @@ pub fn reduce_with_repository(
                     command: command.clone(),
                     revision: revision.clone(),
                     recorded_revision: revision.clone(),
+                    approved_revision: revision.clone(),
                     result: *result,
                     attested: *attested,
                     duration_ms: *duration_ms,
@@ -3866,6 +3883,7 @@ pub fn reduce_with_repository(
                     timeout_seconds: None,
                     revision: revision.clone(),
                     recorded_revision: revision.clone(),
+                    approved_revision: revision.clone(),
                     result: VerifyResult::Bypassed,
                     attested: false,
                     duration_ms: None,
@@ -4005,6 +4023,7 @@ pub fn reduce_with_repository(
                     derived.run_id = Some(run_id.clone());
                     derived.revision = revision.clone();
                     derived.recorded_revision = revision.clone();
+                    derived.approved_revision = revision.clone();
                     derived.tree = tree.clone();
                     derived.against_target = delta.against_target.clone();
                     derived.delta = Some(delta.clone());

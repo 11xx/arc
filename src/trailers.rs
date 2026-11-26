@@ -80,9 +80,13 @@ pub(crate) fn value_is_readable(value: &str) -> bool {
 /// A role key with a value the convention cannot read is `malformed`, and one
 /// whose readable value carries a placeholder or a session id, or is a
 /// `Name <address>` without an email, is `placeholder`: a coordinate nobody
-/// established is omitted, never written. A key outside the convention is
-/// `unsupported` and travels through untouched; [`LEGACY_DISCLOSURE`] is
-/// defined, so an older `Assisted-by` is reported as none of these.
+/// established is omitted, never written. A valid `Planned-by` whose
+/// participant is the sole `Implemented-by`, or a valid `Orchestrated-by` with
+/// no `Implemented-by` from a different participant, is `single-participant`:
+/// both roles credit work done for another participant. A key outside the
+/// convention is `unsupported` and travels through untouched;
+/// [`LEGACY_DISCLOSURE`] is defined, so an older `Assisted-by` is reported as
+/// none of these.
 pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
     let ends_with_newline = message.ends_with(b"\n");
     let body = match ends_with_newline {
@@ -96,10 +100,79 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
     let Some(block) = block_of(&lines) else {
         return Vec::new();
     };
-    lines[block]
+    let block_lines = &lines[block];
+    let implementers: Vec<String> = block_lines
         .iter()
-        .filter_map(|line| line_issue(line, None))
-        .collect()
+        .filter_map(|line| {
+            let key = trailer_key(line)?;
+            if !same_key(&key, "Implemented-by") {
+                return None;
+            }
+            let value = String::from_utf8_lossy(&line[key.len() + 1..])
+                .trim()
+                .to_string();
+            crate::coordinate::coordinate_defect(&value, None)
+                .is_none()
+                .then_some(value)
+        })
+        .collect();
+    let mut issues = Vec::new();
+    for line in block_lines {
+        if let Some(issue) = line_issue(line, None) {
+            issues.push(issue);
+            continue;
+        }
+        let Some(key) = trailer_key(line) else {
+            continue;
+        };
+        let key_str = String::from_utf8_lossy(&key).into_owned();
+        let value = String::from_utf8_lossy(&line[key.len() + 1..])
+            .trim()
+            .to_string();
+        if same_key(&key, "Planned-by")
+            && !implementers.is_empty()
+            && implementers
+                .iter()
+                .all(|implementer| same_participant(implementer, &value))
+        {
+            issues.push(ContributionIssue {
+                kind: "single-participant",
+                key: key_str,
+                value,
+                detail: "Planned-by credits a plan another participant implemented; omit when sole implementer",
+            });
+        } else if same_key(&key, "Orchestrated-by")
+            && !implementers
+                .iter()
+                .any(|implementer| !same_participant(implementer, &value))
+        {
+            issues.push(ContributionIssue {
+                kind: "single-participant",
+                key: key_str,
+                value,
+                detail: "Orchestrated-by requires an Implemented-by from a different participant",
+            });
+        }
+    }
+    issues
+}
+
+/// Whether two valid coordinates name the same participant in a trailer block.
+///
+/// Agent coordinates match by exact trimmed coordinate, so two harness
+/// coordinates running the same model remain distinct participants. Human
+/// coordinates match by trimmed name and case-insensitive email address.
+fn same_participant(left: &str, right: &str) -> bool {
+    let (left, right) = (left.trim(), right.trim());
+    if crate::coordinate::is_person(left) && crate::coordinate::is_person(right) {
+        if let (Some((left_name, left_addr)), Some((right_name, right_addr))) =
+            (left.rsplit_once('<'), right.rsplit_once('<'))
+        {
+            return left_name.trim() == right_name.trim()
+                && left_addr.trim().eq_ignore_ascii_case(right_addr.trim());
+        }
+    }
+    left == right
 }
 
 /// The first of `lines` whose value is no fresh coordinate: a role key's
@@ -719,17 +792,68 @@ pub(crate) struct ChangeTrailers {
     pub notes: Vec<String>,
 }
 
+/// Policy and head context used to decide which pre-integration approvals
+/// project `Reviewed-by`.
+pub(crate) struct ReviewProjection<'a> {
+    pub current_head: Option<&'a str>,
+    pub policy: &'a crate::policy::PolicyFile,
+    pub danger: &'a crate::status::DangerScope,
+}
+
+/// Projected trailer lines absent from one or more commits in `messages`, in
+/// the order `projected` supplies them, each paired with the commits missing it.
+pub(crate) fn missing_in_range(
+    projected: &[String],
+    messages: &[(String, Vec<u8>)],
+) -> Vec<(String, Vec<String>)> {
+    let mut missing = Vec::new();
+    for line in projected {
+        let commits: Vec<String> = messages
+            .iter()
+            .filter(|(_, message)| !contains(message, line))
+            .map(|(commit, _)| commit.clone())
+            .collect();
+        if !commits.is_empty() {
+            missing.push((line.clone(), commits));
+        }
+    }
+    missing
+}
+
 /// The trailer block a change projects, and a note for every contribution it
 /// cannot attribute.
 ///
 /// A line carries a fresh coordinate or nothing: a placeholder, a session id
 /// or an unresolved identity is named in a note, with the value and why, and
-/// never written as a coordinate.
-pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
+/// never written as a coordinate. Pre-integration qualifying `Approved`
+/// verdicts covering the current or shipped patchset project `Reviewed-by`;
+/// post-integration audits, non-approvals, findings-only verdicts, rejected
+/// self-approvals, and debt waivers never project `Reviewed-by`.
+pub(crate) fn for_change(
+    state: &crate::state::ChangeState,
+    review: &ReviewProjection<'_>,
+) -> ChangeTrailers {
     let mut trailers = Vec::new();
     let mut notes = Vec::new();
     for role in CONTRIBUTION_ROLES {
         if role == "Reviewed-by" {
+            if let Some(patchset) = review_subject_patchset(state, review.current_head) {
+                for verdict in qualifying_approvals(state, patchset, review.policy, review.danger) {
+                    match review_identity(state, verdict) {
+                        Ok(value) => {
+                            let line = format!("{role}: {value}");
+                            if !trailers.contains(&line) {
+                                trailers.push(line);
+                            }
+                        }
+                        Err(reason) => notes.push(format!(
+                            "{}: Reviewed-by omitted for {}; {reason}",
+                            verdict.event_id,
+                            verdict.effective_author()
+                        )),
+                    }
+                }
+            }
             continue;
         }
         if role == "Implemented-by" {
@@ -757,7 +881,12 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
         } else if let Some(values) = state.contribution_roles.get(role) {
             for value in values {
                 match crate::coordinate::coordinate_defect(value, None) {
-                    None => trailers.push(format!("{role}: {value}")),
+                    None => {
+                        let line = format!("{role}: {value}");
+                        if !trailers.contains(&line) {
+                            trailers.push(line);
+                        }
+                    }
                     Some(defect) => notes.push(format!(
                         "{role} omitted for {value}; {}: withdraw it with `arc roles {} \
                          --withdraw {}`, and assert the coordinate that did the work where \
@@ -770,12 +899,192 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
             }
         }
     }
-    notes.push("review credit stays in the ledger; Reviewed-by is never projected or backfilled into commits".to_string());
+    if !state.audit_verdicts.is_empty() {
+        notes.push(
+            "post-integration audit verdicts stay in the ledger; Reviewed-by is never backfilled into integrated commits"
+                .to_string(),
+        );
+    }
     ChangeTrailers {
         schema: "arc-trailers/1",
         trailers,
         notes,
     }
+}
+
+/// The patchset whose pre-integration approvals still cover the current or
+/// shipped head, or `None` when the head moved past the patchset's
+/// `approved_head`.
+fn review_subject_patchset<'a>(
+    state: &'a crate::state::ChangeState,
+    current_head: Option<&str>,
+) -> Option<&'a crate::state::Patchset> {
+    let patchset = state
+        .debt_subject_patchset()
+        .or_else(|| state.latest_patchset())?;
+    let expected_head = if state.is_closed() {
+        current_head
+            .or_else(|| state.closed_head())
+            .unwrap_or(&patchset.head)
+    } else {
+        current_head.unwrap_or(&patchset.head)
+    };
+    (patchset.approved_head == expected_head).then_some(patchset)
+}
+
+/// Pre-integration qualifying `Verdict::Approved` verdicts covering `patchset`
+/// in chronological order.
+///
+/// Only the sole authoritative verdict tip (when it approves `patchset`) and
+/// eligible approving verdicts corroborating it qualify. Non-approvals,
+/// superseded or contested verdicts, rejected self-approvals, findings-only
+/// verdicts under assessed clearance, and post-integration audits never
+/// qualify, even when a debt waiver let the change integrate.
+fn qualifying_approvals<'a>(
+    state: &'a crate::state::ChangeState,
+    patchset: &crate::state::Patchset,
+    policy: &crate::policy::PolicyFile,
+    danger: &crate::status::DangerScope,
+) -> Vec<&'a crate::state::VerdictEntry> {
+    let tips = state.eligible_verdict_tips();
+    let [tip] = tips.as_slice() else {
+        return Vec::new();
+    };
+    if tip.patchset_id != patchset.id || tip.verdict != crate::model::Verdict::Approved {
+        return Vec::new();
+    }
+    if state
+        .closure
+        .as_ref()
+        .is_some_and(|closure| tip.event_id >= closure.event_id)
+    {
+        return Vec::new();
+    }
+    let mut included: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    included.insert(tip.event_id.as_str());
+    loop {
+        let mut added = false;
+        for verdict in &state.verdicts {
+            if included.contains(verdict.event_id.as_str())
+                || verdict.patchset_id != patchset.id
+                || verdict.verdict != crate::model::Verdict::Approved
+                || !state.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+                || state
+                    .closure
+                    .as_ref()
+                    .is_some_and(|closure| verdict.event_id >= closure.event_id)
+            {
+                continue;
+            }
+            let corroborates = matches!(
+                verdict.relation.as_ref(),
+                Some(crate::model::VerdictRelation::Corroborates { observed })
+                    if observed.iter().any(|id| included.contains(id.as_str()))
+            );
+            if corroborates {
+                included.insert(verdict.event_id.as_str());
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    let production = state
+        .debt
+        .as_ref()
+        .and_then(|debt| debt.production.as_ref());
+    let implementers = if policy.policy.forbid_self_approval && danger.dangerous {
+        state.authoring_model_values(patchset, production)
+    } else {
+        Vec::new()
+    };
+    state
+        .verdicts
+        .iter()
+        .filter(|verdict| included.contains(verdict.event_id.as_str()))
+        .filter(|verdict| {
+            if policy.policy.forbid_self_approval
+                && danger.dangerous
+                && crate::approval::self_approval_rejection(
+                    patchset,
+                    verdict.effective_author(),
+                    verdict.author_assumed(),
+                    &verdict.judged_models(),
+                    &implementers,
+                    state.verdict_tiebreak(verdict).is_some(),
+                )
+                .is_some()
+            {
+                return false;
+            }
+            if state.verdict_uses_assessed(verdict, policy.policy.review_clearance)
+                && state.verdict_clearance_gap(verdict).is_some()
+            {
+                return false;
+            }
+            if verdict.assessment.as_ref().is_some_and(|assessment| {
+                assessment.independence == crate::model::Independence::Ineligible
+                    || assessment.clears == Some(false)
+            }) {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+/// The coordinate a qualifying approval verdict is credited with, or why none
+/// is projected.
+fn review_identity(
+    state: &crate::state::ChangeState,
+    verdict: &crate::state::VerdictEntry,
+) -> Result<String, String> {
+    use crate::coordinate::Defect;
+    let subject = verdict.effective_author();
+    if verdict.on_behalf_of.is_none()
+        && verdict.actor_source == Some(crate::model::ActorSource::GitFallback)
+    {
+        return Err(
+            "assumed from git config; declare the reviewer with --actor or --on-behalf-of"
+                .to_string(),
+        );
+    }
+    let defect = match crate::coordinate::coordinate_defect(subject, verdict.session.as_deref()) {
+        None => return Ok(subject.trim().to_string()),
+        Some(defect) => defect,
+    };
+    if let Some((harness, id, Some(model))) = crate::coordinate::session_subject(subject) {
+        let coordinate = format!("{harness}:{model}");
+        if crate::coordinate::coordinate_defect(&coordinate, Some(id)).is_none()
+            && crate::coordinate::coordinate_defect(&coordinate, verdict.session.as_deref())
+                .is_none()
+        {
+            return Ok(coordinate);
+        }
+    }
+    if subject != verdict.actor || defect == Defect::NotAnAddress {
+        let reason = match defect {
+            Defect::Unreadable => "unresolved reviewer harness and model",
+            defect => defect.reason(),
+        };
+        return Err(match recorded_coordinate(state, subject) {
+            Some(suggestion) => format!(
+                "{reason}; this change's records by that actor name {suggestion}, a \
+                 suggestion to confirm and never projected"
+            ),
+            None => reason.to_string(),
+        });
+    }
+    coordinate_from_fields(
+        verdict.harness.as_deref(),
+        verdict.model.as_deref(),
+        verdict.session.as_deref(),
+    )
+    .map_err(|recorder| match defect {
+        Defect::Unreadable => recorder,
+        defect => format!("{}, and {recorder}", defect.reason()),
+    })
 }
 
 /// The coordinate `subject` is credited with on `patchset`, or why none is.
@@ -867,10 +1176,23 @@ fn undeclared_recorder(patchset: &crate::state::Patchset) -> String {
 
 /// The recorder's `harness:model` when it is a fresh coordinate, or why not.
 fn recorder_coordinate(patchset: &crate::state::Patchset) -> Result<String, String> {
+    coordinate_from_fields(
+        patchset.harness.as_deref(),
+        patchset.model.as_deref(),
+        patchset.session.as_deref(),
+    )
+}
+
+/// A `harness:model` coordinate built from recorded event fields when valid,
+/// or why not.
+fn coordinate_from_fields(
+    harness: Option<&str>,
+    model: Option<&str>,
+    session: Option<&str>,
+) -> Result<String, String> {
     use crate::coordinate::{coordinate_defect, is_placeholder, model_defect};
-    let session = patchset.session.as_deref();
-    let harness = patchset.harness.as_deref().unwrap_or_default().trim();
-    let model = patchset.model.as_deref().unwrap_or_default().trim();
+    let harness = harness.unwrap_or_default().trim();
+    let model = model.unwrap_or_default().trim();
     let unresolved: Vec<&str> = [("harness", harness), ("model", model)]
         .into_iter()
         .filter(|(_, value)| value.is_empty())
@@ -1476,5 +1798,51 @@ mod tests {
             "{SHA}\treplace\tAssisted-by: a:b\tAssisted-by: codex:unknown\n"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn single_participant_check_reports_solo_planner_and_unaccompanied_orchestrator() {
+        let solo_plan =
+            b"feat: solo\n\nPlanned-by: claude:opus#high\nImplemented-by: claude:opus#high\n";
+        let issues = check_contribution(solo_plan);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].kind, "single-participant");
+        assert_eq!(issues[0].key, "Planned-by");
+        assert_eq!(issues[0].value, "claude:opus#high");
+
+        let solo_orch =
+            b"feat: solo\n\nImplemented-by: claude:opus#high\nOrchestrated-by: claude:opus#high\n";
+        let issues = check_contribution(solo_orch);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].kind, "single-participant");
+        assert_eq!(issues[0].key, "Orchestrated-by");
+
+        let bare_orch = b"feat: bare\n\nOrchestrated-by: claude:opus#high\n";
+        let issues = check_contribution(bare_orch);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].kind, "single-participant");
+        assert_eq!(issues[0].key, "Orchestrated-by");
+
+        let bare_plan = b"feat: bare\n\nPlanned-by: claude:opus#high\n";
+        assert!(check_contribution(bare_plan).is_empty());
+
+        // Two harness coordinates running the same model are two participants.
+        let two_harnesses = b"feat: pair\n\nPlanned-by: claude:opus#high\nImplemented-by: codex:opus#high\nOrchestrated-by: claude:opus#high\n";
+        assert!(check_contribution(two_harnesses).is_empty());
+
+        // A lead who also implemented alongside another implementer is valid.
+        let co_implemented = b"feat: pair\n\nPlanned-by: claude:opus#high\nImplemented-by: claude:opus#high\nImplemented-by: codex:gpt-6.1-sol#high\nOrchestrated-by: claude:opus#high\n";
+        assert!(check_contribution(co_implemented).is_empty());
+
+        // Human email matching is case-insensitive.
+        let solo_human = b"feat: human\n\nPlanned-by: Ada <Ada@example.invalid>\nImplemented-by: Ada <ada@example.invalid>\n";
+        let issues = check_contribution(solo_human);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].kind, "single-participant");
+
+        // Invalid values keep their malformed/placeholder kind without double-reporting.
+        let bad = b"feat: bad\n\nPlanned-by: codex:unknown\nImplemented-by: codex:unknown\n";
+        let issues = check_contribution(bad);
+        assert!(issues.iter().all(|issue| issue.kind == "placeholder"));
     }
 }

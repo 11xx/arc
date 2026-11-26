@@ -497,15 +497,17 @@ enum Cmd {
     /// Print a change's portable trailer block in convention order.
     ///
     /// Planning and orchestration come from assertions, implementation from recorded
-    /// patchset contributors, or the snapshot subject when none are listed. A subject that
-    /// is a fresh harness:model[#effort] or Name <email> supplies itself.
-    /// Retained replay or bound-run author coordinates take precedence over session names.
-    /// The recorder's harness and model apply only to the recorder's own work on a snapshot
-    /// that declared its attribution; a recorder inferred from its harness session or Git
-    /// configuration is not credited. No line carries a
+    /// patchset contributors (or the snapshot subject when none are listed), and review
+    /// credit from qualifying pre-integration Approved verdicts covering the current or
+    /// shipped patchset. A subject that is a fresh harness:model[#effort] or Name <email>
+    /// supplies itself. Retained replay or bound-run author coordinates take precedence
+    /// over session names. The recorder's harness and model apply only to the recorder's
+    /// own work on a snapshot that declared its attribution; a recorder inferred from its
+    /// harness session or Git configuration is not credited. No line carries a
     /// placeholder or a session id: what cannot be attributed is omitted and named in a
-    /// note with its reason and remedy. Review credit stays in the ledger; Reviewed-by is
-    /// never projected.
+    /// note with its reason and remedy. Post-integration audits, non-approvals,
+    /// findings-only reads, rejected self-approvals, and debt waivers never project
+    /// Reviewed-by.
     Trailers {
         /// Change whose attributed contribution trailers to print
         change: String,
@@ -3946,10 +3948,13 @@ enum InstructionsCmd {
     Git {
         /// Report malformed role values, placeholder role values (a
         /// placeholder or session-id segment, or a person without an email),
-        /// and keys outside the convention in a commit message file ('-' for
-        /// stdin); never rewrites it. Exits 1 on a malformed or placeholder
-        /// role value. Agent harness, model and supplied effort segments must
-        /// be nonempty
+        /// single-participant misuse (Planned-by whose participant is the sole
+        /// Implemented-by, or Orchestrated-by with no Implemented-by from a
+        /// different participant), and keys outside the convention in a commit
+        /// message file ('-' for stdin); never rewrites it. Exits 1 on a
+        /// malformed or placeholder role value; single-participant and
+        /// unsupported issues are advisory. Agent harness, model and supplied
+        /// effort segments must be nonempty
         #[arg(long, value_name = "FILE")]
         check: Option<String>,
     },
@@ -5113,14 +5118,14 @@ enum RewriteCmd {
         /// included, naming the file and line. Combined with --drop and
         /// --append, edits apply first, then --drop, then --append; the edits
         /// read each commit's trailer block as the commit carries it
-        #[arg(long = "edits", value_name = "FILE", required_unless_present_any = ["drop", "append"])]
+        #[arg(long = "edits", value_name = "FILE", required_unless_present_any = ["drop", "append", "sync"])]
         edits: Vec<PathBuf>,
         /// Remove every trailer with this key, matched without case; repeat
         /// for more than one
         #[arg(
             long = "drop",
             value_name = "KEY",
-            required_unless_present_any = ["append", "edits"]
+            required_unless_present_any = ["append", "edits", "sync"]
         )]
         drop: Vec<String>,
         /// Add this `Key: value` line to the trailer block where it is not
@@ -5135,16 +5140,22 @@ enum RewriteCmd {
         #[arg(
             long,
             value_name = "LINE",
-            required_unless_present_any = ["drop", "edits"]
+            required_unless_present_any = ["drop", "edits", "sync"]
         )]
         append: Vec<String>,
+        /// Compute the open change's projected contribution trailers and append
+        /// any missing lines across target..head via the role-addition rewrite
+        /// pipeline. Mutually exclusive with --edits and --drop; --from is
+        /// optional and defaults to the first commit in target..head
+        #[arg(long, conflicts_with_all = ["edits", "drop"])]
+        sync: bool,
         /// Oldest commit whose trailers are edited; the named commit itself
         /// is edited and rewritten when its message or ancestry changes.
         /// The range includes merged ancestry beyond this commit's parents,
         /// including target history. Refusals name protected target commits
-        /// and affected refs. Required, since a trailer edit has no default range
-        #[arg(long, required = true)]
-        from: String,
+        /// and affected refs. Required unless --sync is given
+        #[arg(long, required_unless_present = "sync")]
+        from: Option<String>,
         /// Permit recreating commits reachable from the target or another
         /// local or remote-tracking branch. A remote-tracking ref is its own
         /// work only when its fetch source, read from `remote.<name>.fetch`,
@@ -8692,6 +8703,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 edits,
                 drop,
                 append,
+                sync,
                 from,
                 include_shared,
                 key,
@@ -8707,6 +8719,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     edits,
                     drop,
                     append,
+                    sync,
                     dry_run,
                     no_sign,
                     retag,

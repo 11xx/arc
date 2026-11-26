@@ -1777,3 +1777,81 @@ fn raise_refuses_a_target_moved_during_counting() {
         recorded
     );
 }
+
+/// Claim: an applicable budget raise follows `role_additions` and
+/// `signature_only` rewrites when tree, diff, and destination are unchanged,
+/// while refusing any non-role message edit.
+#[test]
+fn raise_follows_signature_only_and_role_addition_rewrites_but_refuses_non_role() {
+    let (repo, id, wt) = setup("rewrite-carry", 10400, 100);
+    let key = crate::rewrite::signing_key(&repo)
+        .expect("signing acceptance requires a sandbox signing key");
+    verify(&repo, &wt, 10300, 1);
+    raise(&repo, &wt).assert().success();
+    snapshot(&repo, &wt);
+    approve(&repo, &wt);
+    let original_head = repo.head(&wt);
+    let record = shown(&repo, &wt, &id)["budget_raises"].clone();
+    repo.arc(&wt).args(["check", &id]).assert().success();
+
+    // Role-addition trailer append preserves the raise, approval, and gate.
+    repo.arc(&wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            "HEAD",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>",
+        ])
+        .assert()
+        .success();
+    let after_role = repo.head(&wt);
+    assert_ne!(after_role, original_head);
+    let st = shown(&repo, &wt, &id);
+    assert_eq!(
+        st["budget_raises"], record,
+        "recorded raise stays immutable"
+    );
+    assert_eq!(st["gate_status"][0]["budget"]["budget_ms"], 10400);
+    repo.arc(&wt).args(["check", &id]).assert().success();
+
+    // Signature-only rewrite preserves the raise as well.
+    crate::rewrite::arc_signing(&repo, &key, &wt)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+    let after_sign = repo.head(&wt);
+    assert_ne!(after_sign, after_role);
+    let st = shown(&repo, &wt, &id);
+    assert_eq!(
+        st["budget_raises"], record,
+        "recorded raise stays immutable"
+    );
+    assert_eq!(st["gate_status"][0]["budget"]["budget_ms"], 10400);
+    repo.arc(&wt).args(["check", &id]).assert().success();
+
+    // A non-role trailer edit invalidates the raise while leaving historical
+    // evidence intact.
+    repo.arc(&wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            "HEAD",
+            "--no-sign",
+            "--append",
+            "Assisted-by: helper:editor#high",
+        ])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&wt), after_sign);
+    let st = shown(&repo, &wt, &id);
+    assert_eq!(st["budget_raises"], record);
+    assert_eq!(st["gate_status"][0]["budget"]["budget_ms"], 10000);
+    refusal(
+        repo.arc(&wt).args(["check", &id]),
+        "requires an applicable accepted raise record",
+    );
+}

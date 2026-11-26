@@ -126,8 +126,28 @@ pub(crate) fn append(
 
 pub(crate) fn print(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     let store = ctx.store()?;
-    let (_, state) = ctx.load_state(&store, reference)?;
-    let projection = crate::trailers::for_change(&state);
+    let (_, mut state) = ctx.load_state(&store, reference)?;
+    let declarations = crate::declarations::for_change(&ctx.cwd, &state)?;
+    state.set_review_context(declarations.review_context.clone());
+    let current_head = if state.is_closed() {
+        state.closed_head().map(str::to_string)
+    } else {
+        gitio::branch_head(&ctx.cwd, &state.branch).ok()
+    };
+    let danger = crate::status::DangerScope::resolve(
+        &state,
+        &declarations.policy,
+        &ctx.cwd,
+        current_head.as_deref(),
+    );
+    let projection = crate::trailers::for_change(
+        &state,
+        &crate::trailers::ReviewProjection {
+            current_head: current_head.as_deref(),
+            policy: &declarations.policy,
+            danger: &danger,
+        },
+    );
     if json {
         println!("{}", serde_json::to_string_pretty(&projection)?);
     } else {

@@ -1370,7 +1370,14 @@ pub fn build_at_with_shape(
     let role_advisories = if state.is_closed() {
         Vec::new()
     } else {
-        role_trailer_advisories(state, cwd, target_head.as_deref(), current_head.as_deref())
+        role_trailer_advisories(
+            state,
+            cwd,
+            target_head.as_deref(),
+            current_head.as_deref(),
+            policy,
+            &danger,
+        )
     };
     let mut report = build_report(
         state,
@@ -2647,23 +2654,27 @@ pub fn matches_declaration(
 /// Whether evidence answers for the change at `head` under the gate's binding.
 ///
 /// A tree-bound gate takes evidence from any commit holding the tree. A
-/// commit-bound one takes only a run at `head` itself, never one a recorded
-/// rewrite carried forward to it, or at the merge of `head` into the target
-/// that the evidence names; telling that merge apart reads its parents from
-/// `cwd`, and without one only `head` itself answers.
+/// Whether `evidence` answers for `head` under `gate`'s binding.
+///
+/// A tree-bound gate accepts any evidence matching the evaluated tree. A
+/// commit-bound one accepts a run whose `approved_revision` matches `head`
+/// (following `signature_only` and `role_additions` rewrites, while stopping
+/// before any content-changing or non-role rewrite), or a run at the merge of
+/// `head` into the target that the evidence names; telling that merge apart
+/// reads its parents from `cwd`, and without one only `head` itself answers.
 pub fn answers_for_commit(
     evidence: &crate::state::VerificationEntry,
     gate: &crate::gates::Gate,
     head: &str,
     cwd: Option<&Path>,
 ) -> bool {
-    if gate.binds == crate::gates::Binding::Tree || evidence.recorded_revision == head {
+    if gate.binds == crate::gates::Binding::Tree || evidence.approved_revision == head {
         return true;
     }
     let (Some(target), Some(cwd)) = (evidence.against_target.as_deref(), cwd) else {
         return false;
     };
-    gitio::commit_parents(cwd, &evidence.recorded_revision)
+    gitio::commit_parents(cwd, &evidence.approved_revision)
         .is_ok_and(|parents| parents == [target, head])
 }
 
@@ -2783,7 +2794,7 @@ fn reviewed_only_by_brief_author<'a>(
 }
 
 /// Advice on the contribution trailers of the commits in `target..head`:
-/// asserted lines a commit lacks, and role lines whose value is no fresh
+/// projected lines a commit lacks, and role lines whose value is no fresh
 /// coordinate. Advice only; neither alters integration authorization, `ready`
 /// or the exit code.
 pub(crate) fn role_trailer_advisories(
@@ -2791,6 +2802,8 @@ pub(crate) fn role_trailer_advisories(
     cwd: &Path,
     target: Option<&str>,
     head: Option<&str>,
+    policy: &PolicyFile,
+    danger: &DangerScope,
 ) -> Vec<Advisory> {
     let (Some(target), Some(head)) = (target, head) else {
         return Vec::new();
@@ -2809,33 +2822,32 @@ pub(crate) fn role_trailer_advisories(
             ))
         }
     };
-    missing_role_trailers_advisory(state, &messages)
+    missing_role_trailers_advisory(state, head, policy, danger, &messages)
         .into_iter()
         .chain(placeholder_role_trailers_advisory(&messages))
         .collect()
 }
 
-/// Asserted lines a commit lacks. Only an assertion that is a fresh
-/// coordinate is advised: the others are notes in `arc trailers`, and no
-/// remedy appends a line that names nobody.
+/// Projected contribution lines a commit lacks. Only fresh coordinates from
+/// `trailers::for_change` (`Planned-by`, `Implemented-by`, `Reviewed-by`,
+/// `Orchestrated-by`) are advised: unresolved or placeholder values are notes
+/// in `arc trailers`, and no remedy appends a line that names nobody.
 fn missing_role_trailers_advisory(
     state: &ChangeState,
+    head: &str,
+    policy: &PolicyFile,
+    danger: &DangerScope,
     messages: &[(String, Vec<u8>)],
 ) -> Option<Advisory> {
-    let mut missing = BTreeMap::<String, Vec<String>>::new();
-    for (commit, message) in messages {
-        for (role, values) in &state.contribution_roles {
-            for value in values {
-                if crate::coordinate::coordinate_defect(value, None).is_some() {
-                    continue;
-                }
-                let line = format!("{role}: {value}");
-                if !crate::trailers::contains(message, &line) {
-                    missing.entry(line).or_default().push(commit.clone());
-                }
-            }
-        }
-    }
+    let projected = crate::trailers::for_change(
+        state,
+        &crate::trailers::ReviewProjection {
+            current_head: Some(head),
+            policy,
+            danger,
+        },
+    );
+    let missing = crate::trailers::missing_in_range(&projected.trailers, messages);
     if missing.is_empty() {
         return None;
     }
@@ -2846,12 +2858,16 @@ fn missing_role_trailers_advisory(
         .collect::<Vec<_>>()
         .join("; ");
     let append = missing
-        .keys()
-        .map(|line| format!(" --append {}", crate::context::shell_quote(line)))
+        .iter()
+        .map(|(line, _)| format!(" --append {}", crate::context::shell_quote(line)))
         .collect::<String>();
     Some(Advisory {
         code: "missing-contribution-trailers",
-        detail: format!("asserted contribution trailers missing: {details}; before integration run `arc rewrite trailers --from {first}{append}`; message rewrites require a fresh snapshot and approval or declared debt"),
+        detail: format!(
+            "projected contribution trailers missing: {details}; before integration run \
+             `arc rewrite trailers --sync` (or `arc rewrite trailers --from {first}{append}`); \
+             appending complete role trailers preserves approvals, debt waivers, and gates"
+        ),
     })
 }
 
@@ -2884,8 +2900,8 @@ fn placeholder_role_trailers_advisory(messages: &[(String, Vec<u8>)]) -> Option<
              commit, `drop` and the exact line to omit it, or the commit, `replace`, the \
              exact line and the real coordinate that is known; the other lines under the \
              same key stay; JSON-quote a field to encode an internal tab as \\t; \
-             message rewrites require a fresh snapshot and approval or \
-             declared debt",
+             replacing or dropping trailers with --edits requires a fresh snapshot and \
+             approval or declared debt",
             found.join("; ")
         ),
     })

@@ -305,11 +305,10 @@ fn a_failing_or_unadmitted_newest_run_reruns() {
     );
 }
 
-/// Claim: a gate declaring `binds = "commit"` is not green after `arc
-/// rewrite trailers` makes a new commit around the same tree, and `verify`
-/// runs it there, while an ordinary gate stays green and is reused. Rejects
-/// a pass for one commit answering for another that holds the same tree,
-/// for a gate that reads commit messages.
+/// Claim: a gate declaring `binds = "commit"` stays green and is reused across
+/// `role_additions` trailer appends (`arc rewrite trailers --append`), but is
+/// invalidated and reruns after a non-role trailer edit or a new same-tree
+/// commit, while an ordinary tree-bound gate stays green across all of them.
 #[test]
 fn a_commit_bound_gate_reruns_after_a_trailer_rewrite_at_the_same_tree() {
     let repo = Repo::new();
@@ -333,6 +332,8 @@ fn a_commit_bound_gate_reruns_after_a_trailer_rewrite_at_the_same_tree() {
         .success();
     let tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
 
+    // Appending a role trailer produces a `role_additions` rewrite: both the
+    // tree-bound gate and the commit-bound gate stay green and are reused.
     repo.arc(&worktree)
         .args([
             "rewrite",
@@ -345,13 +346,45 @@ fn a_commit_bound_gate_reruns_after_a_trailer_rewrite_at_the_same_tree() {
         ])
         .assert()
         .success();
-    assert_ne!(repo.head(&worktree), verified);
+    let after_role = repo.head(&worktree);
+    assert_ne!(after_role, verified);
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^{tree}"]), tree);
+    assert!(gate_green(&repo, &worktree, "reworded", "build"));
+    assert!(
+        gate_green(&repo, &worktree, "reworded", "history"),
+        "a commit-bound pass must carry across a role-addition rewrite"
+    );
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!(
+        (runs(&repo, "build"), runs(&repo, "history")),
+        (1, 1),
+        "role-addition rewrite must reuse commit-bound evidence"
+    );
+
+    // A non-role trailer edit invalidates the commit-bound gate while keeping
+    // the tree-bound gate green.
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Assisted-by: helper:editor#high",
+            "--from",
+            &after_role,
+        ])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&worktree), after_role);
     assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^{tree}"]), tree);
 
     assert!(gate_green(&repo, &worktree, "reworded", "build"));
     assert!(
         !gate_green(&repo, &worktree, "reworded", "history"),
-        "a commit-bound pass answered for another commit"
+        "a commit-bound pass answered across a non-role rewrite"
     );
 
     let rerun = stdout(repo.arc(&worktree).args(["verify", "--all"]));
@@ -363,10 +396,66 @@ fn a_commit_bound_gate_reruns_after_a_trailer_rewrite_at_the_same_tree() {
     assert!(gate_green(&repo, &worktree, "reworded", "build"));
     assert!(gate_green(&repo, &worktree, "reworded", "history"));
 
+    // A new empty commit at the same tree also invalidates the commit-bound gate.
+    git(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "chore: same tree"],
+    );
+    assert!(gate_green(&repo, &worktree, "reworded", "build"));
+    assert!(
+        !gate_green(&repo, &worktree, "reworded", "history"),
+        "a commit-bound pass answered for a new empty commit"
+    );
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 3));
+
     // At its own commit, a commit-bound pass is reused like any other.
     repo.arc(&worktree)
         .args(["verify", "--all"])
         .assert()
         .success();
-    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 2));
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 3));
+}
+
+/// Claim: a gate declaring `binds = "commit"` stays green and is reused across
+/// a `signature_only` signing rewrite (`arc rewrite sign`).
+#[test]
+fn a_commit_bound_gate_carries_across_signature_only_rewrites() {
+    let repo = Repo::new();
+    let key = crate::rewrite::signing_key(&repo)
+        .expect("signing acceptance requires a sandbox signing key");
+    declare(
+        &repo,
+        &[(
+            "history",
+            format!(
+                "command = {:?}\nbinds = \"commit\"",
+                counting(&repo, "history", "true")
+            ),
+        )],
+    );
+    let (_, worktree, verified) = change_with_patchset(&repo, "signed-commit-gate");
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!(runs(&repo, "history"), 1);
+
+    crate::rewrite::arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&worktree), verified);
+    assert!(
+        gate_green(&repo, &worktree, "signed-commit-gate", "history"),
+        "a commit-bound pass must carry across a signature-only rewrite"
+    );
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!(runs(&repo, "history"), 1);
 }

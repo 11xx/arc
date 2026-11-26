@@ -649,6 +649,7 @@ mod tests {
             authority_observed: None,
             causes: Vec::new(),
             body: None,
+            harness: None,
             model: None,
             observed_model: None,
             session: None,

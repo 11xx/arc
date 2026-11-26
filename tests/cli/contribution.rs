@@ -375,10 +375,6 @@ fn change_trailers_order_declared_snapshots_and_unresolved_notes() {
         .unwrap()
         .contains("ps-02")
         && n.as_str().unwrap().contains("model")));
-    assert!(result["notes"].as_array().unwrap().iter().any(|n| n
-        .as_str()
-        .unwrap()
-        .contains("review credit stays in the ledger")));
     for (patchset, coordinate) in [("ps-03", "declared identity"), ("ps-04", "harness")] {
         assert!(
             result["notes"].as_array().unwrap().iter().any(|note| {
@@ -513,7 +509,7 @@ fn change_trailers_print_declared_human_implementers() {
         result["trailers"],
         serde_json::json!(["Implemented-by: Person <p@example.invalid>"])
     );
-    assert_eq!(result["notes"].as_array().unwrap().len(), 1, "{result}");
+    assert_eq!(result["notes"].as_array().unwrap().len(), 0, "{result}");
 }
 
 #[test]
@@ -694,12 +690,17 @@ fn change_trailers_share_subject_attribution_across_ceremonies() {
                     .env_remove("ARC_ACTOR"),
             );
             let before = json_stdout(repo.arc(&wt).args(["trailers", "subject-credit", "--json"]));
-            let expected = if subject == "executor" {
+            let expected_before = if subject == "executor" {
                 serde_json::json!([])
+            } else if ceremony == "review" {
+                serde_json::json!([
+                    format!("Implemented-by: {subject}"),
+                    format!("Reviewed-by: {subject}"),
+                ])
             } else {
                 serde_json::json!([format!("Implemented-by: {subject}")])
             };
-            assert_eq!(before["trailers"], expected, "{ceremony}: {before}");
+            assert_eq!(before["trailers"], expected_before, "{ceremony}: {before}");
             stdout(
                 repo.arc(&wt)
                     .args([
@@ -716,7 +717,19 @@ fn change_trailers_share_subject_attribution_across_ceremonies() {
                     .env("ARC_MODEL", "rewriter#high"),
             );
             let after = json_stdout(repo.arc(&wt).args(["trailers", "subject-credit", "--json"]));
-            assert_eq!(after, before, "{ceremony}: {after}");
+            if ceremony == "review" {
+                // Appending non-role `Assisted-by` leaves the approval stale, so
+                // `Reviewed-by` stops projecting while patchset implementation
+                // attribution is retained identically.
+                let expected_after = if subject == "executor" {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([format!("Implemented-by: {subject}")])
+                };
+                assert_eq!(after["trailers"], expected_after, "{ceremony}: {after}");
+            } else {
+                assert_eq!(after, before, "{ceremony}: {after}");
+            }
         }
     }
 }
