@@ -774,8 +774,19 @@ enum Cmd {
         /// Report all changes (the default)
         #[arg(long)]
         all: bool,
-        /// One row per delegated identity instead of per change: patchsets
-        /// contributed, rework rounds they opened, verdicts issued
+        /// One row per recorded identity instead of per change, grouped by
+        /// canonical `harness:model[#effort]` coordinate. Label-only and
+        /// bare-session subjects stay separate verbatim without merging by
+        /// guess, and events with neither a coordinate nor a delegated subject
+        /// stay under `(unattributed)`. With `--json`, `arc-stats-by-model/2`.
+        ///
+        /// Reports change counts by end state (`integrated`, `abandoned`,
+        /// `closed` for asserted integrations without an arc merge,
+        /// `superseded`, and `open`), land rate (`integrated / (integrated +
+        /// abandoned)`, excluding `open`, `closed`, and `superseded`),
+        /// first-patchset approval rate over closed-out changes (whose first
+        /// patchset was approved without a rework round), patchsets
+        /// contributed, rework rounds they opened, and verdicts issued.
         #[arg(long = "by-model", conflicts_with_all = ["provenance", "round_trip"])]
         by_model: bool,
         /// How often each provenance record was written, one line per class,

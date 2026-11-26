@@ -587,6 +587,17 @@ ORIENT INSIDE A PROJECT (start here, in this order)
     --rank-by blocking|availability|coverage
                          Order rows by one recorded fact; the report states
                          the basis it used.
+  arc stats --by-model   Per recorded `harness:model[#effort]` coordinate
+                         (keeping label-only and bare-session subjects separate
+                         verbatim, and unrecorded events in `(unattributed)`):
+                         change counts by end state (`integrated`, `abandoned`,
+                         `closed` for asserted integrations without an arc
+                         merge, `superseded`, `open`), land rate
+                         (`integrated / (integrated + abandoned)`, excluding
+                         `open`, `closed`, and `superseded`), first-patchset
+                         approval rate over closed-out changes, patchsets,
+                         rework rounds caused, and verdicts, with counts beside
+                         every rate (`arc-stats-by-model/2`).
   arc stats --provenance How often each provenance record was written where it
                          could have been — falsifications, journal links,
                          rejected alternatives, plan-linked briefs, cited
@@ -7166,7 +7177,7 @@ SCHEMAS
     `arc-gate-paths/1`               arc gates paths --json
     `arc-workspace-gates/1`          arc workspace gates --json
     `arc-stats/2`                    arc stats --json
-    `arc-stats-by-model/1`           arc stats --by-model --json
+    `arc-stats-by-model/2`           arc stats --by-model --json
     `arc-stats-provenance/1`         arc stats --provenance --json
     `arc-stats-round-trip/1`         arc stats --round-trip --json
     `arc-cost/1`                     arc cost show --json

@@ -4,11 +4,14 @@
 
 use super::*;
 use crate::model::{
-    BlockerRef, ClaimStage, Closure, Event, JournalRefVia, KeptKind, Payload, ReviewCause,
-    Severity, VerifyResult,
+    BlockerRef, ClaimStage, Closure, DebtIdentity, Event, JournalRefVia, KeptKind, ModelSource,
+    Payload, ReviewCause, Severity, VerifyResult,
 };
+use crate::state::IntegrationKind;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
+
+const BY_MODEL_SCHEMA: &str = "arc-stats-by-model/2";
 
 /// Which changes `arc stats` reports over.
 pub enum StatsSelection {
@@ -81,19 +84,58 @@ struct Percentiles {
     p90_seconds: u64,
 }
 
-/// One executor identity's contribution across the selection.
-///
-/// The interesting number is not a ranking. It is the pair "this identity
-/// produced N patchsets and caused M rework rounds", because that ratio is
-/// what an executor tier actually costs — and the cost is billed to whichever
-/// pool the reviewers run on.
-#[derive(Serialize)]
+/// Counts of changes an identity contributed to, partitioned by end state.
+#[derive(Serialize, Default, Debug, Clone, PartialEq, Eq)]
+struct ChangesByState {
+    integrated: usize,
+    abandoned: usize,
+    /// Closed via asserted integration without an arc merge.
+    closed: usize,
+    superseded: usize,
+    open: usize,
+}
+
+/// A rate together with the numerator and denominator counts it was computed
+/// from, so callers can inspect sample size alongside the share.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct Rate {
+    count: usize,
+    of: usize,
+    /// `count / of`, or `null` when `of == 0`.
+    rate: Option<f64>,
+}
+
+impl Rate {
+    fn new(count: usize, of: usize) -> Self {
+        Self {
+            count,
+            of,
+            rate: (of > 0).then(|| count as f64 / of as f64),
+        }
+    }
+}
+
+/// One identity's contribution across the selection.
+#[derive(Serialize, Debug, PartialEq)]
 struct ModelStats {
-    /// The delegated subject recorded on the event, verbatim. Model identity
-    /// is a convention rather than a schema: leads write it into
-    /// `--on-behalf-of`, and nothing enforces its shape.
+    /// Canonical recorded `harness:model[#effort]` coordinate when established,
+    /// the verbatim subject for label-only or non-coordinate records, or
+    /// `(unattributed)` when neither was recorded.
     identity: String,
+    /// `coordinate` for a canonical `harness:model[#effort]` coordinate,
+    /// `label` for a non-coordinate or bare-session subject kept verbatim,
+    /// or `unattributed` when no coordinate or delegated subject was recorded.
+    identity_kind: &'static str,
     changes: usize,
+    changes_by_state: ChangesByState,
+    /// `integrated / (integrated + abandoned)` over closed-out integrated and
+    /// abandoned changes only; `open`, `closed`, and `superseded` stay out of
+    /// the denominator.
+    land_rate: Rate,
+    /// Share of closed-out changes (`integrated`, `abandoned`, `closed`, and
+    /// `superseded`, excluding `open`) whose first patchset was approved
+    /// without a rework round.
+    first_patchset_approval: Rate,
     /// Patchsets contributed as implementer.
     patchsets: usize,
     /// Rework rounds opened against a patchset this identity contributed —
@@ -115,91 +157,423 @@ struct ByModelOutput {
     models: Vec<ModelStats>,
 }
 
-/// The subject an event is attributed to. A lead runs the snapshot ceremony on
-/// an executor's behalf, so attributing by actor would credit the lead for
-/// every line the executor wrote. Where no subject was recorded the row is
-/// unknown rather than the lead's, and is counted in its own row rather than
-/// distributed silently.
+/// Row key when an event records neither a delegated subject nor a valid
+/// `harness:model[#effort]` coordinate.
 const UNATTRIBUTED: &str = "(unattributed)";
 
-fn subject(event: &Event) -> &str {
-    event
-        .on_behalf_of
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(UNATTRIBUTED)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum IdentityKind {
+    Coordinate,
+    Label,
+    Unattributed,
 }
 
-fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
+impl IdentityKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Coordinate => "coordinate",
+            Self::Label => "label",
+            Self::Unattributed => "unattributed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IdentityKey {
+    kind: IdentityKind,
+    identity: String,
+}
+
+impl IdentityKey {
+    fn coordinate(coordinate: String) -> Self {
+        Self {
+            kind: IdentityKind::Coordinate,
+            identity: coordinate,
+        }
+    }
+
+    fn label(label: &str) -> Self {
+        Self {
+            kind: IdentityKind::Label,
+            identity: label.to_string(),
+        }
+    }
+
+    fn unattributed() -> Self {
+        Self {
+            kind: IdentityKind::Unattributed,
+            identity: UNATTRIBUTED.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndState {
+    Integrated,
+    Abandoned,
+    Closed,
+    Superseded,
+    Open,
+}
+
+impl EndState {
+    fn is_closed_out(self) -> bool {
+        !matches!(self, Self::Open)
+    }
+}
+
+fn change_end_state(state: &ChangeState) -> EndState {
+    match state.closure.as_ref() {
+        None => EndState::Open,
+        Some(closure) => match closure.outcome {
+            Closure::Integrated => match closure.integration {
+                Some(IntegrationKind::Asserted) => EndState::Closed,
+                Some(IntegrationKind::Guarded)
+                | Some(IntegrationKind::LegacyUnclassified)
+                | None => EndState::Integrated,
+            },
+            Closure::Abandoned => EndState::Abandoned,
+            Closure::Superseded => EndState::Superseded,
+        },
+    }
+}
+
+fn is_harness_session_id(harness: &str, value: &str) -> bool {
+    let base = value.split('#').next().unwrap_or(value).trim();
+    let cloud =
+        |rest: &str| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    crate::coordinate::is_session_id(base, None)
+        || (harness == "claude" && base.strip_prefix("cse_").is_some_and(cloud))
+        || (harness == "opencode"
+            && base
+                .strip_prefix("ses_")
+                .is_some_and(|rest| !rest.is_empty()))
+}
+
+/// Build a canonical `harness:model[#effort]` coordinate when both segments are
+/// valid and neither is a placeholder or session identifier.
+fn canonical_coordinate(harness: &str, model: &str, session: Option<&str>) -> Option<String> {
+    let harness = harness.trim();
+    let model = model.trim();
+    if harness.is_empty()
+        || crate::coordinate::is_placeholder(harness)
+        || crate::coordinate::model_defect(model, session).is_some()
+        || is_harness_session_id(harness, model)
+    {
+        return None;
+    }
+    let coordinate = format!("{harness}:{model}");
+    if crate::coordinate::coordinate_defect(&coordinate, session).is_some()
+        || crate::coordinate::is_person(&coordinate)
+    {
+        return None;
+    }
+    Some(coordinate)
+}
+
+/// Parse a string into a canonical `harness:model[#effort]` coordinate without
+/// guessing. Accepts direct `harness:model[#effort]` and session subjects of
+/// the form `harness:session:model[#effort]` (with optional trailing label).
+fn canonical_coordinate_from_str(raw: &str, session: Option<&str>) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || crate::coordinate::is_person(raw) {
+        return None;
+    }
+    if let Some((harness, id, declared_model)) = crate::coordinate::session_subject(raw) {
+        return match declared_model {
+            Some(model) => canonical_coordinate(harness, model, Some(id)),
+            None => canonical_coordinate(harness, id, session),
+        };
+    }
+    let (harness, model) = raw.split_once(':')?;
+    canonical_coordinate(harness, model, session)
+}
+
+fn identity_from_subject(subject: &str, flag_model: Option<&str>) -> IdentityKey {
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return IdentityKey::unattributed();
+    }
+    if let Some(coord) = canonical_coordinate_from_str(subject, None) {
+        return IdentityKey::coordinate(coord);
+    }
+    // A bare session subject paired with an explicit `--model` flag records
+    // that subject's model coordinate without borrowing an invoker's model.
+    if let (Some((harness, sid, None)), Some(model)) =
+        (crate::coordinate::session_subject(subject), flag_model)
+    {
+        if let Some(coord) = canonical_coordinate(harness, model, Some(sid)) {
+            return IdentityKey::coordinate(coord);
+        }
+    }
+    IdentityKey::label(subject)
+}
+
+fn identity_from_debt_identity(author: &DebtIdentity, allow_actor_label: bool) -> IdentityKey {
+    if let (Some(harness), Some(model)) = (author.harness.as_deref(), author.model.as_deref()) {
+        if let Some(coord) = canonical_coordinate(harness, model, author.session.as_deref()) {
+            return IdentityKey::coordinate(coord);
+        }
+    }
+    if let Some(obo) = author
+        .on_behalf_of
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return identity_from_subject(obo, None);
+    }
+    let actor = author.actor.trim();
+    if let Some(coord) = canonical_coordinate_from_str(actor, author.session.as_deref()) {
+        return IdentityKey::coordinate(coord);
+    }
+    if allow_actor_label && !actor.is_empty() {
+        return IdentityKey::label(actor);
+    }
+    IdentityKey::unattributed()
+}
+
+fn event_identity(event: &Event) -> IdentityKey {
+    if let Some(obo) = event
+        .on_behalf_of
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let flag_model = (event.model_provenance.model_source == Some(ModelSource::Flag))
+            .then_some(event.model.as_deref())
+            .flatten();
+        return identity_from_subject(obo, flag_model);
+    }
+    if let (Some(harness), Some(model)) = (event.harness.as_deref(), event.model.as_deref()) {
+        if let Some(coord) = canonical_coordinate(harness, model, event.session.as_deref()) {
+            return IdentityKey::coordinate(coord);
+        }
+    }
+    if let Some(coord) = canonical_coordinate_from_str(&event.actor, event.session.as_deref()) {
+        return IdentityKey::coordinate(coord);
+    }
+    IdentityKey::unattributed()
+}
+
+/// Distinct author identities for a `PatchsetAdded` event, preferring retained
+/// or declared contributor coordinates over the recording lead's session.
+fn patchset_identities(event: &Event, state: &ChangeState, patchset_id: &str) -> Vec<IdentityKey> {
+    let Some(patchset) = state.patchsets.iter().find(|ps| ps.id == patchset_id) else {
+        return vec![event_identity(event)];
+    };
+    if patchset.contributors.is_empty() && patchset.inherited_authors.is_empty() {
+        return vec![event_identity(event)];
+    }
+
+    let mut seen = BTreeSet::new();
+    if !patchset.contributors.is_empty() {
+        let mut resolved: Vec<IdentityKey> = state
+            .authoring_coordinates(patchset)
+            .into_iter()
+            .map(|author| {
+                let is_unlabeled_solo_recorder = author.actor == patchset.actor
+                    && patchset.on_behalf_of.is_none()
+                    && patchset.contributors.len() == 1;
+                identity_from_debt_identity(&author, !is_unlabeled_solo_recorder)
+            })
+            .collect();
+        // When a single contributor is a bare session or label on a delegated
+        // snapshot whose `--on-behalf-of` names a canonical coordinate with a
+        // matching harness, keep that canonical coordinate.
+        if resolved.len() == 1 && resolved[0].kind == IdentityKind::Label {
+            if let Some(obo) = event
+                .on_behalf_of
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let flag_model = (event.model_provenance.model_source == Some(ModelSource::Flag))
+                    .then_some(event.model.as_deref())
+                    .flatten();
+                let delegated = identity_from_subject(obo, flag_model);
+                if delegated.kind == IdentityKind::Coordinate {
+                    let coord_harness = delegated.identity.split_once(':').map(|(h, _)| h);
+                    let label_harness = resolved[0].identity.split_once(':').map(|(h, _)| h);
+                    if label_harness.is_none() || label_harness == coord_harness {
+                        resolved[0] = delegated;
+                    }
+                }
+            }
+        }
+        for ident in resolved {
+            seen.insert(ident);
+        }
+    } else {
+        for author in &patchset.inherited_authors {
+            seen.insert(identity_from_debt_identity(author, true));
+        }
+    }
+
+    if seen.is_empty() {
+        vec![event_identity(event)]
+    } else {
+        seen.into_iter().collect()
+    }
+}
+
+fn summarize_by_model(changes: &[(String, ChangeState, Vec<Event>)]) -> Vec<ModelStats> {
     #[derive(Default)]
     struct Row {
-        changes: BTreeSet<String>,
+        changes: BTreeMap<String, (EndState, bool)>,
         patchsets: usize,
         rework_rounds: usize,
         verdicts: usize,
     }
-    let mut rows: BTreeMap<String, Row> = BTreeMap::new();
-    for change_id in change_ids {
-        let events = store.load_events(change_id)?;
+
+    let mut rows: BTreeMap<IdentityKey, Row> = BTreeMap::new();
+    for (change_id, state, events) in changes {
+        let end_state = change_end_state(state);
+        let rework = derive_rework(events);
         // Who contributed each patchset, so a rework round lands on the
         // identity whose work opened it rather than on the reviewer.
-        let mut patchset_subject: BTreeMap<&str, &str> = BTreeMap::new();
-        for event in &events {
-            // Touching a change is any recorded contribution to it, so an
-            // identity that only filed findings or ran gates has a row rather
-            // than vanishing.
-            let row = rows.entry(subject(event).to_string()).or_default();
-            row.changes.insert(change_id.clone());
+        let mut patchset_subjects: BTreeMap<&str, Vec<IdentityKey>> = BTreeMap::new();
+        for event in events {
             match &event.payload {
                 Payload::PatchsetAdded { patchset_id, .. } => {
-                    patchset_subject.insert(patchset_id.as_str(), subject(event));
-                    row.patchsets += 1;
+                    let identities = patchset_identities(event, state, patchset_id);
+                    for ident in &identities {
+                        let row = rows.entry(ident.clone()).or_default();
+                        row.changes
+                            .entry(change_id.clone())
+                            .or_insert((end_state, rework.first_pass_approval));
+                        row.patchsets += 1;
+                    }
+                    patchset_subjects.insert(patchset_id.as_str(), identities);
                 }
                 Payload::VerdictRecorded { .. } | Payload::AuditVerdictRecorded { .. } => {
-                    row.verdicts += 1
+                    let ident = event_identity(event);
+                    let row = rows.entry(ident).or_default();
+                    row.changes
+                        .entry(change_id.clone())
+                        .or_insert((end_state, rework.first_pass_approval));
+                    row.verdicts += 1;
                 }
-                _ => {}
+                _ => {
+                    // Touching a change is any recorded contribution to it, so
+                    // an identity that only filed findings or ran gates has a
+                    // row rather than vanishing.
+                    let ident = event_identity(event);
+                    let row = rows.entry(ident).or_default();
+                    row.changes
+                        .entry(change_id.clone())
+                        .or_insert((end_state, rework.first_pass_approval));
+                }
             }
         }
-        for patchset_id in derive_rework(&events).reworked_patchsets {
-            let subject = patchset_subject
+        for patchset_id in rework.reworked_patchsets {
+            let subjects = patchset_subjects
                 .get(patchset_id.as_str())
-                .copied()
-                .unwrap_or(UNATTRIBUTED);
-            rows.entry(subject.to_string()).or_default().rework_rounds += 1;
+                .cloned()
+                .unwrap_or_else(|| vec![IdentityKey::unattributed()]);
+            for ident in subjects {
+                rows.entry(ident).or_default().rework_rounds += 1;
+            }
         }
     }
 
-    let models: Vec<ModelStats> = rows
-        .into_iter()
-        .map(|(identity, row)| ModelStats {
-            identity,
-            changes: row.changes.len(),
-            patchsets: row.patchsets,
-            rework_rounds_caused: row.rework_rounds,
-            verdicts: row.verdicts,
+    rows.into_iter()
+        .map(|(key, row)| {
+            let mut by_state = ChangesByState::default();
+            let mut closed_out = 0usize;
+            let mut first_pass_approved = 0usize;
+            for &(end_state, first_pass) in row.changes.values() {
+                match end_state {
+                    EndState::Integrated => by_state.integrated += 1,
+                    EndState::Abandoned => by_state.abandoned += 1,
+                    EndState::Closed => by_state.closed += 1,
+                    EndState::Superseded => by_state.superseded += 1,
+                    EndState::Open => by_state.open += 1,
+                }
+                if end_state.is_closed_out() {
+                    closed_out += 1;
+                    if first_pass {
+                        first_pass_approved += 1;
+                    }
+                }
+            }
+            let land_rate = Rate::new(
+                by_state.integrated,
+                by_state.integrated + by_state.abandoned,
+            );
+            let first_patchset_approval = Rate::new(first_pass_approved, closed_out);
+            ModelStats {
+                identity: key.identity,
+                identity_kind: key.kind.as_str(),
+                changes: row.changes.len(),
+                changes_by_state: by_state,
+                land_rate,
+                first_patchset_approval,
+                patchsets: row.patchsets,
+                rework_rounds_caused: row.rework_rounds,
+                verdicts: row.verdicts,
+            }
         })
-        .collect();
+        .collect()
+}
+
+fn format_rate(rate: &Rate) -> String {
+    match rate.rate {
+        Some(value) => format!("{:>5.1}% ({}/{})", value * 100.0, rate.count, rate.of),
+        None => format!("   n/a ({}/{})", rate.count, rate.of),
+    }
+}
+
+fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
+    let read = store.read()?;
+    read.rewrites()?;
+    let mut loaded = Vec::with_capacity(change_ids.len());
+    for change_id in change_ids {
+        let events = read.events(change_id)?;
+        let state = read.project(&events)?;
+        loaded.push((change_id.clone(), state, events));
+    }
+
+    let models = summarize_by_model(&loaded);
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&ByModelOutput {
-                schema: "arc-stats-by-model/1",
+                schema: BY_MODEL_SCHEMA,
                 models,
             })?
         );
         return Ok(());
     }
     println!(
-        "{:<40} {:>8} {:>10} {:>8} {:>9}",
-        "identity", "changes", "patchsets", "caused-rw", "verdicts"
+        "{:<36} {:>7} {:>4} {:>4} {:>4} {:>4} {:>4} {:>16} {:>16} {:>4} {:>9} {:>8}",
+        "identity",
+        "changes",
+        "int",
+        "abnd",
+        "clsd",
+        "sup",
+        "open",
+        "land-rate",
+        "first-pass",
+        "ps",
+        "caused-rw",
+        "verdicts"
     );
     for model in &models {
+        let s = &model.changes_by_state;
         println!(
-            "{:<40} {:>8} {:>10} {:>8} {:>9}",
-            truncate(&model.identity, 40),
+            "{:<36} {:>7} {:>4} {:>4} {:>4} {:>4} {:>4} {:>16} {:>16} {:>4} {:>9} {:>8}",
+            truncate(&model.identity, 36),
             model.changes,
+            s.integrated,
+            s.abandoned,
+            s.closed,
+            s.superseded,
+            s.open,
+            format_rate(&model.land_rate),
+            format_rate(&model.first_patchset_approval),
             model.patchsets,
             model.rework_rounds_caused,
             model.verdicts
@@ -1325,10 +1699,11 @@ fn print_table(changes: &[ChangeStats], aggregate: &Aggregate) {
 }
 
 fn truncate(text: &str, width: usize) -> String {
-    if text.len() <= width {
+    if text.chars().count() <= width {
         text.to_string()
     } else {
-        format!("{}…", &text[..width - 1])
+        let prefix: String = text.chars().take(width.saturating_sub(1)).collect();
+        format!("{prefix}…")
     }
 }
 
@@ -1930,5 +2305,459 @@ mod tests {
         let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         assert_eq!(nearest_rank(&sorted, 0.5), 5);
         assert_eq!(nearest_rank(&sorted, 0.9), 9);
+    }
+
+    fn opened_event(id: &str, change_id: &str) -> Event {
+        let mut ev = event(
+            id,
+            0,
+            Payload::ChangeOpened {
+                dangerous: false,
+                slug: change_id.into(),
+                title: change_id.into(),
+                profile: "local".into(),
+                target_branch: "master".into(),
+                branch: format!("arc/{change_id}"),
+                base: "b".into(),
+                worktree: None,
+                worktree_created: false,
+                worktree_owner_token: None,
+                blocked_by: Vec::new(),
+                tags: Vec::new(),
+                journal_ref: None,
+                journal_ref_digest: None,
+                from_fork: None,
+            },
+        );
+        ev.change_id = change_id.into();
+        ev
+    }
+
+    fn with_identity(
+        mut ev: Event,
+        actor: &str,
+        on_behalf_of: Option<&str>,
+        harness: Option<&str>,
+        model: Option<&str>,
+        model_source: Option<ModelSource>,
+    ) -> Event {
+        ev.actor = actor.into();
+        ev.on_behalf_of = on_behalf_of.map(str::to_string);
+        ev.harness = harness.map(str::to_string);
+        ev.model = model.map(str::to_string);
+        ev.model_provenance.model_source = model_source;
+        ev
+    }
+
+    fn ps_event(id: &str, seconds: i64, patchset_id: &str, head: &str) -> Event {
+        event(
+            id,
+            seconds,
+            Payload::PatchsetAdded {
+                budget_raise_ids: Vec::new(),
+                patchset_id: patchset_id.into(),
+                base: "b".into(),
+                head: head.into(),
+                merge_base: None,
+                brief_ref: None,
+                author_name: None,
+                author_email: None,
+                committer_name: None,
+                committer_email: None,
+                contributors: Vec::new(),
+                inherited_authors: Vec::new(),
+                claim_id: None,
+                claim_actor: None,
+                journal_refs: Vec::new(),
+                thread: None,
+                candidate: None,
+                rebase_started_at: None,
+            },
+        )
+    }
+
+    fn verdict_event(id: &str, seconds: i64, patchset_id: &str, verdict: Verdict) -> Event {
+        event(
+            id,
+            seconds,
+            Payload::VerdictRecorded {
+                basis: Default::default(),
+                tiebreak_reviewer: None,
+                tiebreak_target: None,
+                dispositions: Vec::new(),
+                receipt: None,
+                forge_frontier: None,
+                forge_sources: Vec::new(),
+                patchset_id: patchset_id.into(),
+                verdict,
+                authority_observed: None,
+                causes: Vec::new(),
+                body: None,
+                findings: Vec::new(),
+                relation: None,
+                provisional: None,
+                route_version: None,
+                assessment: None,
+            },
+        )
+    }
+
+    fn change_tuple(change_id: &str, events: Vec<Event>) -> (String, ChangeState, Vec<Event>) {
+        let state = crate::state::reduce(&events).expect("fixture events reduce");
+        (change_id.to_string(), state, events)
+    }
+
+    #[test]
+    fn by_model_groups_canonical_coordinates_and_keeps_labels_separate() {
+        let uuid_a = "01a1a5a7-08d2-7662-a98a-92deffb9a8ae";
+        let uuid_b = "01a151ac-d0b4-7fe3-b00b-85d628eb83d3";
+        let uuid_c = "01a0ff27-edd0-7722-8810-5f7aca8afe6c";
+
+        let c1 = change_tuple(
+            "c1",
+            vec![
+                with_identity(
+                    opened_event("1", "c1"),
+                    "lead",
+                    None,
+                    Some("codex"),
+                    Some("gpt-6.1-sol#xhigh"),
+                    Some(ModelSource::Resolved),
+                ),
+                with_identity(
+                    ps_event("2", 10, "ps-01", "h1"),
+                    "lead",
+                    Some("codex:gpt-6.1-sol#xhigh"),
+                    Some("claude"),
+                    Some("claude-opus-5-5#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                with_identity(
+                    verdict_event("3", 20, "ps-01", Verdict::Approved),
+                    "lead",
+                    Some(&format!("codex:{uuid_a}:gpt-6.1-sol#xhigh (reviewer)")),
+                    Some("claude"),
+                    Some("claude-opus-5-5#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                with_identity(
+                    verdict_event("4", 25, "ps-01", Verdict::Approved),
+                    "lead",
+                    Some(&format!("codex:{uuid_c}")),
+                    Some("claude"),
+                    Some("gpt-6.1-sol#xhigh"),
+                    Some(ModelSource::Flag),
+                ),
+                // Bare session id with invoker-resolved model stays separate
+                // and must never borrow the invoker's Claude model.
+                with_identity(
+                    verdict_event("5", 30, "ps-01", Verdict::Approved),
+                    "lead",
+                    Some(&format!("codex:{uuid_b}")),
+                    Some("claude"),
+                    Some("claude-opus-5-5#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                // Label-only subjects stay separate verbatim.
+                with_identity(
+                    verdict_event("6", 35, "ps-01", Verdict::Approved),
+                    "lead",
+                    Some("codex-sol"),
+                    Some("claude"),
+                    Some("claude-opus-5-5#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                with_identity(
+                    verdict_event("7", 40, "ps-01", Verdict::Approved),
+                    "lead",
+                    Some("Codex Sol Reviewer"),
+                    Some("claude"),
+                    Some("claude-opus-5-5#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                with_identity(
+                    verdict_event("8", 45, "ps-01", Verdict::Approved),
+                    "lead",
+                    Some("gpt-6.1-sol#xhigh"),
+                    Some("claude"),
+                    Some("claude-opus-5-5#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                // Non-delegated event with no model stays unattributed.
+                with_identity(
+                    integrated("9", 50, "ps-01"),
+                    "Lucas Gabriel",
+                    None,
+                    Some("claude"),
+                    None,
+                    None,
+                ),
+            ],
+        );
+
+        let rows = summarize_by_model(&[c1]);
+        let by_id: BTreeMap<&str, &ModelStats> =
+            rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+        // Canonical coordinate combines non-delegated harness:model, direct
+        // on_behalf_of coordinate, session:model subject, and bare session with
+        // explicit --model flag.
+        let sol = by_id["codex:gpt-6.1-sol#xhigh"];
+        assert_eq!(sol.identity_kind, "coordinate");
+        assert_eq!(sol.changes, 1);
+        assert_eq!(sol.patchsets, 1);
+        assert_eq!(sol.verdicts, 2);
+
+        // Label-only and bare-session rows remain distinct, never merged.
+        for label in [
+            "codex-sol",
+            "Codex Sol Reviewer",
+            "gpt-6.1-sol#xhigh",
+            &format!("codex:{uuid_b}"),
+        ] {
+            let row = by_id[label];
+            assert_eq!(row.identity_kind, "label", "{label}");
+            assert_eq!(row.verdicts, 1, "{label}");
+        }
+
+        // Invoker's Claude model was never attributed to delegated events.
+        assert!(!by_id.contains_key("claude:claude-opus-5-5#high"));
+
+        let unattr = by_id[UNATTRIBUTED];
+        assert_eq!(unattr.identity_kind, "unattributed");
+        assert_eq!(unattr.changes, 1);
+    }
+
+    #[test]
+    fn by_model_rates_exclude_open_closed_and_superseded_as_specified() {
+        let model = |ev: Event| {
+            with_identity(
+                ev,
+                "exec",
+                None,
+                Some("codex"),
+                Some("gpt-6.1-sol#xhigh"),
+                Some(ModelSource::Resolved),
+            )
+        };
+        let reviewer = |ev: Event| {
+            with_identity(
+                ev,
+                "rev",
+                None,
+                Some("claude"),
+                Some("claude-opus-5-5#high"),
+                Some(ModelSource::Resolved),
+            )
+        };
+
+        // c1: integrated, ps-01 approved on first pass.
+        let c1 = change_tuple(
+            "c1",
+            vec![
+                model(opened_event("1", "c1")),
+                model(ps_event("2", 10, "ps-01", "h1")),
+                reviewer(verdict_event("3", 20, "ps-01", Verdict::Approved)),
+                model(integrated("4", 30, "ps-01")),
+            ],
+        );
+        // c2: integrated after 1 rework round (NOT first-pass approved).
+        let c2 = change_tuple(
+            "c2",
+            vec![
+                model(opened_event("1", "c2")),
+                model(ps_event("2", 10, "ps-01", "h1")),
+                reviewer(verdict_event("3", 20, "ps-01", Verdict::ChangesRequested)),
+                model(ps_event("4", 30, "ps-02", "h2")),
+                reviewer(verdict_event("5", 40, "ps-02", Verdict::Approved)),
+                model(integrated("6", 50, "ps-02")),
+            ],
+        );
+        // c3: abandoned after changes requested.
+        let c3 = change_tuple(
+            "c3",
+            vec![
+                model(opened_event("1", "c3")),
+                model(ps_event("2", 10, "ps-01", "h1")),
+                reviewer(verdict_event("3", 20, "ps-01", Verdict::ChangesRequested)),
+                model(event(
+                    "4",
+                    30,
+                    Payload::ChangeClosed {
+                        outcome: Closure::Abandoned,
+                        integrated_commit: None,
+                        superseded_by: None,
+                    },
+                )),
+            ],
+        );
+        // c4: closed (asserted integration, no arc merge) with ps-01 approved.
+        let c4 = change_tuple(
+            "c4",
+            vec![
+                model(opened_event("1", "c4")),
+                model(ps_event("2", 10, "ps-01", "h1")),
+                reviewer(verdict_event("3", 20, "ps-01", Verdict::Approved)),
+                model(event(
+                    "4",
+                    30,
+                    Payload::IntegrationAsserted {
+                        integrated_commit: "m".into(),
+                        source_patchset_id: "ps-01".into(),
+                        source_head: "h1".into(),
+                        target_branch: "master".into(),
+                        target_before: Some("b".into()),
+                        external_reference: None,
+                        correspondence: Vec::new(),
+                    },
+                )),
+            ],
+        );
+        // c5: superseded without approval.
+        let c5 = change_tuple(
+            "c5",
+            vec![
+                model(opened_event("1", "c5")),
+                model(ps_event("2", 10, "ps-01", "h1")),
+                model(event(
+                    "3",
+                    20,
+                    Payload::ChangeClosed {
+                        outcome: Closure::Superseded,
+                        integrated_commit: None,
+                        superseded_by: Some("c1".into()),
+                    },
+                )),
+            ],
+        );
+        // c6: open with ps-01 approved — excluded from both rates.
+        let c6 = change_tuple(
+            "c6",
+            vec![
+                model(opened_event("1", "c6")),
+                model(ps_event("2", 10, "ps-01", "h1")),
+                reviewer(verdict_event("3", 20, "ps-01", Verdict::Approved)),
+            ],
+        );
+        // c7: open-only model — both rates must be None (0/0).
+        let c7 = change_tuple(
+            "c7",
+            vec![
+                with_identity(
+                    opened_event("1", "c7"),
+                    "exec",
+                    None,
+                    Some("antigravity"),
+                    Some("gemini-4-neon#high"),
+                    Some(ModelSource::Resolved),
+                ),
+                with_identity(
+                    ps_event("2", 10, "ps-01", "h1"),
+                    "exec",
+                    None,
+                    Some("antigravity"),
+                    Some("gemini-4-neon#high"),
+                    Some(ModelSource::Resolved),
+                ),
+            ],
+        );
+
+        let rows = summarize_by_model(&[c1, c2, c3, c4, c5, c6, c7]);
+        let by_id: BTreeMap<&str, &ModelStats> =
+            rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+        let sol = by_id["codex:gpt-6.1-sol#xhigh"];
+        assert_eq!(sol.changes, 6);
+        assert_eq!(
+            sol.changes_by_state,
+            ChangesByState {
+                integrated: 2,
+                abandoned: 1,
+                closed: 1,
+                superseded: 1,
+                open: 1,
+            }
+        );
+        // Land rate: 2 integrated / (2 integrated + 1 abandoned) = 2/3.
+        assert_eq!(sol.land_rate.count, 2);
+        assert_eq!(sol.land_rate.of, 3);
+        assert!((sol.land_rate.rate.unwrap() - (2.0 / 3.0)).abs() < 1e-12);
+        // First-patchset approval: closed-out changes are c1..=c5 (5 changes);
+        // c1 and c4 had ps-01 approved without rework (c6 is open, excluded).
+        assert_eq!(sol.first_patchset_approval.count, 2);
+        assert_eq!(sol.first_patchset_approval.of, 5);
+        assert!((sol.first_patchset_approval.rate.unwrap() - 0.4).abs() < 1e-12);
+        assert_eq!(sol.patchsets, 7);
+        assert_eq!(sol.rework_rounds_caused, 1);
+
+        let gem = by_id["antigravity:gemini-4-neon#high"];
+        assert_eq!(gem.changes, 1);
+        assert_eq!(gem.changes_by_state.open, 1);
+        assert_eq!(gem.land_rate, Rate::new(0, 0));
+        assert_eq!(gem.first_patchset_approval, Rate::new(0, 0));
+        assert_eq!(format_rate(&gem.land_rate), "   n/a (0/0)");
+    }
+
+    #[test]
+    fn by_model_patchset_contributors_credit_authors_not_recording_lead() {
+        let mut ps = with_identity(
+            ps_event("2", 10, "ps-01", "h1"),
+            "opus-lead",
+            None,
+            Some("claude"),
+            Some("claude-opus-5-5#high"),
+            Some(ModelSource::Resolved),
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ref mut inherited_authors,
+            ..
+        } = ps.payload
+        {
+            contributors.push("codex:01a1d771-d401-7bd0-8b41-dd9ce2d9410a".into());
+            inherited_authors.push(DebtIdentity::new(
+                "codex:01a1d771-d401-7bd0-8b41-dd9ce2d9410a".into(),
+                None,
+                Some("codex".into()),
+                Some("gpt-6.1-sol#xhigh".into()),
+                Some("01a1d771-d401-7bd0-8b41-dd9ce2d9410a".into()),
+            ));
+        }
+
+        let c1 = change_tuple(
+            "c1",
+            vec![
+                with_identity(opened_event("1", "c1"), "opus-lead", None, None, None, None),
+                ps,
+                with_identity(
+                    verdict_event("3", 20, "ps-01", Verdict::Approved),
+                    "opus-lead",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                with_identity(
+                    integrated("4", 30, "ps-01"),
+                    "opus-lead",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ],
+        );
+
+        let rows = summarize_by_model(&[c1]);
+        let by_id: BTreeMap<&str, &ModelStats> =
+            rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+        assert!(!by_id.contains_key("claude:claude-opus-5-5#high"));
+        let sol = by_id["codex:gpt-6.1-sol#xhigh"];
+        assert_eq!(sol.identity_kind, "coordinate");
+        assert_eq!(sol.patchsets, 1);
+        assert_eq!(sol.changes_by_state.integrated, 1);
+        assert_eq!(sol.land_rate, Rate::new(1, 1));
+        assert_eq!(sol.first_patchset_approval, Rate::new(1, 1));
     }
 }

@@ -152,6 +152,7 @@ mod schemas;
 mod selection;
 mod skip_green;
 mod slots;
+mod stats_by_model;
 mod take;
 mod tiebreak_reviewers;
 mod timeline;
