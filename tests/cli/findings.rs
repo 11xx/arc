@@ -2172,3 +2172,236 @@ fn merge_of_two_opaque_parents_restoring_second_parent_text_is_parent_order_symm
         repo.arc(&wt).args(["check", &change]).assert().code(2);
     }
 }
+
+#[test]
+fn mixed_merge_and_post_merge_guard_deletion_are_parent_order_invariant() {
+    // Case 1: Mixed text + opaque merge with an additional MERGE NOTE line on top
+    // of parent 2's pre-binary text (where GUARD was deleted after splitting B)
+    // must reopen in BOTH parent orders.
+    for swap_parents in [false, true] {
+        let repo = Repo::new();
+        let slug = if swap_parents {
+            "mixed-opaque-swapped"
+        } else {
+            "mixed-opaque-normal"
+        };
+        let begin = stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let change = opened_change_id(&begin);
+        let wt = repo.home.join(format!(".worktrees/repo-{slug}"));
+
+        repo.commit(&wt, "f.txt", "A\nB\nC\n", "feat: initial");
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let fid = stdout(repo.arc(&wt).args([
+            "finding",
+            slug,
+            "--summary",
+            "insert guard before B",
+            "--blocking",
+            "--severity",
+            "major",
+        ]))
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+        repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+        let fix = repo.head(&wt);
+        stdout(repo.arc(&wt).args([
+            "resolve", slug, &fid, "--status", "resolved", "--commit", &fix,
+        ]));
+
+        // Parent 1: appends TAIL and stays text.
+        git(&wt, &["checkout", "-b", "mixed-p1", &fix]);
+        repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\nTAIL\n", "chore: append tail");
+        let p1 = repo.head(&wt);
+
+        // Parent 2: splits B while retaining GUARD, deletes only GUARD, then turns A binary.
+        git(&wt, &["checkout", "-b", "mixed-p2", &fix]);
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nGUARD\nB part one\nB part two\nC\n",
+            "refactor: split B keeping guard",
+        );
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nB part one\nB part two\nC\n",
+            "chore: delete guard",
+        );
+        fs::write(wt.join("f.txt"), b"A\x00\nB part one\nB part two\nC\n").unwrap();
+        git(&wt, &["add", "f.txt"]);
+        git(&wt, &["commit", "-m", "chore: p2 binary"]);
+        let p2 = repo.head(&wt);
+
+        // Build tree for parent 2's pre-binary text plus an unrelated MERGE NOTE line.
+        git(&wt, &["checkout", "-b", "mixed-tree-tmp", &fix]);
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nB part one\nB part two\nC\nMERGE NOTE\n",
+            "tmp: merge tree",
+        );
+        let merge_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+
+        let (first_p, second_p) = if swap_parents { (&p2, &p1) } else { (&p1, &p2) };
+        let merge_commit = git_out(
+            &wt,
+            &[
+                "commit-tree",
+                &merge_tree,
+                "-p",
+                first_p,
+                "-p",
+                second_p,
+                "-m",
+                "merge: p2 text + MERGE NOTE",
+            ],
+        );
+        git(&wt, &["checkout", &format!("arc/{slug}")]);
+        git(&wt, &["reset", "--hard", &merge_commit]);
+        git(
+            &wt,
+            &["branch", "-D", "mixed-p1", "mixed-p2", "mixed-tree-tmp"],
+        );
+
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let status = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+        assert_eq!(
+            status["open_blocking_findings"],
+            serde_json::json!([fid]),
+            "mixed text+opaque merge with MERGE NOTE must reopen (swap_parents={swap_parents}): {status}"
+        );
+        repo.arc(&wt).args(["check", &change]).assert().code(2);
+    }
+
+    // Case 2: Text-restoring merge of two parents with different surviving span sets,
+    // followed by a child commit deleting ONLY GUARD, must reopen in BOTH parent orders
+    // (while staying resolved at the merge itself).
+    for swap_parents in [false, true] {
+        let repo = Repo::new();
+        let slug = if swap_parents {
+            "post-merge-del-swapped"
+        } else {
+            "post-merge-del-normal"
+        };
+        let begin = stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let change = opened_change_id(&begin);
+        let wt = repo.home.join(format!(".worktrees/repo-{slug}"));
+
+        repo.commit(&wt, "f.txt", "A\nB\nC\n", "feat: initial");
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let fid = stdout(repo.arc(&wt).args([
+            "finding",
+            slug,
+            "--summary",
+            "insert guard before B",
+            "--blocking",
+            "--severity",
+            "major",
+        ]))
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+        repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+        let fix = repo.head(&wt);
+        stdout(repo.arc(&wt).args([
+            "resolve", slug, &fid, "--status", "resolved", "--commit", &fix,
+        ]));
+
+        // Parent 1: splits B while retaining GUARD, then binary detour.
+        git(&wt, &["checkout", "-b", "pm-p1", &fix]);
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nGUARD\nB part one\nB part two\nC\n",
+            "refactor: split B retaining guard",
+        );
+        fs::write(
+            wt.join("f.txt"),
+            b"A\x00p1\nGUARD\nB part one\nB part two\nC\n",
+        )
+        .unwrap();
+        git(&wt, &["add", "f.txt"]);
+        git(&wt, &["commit", "-m", "chore: p1 binary"]);
+        let p1 = repo.head(&wt);
+
+        // Parent 2: splits B AND replaces GUARD -> GUARD_V2 in one commit,
+        // then changes GUARD_V2 back to GUARD, then binary detour.
+        git(&wt, &["checkout", "-b", "pm-p2", &fix]);
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nGUARD_V2\nB part one\nB part two\nC\n",
+            "refactor: split B and refine guard",
+        );
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nGUARD\nB part one\nB part two\nC\n",
+            "refactor: restore GUARD",
+        );
+        fs::write(
+            wt.join("f.txt"),
+            b"A\x00p2\nGUARD\nB part one\nB part two\nC\n",
+        )
+        .unwrap();
+        git(&wt, &["add", "f.txt"]);
+        git(&wt, &["commit", "-m", "chore: p2 binary"]);
+        let p2 = repo.head(&wt);
+
+        // Merge to shared last text + MERGE NOTE.
+        git(&wt, &["checkout", "-b", "pm-tree-tmp", &fix]);
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nGUARD\nB part one\nB part two\nC\nMERGE NOTE\n",
+            "tmp: merge tree",
+        );
+        let merge_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+
+        let (first_p, second_p) = if swap_parents { (&p2, &p1) } else { (&p1, &p2) };
+        let merge_commit = git_out(
+            &wt,
+            &[
+                "commit-tree",
+                &merge_tree,
+                "-p",
+                first_p,
+                "-p",
+                second_p,
+                "-m",
+                "merge: restore text with GUARD + MERGE NOTE",
+            ],
+        );
+        git(&wt, &["checkout", &format!("arc/{slug}")]);
+        git(&wt, &["reset", "--hard", &merge_commit]);
+        git(&wt, &["branch", "-D", "pm-p1", "pm-p2", "pm-tree-tmp"]);
+
+        // At the merge itself, GUARD is present -> stays resolved in both orders.
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let status_at_merge = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+        assert_eq!(
+            status_at_merge["open_blocking_findings"],
+            serde_json::json!([]),
+            "merge keeping GUARD must stay resolved (swap_parents={swap_parents}): {status_at_merge}"
+        );
+
+        // Child commit deletes ONLY GUARD -> must reopen in BOTH parent orders.
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nB part one\nB part two\nC\nMERGE NOTE\n",
+            "chore: delete GUARD after merge",
+        );
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let status_after_del = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+        assert_eq!(
+            status_after_del["open_blocking_findings"],
+            serde_json::json!([fid]),
+            "post-merge GUARD deletion must reopen regardless of parent order (swap_parents={swap_parents}): {status_after_del}"
+        );
+        repo.arc(&wt).args(["check", &change]).assert().code(2);
+    }
+}

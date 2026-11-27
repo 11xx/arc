@@ -808,19 +808,30 @@ struct TrackedHunk {
     absorbed_neighbor_count: usize,
 }
 
+/// Bound the number of distinct tracked-hunk configurations retained per commit
+/// so normal merges stay exact and order-invariant while pathological diamond
+/// DAGs remain bounded.
+const MAX_TRACKED_CONFIGS: usize = 64;
+
 #[derive(Debug, Clone)]
 enum CommitBlobState {
     Tracked {
         oid: String,
-        hunks: Vec<TrackedHunk>,
+        configs: Vec<Vec<TrackedHunk>>,
     },
     /// Opaque (binary or non-regular) intermediate state preserving every
     /// reachable parent's last usable `(oid, hunks)` text snapshot so text
-    /// restoration at a merge or later commit checks all saved text ancestors
-    /// symmetrically regardless of parent ordering.
+    /// restoration at a merge or later commit evaluates all saved text
+    /// ancestors symmetrically regardless of parent ordering.
     Unprojectable {
         saved: Vec<(String, Vec<TrackedHunk>)>,
     },
+}
+
+fn push_unique_config(dest: &mut Vec<Vec<TrackedHunk>>, hunks: Vec<TrackedHunk>) {
+    if dest.len() < MAX_TRACKED_CONFIGS && !dest.contains(&hunks) {
+        dest.push(hunks);
+    }
 }
 
 fn push_unique_saved(
@@ -828,15 +839,17 @@ fn push_unique_saved(
     oid: String,
     hunks: Vec<TrackedHunk>,
 ) {
-    if !dest.iter().any(|(o, h)| o == &oid && h == &hunks) {
+    if dest.len() < MAX_TRACKED_CONFIGS && !dest.iter().any(|(o, h)| o == &oid && h == &hunks) {
         dest.push((oid, hunks));
     }
 }
 
 fn collect_saved_from_state(state: &CommitBlobState, dest: &mut Vec<(String, Vec<TrackedHunk>)>) {
     match state {
-        CommitBlobState::Tracked { oid, hunks } => {
-            push_unique_saved(dest, oid.clone(), hunks.clone());
+        CommitBlobState::Tracked { oid, configs } => {
+            for hunks in configs {
+                push_unique_saved(dest, oid.clone(), hunks.clone());
+            }
         }
         CommitBlobState::Unprojectable { saved } => {
             for (oid, hunks) in saved {
@@ -846,56 +859,41 @@ fn collect_saved_from_state(state: &CommitBlobState, dest: &mut Vec<(String, Vec
     }
 }
 
-/// Select a symmetric `Tracked` result from candidate `(source_oid, hunks)`
-/// projections onto `target_oid`: prefer any exact `source_oid == target_oid`
-/// match first (choosing a non-surviving match if multiple exist), otherwise
-/// project from all candidates and prefer any non-surviving projection so
-/// merge parent ordering cannot mask a rollback.
-fn resolve_text_from_candidates(
+/// Resolve all distinct tracked-hunk configurations for `target_oid` from
+/// `candidates` symmetrically (parent-order invariant):
+/// - If any candidate has `src_oid == target_oid`, retain all distinct exact
+///   matches.
+/// - Otherwise project every candidate `src_oid -> target_oid` and retain all
+///   distinct projected configurations so downstream commits check survival
+///   against every eligible parent's tracked spans regardless of parent order.
+fn resolve_all_configs(
     cwd: &Path,
     target_oid: &str,
     candidates: &[(String, Vec<TrackedHunk>)],
-) -> Option<Vec<TrackedHunk>> {
+) -> Option<Vec<Vec<TrackedHunk>>> {
     let target_bytes = gitio::read_blob(cwd, target_oid).ok()?;
     if target_bytes.contains(&0) {
         return None;
     }
-    let target_lines = split_lines(&target_bytes);
 
-    let mut exact_match: Option<Vec<TrackedHunk>> = None;
+    let mut exact = Vec::new();
     for (src_oid, src_hunks) in candidates {
         if src_oid == target_oid {
-            let survives = src_hunks
-                .iter()
-                .all(|tracked| tracked_hunk_survives(tracked, &target_lines));
-            if !survives {
-                return Some(src_hunks.clone());
-            }
-            if exact_match.is_none() {
-                exact_match = Some(src_hunks.clone());
-            }
+            push_unique_config(&mut exact, src_hunks.clone());
         }
     }
-    if exact_match.is_some() {
-        return exact_match;
+    if !exact.is_empty() {
+        return Some(exact);
     }
 
-    let mut projected_first: Option<Vec<TrackedHunk>> = None;
+    let mut projected_all = Vec::new();
     for (src_oid, src_hunks) in candidates {
         let mut projected = src_hunks.clone();
         if project_hunks_between_blobs(cwd, src_oid, target_oid, &mut projected).is_some() {
-            let survives = projected
-                .iter()
-                .all(|tracked| tracked_hunk_survives(tracked, &target_lines));
-            if !survives {
-                return Some(projected);
-            }
-            if projected_first.is_none() {
-                projected_first = Some(projected);
-            }
+            push_unique_config(&mut projected_all, projected);
         }
     }
-    projected_first
+    (!projected_all.is_empty()).then_some(projected_all)
 }
 
 fn init_tracked_hunks(
@@ -1180,7 +1178,7 @@ fn text_blob_survives_along_history(
         fix_commit,
         CommitBlobState::Tracked {
             oid: entry.new_oid.clone(),
-            hunks: initial_hunks.clone(),
+            configs: vec![initial_hunks.clone()],
         },
     );
 
@@ -1194,17 +1192,17 @@ fn text_blob_survives_along_history(
             continue;
         }
 
-        // Prefer any reachable parent whose tree entry for this path equals
-        // `commit`'s entry AND has usable tracked spans (so `-s ours` merges
-        // discarding a binary or reverted side branch inherit the unchanged
-        // parent's exact tracked text state). When `commit` changes the entry
-        // relative to every reachable parent (including merges of opaque
-        // parents), evaluate all reachable parents' saved text states
-        // symmetrically, preferring exact saved-OID matches before projecting.
-        let mut inherited_tracked: Vec<(&str, &Vec<TrackedHunk>)> = Vec::new();
+        // Prefer unchanged `Tracked` parents (retaining every distinct config
+        // across all unchanged tracked parents so `-s ours` inherits only the
+        // unchanged branch while tied unchanged parents remain order-invariant).
+        // When `commit` changes the entry relative to every reachable parent
+        // (including mixed text + opaque merges), project EVERY reachable
+        // parent's saved text states symmetrically and retain all distinct
+        // resulting configs so downstream commits remain parent-order invariant.
+        let mut inherited_tracked_oid: Option<String> = None;
+        let mut inherited_tracked_configs: Vec<Vec<TrackedHunk>> = Vec::new();
         let mut has_inherited_unprojectable = false;
         let mut changed_entry: Option<(String, String)> = None;
-        let mut tracked_candidates: Vec<(String, Vec<TrackedHunk>)> = Vec::new();
         let mut all_saved: Vec<(String, Vec<TrackedHunk>)> = Vec::new();
         for &parent in &reachable {
             let key = (parent.to_string(), commit.clone());
@@ -1220,8 +1218,13 @@ fn text_blob_survives_along_history(
             collect_saved_from_state(&states[parent], &mut all_saved);
             match entries.iter().find(|e| e.path == entry.path) {
                 None => match &states[parent] {
-                    CommitBlobState::Tracked { oid, hunks } => {
-                        inherited_tracked.push((oid.as_str(), hunks));
+                    CommitBlobState::Tracked { oid, configs } => {
+                        if inherited_tracked_oid.is_none() {
+                            inherited_tracked_oid = Some(oid.clone());
+                        }
+                        for cfg in configs {
+                            push_unique_config(&mut inherited_tracked_configs, cfg.clone());
+                        }
                     }
                     CommitBlobState::Unprojectable { .. } => {
                         has_inherited_unprojectable = true;
@@ -1231,35 +1234,14 @@ fn text_blob_survives_along_history(
                     if changed_entry.is_none() {
                         changed_entry = Some((changed.new_mode.clone(), changed.new_oid.clone()));
                     }
-                    if let CommitBlobState::Tracked { oid, hunks } = &states[parent] {
-                        push_unique_saved(&mut tracked_candidates, oid.clone(), hunks.clone());
-                    }
                 }
             }
         }
 
-        let next_state = if !inherited_tracked.is_empty() {
-            let chosen_oid = inherited_tracked[0].0.to_string();
-            let chosen_hunks = if inherited_tracked.len() == 1 {
-                inherited_tracked[0].1.clone()
-            } else if let Ok(bytes) = gitio::read_blob(cwd, &chosen_oid) {
-                let lines = split_lines(&bytes);
-                inherited_tracked
-                    .iter()
-                    .find(|(_, hunks)| {
-                        !hunks
-                            .iter()
-                            .all(|tracked| tracked_hunk_survives(tracked, &lines))
-                    })
-                    .unwrap_or(&inherited_tracked[0])
-                    .1
-                    .clone()
-            } else {
-                inherited_tracked[0].1.clone()
-            };
+        let next_state = if let Some(oid) = inherited_tracked_oid {
             CommitBlobState::Tracked {
-                oid: chosen_oid,
-                hunks: chosen_hunks,
+                oid,
+                configs: inherited_tracked_configs,
             }
         } else if has_inherited_unprojectable {
             CommitBlobState::Unprojectable { saved: all_saved }
@@ -1267,23 +1249,11 @@ fn text_blob_survives_along_history(
             if !is_regular_blob_mode(&c_mode) {
                 CommitBlobState::Unprojectable { saved: all_saved }
             } else {
-                // Check exact saved-OID matches across ALL reachable parents
-                // first (including opaque parents), then project symmetrically
-                // from Tracked parents if any exist, else from all saved states.
-                let exact_sources: Vec<(String, Vec<TrackedHunk>)> = all_saved
-                    .iter()
-                    .filter(|(oid, _)| oid == &c_oid)
-                    .cloned()
-                    .collect();
-                let resolved = if !exact_sources.is_empty() {
-                    resolve_text_from_candidates(cwd, &c_oid, &exact_sources)
-                } else if !tracked_candidates.is_empty() {
-                    resolve_text_from_candidates(cwd, &c_oid, &tracked_candidates)
-                } else {
-                    resolve_text_from_candidates(cwd, &c_oid, &all_saved)
-                };
-                match resolved {
-                    Some(hunks) => CommitBlobState::Tracked { oid: c_oid, hunks },
+                match resolve_all_configs(cwd, &c_oid, &all_saved) {
+                    Some(configs) => CommitBlobState::Tracked {
+                        oid: c_oid,
+                        configs,
+                    },
                     None => CommitBlobState::Unprojectable { saved: all_saved },
                 }
             }
@@ -1293,11 +1263,11 @@ fn text_blob_survives_along_history(
         states.insert(commit.as_str(), next_state);
     }
 
-    let final_hunks = match states.get(head) {
-        Some(CommitBlobState::Tracked { hunks, .. }) => hunks.clone(),
+    let final_configs = match states.get(head) {
+        Some(CommitBlobState::Tracked { configs, .. }) => configs.clone(),
         Some(CommitBlobState::Unprojectable { saved }) => {
-            match resolve_text_from_candidates(cwd, head_oid, saved) {
-                Some(hunks) => hunks,
+            match resolve_all_configs(cwd, head_oid, saved) {
+                Some(configs) => configs,
                 None => return false,
             }
         }
@@ -1307,13 +1277,15 @@ fn text_blob_survives_along_history(
             {
                 return false;
             }
-            projected
+            vec![projected]
         }
     };
 
-    final_hunks
-        .iter()
-        .all(|tracked| tracked_hunk_survives(tracked, &head_lines))
+    final_configs.iter().all(|hunks| {
+        hunks
+            .iter()
+            .all(|tracked| tracked_hunk_survives(tracked, &head_lines))
+    })
 }
 
 fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
