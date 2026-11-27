@@ -818,3 +818,409 @@ fn candidate_non_utf8_invariants_file_does_not_block_valid_target() {
     let row = gate_row(&repo, &wt, &id, "check");
     assert_eq!(row["green_at_head"], true, "{row}");
 }
+
+/// Claim: a stacked landing never authorizes a member using another member's
+/// combined `Witness:` receipt; if a member's own witness declaration fails,
+/// the stack landing refuses, and when all member obligations pass each member
+/// receives its own matching receipt.
+#[test]
+fn stacked_landing_executes_and_binds_each_members_witness_declaration() {
+    let repo = Repo::new();
+    let allow_alpha = repo.home.join("allow-alpha");
+    let log = repo.home.join("stacked-witnesses.log");
+    let script = repo.home.join("stacked-gate.py");
+    fs::write(
+        &script,
+        format!(
+            concat!(
+                "import os, pathlib, sys\n",
+                "w = os.environ.get('ARC_WITNESSES', '')\n",
+                "open({log:?}, 'a').write(w.replace('\\n', ',') + '\\n')\n",
+                "if w == 'unit:alpha' and not pathlib.Path({allow:?}).exists():\n",
+                "    sys.exit(1)\n",
+            ),
+            log = log.display().to_string(),
+            allow = allow_alpha.display().to_string(),
+        ),
+    )
+    .unwrap();
+    repo.redeclare_gates(&format!(
+        "[gates.check]\ncommand = 'python3 {}'\n",
+        script.display()
+    ));
+
+    // Create alpha on master with `Witness: unit:alpha`.
+    let (alpha_id, alpha_wt, _) = change_with_patchset(&repo, "stack-alpha");
+    repo.commit(
+        &alpha_wt,
+        "alpha.txt",
+        "alpha\n",
+        "feat: alpha\n\nWitness: unit:alpha\n",
+    );
+    repo.arc(&alpha_wt).args(["snapshot"]).assert().success();
+    let alpha_head = repo.head(&alpha_wt);
+
+    // Stack beta directly on top of alpha with `Witness: unit:beta`.
+    let beta_out =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "stack-beta", "--base", &alpha_head]),
+        );
+    let beta_id = opened_change_id(&beta_out);
+    let beta_wt = repo.home.join(".worktrees/repo-stack-beta");
+    repo.commit(
+        &beta_wt,
+        "beta.txt",
+        "beta\n",
+        "feat: beta\n\nWitness: unit:beta\n",
+    );
+    repo.arc(&beta_wt).args(["snapshot"]).assert().success();
+
+    // Alpha's own witness fails while beta's combined witness passes.
+    repo.arc(&alpha_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .code(1);
+    let master_before = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["land", &alpha_id, &beta_id, "--debt", "stack"])
+        .assert()
+        .code(5);
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert!(
+        json_stdout(repo.arc(&repo.root).args(["show", &alpha_id, "--json"]))["closure"].is_null()
+    );
+    assert!(
+        json_stdout(repo.arc(&repo.root).args(["show", &beta_id, "--json"]))["closure"].is_null()
+    );
+
+    // Once alpha's witness passes, alpha's obligation executes and passes while
+    // beta's distinct combined obligation is already green/reusable; both bind distinct receipts.
+    fs::write(&allow_alpha, "ok\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["land", &alpha_id, &beta_id, "--debt", "stack"])
+        .assert()
+        .success();
+
+    let seen: Vec<String> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        seen.iter().any(|line| line == "unit:alpha"),
+        "expected unit:alpha execution in {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|line| line == "unit:alpha,unit:beta"),
+        "expected unit:alpha,unit:beta execution in {seen:?}"
+    );
+
+    let alpha = json_stdout(repo.arc(&repo.root).args(["show", &alpha_id, "--json"]));
+    let beta = json_stdout(repo.arc(&repo.root).args(["show", &beta_id, "--json"]));
+    assert_eq!(alpha["closure"]["outcome"], "integrated", "{alpha}");
+    assert_eq!(beta["closure"]["outcome"], "integrated", "{beta}");
+    let alpha_ev = alpha["closure"]["authorization"]["gate_evidence"]["check"]
+        .as_str()
+        .expect("alpha check evidence");
+    let beta_ev = beta["closure"]["authorization"]["gate_evidence"]["check"]
+        .as_str()
+        .expect("beta check evidence");
+    assert_ne!(
+        alpha_ev, beta_ev,
+        "stacked members with distinct witness declarations must bind distinct receipts"
+    );
+}
+
+/// Claim: composed landings sum all distinct `(gate, declaration_identity)`
+/// execution passes against `[budget] total` before starting the attempt.
+#[test]
+fn composed_landing_total_budget_counts_distinct_witness_obligations() {
+    let repo = Repo::new();
+    repo.redeclare_gates(
+        "[budget]\ntotal = '10s'\n[gates.check]\ncommand = 'true'\nbudget = '6s'\n",
+    );
+
+    let (alpha_id, alpha_wt, _) = change_with_patchset(&repo, "budget-alpha");
+    repo.commit(
+        &alpha_wt,
+        "alpha.txt",
+        "alpha\n",
+        "feat: alpha\n\nWitness: unit:alpha\n",
+    );
+    repo.arc(&alpha_wt).args(["snapshot"]).assert().success();
+
+    let (beta_id, beta_wt, _) = change_with_patchset(&repo, "budget-beta");
+    repo.commit(
+        &beta_wt,
+        "beta.txt",
+        "beta\n",
+        "feat: beta\n\nWitness: unit:beta\n",
+    );
+    repo.arc(&beta_wt).args(["snapshot"]).assert().success();
+
+    let dry = repo
+        .arc(&repo.root)
+        .args([
+            "land",
+            &alpha_id,
+            &beta_id,
+            "--dry-run",
+            "--debt",
+            "composed",
+        ])
+        .assert()
+        .code(5);
+    let stderr = String::from_utf8_lossy(&dry.get_output().stderr);
+    assert!(
+        stderr.contains("integration sum 12s exceeds total 10s"),
+        "{stderr}"
+    );
+
+    let master_before = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .env("ARC_TEST_COMMAND_RUN_MS", "5500")
+        .args(["land", &alpha_id, &beta_id, "--debt", "composed"])
+        .assert()
+        .code(5);
+    assert_eq!(repo.head(&repo.root), master_before);
+
+    // A 12s total accommodates both 6s serial passes cleanly.
+    let repo2 = Repo::new();
+    repo2.redeclare_gates(
+        "[budget]\ntotal = '12s'\n[gates.check]\ncommand = 'true'\nbudget = '6s'\n",
+    );
+    let (a2, a2_wt, _) = change_with_patchset(&repo2, "budget-alpha-ok");
+    repo2.commit(
+        &a2_wt,
+        "alpha.txt",
+        "alpha\n",
+        "feat: alpha\n\nWitness: unit:alpha\n",
+    );
+    repo2.arc(&a2_wt).args(["snapshot"]).assert().success();
+    let (b2, b2_wt, _) = change_with_patchset(&repo2, "budget-beta-ok");
+    repo2.commit(
+        &b2_wt,
+        "beta.txt",
+        "beta\n",
+        "feat: beta\n\nWitness: unit:beta\n",
+    );
+    repo2.arc(&b2_wt).args(["snapshot"]).assert().success();
+    repo2
+        .arc(&repo2.root)
+        .env("ARC_TEST_COMMAND_RUN_MS", "5500")
+        .args(["land", &a2, &b2, "--debt", "composed"])
+        .assert()
+        .success();
+}
+
+/// Claim: publication audits reconstruct a retired base-pass gate's historical
+/// `invariants` file from the baseline revision, verify its recorded digest,
+/// pass the real `ARC_INVARIANTS` value, and fail closed if it cannot be
+/// reconstructed.
+#[test]
+fn publication_audit_reconstructs_retired_base_pass_invariants_and_fails_closed() {
+    let repo = Repo::new();
+    let dump = repo.home.join("retired-base-pass-invariants.txt");
+    let script = repo.home.join("assert-invariants.py");
+    fs::write(
+        &script,
+        format!(
+            concat!(
+                "import os, pathlib, sys\n",
+                "inv = os.environ.get('ARC_INVARIANTS')\n",
+                "pathlib.Path({dump:?}).write_text(str(inv))\n",
+                "if inv != 'unit:one':\n",
+                "    sys.stderr.write(f'unexpected ARC_INVARIANTS={{inv!r}}\\n')\n",
+                "    sys.exit(1)\n",
+            ),
+            dump = dump.display().to_string(),
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.root.join("scripts")).unwrap();
+    repo.commit(
+        &repo.root,
+        "scripts/check-invariants.json",
+        r#"[{"name": "one", "check": "unit:one"}]"#,
+        "chore: add base-pass invariants",
+    );
+    repo.redeclare_gates(&format!(
+        "[selection]\nbase_passes = true\ninert = ['docs/**']\n\
+         [gates.check]\ncommand = 'python3 {}'\npaths = ['src/**']\ninvariants = 'scripts/check-invariants.json'\n",
+        script.display()
+    ));
+
+    // Warm the baseline with a real execution under ARC_INVARIANTS=unit:one.
+    let (warm_id, warm_wt, _) = change_with_patchset(&repo, "warm-inv");
+    fs::create_dir_all(warm_wt.join("src")).unwrap();
+    repo.commit(&warm_wt, "src/lib.rs", "pub fn x() {}\n", "feat: warm");
+    repo.arc(&warm_wt).args(["snapshot"]).assert().success();
+    repo.arc(&warm_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    repo.arc(&warm_wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &warm_id])
+        .assert()
+        .success();
+
+    // Land an inert change (only docs/** touched) authorized via the warmed base-pass.
+    let inert_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "inert-inv"])));
+    let inert_wt = repo.home.join(".worktrees/repo-inert-inv");
+    fs::create_dir_all(inert_wt.join("docs")).unwrap();
+    repo.commit(&inert_wt, "docs/guide.md", "notes\n", "docs: inert");
+    repo.arc(&inert_wt).args(["snapshot"]).assert().success();
+    repo.arc(&inert_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    let inert_state = json_stdout(repo.arc(&inert_wt).args(["show", &inert_id, "--json"]));
+    assert!(
+        inert_state["verifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["gate"] == "check" && v["base_pass"].is_object()),
+        "expected base_pass reuse on inert change: {inert_state}"
+    );
+    repo.arc(&inert_wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &inert_id])
+        .assert()
+        .success();
+
+    // Retire the gate and remove its invariants file from the publication target.
+    fs::remove_file(repo.root.join("scripts/check-invariants.json")).unwrap();
+    git(&repo.root, &["rm", "scripts/check-invariants.json"]);
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.other]\ncommand = 'true'\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "chore: retire check gate and invariants"],
+    );
+    let _ = fs::remove_file(&dump);
+
+    // Publication must reconstruct the exact historical invariants from baseline.revision.
+    repo.arc(&repo.root)
+        .args(["publication", "--target", "master"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&dump).unwrap(), "unit:one");
+
+    // Fail-closed: if the historical invariants blob cannot be reconstructed,
+    // publication refuses without executing the gate with an empty ARC_INVARIANTS.
+    let repo2 = Repo::new();
+    let dump2 = repo2.home.join("never-written.txt");
+    let script2 = repo2.home.join("never-run.py");
+    fs::write(
+        &script2,
+        format!(
+            "import os, pathlib\npathlib.Path({dump:?}).write_text(str(os.environ.get('ARC_INVARIANTS')))\n",
+            dump = dump2.display().to_string(),
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(repo2.root.join("scripts")).unwrap();
+    repo2.commit(
+        &repo2.root,
+        "scripts/check-invariants.json",
+        r#"[{"name": "one", "check": "unit:one"}]"#,
+        "chore: add base-pass invariants",
+    );
+    let blob = git_out(
+        &repo2.root,
+        &["rev-parse", "HEAD:scripts/check-invariants.json"],
+    );
+    repo2.redeclare_gates(&format!(
+        "[selection]\nbase_passes = true\ninert = ['docs/**']\n\
+         [gates.check]\ncommand = 'python3 {}'\npaths = ['src/**']\ninvariants = 'scripts/check-invariants.json'\n",
+        script2.display()
+    ));
+    let (warm2_id, warm2_wt, _) = change_with_patchset(&repo2, "warm-inv-2");
+    fs::create_dir_all(warm2_wt.join("src")).unwrap();
+    repo2.commit(&warm2_wt, "src/lib.rs", "pub fn y() {}\n", "feat: warm2");
+    repo2.arc(&warm2_wt).args(["snapshot"]).assert().success();
+    repo2
+        .arc(&warm2_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    repo2
+        .arc(&warm2_wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo2
+        .arc(&repo2.root)
+        .args(["integrate", &warm2_id])
+        .assert()
+        .success();
+    let inert2_id = opened_change_id(&stdout(
+        repo2.arc(&repo2.root).args(["begin", "inert-inv-2"]),
+    ));
+    let inert2_wt = repo2.home.join(".worktrees/repo-inert-inv-2");
+    fs::create_dir_all(inert2_wt.join("docs")).unwrap();
+    repo2.commit(&inert2_wt, "docs/guide.md", "notes\n", "docs: inert2");
+    repo2.arc(&inert2_wt).args(["snapshot"]).assert().success();
+    repo2
+        .arc(&inert2_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    repo2
+        .arc(&inert2_wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo2
+        .arc(&repo2.root)
+        .args(["integrate", &inert2_id])
+        .assert()
+        .success();
+    fs::remove_file(repo2.root.join("scripts/check-invariants.json")).unwrap();
+    git(&repo2.root, &["rm", "scripts/check-invariants.json"]);
+    fs::write(
+        repo2.root.join(".arc/gates.toml"),
+        "[gates.other]\ncommand = 'true'\n",
+    )
+    .unwrap();
+    git(&repo2.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo2.root,
+        &["commit", "-m", "chore: retire check gate and invariants"],
+    );
+    let _ = fs::remove_file(&dump2);
+    // Remove the loose invariants blob so reconstruction fails.
+    let blob_path = repo2
+        .root
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(&blob_path).unwrap();
+    let pub_fail = repo2
+        .arc(&repo2.root)
+        .args(["publication", "--target", "master"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&pub_fail.get_output().stderr);
+    assert!(
+        stderr.contains("could not be reconstructed"),
+        "expected fail-closed reconstruction error: {stderr}"
+    );
+    assert!(
+        !dump2.exists(),
+        "retired gate must not execute when its historical invariants cannot be reconstructed"
+    );
+}

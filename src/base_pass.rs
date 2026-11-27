@@ -1006,16 +1006,51 @@ pub fn publication_participants(
                 gate.gate_trailers = serde_json::from_value(gate_trailers)?;
             }
             if let Some(obj) = invariants_obj {
-                if let (Some(path), Some(sha256)) = (
-                    obj.get("path").and_then(|v| v.as_str()),
-                    obj.get("sha256").and_then(|v| v.as_str()),
-                ) {
-                    gate.resolved_invariants = Some(crate::gate_trailers::ResolvedInvariants {
-                        path: path.to_string(),
-                        sha256: sha256.to_string(),
-                        entries: Vec::new(),
-                    });
+                let path = obj.get("path").and_then(|v| v.as_str()).with_context(|| {
+                    format!("publication base-pass gate {name:?} invariants missing path")
+                })?;
+                let expected_sha256 =
+                    obj.get("sha256")
+                        .and_then(|v| v.as_str())
+                        .with_context(|| {
+                            format!(
+                            "publication base-pass gate {name:?} invariants {path:?} missing digest"
+                        )
+                        })?;
+                let mut reconstructed = None;
+                for candidate in [
+                    baseline.revision.as_str(),
+                    base.revision.as_str(),
+                    revision,
+                    entry.execution.revision.as_str(),
+                ] {
+                    if let Ok(Some(content)) = crate::gitio::file_at(cwd, candidate, path) {
+                        if let Ok(parsed) =
+                            crate::gate_trailers::parse_invariants_file(path, &content)
+                        {
+                            if parsed.sha256 == expected_sha256 {
+                                reconstructed = Some(parsed);
+                                break;
+                            }
+                        }
+                    }
                 }
+                let Some(resolved) = reconstructed else {
+                    bail!(
+                        "publication base-pass gate {name:?} requires invariants {path:?} \
+                         ({expected_sha256}), which could not be reconstructed from baseline \
+                         revision {}",
+                        baseline.revision
+                    );
+                };
+                gate.resolved_invariants = Some(resolved);
+            }
+            if gate.invariants.is_some() && gate.resolved_invariants.is_none() {
+                bail!(
+                    "publication base-pass gate {name:?} declares invariants {:?} without a \
+                     reconstructable historical digest",
+                    gate.invariants.as_deref().unwrap_or_default()
+                );
             }
             gate.budget = entry.budget_ms;
             participants.insert(name.to_owned(), gate);

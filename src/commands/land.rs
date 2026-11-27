@@ -1019,8 +1019,18 @@ fn plan(
         projected_states.push(selected);
         declarations_used.push(normalized);
     }
-    // Every gate in the union runs in this attempt, whatever member profile
-    // required it. The strictest total bounds that complete suite.
+    let composed_obligations: Vec<(String, crate::gates::Gate)> = composed_order
+        .into_iter()
+        .map(|key| {
+            let gate = composed_by_key
+                .remove(&key)
+                .expect("ordered key exists in composed obligations");
+            (key.0, gate)
+        })
+        .collect();
+    // Every distinct gate obligation runs in this attempt across sequential
+    // passes, whatever member profile or trailer declaration required it.
+    // The strictest total bounds the complete pass schedule.
     let combined = crate::gates::GatesFile {
         budget: budget_rules.clone(),
         gates: gate_declarations
@@ -1030,9 +1040,12 @@ fn plan(
         ..Default::default()
     };
     let mut errors = combined.budget_errors();
-    let required = combined.gates.iter().collect::<Vec<_>>();
     if let Some(rules) = &combined.budget {
-        let cost = crate::gate_concurrency::total(&required);
+        let passes = super::gatekeeping::group_landing_passes(&composed_obligations);
+        let cost = passes.iter().try_fold(0_u64, |acc, pass| {
+            let pass_cost = crate::gate_concurrency::total(pass)?;
+            acc.checked_add(pass_cost)
+        });
         match (cost, rules.total) {
             (Some(cost), Some(total)) if cost > total => errors.push(format!(
                 "budget: integration sum {} exceeds total {} (combined landing suite)",
@@ -1058,9 +1071,9 @@ fn plan(
             "no required gates declared for this landing; declare an integration gate before landing",
         );
     }
-    // A stack runs one gate set at its top head: every gate a member
-    // requires must be one the top head requires, under the same
-    // declaration. A composed landing runs the union at its composed head.
+    // A stack runs at its top head: every gate a member requires must be one
+    // the top head requires, under the same gate definition (distinct per-member
+    // trailer obligations are each executed and bound individually at the top head).
     for (name, gate) in union.iter().filter(|_| shape == Shape::Stack) {
         if top_gates.get(name) != Some(&gate.identity) {
             return refuse(
@@ -1079,15 +1092,6 @@ fn plan(
     if gitio::fresh_branch_head(&ctx.cwd, &target)? != target_before {
         return refuse(1, "landing target moved while planning");
     }
-    let composed_obligations = composed_order
-        .into_iter()
-        .map(|key| {
-            let gate = composed_by_key
-                .remove(&key)
-                .expect("ordered key exists in composed obligations");
-            (key.0, gate)
-        })
-        .collect();
     Ok(Ok(Planned {
         plan: Plan {
             schema: PLAN_SCHEMA,
@@ -1792,27 +1796,33 @@ fn run_attempt(
         .clone();
     // A composed attempt replays first, and an attempt with auto-trailers
     // stamps each layer bottom-to-top first: the head it gates is the one it
-    // installs.
-    let composed_evidence = if pinned.shape == Shape::Composed || any_stamping {
-        match compose(ctx, store, &mut pinned, &mut intent, &projected_trailers) {
-            Ok(Ok(())) => {}
-            Ok(Err(refusal)) => {
-                abandon(ctx, store, &attempt, &refusal.message)?;
-                eprintln!("Cannot land: {}; nothing closed", refusal.message);
-                return Ok(refusal.code);
+    // installs. A stack whose members carry distinct per-member trailer
+    // obligations also gates per distinct `(gate, declaration_identity)` at
+    // the top head so one member's combined receipt never authorizes another.
+    let needs_compose = pinned.shape == Shape::Composed || any_stamping;
+    let has_distinct_obligations = composed_obligations.len() != gate_declarations.len();
+    let composed_evidence = if needs_compose || has_distinct_obligations {
+        if needs_compose {
+            match compose(ctx, store, &mut pinned, &mut intent, &projected_trailers) {
+                Ok(Ok(())) => {}
+                Ok(Err(refusal)) => {
+                    abandon(ctx, store, &attempt, &refusal.message)?;
+                    eprintln!("Cannot land: {}; nothing closed", refusal.message);
+                    return Ok(refusal.code);
+                }
+                Err(error) => {
+                    abandon(
+                        ctx,
+                        store,
+                        &attempt,
+                        &format!("composition failed: {error:#}"),
+                    )?;
+                    return Err(error);
+                }
             }
-            Err(error) => {
-                abandon(
-                    ctx,
-                    store,
-                    &attempt,
-                    &format!("composition failed: {error:#}"),
-                )?;
-                return Err(error);
-            }
+            crash_point("composed");
         }
-        crash_point("composed");
-        // The gates every member requires run at the composed head, once per
+        // The gates every member requires run at the landing head, once per
         // distinct `(gate, gate_trailers)` obligation, in a checkout the
         // attempt owns, with no ledger or change lock held.
         let gated = gate_composed(ctx, store, &pinned, &composed_obligations, &top, &attempt);
@@ -1829,14 +1839,15 @@ fn run_attempt(
                     return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
                 }
                 report.gate_failed = true;
+                let head_label = if needs_compose { "composed" } else { "top" };
                 abandon(
                     ctx,
                     store,
                     &attempt,
-                    "a required gate failed at the composed head",
+                    &format!("a required gate failed at the {head_label} head"),
                 )?;
                 eprintln!(
-                    "Cannot land: a required gate failed at the composed head; nothing closed"
+                    "Cannot land: a required gate failed at the {head_label} head; nothing closed"
                 );
                 return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
             }

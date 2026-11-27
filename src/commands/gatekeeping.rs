@@ -1392,6 +1392,26 @@ pub(crate) struct LandingGateRun<'a> {
     pub attempt: &'a str,
 }
 
+/// Partition gate obligations into sequential passes where each pass has unique
+/// gate names so distinct `(gate_name, declaration_identity)` obligations run
+/// cleanly without shadowing one another.
+pub(crate) fn group_landing_passes<'a>(
+    obligations: &'a [(String, gates::Gate)],
+) -> Vec<Vec<(&'a String, &'a gates::Gate)>> {
+    let mut passes: Vec<Vec<(&'a String, &'a gates::Gate)>> = Vec::new();
+    for (name, gate) in obligations {
+        if let Some(pass) = passes
+            .iter_mut()
+            .find(|pass| !pass.iter().any(|(existing, _)| *existing == name))
+        {
+            pass.push((name, gate));
+        } else {
+            passes.push(vec![(name, gate)]);
+        }
+    }
+    passes
+}
+
 /// Run a composed landing's gate obligations in its checkout, recording
 /// evidence on one member with the landing named. A pass already recorded at
 /// the composed tree answers its obligation under the rule every run follows:
@@ -1414,20 +1434,7 @@ pub(crate) fn verify_landing_head(
         &gitio::landing_retention_ref(run.change_id, run.commit),
         run.commit,
     )?;
-    // Group obligations into passes with unique gate names so distinct member
-    // witness/change-size inputs for the same gate name each run cleanly with
-    // their own verification run and environment without shadowing one another.
-    let mut passes: Vec<Vec<(&String, &gates::Gate)>> = Vec::new();
-    for (name, gate) in run.gates {
-        if let Some(pass) = passes
-            .iter_mut()
-            .find(|pass| !pass.iter().any(|(existing, _)| *existing == name))
-        {
-            pass.push((name, gate));
-        } else {
-            passes.push(vec![(name, gate)]);
-        }
-    }
+    let passes = group_landing_passes(run.gates);
     let answering = || Answering {
         tree: run.tree,
         head: run.commit,
