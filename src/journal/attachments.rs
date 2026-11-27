@@ -2,11 +2,12 @@
 //!
 //! Blobs live under `<hot>/attachments/<sha256>.<ext>` and
 //! `<cold>/attachments/<sha256>.<ext>` and are referenced in Markdown by the
-//! relative path `attachments/<sha256>.<ext>`. Only PNG, JPEG, WebP, and GIF
-//! payloads verified by magic bytes up to [`MAX_ATTACHMENT_BYTES`] are
-//! accepted; SVG, HTML, and other active formats are refused. Directory and
-//! blob opens inside the journal never follow symbolic links and verify both
-//! format and SHA-256 digest on every read and import.
+//! relative path `attachments/<sha256>.<ext>`. Only structurally valid PNG,
+//! JPEG, WebP, and GIF payloads up to [`MAX_ATTACHMENT_BYTES`] are accepted;
+//! SVG, HTML, truncated/magic-only payloads, and other active formats are
+//! refused. Directory and blob opens inside the journal never follow symbolic
+//! links and verify container structure and SHA-256 digest on every write,
+//! read, import, and rendered transform.
 
 use super::private_text::{Finding, Scanner};
 use super::{archive_dir, parse_artifact_name, relocation, DoctorFinding, JournalEvent};
@@ -28,6 +29,10 @@ pub(crate) const ATTACHMENTS_DIR: &str = "attachments";
 
 /// Maximum accepted byte length of one attached image (5 MiB).
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Maximum decompressed byte length accepted while scanning one compressed
+/// metadata chunk (2 MiB) to bound memory against decompression bombs.
+const MAX_METADATA_DECOMPRESS_BYTES: usize = 2 * 1024 * 1024;
 
 /// Allowed raster image formats. Active and vector formats are excluded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -67,7 +72,9 @@ impl ImageFormat {
         }
     }
 
-    /// Sniff an allowed raster image format strictly from magic bytes.
+    /// Sniff an allowed raster image format from its container signature.
+    /// Callers validating a blob must use [`validate_image_bytes`], which
+    /// validates the full container structure rather than the prefix alone.
     pub(crate) fn detect(bytes: &[u8]) -> Option<Self> {
         if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
         {
@@ -182,7 +189,8 @@ impl BundledAttachment {
         }
     }
 
-    /// Validate metadata, base64 encoding, size bounds, magic bytes, and SHA-256.
+    /// Validate metadata, base64 encoding, size bounds, full container
+    /// structure, and SHA-256 digest.
     pub(crate) fn validate_and_decode(&self) -> Result<(AttachmentId, Vec<u8>)> {
         let id = AttachmentId::parse_rel_path(&self.path)
             .with_context(|| format!("invalid bundled attachment path {:?}", self.path))?;
@@ -224,7 +232,9 @@ impl BundledAttachment {
                 decoded.len()
             );
         }
-        if ImageFormat::detect(&decoded) != Some(id.format) {
+        let validated = validate_image_bytes(&decoded)
+            .with_context(|| format!("bundled attachment {} is invalid", self.path))?;
+        if validated != id.format {
             bail!(
                 "bundled attachment {} bytes do not match {}",
                 self.path,
@@ -289,8 +299,8 @@ pub(crate) enum ReadOutcome {
 ///
 /// The source file's host path is never stored in the returned metadata or alt
 /// text. Non-regular files (directories, FIFOs, devices), empty files, files
-/// larger than [`MAX_ATTACHMENT_BYTES`], and non-raster/active formats (such as
-/// SVG or HTML) are refused.
+/// larger than [`MAX_ATTACHMENT_BYTES`], truncated/malformed containers, and
+/// non-raster/active formats (such as SVG or HTML) are refused.
 pub(super) fn load_source(path: &Path, scanner: &Scanner) -> Result<ValidatedAttachment> {
     if path.as_os_str().is_empty() {
         bail!("attachment path must not be empty");
@@ -388,6 +398,8 @@ fn looks_like_markup_or_svg(bytes: &[u8]) -> bool {
         || prefix.starts_with(b"<!--")
 }
 
+/// Validate size bounds, reject active markup, and structurally validate the
+/// full PNG, JPEG, WebP, or GIF container framing.
 pub(crate) fn validate_image_bytes(bytes: &[u8]) -> Result<ImageFormat> {
     if bytes.is_empty() {
         bail!("attachment is empty");
@@ -401,11 +413,501 @@ pub(crate) fn validate_image_bytes(bytes: &[u8]) -> Result<ImageFormat> {
              supported raster image formats are PNG, JPEG, WebP, and GIF"
         );
     }
-    ImageFormat::detect(bytes).ok_or_else(|| {
+    let format = ImageFormat::detect(bytes).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported attachment format: magic bytes do not match PNG, JPEG, WebP, or GIF"
         )
-    })
+    })?;
+    match format {
+        ImageFormat::Png => validate_png(bytes)?,
+        ImageFormat::Jpeg => validate_jpeg(bytes)?,
+        ImageFormat::Webp => validate_webp(bytes)?,
+        ImageFormat::Gif => validate_gif(bytes)?,
+    }
+    Ok(format)
+}
+
+fn validate_png(bytes: &[u8]) -> Result<()> {
+    if bytes.len() < 8 + 25 + 12 {
+        bail!("truncated PNG image");
+    }
+    let mut pos = 8usize;
+    let mut saw_ihdr = false;
+    let mut needs_plte = false;
+    let mut saw_plte = false;
+    let mut idat_bytes = 0usize;
+    let mut idat_head = [0u8; 2];
+    let mut idat_head_len = 0usize;
+    let mut saw_iend = false;
+
+    while pos < bytes.len() {
+        if saw_iend {
+            bail!("trailing bytes after PNG IEND chunk");
+        }
+        if pos + 12 > bytes.len() {
+            bail!("truncated PNG chunk header");
+        }
+        let len_u32 =
+            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        if len_u32 > 0x7FFF_FFFF {
+            bail!("PNG chunk length exceeds 31-bit limit");
+        }
+        let len = len_u32 as usize;
+        let kind = &bytes[pos + 4..pos + 8];
+        if !kind.iter().all(|b| b.is_ascii_alphabetic()) {
+            bail!("malformed PNG chunk type");
+        }
+        let data_start = pos + 8;
+        let Some(data_end) = data_start.checked_add(len) else {
+            bail!("PNG chunk length overflow");
+        };
+        let Some(chunk_end) = data_end.checked_add(4) else {
+            bail!("PNG chunk length overflow");
+        };
+        if chunk_end > bytes.len() {
+            bail!("truncated PNG chunk");
+        }
+        let expected_crc = u32::from_be_bytes([
+            bytes[data_end],
+            bytes[data_end + 1],
+            bytes[data_end + 2],
+            bytes[data_end + 3],
+        ]);
+        let actual_crc = crc32(&bytes[pos + 4..data_end]);
+        if actual_crc != expected_crc {
+            bail!("PNG chunk CRC mismatch");
+        }
+        let data = &bytes[data_start..data_end];
+        if !saw_ihdr {
+            if kind != b"IHDR" || len != 13 {
+                bail!("PNG must begin with a 13-byte IHDR chunk");
+            }
+            let width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            let height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+            if width == 0 || height == 0 || width > 0x7FFF_FFFF || height > 0x7FFF_FFFF {
+                bail!("PNG IHDR dimensions are invalid");
+            }
+            let bit_depth = data[8];
+            let color_type = data[9];
+            let valid_depth = match color_type {
+                0 => matches!(bit_depth, 1 | 2 | 4 | 8 | 16),
+                2 | 4 | 6 => matches!(bit_depth, 8 | 16),
+                3 => matches!(bit_depth, 1 | 2 | 4 | 8),
+                _ => false,
+            };
+            if !valid_depth || data[10] != 0 || data[11] != 0 || data[12] > 1 {
+                bail!("PNG IHDR parameters are invalid");
+            }
+            needs_plte = color_type == 3;
+            saw_ihdr = true;
+        } else {
+            match kind {
+                b"IHDR" => bail!("duplicate PNG IHDR chunk"),
+                b"PLTE" => {
+                    if len == 0 || !len.is_multiple_of(3) || len > 768 {
+                        bail!("invalid PNG PLTE chunk length");
+                    }
+                    saw_plte = true;
+                }
+                b"IDAT" => {
+                    for &b in data {
+                        if idat_head_len < 2 {
+                            idat_head[idat_head_len] = b;
+                            idat_head_len += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    idat_bytes = idat_bytes.saturating_add(len);
+                }
+                b"IEND" => {
+                    if len != 0 {
+                        bail!("PNG IEND chunk must be empty");
+                    }
+                    saw_iend = true;
+                }
+                _ => {}
+            }
+        }
+        pos = chunk_end;
+    }
+
+    if !saw_ihdr || !saw_iend {
+        bail!("incomplete PNG container (missing IHDR or IEND)");
+    }
+    if needs_plte && !saw_plte {
+        bail!("indexed-color PNG is missing PLTE chunk");
+    }
+    if idat_bytes < 6 {
+        bail!("PNG is missing compressed IDAT image data");
+    }
+    let cmf = idat_head[0];
+    let flg = idat_head[1];
+    if (cmf & 0x0F) != 8
+        || (cmf >> 4) > 7
+        || !((u16::from(cmf) << 8) | u16::from(flg)).is_multiple_of(31)
+    {
+        bail!("PNG IDAT stream does not begin with a valid zlib header");
+    }
+    Ok(())
+}
+
+/// One framed JPEG segment or scan returned by [`walk_jpeg_segments`].
+struct JpegSegment {
+    marker: u8,
+    /// Full byte slice start (at the marker's `0xFF`).
+    start: usize,
+    /// Payload start (after length bytes for length-bearing segments, or at
+    /// `start + 2` for standalone markers).
+    payload_start: usize,
+    /// End of marker header (or end of segment for non-SOS markers).
+    header_end: usize,
+    /// End of segment including any entropy-coded scan data for SOS (`0xDA`).
+    end: usize,
+}
+
+/// Walk every JPEG marker segment and entropy-coded scan from `SOI` through
+/// `EOI`, skipping byte-stuffed `0xFF 0x00` and restart markers `0xFFD0..=0xFFD7`
+/// inside scan data. Rejects truncated segments, nested `SOI`, missing `EOI`,
+/// and trailing bytes after `EOI`.
+fn walk_jpeg_segments(bytes: &[u8]) -> Result<Vec<JpegSegment>> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        bail!("truncated JPEG SOI header");
+    }
+    let mut segments = Vec::new();
+    let mut pos = 2usize;
+    let mut saw_eoi = false;
+
+    while pos < bytes.len() {
+        if saw_eoi {
+            bail!("trailing bytes after JPEG EOI marker");
+        }
+        if bytes[pos] != 0xFF {
+            bail!("malformed JPEG marker stream");
+        }
+        let seg_start = pos;
+        while pos < bytes.len() && bytes[pos] == 0xFF {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            bail!("truncated JPEG marker");
+        }
+        let marker = bytes[pos];
+        pos += 1;
+        if marker == 0x00 {
+            bail!("unexpected stuffed byte outside JPEG scan");
+        }
+        if marker == 0xD8 {
+            bail!("unexpected nested JPEG SOI marker");
+        }
+        if marker == 0xD9 {
+            segments.push(JpegSegment {
+                marker,
+                start: seg_start,
+                payload_start: pos,
+                header_end: pos,
+                end: pos,
+            });
+            saw_eoi = true;
+            continue;
+        }
+        if matches!(marker, 0xD0..=0xD7 | 0x01) {
+            segments.push(JpegSegment {
+                marker,
+                start: seg_start,
+                payload_start: pos,
+                header_end: pos,
+                end: pos,
+            });
+            continue;
+        }
+        if pos + 2 > bytes.len() {
+            bail!("truncated JPEG segment length");
+        }
+        let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        if len < 2 || pos + len > bytes.len() {
+            bail!("invalid JPEG segment length");
+        }
+        let payload_start = pos + 2;
+        let header_end = pos + len;
+        if marker == 0xDA {
+            // Walk entropy-coded scan until the next non-stuffed, non-restart marker.
+            let mut scan = header_end;
+            let scan_end = loop {
+                if scan >= bytes.len() {
+                    bail!("truncated JPEG entropy-coded scan");
+                }
+                if bytes[scan] != 0xFF {
+                    scan += 1;
+                    continue;
+                }
+                let ff_start = scan;
+                while scan < bytes.len() && bytes[scan] == 0xFF {
+                    scan += 1;
+                }
+                if scan >= bytes.len() {
+                    bail!("truncated JPEG marker inside scan");
+                }
+                let next = bytes[scan];
+                if next == 0x00 || (0xD0..=0xD7).contains(&next) {
+                    scan += 1;
+                    continue;
+                }
+                break ff_start;
+            };
+            if scan_end == header_end {
+                bail!("empty JPEG entropy-coded scan");
+            }
+            segments.push(JpegSegment {
+                marker,
+                start: seg_start,
+                payload_start,
+                header_end,
+                end: scan_end,
+            });
+            pos = scan_end;
+        } else {
+            segments.push(JpegSegment {
+                marker,
+                start: seg_start,
+                payload_start,
+                header_end,
+                end: header_end,
+            });
+            pos = header_end;
+        }
+    }
+
+    if !saw_eoi {
+        bail!("incomplete JPEG container (missing EOI marker)");
+    }
+    Ok(segments)
+}
+
+fn is_jpeg_sof_marker(marker: u8) -> bool {
+    matches!(
+        marker,
+        0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF
+    )
+}
+
+fn validate_jpeg(bytes: &[u8]) -> Result<()> {
+    let segments = walk_jpeg_segments(bytes)?;
+    let mut saw_sof = false;
+    let mut saw_sos = false;
+    for seg in &segments {
+        if is_jpeg_sof_marker(seg.marker) {
+            let payload = &bytes[seg.payload_start..seg.header_end];
+            if payload.len() < 6 {
+                bail!("truncated JPEG SOF frame header");
+            }
+            let precision = payload[0];
+            let height = u16::from_be_bytes([payload[1], payload[2]]);
+            let width = u16::from_be_bytes([payload[3], payload[4]]);
+            let components = payload[5] as usize;
+            if !matches!(precision, 8 | 12)
+                || width == 0
+                || height == 0
+                || !(1..=4).contains(&components)
+                || payload.len() != 6 + 3 * components
+            {
+                bail!("invalid JPEG SOF frame parameters");
+            }
+            saw_sof = true;
+        } else if seg.marker == 0xDA {
+            let payload = &bytes[seg.payload_start..seg.header_end];
+            if payload.len() < 4 {
+                bail!("truncated JPEG SOS header");
+            }
+            let components = payload[0] as usize;
+            if !(1..=4).contains(&components) || payload.len() != 1 + 2 * components + 3 {
+                bail!("invalid JPEG SOS header parameters");
+            }
+            saw_sos = true;
+        }
+    }
+    if !saw_sof || !saw_sos {
+        bail!("incomplete JPEG image (missing SOF frame or SOS scan)");
+    }
+    Ok(())
+}
+
+fn validate_webp(bytes: &[u8]) -> Result<()> {
+    if bytes.len() < 20 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        bail!("truncated WebP container");
+    }
+    let riff_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if riff_size < 12 || riff_size + 8 != bytes.len() {
+        bail!("WebP RIFF size does not match file length");
+    }
+    let mut pos = 12usize;
+    let mut saw_image = false;
+    let mut saw_vp8x = false;
+    let mut saw_anim = false;
+    let mut saw_anmf = false;
+
+    while pos < bytes.len() {
+        if pos + 8 > bytes.len() {
+            bail!("truncated WebP chunk header");
+        }
+        let fourcc = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        let data_start = pos + 8;
+        let Some(data_end) = data_start.checked_add(size) else {
+            bail!("WebP chunk size overflow");
+        };
+        if data_end > bytes.len() {
+            bail!("truncated WebP chunk payload");
+        }
+        let padded_end = data_end
+            .checked_add(size & 1)
+            .ok_or_else(|| anyhow::anyhow!("WebP chunk size overflow"))?;
+        if padded_end > bytes.len() {
+            bail!("truncated WebP chunk padding byte");
+        }
+        let data = &bytes[data_start..data_end];
+        match fourcc {
+            b"VP8 " => {
+                if data.len() < 10 {
+                    bail!("truncated WebP VP8 bitstream");
+                }
+                let is_keyframe = (data[0] & 0x01) == 0;
+                if !is_keyframe || &data[3..6] != b"\x9d\x01\x2a" {
+                    bail!("invalid WebP VP8 keyframe header");
+                }
+                let width = u16::from_le_bytes([data[6], data[7]]) & 0x3FFF;
+                let height = u16::from_le_bytes([data[8], data[9]]) & 0x3FFF;
+                if width == 0 || height == 0 {
+                    bail!("WebP VP8 dimensions must be non-zero");
+                }
+                saw_image = true;
+            }
+            b"VP8L" => {
+                if data.len() < 5 || data[0] != 0x2F {
+                    bail!("invalid WebP VP8L bitstream header");
+                }
+                saw_image = true;
+            }
+            b"VP8X" => {
+                if data.len() != 10 {
+                    bail!("invalid WebP VP8X header length");
+                }
+                saw_vp8x = true;
+            }
+            b"ANIM" => {
+                if data.len() != 6 {
+                    bail!("invalid WebP ANIM chunk length");
+                }
+                saw_anim = true;
+            }
+            b"ANMF" => {
+                if data.len() < 16 {
+                    bail!("truncated WebP ANMF frame");
+                }
+                saw_anmf = true;
+            }
+            _ => {}
+        }
+        pos = padded_end;
+    }
+
+    if !saw_image && !(saw_vp8x && saw_anim && saw_anmf) {
+        bail!("WebP container carries no VP8/VP8L/ANMF image bitstream");
+    }
+    Ok(())
+}
+
+fn validate_gif(bytes: &[u8]) -> Result<()> {
+    if bytes.len() < 14 || (&bytes[0..6] != b"GIF87a" && &bytes[0..6] != b"GIF89a") {
+        bail!("truncated GIF header");
+    }
+    let width = u16::from_le_bytes([bytes[6], bytes[7]]);
+    let height = u16::from_le_bytes([bytes[8], bytes[9]]);
+    if width == 0 || height == 0 {
+        bail!("GIF logical screen dimensions must be non-zero");
+    }
+    let mut pos = 13usize;
+    let packed = bytes[10];
+    if (packed & 0x80) != 0 {
+        let gct = 3usize << ((packed & 0x07) + 1);
+        pos = pos
+            .checked_add(gct)
+            .ok_or_else(|| anyhow::anyhow!("GIF color table overflow"))?;
+        if pos > bytes.len() {
+            bail!("truncated GIF global color table");
+        }
+    }
+    let mut saw_image = false;
+    let mut saw_trailer = false;
+
+    while pos < bytes.len() {
+        if saw_trailer {
+            bail!("trailing bytes after GIF trailer");
+        }
+        match bytes[pos] {
+            0x3B => {
+                saw_trailer = true;
+                pos += 1;
+            }
+            0x21 => {
+                if pos + 2 > bytes.len() {
+                    bail!("truncated GIF extension");
+                }
+                let Some(next) = gif_skip_subblocks(bytes, pos + 2) else {
+                    bail!("truncated GIF extension sub-blocks");
+                };
+                pos = next;
+            }
+            0x2C => {
+                if pos + 10 > bytes.len() {
+                    bail!("truncated GIF image descriptor");
+                }
+                let img_w = u16::from_le_bytes([bytes[pos + 5], bytes[pos + 6]]);
+                let img_h = u16::from_le_bytes([bytes[pos + 7], bytes[pos + 8]]);
+                if img_w == 0 || img_h == 0 {
+                    bail!("GIF image descriptor dimensions must be non-zero");
+                }
+                let lpacked = bytes[pos + 9];
+                pos += 10;
+                if (lpacked & 0x80) != 0 {
+                    let lct = 3usize << ((lpacked & 0x07) + 1);
+                    pos = pos
+                        .checked_add(lct)
+                        .ok_or_else(|| anyhow::anyhow!("GIF local color table overflow"))?;
+                    if pos > bytes.len() {
+                        bail!("truncated GIF local color table");
+                    }
+                }
+                if pos >= bytes.len() {
+                    bail!("truncated GIF image LZW header");
+                }
+                let lzw_min = bytes[pos];
+                if !(2..=8).contains(&lzw_min) {
+                    bail!("invalid GIF LZW minimum code size");
+                }
+                pos += 1;
+                if pos >= bytes.len() || bytes[pos] == 0 {
+                    bail!("GIF image descriptor carries no LZW sub-blocks");
+                }
+                let Some(next) = gif_skip_subblocks(bytes, pos) else {
+                    bail!("truncated GIF image sub-blocks");
+                };
+                pos = next;
+                saw_image = true;
+            }
+            _ => bail!("unexpected GIF block marker"),
+        }
+    }
+
+    if !saw_trailer || !saw_image {
+        bail!("incomplete GIF container (missing image data or trailer)");
+    }
+    Ok(())
 }
 
 /// Derive a privacy-safe Markdown alt label from a source file's basename stem
@@ -637,6 +1139,61 @@ fn ensure_attachments_dir(store_dir: &Path, dir_mode: Option<u32>) -> Result<(Pa
     }
 }
 
+/// Read-only preflight verifying that `<store_dir>/attachments/<id>` is either
+/// absent or already holds an identical, verified regular blob.
+///
+/// Refuses symlinked roots/directories, non-regular entries, or corrupt/mismatched
+/// destination files before any transaction file or sibling blob is published.
+pub(crate) fn check_destination_available(store_dir: &Path, id: &AttachmentId) -> Result<()> {
+    let root_fd = match open_dir_nofollow(store_dir) {
+        Ok(fd) => fd,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("{} must be a real directory", store_dir.display()));
+        }
+    };
+    let att_fd = match open_subdir_nofollow(&root_fd, ATTACHMENTS_DIR) {
+        Ok(fd) => fd,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "{} must be a real directory (not a symbolic link)",
+                    store_dir.join(ATTACHMENTS_DIR).display()
+                )
+            });
+        }
+    };
+    let name = id.filename();
+    match fstatat_nofollow(&att_fd, &name) {
+        Ok(stat) => {
+            #[allow(clippy::unnecessary_cast)]
+            let is_reg = (stat.st_mode as u32 & libc::S_IFMT as u32) == libc::S_IFREG as u32;
+            if !is_reg {
+                bail!("refusing non-regular attachment entry at {}", id.rel_path());
+            }
+            match verify_opened_blob(&att_fd, id) {
+                ReadOutcome::Available { .. } => Ok(()),
+                ReadOutcome::Corrupt(reason) => {
+                    bail!(
+                        "existing attachment {} is corrupt ({reason}); refusing overwrite",
+                        id.rel_path()
+                    );
+                }
+                ReadOutcome::Missing => Ok(()),
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "cannot inspect {}",
+                store_dir.join(ATTACHMENTS_DIR).join(&name).display()
+            )
+        }),
+    }
+}
+
 /// Atomically store verified attachment bytes under
 /// `<store_dir>/attachments/<sha256>.<ext>`.
 ///
@@ -768,11 +1325,15 @@ fn verify_opened_blob(att_fd: &OwnedFd, id: &AttachmentId) -> ReadOutcome {
     if bytes.is_empty() || bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
         return ReadOutcome::Corrupt("size out of bounds".to_string());
     }
-    if ImageFormat::detect(&bytes) != Some(id.format) {
-        return ReadOutcome::Corrupt(format!(
-            "magic bytes do not match {}",
-            id.format.media_type()
-        ));
+    match validate_image_bytes(&bytes) {
+        Ok(fmt) if fmt == id.format => {}
+        Ok(_) => {
+            return ReadOutcome::Corrupt(format!(
+                "container format does not match {}",
+                id.format.media_type()
+            ));
+        }
+        Err(err) => return ReadOutcome::Corrupt(err.to_string()),
     }
     let actual = hex::encode(Sha256::digest(&bytes));
     if actual != id.sha256 {
@@ -815,7 +1376,7 @@ pub(crate) fn read_verified(hot: &Path, id: &AttachmentId) -> ReadOutcome {
 // ---------------------------------------------------------------------------
 
 /// Collect all attachments referenced by regular artifact files currently in
-/// `store_dir`, excluding `skip_files`.
+/// `store_dir`, excluding `skip_files` and relocated tombstones.
 fn attachments_used_in_store(
     store_dir: &Path,
     events: &[JournalEvent],
@@ -833,7 +1394,10 @@ fn attachments_used_in_store(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if parse_artifact_name(&name).is_none() || skip_files.contains(name.as_str()) {
+        if parse_artifact_name(&name).is_none()
+            || skip_files.contains(name.as_str())
+            || relocation(events, &name).is_some()
+        {
             continue;
         }
         if let Ok(body) = std::fs::read_to_string(entry.path()) {
@@ -844,7 +1408,7 @@ fn attachments_used_in_store(
 }
 
 /// Copy every attachment referenced by `filename` (body + events) from
-/// `source_dir` into `dest_dir`, verifying hash and format.
+/// `source_dir` into `dest_dir`, verifying hash and container structure.
 pub(super) fn copy_for_artifact(
     source_dir: &Path,
     dest_dir: &Path,
@@ -888,10 +1452,16 @@ pub(super) fn copy_for_artifact(
 }
 
 /// Remove unreferenced blobs from `store_dir/attachments/` after an artifact
-/// leaves `store_dir`. Blobs still referenced by any remaining artifact in
-/// `store_dir` are preserved.
+/// leaves `store_dir`.
+///
+/// Blobs still referenced by any remaining artifact in `store_dir` stay in
+/// place. If a surviving artifact in `sibling_dir` (the other storage tier)
+/// still references a candidate blob, a verified copy is ensured in
+/// `sibling_dir/attachments/` before unlinking the copy in `store_dir` so no
+/// surviving artifact loses its only journal copy.
 pub(crate) fn prune_unreferenced_from_store(
     store_dir: &Path,
+    sibling_dir: &Path,
     events: &[JournalEvent],
     candidates: &[AttachmentId],
     leaving_files: &BTreeSet<&str>,
@@ -899,7 +1469,8 @@ pub(crate) fn prune_unreferenced_from_store(
     if candidates.is_empty() {
         return Ok(());
     }
-    let still_used = attachments_used_in_store(store_dir, events, leaving_files)?;
+    let still_used_here = attachments_used_in_store(store_dir, events, leaving_files)?;
+    let still_used_sibling = attachments_used_in_store(sibling_dir, events, leaving_files)?;
     let Ok(root_fd) = open_dir_nofollow(store_dir) else {
         return Ok(());
     };
@@ -908,8 +1479,24 @@ pub(crate) fn prune_unreferenced_from_store(
     };
     let mut removed_any = false;
     for id in candidates {
-        if still_used.contains(id) {
+        if still_used_here.contains(id) {
             continue;
+        }
+        if still_used_sibling.contains(id)
+            && !matches!(
+                read_verified_in_store(sibling_dir, id),
+                ReadOutcome::Available { .. }
+            )
+        {
+            match verify_opened_blob(&att_fd, id) {
+                ReadOutcome::Available { bytes } => {
+                    store_bytes(sibling_dir, id, &bytes, None, None)?;
+                }
+                ReadOutcome::Missing | ReadOutcome::Corrupt(_) => {
+                    // Never delete when we cannot ensure a verified copy for the surviving reference.
+                    continue;
+                }
+            }
         }
         let name = id.filename();
         let c = c_name(&name)?;
@@ -1004,7 +1591,7 @@ pub(crate) fn copy_relocation_attachments(
             continue;
         }
         match read_verified(hot, id) {
-            ReadOutcome::Available { bytes, .. } => {
+            ReadOutcome::Available { bytes } => {
                 store_bytes(destination_dir, id, &bytes, Some(0o600), Some(0o700))?;
             }
             ReadOutcome::Missing => {
@@ -1205,34 +1792,50 @@ pub(super) fn inspect(
 // Image metadata privacy scanning & stripping
 // ---------------------------------------------------------------------------
 
-/// Scan textual metadata chunks embedded inside a validated raster image for
-/// private paths, addresses, or hostnames using `scanner`.
-pub(super) fn scan_metadata(format: ImageFormat, bytes: &[u8], scanner: &Scanner) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    for text in extract_metadata_strings(format, bytes) {
-        findings.extend(scanner.findings(&text));
+/// Result of scanning an image's metadata chunks: matched private stretches
+/// plus any compressed/structured metadata chunks that could not be inspected.
+#[derive(Debug, Default)]
+pub(super) struct MetadataScan {
+    pub(super) findings: Vec<Finding>,
+    pub(super) unreadable: Vec<String>,
+}
+
+/// Scan textual and compressed metadata chunks embedded inside a validated
+/// raster image for private paths, addresses, or hostnames using `scanner`.
+pub(super) fn scan_metadata(format: ImageFormat, bytes: &[u8], scanner: &Scanner) -> MetadataScan {
+    let mut scan = MetadataScan::default();
+    let (texts, unreadable) = extract_metadata_strings(format, bytes);
+    for text in texts {
+        scan.findings.extend(scanner.findings(&text));
     }
-    findings
+    scan.unreadable = unreadable;
+    scan
 }
 
 /// Remove textual/EXIF/XMP/comment metadata chunks from a validated raster
 /// image so rendered `data:` URIs never carry private metadata under
-/// `--strip-private`.
+/// `--strip-private`, validating the resulting container before returning it.
 pub(crate) fn strip_metadata(format: ImageFormat, bytes: &[u8]) -> Result<Vec<u8>> {
-    match format {
-        ImageFormat::Png => strip_png_metadata(bytes),
-        ImageFormat::Jpeg => strip_jpeg_metadata(bytes),
-        ImageFormat::Webp => strip_webp_metadata(bytes),
-        ImageFormat::Gif => strip_gif_metadata(bytes),
+    let stripped = match format {
+        ImageFormat::Png => strip_png_metadata(bytes)?,
+        ImageFormat::Jpeg => strip_jpeg_metadata(bytes)?,
+        ImageFormat::Webp => strip_webp_metadata(bytes)?,
+        ImageFormat::Gif => strip_gif_metadata(bytes)?,
+    };
+    let validated =
+        validate_image_bytes(&stripped).context("stripped image failed container validation")?;
+    if validated != format {
+        bail!("stripped image format changed unexpectedly");
     }
+    Ok(stripped)
 }
 
-fn extract_metadata_strings(format: ImageFormat, bytes: &[u8]) -> Vec<String> {
+fn extract_metadata_strings(format: ImageFormat, bytes: &[u8]) -> (Vec<String>, Vec<String>) {
     match format {
         ImageFormat::Png => extract_png_metadata(bytes),
-        ImageFormat::Jpeg => extract_jpeg_metadata(bytes),
-        ImageFormat::Webp => extract_webp_metadata(bytes),
-        ImageFormat::Gif => extract_gif_metadata(bytes),
+        ImageFormat::Jpeg => (extract_jpeg_metadata(bytes), Vec::new()),
+        ImageFormat::Webp => (extract_webp_metadata(bytes), Vec::new()),
+        ImageFormat::Gif => (extract_gif_metadata(bytes), Vec::new()),
     }
 }
 
@@ -1242,14 +1845,12 @@ fn printable_runs(data: &[u8]) -> Vec<String> {
     for &b in data {
         if matches!(b, 0x20..=0x7E | b'\t' | b'\n' | b'\r') {
             cur.push(b);
-        } else {
-            if cur.len() >= 4 {
-                if let Ok(s) = String::from_utf8(std::mem::take(&mut cur)) {
-                    out.push(s);
-                }
-            } else {
-                cur.clear();
+        } else if cur.len() >= 4 {
+            if let Ok(s) = String::from_utf8(std::mem::take(&mut cur)) {
+                out.push(s);
             }
+        } else {
+            cur.clear();
         }
     }
     if cur.len() >= 4 {
@@ -1260,8 +1861,9 @@ fn printable_runs(data: &[u8]) -> Vec<String> {
     out
 }
 
-fn extract_png_metadata(bytes: &[u8]) -> Vec<String> {
+fn extract_png_metadata(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
     let mut out = Vec::new();
+    let mut unreadable = Vec::new();
     let mut pos = 8;
     while pos + 12 <= bytes.len() {
         let len = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
@@ -1275,12 +1877,88 @@ fn extract_png_metadata(bytes: &[u8]) -> Vec<String> {
             break;
         }
         let data = &bytes[data_start..data_start + len];
-        if matches!(kind, b"tEXt" | b"iTXt" | b"eXIf") {
-            out.extend(printable_runs(data));
+        match kind {
+            b"tEXt" | b"eXIf" => out.extend(printable_runs(data)),
+            b"zTXt" => {
+                if let Some(nul) = data.iter().position(|&b| b == 0) {
+                    out.extend(printable_runs(&data[..nul]));
+                    if nul + 2 <= data.len() && data[nul + 1] == 0 {
+                        match inflate_zlib_bounded(&data[nul + 2..], MAX_METADATA_DECOMPRESS_BYTES)
+                        {
+                            Ok(decompressed) => out.extend(printable_runs(&decompressed)),
+                            Err(err) => {
+                                unreadable.push(format!("unreadable PNG zTXt chunk: {err}"))
+                            }
+                        }
+                    } else {
+                        unreadable.push(
+                            "unreadable PNG zTXt chunk: unsupported compression method".to_string(),
+                        );
+                    }
+                } else {
+                    unreadable
+                        .push("unreadable PNG zTXt chunk: missing keyword delimiter".to_string());
+                }
+            }
+            b"iTXt" => {
+                // <keyword>\0<compression_flag><compression_method><lang>\0<translated>\0<text>
+                if let Some(k_nul) = data.iter().position(|&b| b == 0) {
+                    out.extend(printable_runs(&data[..k_nul]));
+                    if k_nul + 3 <= data.len() {
+                        let comp_flag = data[k_nul + 1];
+                        let comp_method = data[k_nul + 2];
+                        let rest = &data[k_nul + 3..];
+                        if let Some(l_nul) = rest.iter().position(|&b| b == 0) {
+                            out.extend(printable_runs(&rest[..l_nul]));
+                            let after_lang = &rest[l_nul + 1..];
+                            if let Some(t_nul) = after_lang.iter().position(|&b| b == 0) {
+                                out.extend(printable_runs(&after_lang[..t_nul]));
+                                let text_bytes = &after_lang[t_nul + 1..];
+                                match comp_flag {
+                                    0 => out.extend(printable_runs(text_bytes)),
+                                    1 if comp_method == 0 => {
+                                        match inflate_zlib_bounded(
+                                            text_bytes,
+                                            MAX_METADATA_DECOMPRESS_BYTES,
+                                        ) {
+                                            Ok(decompressed) => {
+                                                out.extend(printable_runs(&decompressed))
+                                            }
+                                            Err(err) => unreadable.push(format!(
+                                                "unreadable compressed PNG iTXt chunk: {err}"
+                                            )),
+                                        }
+                                    }
+                                    _ => unreadable.push(
+                                        "unreadable PNG iTXt chunk: unsupported compression"
+                                            .to_string(),
+                                    ),
+                                }
+                            } else {
+                                unreadable.push(
+                                    "unreadable PNG iTXt chunk: missing translated keyword delimiter"
+                                        .to_string(),
+                                );
+                            }
+                        } else {
+                            unreadable.push(
+                                "unreadable PNG iTXt chunk: missing language tag delimiter"
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        unreadable.push("unreadable PNG iTXt chunk: truncated header".to_string());
+                    }
+                } else {
+                    unreadable
+                        .push("unreadable PNG iTXt chunk: missing keyword delimiter".to_string());
+                }
+            }
+            _ => {}
         }
         pos = chunk_end;
     }
-    out
+    (out, unreadable)
 }
 
 fn strip_png_metadata(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -1308,88 +1986,40 @@ fn strip_png_metadata(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+fn is_jpeg_metadata_marker(marker: u8) -> bool {
+    marker == 0xFE || (0xE1..=0xEF).contains(&marker)
+}
+
 fn extract_jpeg_metadata(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
-    let mut pos = 2;
-    while pos + 2 <= bytes.len() {
-        if bytes[pos] != 0xFF {
-            break;
+    let Ok(segments) = walk_jpeg_segments(bytes) else {
+        return out;
+    };
+    for seg in segments {
+        if is_jpeg_metadata_marker(seg.marker) {
+            out.extend(printable_runs(&bytes[seg.payload_start..seg.header_end]));
+        } else if seg.marker == 0xE0 {
+            let payload = &bytes[seg.payload_start..seg.header_end];
+            if !payload.starts_with(b"JFIF\0") || payload.len() > 14 {
+                out.extend(printable_runs(payload));
+            }
         }
-        while pos < bytes.len() && bytes[pos] == 0xFF {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        let marker = bytes[pos];
-        pos += 1;
-        if marker == 0xD9 || marker == 0xDA {
-            break;
-        }
-        if matches!(marker, 0xD0..=0xD8 | 0x01) {
-            continue;
-        }
-        if pos + 2 > bytes.len() {
-            break;
-        }
-        let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-        if len < 2 || pos + len > bytes.len() {
-            break;
-        }
-        let payload = &bytes[pos + 2..pos + len];
-        if marker == 0xFE || (0xE1..=0xEF).contains(&marker) {
-            out.extend(printable_runs(payload));
-        }
-        pos += len;
     }
     out
 }
 
 fn strip_jpeg_metadata(bytes: &[u8]) -> Result<Vec<u8>> {
-    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
-        bail!("truncated JPEG header");
-    }
+    let segments = walk_jpeg_segments(bytes)?;
     let mut out = Vec::with_capacity(bytes.len());
-    out.extend_from_slice(&bytes[..2]);
-    let mut pos = 2;
-    while pos < bytes.len() {
-        if bytes[pos] != 0xFF {
-            bail!("malformed JPEG marker stream");
+    out.extend_from_slice(&bytes[..2]); // SOI
+    for seg in segments {
+        let drop_app0 = seg.marker == 0xE0 && {
+            let payload = &bytes[seg.payload_start..seg.header_end];
+            !payload.starts_with(b"JFIF\0") || payload.len() > 14
+        };
+        if !is_jpeg_metadata_marker(seg.marker) && !drop_app0 {
+            out.extend_from_slice(&bytes[seg.start..seg.end]);
         }
-        let seg_start = pos;
-        while pos < bytes.len() && bytes[pos] == 0xFF {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        let marker = bytes[pos];
-        pos += 1;
-        if marker == 0xDA {
-            // SOS and entropy-coded scan through EOI stay untouched.
-            out.extend_from_slice(&bytes[seg_start..]);
-            return Ok(out);
-        }
-        if marker == 0xD9 {
-            out.extend_from_slice(&bytes[seg_start..pos]);
-            return Ok(out);
-        }
-        if matches!(marker, 0xD0..=0xD8 | 0x01) {
-            out.extend_from_slice(&bytes[seg_start..pos]);
-            continue;
-        }
-        if pos + 2 > bytes.len() {
-            bail!("truncated JPEG segment length");
-        }
-        let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-        if len < 2 || pos + len > bytes.len() {
-            bail!("invalid JPEG segment length");
-        }
-        let seg_end = pos + len;
-        if marker != 0xFE && !(0xE1..=0xEF).contains(&marker) {
-            out.extend_from_slice(&bytes[seg_start..seg_end]);
-        }
-        pos = seg_end;
     }
     Ok(out)
 }
@@ -1604,6 +2234,330 @@ fn strip_gif_metadata(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
+// Checksums & bounded RFC 1950 / RFC 1951 (zlib / DEFLATE) decompressor
+// ---------------------------------------------------------------------------
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    let mut a = 1u32;
+    let mut b = 0u32;
+    for &byte in data {
+        a = (a + u32::from(byte)) % MOD;
+        b = (b + a) % MOD;
+    }
+    (b << 16) | a
+}
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    buf: u64,
+    bits: u32,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            buf: 0,
+            bits: 0,
+        }
+    }
+
+    fn fill(&mut self, needed: u32) -> Result<()> {
+        while self.bits < needed {
+            if self.pos >= self.data.len() {
+                bail!("unexpected end of deflate stream");
+            }
+            self.buf |= u64::from(self.data[self.pos]) << self.bits;
+            self.pos += 1;
+            self.bits += 8;
+        }
+        Ok(())
+    }
+
+    fn read_bits(&mut self, count: u32) -> Result<u16> {
+        if count == 0 {
+            return Ok(0);
+        }
+        self.fill(count)?;
+        let val = (self.buf & ((1u64 << count) - 1)) as u16;
+        self.buf >>= count;
+        self.bits -= count;
+        Ok(val)
+    }
+
+    fn align_byte(&mut self) {
+        let drop_bits = self.bits % 8;
+        self.buf >>= drop_bits;
+        self.bits -= drop_bits;
+    }
+
+    fn read_u16_le(&mut self) -> Result<u16> {
+        self.align_byte();
+        let lo = self.read_bits(8)?;
+        let hi = self.read_bits(8)?;
+        Ok(lo | (hi << 8))
+    }
+
+    fn read_exact_aligned(&mut self, len: usize, out: &mut Vec<u8>) -> Result<()> {
+        self.align_byte();
+        let mut remaining = len;
+        while remaining > 0 && self.bits >= 8 {
+            out.push((self.buf & 0xFF) as u8);
+            self.buf >>= 8;
+            self.bits -= 8;
+            remaining -= 1;
+        }
+        if self.pos + remaining > self.data.len() {
+            bail!("truncated deflate stored block");
+        }
+        out.extend_from_slice(&self.data[self.pos..self.pos + remaining]);
+        self.pos += remaining;
+        Ok(())
+    }
+}
+
+struct Huffman {
+    counts: [u16; 16],
+    symbols: Vec<u16>,
+}
+
+impl Huffman {
+    fn from_lengths(lengths: &[u8]) -> Result<Self> {
+        let mut counts = [0u16; 16];
+        for &len in lengths {
+            if len as usize >= counts.len() {
+                bail!("invalid Huffman code length");
+            }
+            if len > 0 {
+                counts[len as usize] += 1;
+            }
+        }
+        let mut left = 1i32;
+        for &count in &counts[1..] {
+            left = (left << 1) - i32::from(count);
+            if left < 0 {
+                bail!("over-subscribed Huffman tree");
+            }
+        }
+        let mut offsets = [0usize; 16];
+        for bits in 1..15 {
+            offsets[bits + 1] = offsets[bits] + usize::from(counts[bits]);
+        }
+        let total: usize = counts[1..].iter().map(|&c| usize::from(c)).sum();
+        let mut symbols = vec![0u16; total];
+        for (sym, &len) in lengths.iter().enumerate() {
+            if len > 0 {
+                let idx = offsets[len as usize];
+                symbols[idx] = sym as u16;
+                offsets[len as usize] += 1;
+            }
+        }
+        Ok(Self { counts, symbols })
+    }
+
+    fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16> {
+        let mut code = 0i32;
+        let mut first = 0i32;
+        let mut index = 0usize;
+        for len in 1..=15 {
+            code |= i32::from(reader.read_bits(1)?);
+            let count = i32::from(self.counts[len]);
+            if code - count < first {
+                return Ok(self.symbols[index + (code - first) as usize]);
+            }
+            index += count as usize;
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        bail!("invalid Huffman symbol")
+    }
+}
+
+/// Bounded RFC 1950 (zlib) + RFC 1951 (DEFLATE) decompressor for inspecting
+/// compressed PNG metadata (`zTXt`, compressed `iTXt`).
+fn inflate_zlib_bounded(data: &[u8], max_bytes: usize) -> Result<Vec<u8>> {
+    if data.len() < 6 {
+        bail!("truncated zlib stream");
+    }
+    let cmf = data[0];
+    let flg = data[1];
+    if (cmf & 0x0F) != 8 || (cmf >> 4) > 7 {
+        bail!("unsupported zlib compression method or window size");
+    }
+    if !((u16::from(cmf) << 8) | u16::from(flg)).is_multiple_of(31) {
+        bail!("invalid zlib header checksum");
+    }
+    if (flg & 0x20) != 0 {
+        bail!("preset zlib dictionaries are not supported");
+    }
+    let deflate_slice = &data[2..data.len() - 4];
+    let expected_adler = u32::from_be_bytes([
+        data[data.len() - 4],
+        data[data.len() - 3],
+        data[data.len() - 2],
+        data[data.len() - 1],
+    ]);
+
+    const LEN_BASE: [u16; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
+    ];
+    const LEN_EXTRA: [u32; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    ];
+    const DIST_BASE: [u16; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+    ];
+    const DIST_EXTRA: [u32; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13,
+    ];
+    const CL_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+
+    let mut reader = BitReader::new(deflate_slice);
+    let mut out = Vec::new();
+    loop {
+        let bfinal = reader.read_bits(1)? != 0;
+        let btype = reader.read_bits(2)?;
+        match btype {
+            0 => {
+                let len = reader.read_u16_le()?;
+                let nlen = reader.read_u16_le()?;
+                if len != !nlen {
+                    bail!("corrupt deflate stored block length");
+                }
+                let len = usize::from(len);
+                if out.len().saturating_add(len) > max_bytes {
+                    bail!("compressed metadata exceeds {max_bytes}-byte decompression cap");
+                }
+                reader.read_exact_aligned(len, &mut out)?;
+            }
+            1 | 2 => {
+                let (litlen_tree, dist_tree) = if btype == 1 {
+                    let mut lit = [0u8; 288];
+                    lit[..144].fill(8);
+                    lit[144..256].fill(9);
+                    lit[256..280].fill(7);
+                    lit[280..288].fill(8);
+                    let dist = [5u8; 32];
+                    (Huffman::from_lengths(&lit)?, Huffman::from_lengths(&dist)?)
+                } else {
+                    let hlit = usize::from(reader.read_bits(5)?) + 257;
+                    let hdist = usize::from(reader.read_bits(5)?) + 1;
+                    let hclen = usize::from(reader.read_bits(4)?) + 4;
+                    if hlit > 286 || hdist > 30 {
+                        bail!("invalid dynamic Huffman table sizes");
+                    }
+                    let mut cl_lengths = [0u8; 19];
+                    for &slot in &CL_ORDER[..hclen] {
+                        cl_lengths[slot] = reader.read_bits(3)? as u8;
+                    }
+                    let cl_tree = Huffman::from_lengths(&cl_lengths)?;
+                    let total = hlit + hdist;
+                    let mut lengths = Vec::with_capacity(total);
+                    while lengths.len() < total {
+                        let sym = cl_tree.decode(&mut reader)?;
+                        match sym {
+                            0..=15 => lengths.push(sym as u8),
+                            16 => {
+                                let prev = *lengths.last().ok_or_else(|| {
+                                    anyhow::anyhow!("repeat without prior length")
+                                })?;
+                                let repeat = usize::from(reader.read_bits(2)?) + 3;
+                                if lengths.len() + repeat > total {
+                                    bail!("Huffman length repeat overflow");
+                                }
+                                lengths.resize(lengths.len() + repeat, prev);
+                            }
+                            17 => {
+                                let repeat = usize::from(reader.read_bits(3)?) + 3;
+                                if lengths.len() + repeat > total {
+                                    bail!("Huffman zero repeat overflow");
+                                }
+                                lengths.resize(lengths.len() + repeat, 0);
+                            }
+                            18 => {
+                                let repeat = usize::from(reader.read_bits(7)?) + 11;
+                                if lengths.len() + repeat > total {
+                                    bail!("Huffman zero repeat overflow");
+                                }
+                                lengths.resize(lengths.len() + repeat, 0);
+                            }
+                            _ => bail!("invalid code-length Huffman symbol"),
+                        }
+                    }
+                    (
+                        Huffman::from_lengths(&lengths[..hlit])?,
+                        Huffman::from_lengths(&lengths[hlit..])?,
+                    )
+                };
+
+                loop {
+                    let sym = litlen_tree.decode(&mut reader)?;
+                    if sym < 256 {
+                        if out.len() >= max_bytes {
+                            bail!("compressed metadata exceeds {max_bytes}-byte decompression cap");
+                        }
+                        out.push(sym as u8);
+                    } else if sym == 256 {
+                        break;
+                    } else {
+                        let idx = usize::from(sym - 257);
+                        if idx >= LEN_BASE.len() {
+                            bail!("invalid deflate length symbol");
+                        }
+                        let length = usize::from(LEN_BASE[idx])
+                            + usize::from(reader.read_bits(LEN_EXTRA[idx])?);
+                        let dsym = usize::from(dist_tree.decode(&mut reader)?);
+                        if dsym >= DIST_BASE.len() {
+                            bail!("invalid deflate distance symbol");
+                        }
+                        let dist = usize::from(DIST_BASE[dsym])
+                            + usize::from(reader.read_bits(DIST_EXTRA[dsym])?);
+                        if dist == 0 || dist > out.len() {
+                            bail!("deflate back-reference out of bounds");
+                        }
+                        if out.len().saturating_add(length) > max_bytes {
+                            bail!("compressed metadata exceeds {max_bytes}-byte decompression cap");
+                        }
+                        for _ in 0..length {
+                            let b = out[out.len() - dist];
+                            out.push(b);
+                        }
+                    }
+                }
+            }
+            _ => bail!("invalid deflate block type"),
+        }
+        if bfinal {
+            break;
+        }
+    }
+    if adler32(&out) != expected_adler {
+        bail!("zlib Adler-32 checksum mismatch");
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Standard RFC 4648 base64 codec (no external dependency)
 // ---------------------------------------------------------------------------
 
@@ -1696,64 +2650,118 @@ pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn sample_png() -> Vec<u8> {
-        // Minimal valid 1x1 PNG (signature + IHDR + IDAT + IEND).
-        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        // IHDR
-        png.extend_from_slice(&13u32.to_be_bytes());
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
-        png.extend_from_slice(&[0, 0, 0, 0]);
-        // IEND
-        png.extend_from_slice(&0u32.to_be_bytes());
-        png.extend_from_slice(b"IEND");
-        png.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
-        png
+    /// Decoder-valid 1x1 PNG (Pillow-verified).
+    const VALID_PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2,
+        0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 224, 18, 145, 3, 0,
+        0, 104, 0, 61, 84, 8, 163, 247, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    /// Decoder-valid 1x1 multi-scan progressive JPEG (Pillow-verified).
+    const VALID_PROGRESSIVE_JPEG: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67,
+        0, 8, 6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15,
+        20, 29, 26, 31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44,
+        48, 49, 52, 52, 52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 219, 0, 67, 1, 9, 9,
+        9, 12, 11, 12, 24, 13, 13, 24, 50, 33, 28, 33, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+        50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+        50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 255, 194, 0, 17, 8, 0, 1,
+        0, 1, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 21, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 6, 255, 196, 0, 20, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        255, 218, 0, 12, 3, 1, 0, 2, 16, 3, 16, 0, 0, 1, 136, 12, 127, 255, 196, 0, 20, 16, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 1, 0, 1, 5, 2, 127, 255,
+        196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1,
+        1, 63, 1, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255,
+        218, 0, 8, 1, 2, 1, 1, 63, 1, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 1, 0, 6, 63, 2, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 1, 0, 1, 63, 33, 127, 255, 218, 0,
+        12, 3, 1, 0, 2, 0, 3, 0, 0, 0, 16, 7, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 16, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 16, 127, 255, 196,
+        0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 1, 0, 1,
+        63, 16, 127, 255, 217,
+    ];
+
+    /// Decoder-valid 1x1 lossless WebP (Pillow-verified).
+    const VALID_WEBP: &[u8] = &[
+        82, 73, 70, 70, 30, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 17, 0, 0, 0, 47, 0, 0, 0, 0,
+        7, 80, 138, 42, 212, 163, 255, 129, 136, 232, 127, 0, 0,
+    ];
+
+    /// Decoder-valid 1x1 GIF87a (Pillow-verified).
+    const VALID_GIF: &[u8] = &[
+        71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44,
+        0, 0, 0, 0, 1, 0, 1, 0, 0, 8, 4, 0, 1, 4, 4, 0, 59,
+    ];
+
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(12 + data.len());
+        chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        let crc = crc32(&chunk[4..]);
+        chunk.extend_from_slice(&crc.to_be_bytes());
+        chunk
     }
 
-    fn png_with_text(text: &str) -> Vec<u8> {
-        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        png.extend_from_slice(&13u32.to_be_bytes());
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
-        png.extend_from_slice(&[0, 0, 0, 0]);
-        let payload = format!("Comment\0{text}");
-        png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        png.extend_from_slice(b"tEXt");
-        png.extend_from_slice(payload.as_bytes());
-        png.extend_from_slice(&[0, 0, 0, 0]);
-        png.extend_from_slice(&0u32.to_be_bytes());
-        png.extend_from_slice(b"IEND");
-        png.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
-        png
+    fn zlib_stored(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01]; // zlib header, deflate 32K
+        let len = payload.len() as u16;
+        out.push(0x01); // BFINAL=1, BTYPE=00 (stored)
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&adler32(payload).to_be_bytes());
+        out
+    }
+
+    fn png_with_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        // Insert chunk right before the 12-byte IEND chunk.
+        let iend_start = VALID_PNG.len() - 12;
+        let mut out = VALID_PNG[..iend_start].to_vec();
+        out.extend_from_slice(&png_chunk(kind, data));
+        out.extend_from_slice(&VALID_PNG[iend_start..]);
+        out
+    }
+
+    fn jpeg_with_trailing_com(comment: &[u8]) -> Vec<u8> {
+        // Insert COM segment after the final SOS scan, right before EOI (0xFF 0xD9).
+        let eoi = VALID_PROGRESSIVE_JPEG.len() - 2;
+        let mut out = VALID_PROGRESSIVE_JPEG[..eoi].to_vec();
+        out.push(0xFF);
+        out.push(0xFE);
+        out.extend_from_slice(&((comment.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(comment);
+        out.extend_from_slice(&VALID_PROGRESSIVE_JPEG[eoi..]);
+        out
     }
 
     #[test]
-    fn magic_bytes_accept_raster_and_reject_svg_html_and_text() {
+    fn validates_genuine_containers_and_rejects_magic_only_svg_and_truncated() {
+        assert_eq!(validate_image_bytes(VALID_PNG).unwrap(), ImageFormat::Png);
         assert_eq!(
-            validate_image_bytes(&sample_png()).unwrap(),
-            ImageFormat::Png
-        );
-        assert_eq!(
-            validate_image_bytes(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap(),
+            validate_image_bytes(VALID_PROGRESSIVE_JPEG).unwrap(),
             ImageFormat::Jpeg
         );
-        assert_eq!(
-            validate_image_bytes(b"RIFF\x10\x00\x00\x00WEBPVP8 ").unwrap(),
-            ImageFormat::Webp
-        );
-        assert_eq!(
-            validate_image_bytes(b"GIF89a\x01\x00\x01\x00\x00\x00\x00;").unwrap(),
-            ImageFormat::Gif
-        );
+        assert_eq!(validate_image_bytes(VALID_WEBP).unwrap(), ImageFormat::Webp);
+        assert_eq!(validate_image_bytes(VALID_GIF).unwrap(), ImageFormat::Gif);
+
         for bad in [
+            // Magic-only and truncated payloads for each format.
+            b"\x89PNG\r\n\x1a\n".as_slice(),
+            &VALID_PNG[..VALID_PNG.len() - 4],
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xD9],
+            &VALID_PROGRESSIVE_JPEG[..VALID_PROGRESSIVE_JPEG.len() - 2],
+            b"RIFF\x10\x00\x00\x00WEBPVP8 ".as_slice(),
+            b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".as_slice(),
+            // Active / non-image payloads.
             b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>".as_slice(),
             b"<?xml version='1.0'?><svg></svg>".as_slice(),
             b"<!doctype html><html><body>hi</body></html>".as_slice(),
             b"plain text".as_slice(),
             b"".as_slice(),
         ] {
-            assert!(validate_image_bytes(bad).is_err());
+            assert!(validate_image_bytes(bad).is_err(), "accepted bad payload");
         }
     }
 
@@ -1785,14 +2793,59 @@ mod tests {
     }
 
     #[test]
-    fn png_metadata_scan_and_strip() {
+    fn png_ztxt_and_compressed_itxt_metadata_are_scanned_and_stripped() {
         let scanner = Scanner::new(Vec::<PathBuf>::new());
-        let png = png_with_text("captured at /home/alice/secret.png on 192.168.1.9");
-        let findings = scan_metadata(ImageFormat::Png, &png, &scanner);
-        assert_eq!(findings.len(), 2, "{findings:?}");
-        let stripped = strip_metadata(ImageFormat::Png, &png).unwrap();
-        assert_eq!(ImageFormat::detect(&stripped), Some(ImageFormat::Png));
-        assert!(scan_metadata(ImageFormat::Png, &stripped, &scanner).is_empty());
+
+        // zTXt compressed comment.
+        let mut ztxt = b"Comment\0\x00".to_vec();
+        ztxt.extend_from_slice(&zlib_stored(b"captured at /home/alice/secret.png"));
+        let png_ztxt = png_with_chunk(b"zTXt", &ztxt);
+        assert_eq!(validate_image_bytes(&png_ztxt).unwrap(), ImageFormat::Png);
+        let scan = scan_metadata(ImageFormat::Png, &png_ztxt, &scanner);
+        assert!(scan.unreadable.is_empty(), "{scan:?}");
+        assert_eq!(scan.findings.len(), 1, "{scan:?}");
+        assert_eq!(scan.findings[0].text, "/home/alice/secret.png");
+
+        let stripped = strip_metadata(ImageFormat::Png, &png_ztxt).unwrap();
+        let after = scan_metadata(ImageFormat::Png, &stripped, &scanner);
+        assert!(after.findings.is_empty() && after.unreadable.is_empty());
+
+        // Compressed iTXt comment.
+        let mut itxt = b"Comment\0\x01\x00en\0\0".to_vec();
+        itxt.extend_from_slice(&zlib_stored(b"host 192.168.1.99"));
+        let png_itxt = png_with_chunk(b"iTXt", &itxt);
+        assert_eq!(validate_image_bytes(&png_itxt).unwrap(), ImageFormat::Png);
+        let scan = scan_metadata(ImageFormat::Png, &png_itxt, &scanner);
+        assert!(scan.unreadable.is_empty(), "{scan:?}");
+        assert_eq!(scan.findings.len(), 1, "{scan:?}");
+        assert_eq!(scan.findings[0].text, "192.168.1.99");
+
+        // Corrupt zTXt stream is reported as unreadable so default render refuses.
+        let corrupt_ztxt = png_with_chunk(b"zTXt", b"Comment\0\x00not-zlib");
+        let scan = scan_metadata(ImageFormat::Png, &corrupt_ztxt, &scanner);
+        assert!(!scan.unreadable.is_empty(), "{scan:?}");
+    }
+
+    #[test]
+    fn jpeg_post_scan_com_is_scanned_and_stripped_across_progressive_scans() {
+        let scanner = Scanner::new(Vec::<PathBuf>::new());
+        let jpeg = jpeg_with_trailing_com(b"from /home/alice/private.png");
+        assert_eq!(validate_image_bytes(&jpeg).unwrap(), ImageFormat::Jpeg);
+        let scan = scan_metadata(ImageFormat::Jpeg, &jpeg, &scanner);
+        assert_eq!(scan.findings.len(), 1, "{scan:?}");
+        assert_eq!(scan.findings[0].text, "/home/alice/private.png");
+
+        let stripped = strip_metadata(ImageFormat::Jpeg, &jpeg).unwrap();
+        assert_eq!(validate_image_bytes(&stripped).unwrap(), ImageFormat::Jpeg);
+        assert!(
+            !stripped
+                .windows(b"/home/alice/private.png".len())
+                .any(|w| w == b"/home/alice/private.png"),
+            "private comment survived JPEG metadata strip"
+        );
+        assert!(scan_metadata(ImageFormat::Jpeg, &stripped, &scanner)
+            .findings
+            .is_empty());
     }
 
     #[test]

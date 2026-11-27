@@ -1,50 +1,210 @@
 use super::common::*;
 
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    let mut a = 1u32;
+    let mut b = 0u32;
+    for &byte in data {
+        a = (a + u32::from(byte)) % MOD;
+        b = (b + a) % MOD;
+    }
+    (b << 16) | a
+}
+
+fn zlib_stored(payload: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let len = payload.len() as u16;
+    out.push(0x01);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(payload);
+    out.extend_from_slice(&adler32(payload).to_be_bytes());
+    out
+}
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut chunk = Vec::with_capacity(12 + data.len());
+    chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    chunk.extend_from_slice(&crc32(&chunk[4..]).to_be_bytes());
+    chunk
+}
+
+/// Build a genuine, decoder-valid 1x1 RGB PNG for the given pixel color.
 fn sample_png(tag: u8) -> Vec<u8> {
     let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    png.extend_from_slice(&13u32.to_be_bytes());
-    png.extend_from_slice(b"IHDR");
-    png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
-    png.extend_from_slice(&[0, 0, 0, tag]);
-    png.extend_from_slice(&0u32.to_be_bytes());
-    png.extend_from_slice(b"IEND");
-    png.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
+    let ihdr = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
+    png.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    // Scanline: filter byte 0 + RGB pixel.
+    let raw_scanline = [0u8, tag, tag.wrapping_mul(3), tag.wrapping_mul(7)];
+    let idat = zlib_stored(&raw_scanline);
+    png.extend_from_slice(&png_chunk(b"IDAT", &idat));
+    png.extend_from_slice(&png_chunk(b"IEND", &[]));
     png
+}
+
+fn png_with_extra_chunk(tag: u8, kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let base = sample_png(tag);
+    let iend_start = base.len() - 12;
+    let mut out = base[..iend_start].to_vec();
+    out.extend_from_slice(&png_chunk(kind, data));
+    out.extend_from_slice(&base[iend_start..]);
+    out
 }
 
 fn png_with_text_chunk(text: &str) -> Vec<u8> {
-    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    png.extend_from_slice(&13u32.to_be_bytes());
-    png.extend_from_slice(b"IHDR");
-    png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
-    png.extend_from_slice(&[0, 0, 0, 0]);
     let payload = format!("Comment\0{text}");
-    png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    png.extend_from_slice(b"tEXt");
-    png.extend_from_slice(payload.as_bytes());
-    png.extend_from_slice(&[0, 0, 0, 0]);
-    png.extend_from_slice(&0u32.to_be_bytes());
-    png.extend_from_slice(b"IEND");
-    png.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
-    png
+    png_with_extra_chunk(5, b"tEXt", payload.as_bytes())
 }
 
+fn png_with_ztxt_chunk(text: &str) -> Vec<u8> {
+    let mut payload = b"Comment\0\x00".to_vec();
+    payload.extend_from_slice(&zlib_stored(text.as_bytes()));
+    png_with_extra_chunk(6, b"zTXt", &payload)
+}
+
+fn png_with_compressed_itxt_chunk(text: &str) -> Vec<u8> {
+    let mut payload = b"Comment\0\x01\x00en\0\0".to_vec();
+    payload.extend_from_slice(&zlib_stored(text.as_bytes()));
+    png_with_extra_chunk(7, b"iTXt", &payload)
+}
+
+/// Genuine decoder-valid 1x1 baseline JPEG (Pillow-verified).
+const VALID_JPEG: &[u8] = &[
+    255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67, 0, 8,
+    6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15, 20, 29, 26,
+    31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44, 48, 49, 52, 52,
+    52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 219, 0, 67, 1, 9, 9, 9, 12, 11, 12, 24,
+    13, 13, 24, 50, 33, 28, 33, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+    50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+    50, 50, 50, 50, 50, 50, 50, 50, 50, 255, 192, 0, 17, 8, 0, 1, 0, 1, 3, 1, 34, 0, 2, 17, 1, 3,
+    17, 1, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6,
+    7, 8, 9, 10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125, 1, 2,
+    3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35, 66,
+    177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40,
+    41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89,
+    90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132,
+    133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165,
+    166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197, 198,
+    199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230,
+    231, 232, 233, 234, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0,
+    181, 17, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0, 1, 2, 3, 17, 4, 5, 33, 49, 6, 18,
+    65, 81, 7, 97, 113, 19, 34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21, 98,
+    114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39, 40, 41, 42, 53, 54, 55, 56, 57,
+    58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103,
+    104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136, 137,
+    138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170,
+    178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210,
+    211, 212, 213, 214, 215, 216, 217, 218, 226, 227, 228, 229, 230, 231, 232, 233, 234, 242, 243,
+    244, 245, 246, 247, 248, 249, 250, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 241, 26,
+    40, 162, 182, 50, 63, 255, 217,
+];
+
+/// Genuine decoder-valid 1x1 multi-scan progressive JPEG (Pillow-verified).
+const VALID_PROGRESSIVE_JPEG: &[u8] = &[
+    255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67, 0, 8,
+    6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15, 20, 29, 26,
+    31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44, 48, 49, 52, 52,
+    52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 219, 0, 67, 1, 9, 9, 9, 12, 11, 12, 24,
+    13, 13, 24, 50, 33, 28, 33, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+    50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+    50, 50, 50, 50, 50, 50, 50, 50, 50, 255, 194, 0, 17, 8, 0, 1, 0, 1, 3, 1, 34, 0, 2, 17, 1, 3,
+    17, 1, 255, 196, 0, 21, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 255, 196, 0,
+    20, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 255, 218, 0, 12, 3, 1, 0, 2, 16, 3,
+    16, 0, 0, 1, 136, 12, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 255, 218, 0, 8, 1, 1, 0, 1, 5, 2, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 1, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 1, 127, 255, 196, 0, 20,
+    16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 1, 0, 6, 63, 2, 127,
+    255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 1,
+    0, 1, 63, 33, 127, 255, 218, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 0, 16, 7, 255, 196, 0, 20, 17, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 16, 127, 255,
+    196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1,
+    63, 16, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218,
+    0, 8, 1, 1, 0, 1, 63, 16, 127, 255, 217,
+];
+
+/// Genuine decoder-valid 1x1 lossless WebP (Pillow-verified).
+const VALID_WEBP: &[u8] = &[
+    82, 73, 70, 70, 30, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 17, 0, 0, 0, 47, 0, 0, 0, 0, 7,
+    80, 138, 42, 212, 163, 255, 129, 136, 232, 127, 0, 0,
+];
+
+/// Genuine decoder-valid 1x1 GIF87a (Pillow-verified).
+const VALID_GIF: &[u8] = &[
+    71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 0, 0,
+    0, 0, 1, 0, 1, 0, 0, 8, 4, 0, 1, 4, 4, 0, 59,
+];
+
 fn sample_jpeg() -> Vec<u8> {
-    vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xD9]
+    VALID_JPEG.to_vec()
+}
+
+fn progressive_jpeg_with_post_scan_comment(comment: &[u8]) -> Vec<u8> {
+    let eoi = VALID_PROGRESSIVE_JPEG.len() - 2;
+    let mut out = VALID_PROGRESSIVE_JPEG[..eoi].to_vec();
+    out.push(0xFF);
+    out.push(0xFE);
+    out.extend_from_slice(&((comment.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(comment);
+    out.extend_from_slice(&VALID_PROGRESSIVE_JPEG[eoi..]);
+    out
 }
 
 fn sample_webp() -> Vec<u8> {
-    let mut buf = b"RIFF".to_vec();
-    buf.extend_from_slice(&12u32.to_le_bytes());
-    buf.extend_from_slice(b"WEBPVP8 ");
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf
+    VALID_WEBP.to_vec()
 }
 
 fn sample_gif() -> Vec<u8> {
-    let mut buf = b"GIF89a".to_vec();
-    buf.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0, 0x3B]);
-    buf
+    VALID_GIF.to_vec()
+}
+
+fn decode_b64_data_uri(html: &str, prefix: &str) -> Vec<u8> {
+    let start = html
+        .find(prefix)
+        .unwrap_or_else(|| panic!("missing {prefix} in {html}"))
+        + prefix.len();
+    let end = html[start..].find('"').unwrap() + start;
+    let b64 = &html[start..end];
+    let val = |b: u8| -> u8 {
+        match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => panic!("invalid b64 char {b}"),
+        }
+    };
+    let mut out = Vec::new();
+    for chunk in b64.as_bytes().chunks_exact(4) {
+        let v0 = val(chunk[0]);
+        let v1 = val(chunk[1]);
+        out.push((v0 << 2) | (v1 >> 4));
+        if chunk[2] != b'=' {
+            let v2 = val(chunk[2]);
+            out.push((v1 << 4) | (v2 >> 2));
+            if chunk[3] != b'=' {
+                let v3 = val(chunk[3]);
+                out.push((v2 << 6) | v3);
+            }
+        }
+    }
+    out
 }
 
 fn journal_dir(repo: &Repo) -> PathBuf {
@@ -165,7 +325,7 @@ fn attach_at_filing_and_append_deduplicates_and_hides_source_paths() {
 }
 
 #[test]
-fn rejects_svg_html_non_image_empty_and_oversized_attachments() {
+fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
     let repo = Repo::new();
     let dir = repo.home.join("bad-inputs");
     fs::create_dir_all(&dir).unwrap();
@@ -188,12 +348,40 @@ fn rejects_svg_html_non_image_empty_and_oversized_attachments() {
     fs::write(&plain, b"not an image at all").unwrap();
     let empty = dir.join("empty.png");
     fs::write(&empty, b"").unwrap();
+    let sig_only_png = dir.join("sig-only.png");
+    fs::write(&sig_only_png, b"\x89PNG\r\n\x1a\n").unwrap();
+    let truncated_png = dir.join("trunc.png");
+    let valid = sample_png(9);
+    fs::write(&truncated_png, &valid[..valid.len() - 4]).unwrap();
+    let sig_only_jpg = dir.join("sig-only.jpg");
+    fs::write(
+        &sig_only_jpg,
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xD9],
+    )
+    .unwrap();
+    let sig_only_webp = dir.join("sig-only.webp");
+    fs::write(&sig_only_webp, b"RIFF\x10\x00\x00\x00WEBPVP8 ").unwrap();
+    let sig_only_gif = dir.join("sig-only.gif");
+    fs::write(&sig_only_gif, b"GIF89a\x01\x00\x01\x00\x00\x00\x00;").unwrap();
     let huge = dir.join("huge.png");
     let mut huge_bytes = sample_png(9);
     huge_bytes.resize(5 * 1024 * 1024 + 1, 0);
     fs::write(&huge, &huge_bytes).unwrap();
 
-    for bad in [&svg, &disguised_svg, &html, &plain, &empty, &huge, &dir] {
+    for bad in [
+        &svg,
+        &disguised_svg,
+        &html,
+        &plain,
+        &empty,
+        &sig_only_png,
+        &truncated_png,
+        &sig_only_jpg,
+        &sig_only_webp,
+        &sig_only_gif,
+        &huge,
+        &dir,
+    ] {
         let out = repo
             .arc(&repo.root)
             .args([
@@ -273,71 +461,132 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
     assert!(!html.contains("secret.png"), "{html}");
     assert!(!html.to_ascii_lowercase().contains("<script"), "{html}");
 
-    // Metadata privacy: PNG tEXt chunk with local path & private IP must be
-    // refused by default, stripped under --strip-private, and kept under --keep-private.
-    let leaky_png = dir.join("leaky.png");
+    // Metadata privacy: PNG tEXt, zTXt, compressed iTXt, and post-scan progressive JPEG COM
+    // carrying private paths/addresses must refuse by default and be fully stripped under --strip-private.
+    let cases: [(&str, Vec<u8>, &str); 4] = [
+        (
+            "leaky-text.png",
+            png_with_text_chunk("saved from /home/alice/notes.png via 192.168.1.44"),
+            "data:image/png;base64,",
+        ),
+        (
+            "leaky-ztxt.png",
+            png_with_ztxt_chunk("compressed /home/alice/private.png"),
+            "data:image/png;base64,",
+        ),
+        (
+            "leaky-itxt.png",
+            png_with_compressed_itxt_chunk("itxt /home/alice/private.png"),
+            "data:image/png;base64,",
+        ),
+        (
+            "leaky-prog.jpg",
+            progressive_jpeg_with_post_scan_comment(b"tail /home/alice/private.png"),
+            "data:image/jpeg;base64,",
+        ),
+    ];
+
+    for (idx, (filename, bytes, data_prefix)) in cases.iter().enumerate() {
+        let img_path = dir.join(filename);
+        fs::write(&img_path, bytes).unwrap();
+        let topic = format!("leaky-{idx}");
+        let leaky_out = stdout(repo.arc(&repo.root).args([
+            "journal",
+            "note",
+            &topic,
+            "--title",
+            "Leaky image",
+            "--attach",
+            img_path.to_str().unwrap(),
+        ]));
+        let leaky_file = Path::new(leaky_out.trim())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let refused = repo
+            .arc(&repo.root)
+            .args(["journal", "render", &leaky_file])
+            .output()
+            .unwrap();
+        assert!(
+            !refused.status.success(),
+            "must refuse private metadata in {filename}"
+        );
+        let refused_err = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            refused_err.contains("/home/alice/"),
+            "{filename}: {refused_err}"
+        );
+
+        let stripped_html = stdout(repo.arc(&repo.root).args([
+            "journal",
+            "render",
+            &leaky_file,
+            "--strip-private",
+        ]));
+        let decoded = decode_b64_data_uri(&stripped_html, data_prefix);
+        assert!(
+            !decoded
+                .windows(b"/home/alice/".len())
+                .any(|w| w == b"/home/alice/"),
+            "{filename}: stripped data URI still contains private path bytes"
+        );
+        assert!(
+            !decoded.windows(b"zTXt".len()).any(|w| w == b"zTXt")
+                && !decoded.windows(b"iTXt".len()).any(|w| w == b"iTXt")
+                && !decoded.windows(b"tEXt".len()).any(|w| w == b"tEXt"),
+            "{filename}: stripped PNG still contains text metadata chunk"
+        );
+
+        let kept_doc = json_stdout(repo.arc(&repo.root).args([
+            "journal",
+            "render",
+            &leaky_file,
+            "--keep-private",
+            "--json",
+        ]));
+        assert!(
+            kept_doc["pages"][0]["private_stretches"].as_u64().unwrap() >= 1,
+            "{filename}: {kept_doc}"
+        );
+    }
+
+    // Corrupt compressed zTXt chunk cannot be inspected -> default render refuses, --strip-private succeeds.
+    let bad_ztxt_path = dir.join("bad-ztxt.png");
     fs::write(
-        &leaky_png,
-        png_with_text_chunk("saved from /home/alice/notes.png via 192.168.1.44"),
+        &bad_ztxt_path,
+        png_with_extra_chunk(8, b"zTXt", b"Comment\0\x00not-valid-zlib"),
     )
     .unwrap();
-    let leaky_out = stdout(repo.arc(&repo.root).args([
-        "journal",
-        "note",
-        "leaky",
-        "--title",
-        "Leaky image",
-        "--attach",
-        leaky_png.to_str().unwrap(),
-    ]));
-    let leaky_file = Path::new(leaky_out.trim())
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-
-    let refused = repo
-        .arc(&repo.root)
-        .args(["journal", "render", &leaky_file])
-        .output()
-        .unwrap();
-    assert!(
-        !refused.status.success(),
-        "must refuse private image metadata"
-    );
-    let refused_err = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        refused_err.contains("/home/alice/notes.png"),
-        "{refused_err}"
-    );
-    assert!(refused_err.contains("192.168.1.44"), "{refused_err}");
-
-    let stripped =
-        stdout(
-            repo.arc(&repo.root)
-                .args(["journal", "render", &leaky_file, "--strip-private"]),
-        );
-    assert!(stripped.contains("data:image/png;base64,"), "{stripped}");
-    // Extract base64 payload and confirm metadata strings were stripped from PNG bytes.
-    let b64_start =
-        stripped.find("data:image/png;base64,").unwrap() + "data:image/png;base64,".len();
-    let b64_end = stripped[b64_start..].find('"').unwrap() + b64_start;
-    let b64 = &stripped[b64_start..b64_end];
-    let stripped_doc = json_stdout(repo.arc(&repo.root).args([
+    let bad_ztxt_file = Path::new(
+        stdout(repo.arc(&repo.root).args([
+            "journal",
+            "note",
+            "bad-ztxt",
+            "--title",
+            "Unreadable zTXt",
+            "--attach",
+            bad_ztxt_path.to_str().unwrap(),
+        ]))
+        .trim(),
+    )
+    .file_name()
+    .unwrap()
+    .to_string_lossy()
+    .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "render", &bad_ztxt_file])
+        .assert()
+        .failure();
+    assert!(stdout(repo.arc(&repo.root).args([
         "journal",
         "render",
-        &leaky_file,
-        "--keep-private",
-        "--json",
-    ]));
-    assert_eq!(stripped_doc["pages"][0]["private_stretches"], 2);
-    assert!(
-        !stripped_doc["pages"][0]["html"]
-            .as_str()
-            .unwrap()
-            .contains(b64),
-        "stripped PNG bytes must differ from unstripped bytes"
-    );
+        &bad_ztxt_file,
+        "--strip-private",
+    ]))
+    .contains("data:image/png;base64,"));
 }
 
 #[test]
@@ -597,6 +846,90 @@ fn attachments_travel_through_archive_unarchive_and_relocate_preserving_shared_b
 }
 
 #[test]
+fn relocating_archived_artifact_preserves_blob_for_live_cross_tier_reference() {
+    let repo = Repo::new();
+    let img = repo.home.join("cross-tier.png");
+    let bytes = sample_png(33);
+    fs::write(&img, &bytes).unwrap();
+    let rel = format!("attachments/{}.png", hex::encode(Sha256::digest(&bytes)));
+
+    // Archive a todo so the blob exists ONLY in cold storage.
+    let archived_todo = Path::new(
+        stdout(repo.arc(&repo.root).args([
+            "journal",
+            "todo",
+            "cold-owner",
+            "--title",
+            "Cold owner",
+            "--attach",
+            img.to_str().unwrap(),
+        ]))
+        .trim(),
+    )
+    .file_name()
+    .unwrap()
+    .to_string_lossy()
+    .to_string();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "consume", &archived_todo]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "archive", &archived_todo]),
+    );
+
+    let hot = journal_dir(&repo);
+    let cold = cold_dir(&repo);
+    assert!(!hot.join(&rel).exists());
+    assert!(cold.join(&rel).is_file());
+
+    // File a live note referencing the same canonical Markdown attachment path.
+    let live_note = Path::new(
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "note", "live-ref", "--body-file", "-"])
+                .write_stdin(format!("# Live ref\n\n![reused]({rel})\n")),
+        )
+        .trim(),
+    )
+    .file_name()
+    .unwrap()
+    .to_string_lossy()
+    .to_string();
+
+    // Relocate ONLY the archived todo. The live note must keep a verified hot copy.
+    let dest = repo.home.join("relocated-cold");
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "relocate",
+        &archived_todo,
+        "--to",
+        dest.to_str().unwrap(),
+        "--reason",
+        "move archived todo",
+    ]));
+
+    assert_eq!(fs::read(dest.join(&rel)).unwrap(), bytes);
+    assert_eq!(
+        fs::read(hot.join(&rel)).unwrap(),
+        bytes,
+        "relocating archived todo must preserve a verified copy in hot for live note"
+    );
+    assert!(!cold.join(&rel).exists());
+    let rendered = stdout(repo.arc(&repo.root).args(["journal", "render", &live_note]));
+    assert!(rendered.contains("data:image/png;base64,"), "{rendered}");
+    assert!(
+        !rendered.contains("class=\"attachment-missing\""),
+        "{rendered}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn attachments_round_trip_through_exchange_spool_and_global_promote() {
     let source = Repo::new();
     let recipient = Repo::new();
@@ -718,4 +1051,94 @@ fn attachments_round_trip_through_exchange_spool_and_global_promote() {
             .args(["journal", "--global", "render", &global_file,])
     )
     .contains("data:image/png;base64,"));
+}
+
+#[test]
+fn corrupt_destination_attachment_refuses_import_atomically_without_blocking_writes() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    super::journal_exchange::pair(&source, &recipient, "alpha", "beta");
+
+    let img_a = source.home.join("first.png");
+    let img_b = source.home.join("second.png");
+    let bytes_a = sample_png(11);
+    let bytes_b = sample_png(22);
+    fs::write(&img_a, &bytes_a).unwrap();
+    fs::write(&img_b, &bytes_b).unwrap();
+    let rel_a = format!("attachments/{}.png", hex::encode(Sha256::digest(&bytes_a)));
+    let rel_b = format!("attachments/{}.png", hex::encode(Sha256::digest(&bytes_b)));
+    // Sort so we corrupt whichever attachment is installed second in sorted order.
+    let (first_rel, second_rel) = if rel_a < rel_b {
+        (rel_a, rel_b)
+    } else {
+        (rel_b, rel_a)
+    };
+
+    let note_file = Path::new(
+        stdout(source.arc(&source.root).args([
+            "journal",
+            "note",
+            "two-imgs",
+            "--title",
+            "Two images",
+            "--attach",
+            img_a.to_str().unwrap(),
+            "--attach",
+            img_b.to_str().unwrap(),
+        ]))
+        .trim(),
+    )
+    .file_name()
+    .unwrap()
+    .to_string_lossy()
+    .to_string();
+
+    let bundle_path = source.home.join("two.json");
+    stdout(source.arc(&source.root).args([
+        "journal",
+        "export",
+        &note_file,
+        "--output",
+        bundle_path.to_str().unwrap(),
+    ]));
+
+    // Pre-populate a corrupt file at the second attachment's destination in recipient.
+    let recipient_hot = journal_dir(&recipient);
+    fs::create_dir_all(recipient_hot.join("attachments")).unwrap();
+    fs::write(recipient_hot.join(&second_rel), b"corrupt-bytes").unwrap();
+
+    // Import must refuse atomically: first blob is NOT installed, no exchange/pending.json left behind.
+    recipient
+        .arc(&recipient.root)
+        .args(["journal", "import", bundle_path.to_str().unwrap()])
+        .assert()
+        .failure();
+    assert!(
+        !recipient_hot.join(&first_rel).exists(),
+        "refused import must not install the first attachment"
+    );
+    assert!(
+        !recipient_hot.join("exchange/pending.json").exists(),
+        "refused import must not leave a pending exchange transaction"
+    );
+    assert!(
+        !recipient_hot.join(&note_file).exists(),
+        "refused import must not write the artifact body"
+    );
+
+    // An unrelated write on recipient must succeed immediately (journal is not wedged).
+    recipient
+        .arc(&recipient.root)
+        .args([
+            "journal",
+            "memory",
+            "unrelated",
+            "--title",
+            "Still writable",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Journal remains writable.\n")
+        .assert()
+        .success();
 }

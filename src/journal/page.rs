@@ -397,6 +397,7 @@ impl<'c> Run<'c> {
             mode: private,
             scanner,
             findings: Vec::new(),
+            unreadable_metadata: Vec::new(),
         };
         let sha256 = render_digest(&location.hot, &body);
         let bytes = body.len();
@@ -621,6 +622,7 @@ struct PagePrivacy {
     mode: PrivateText,
     scanner: Rc<Scanner>,
     findings: Vec<(String, Finding)>,
+    unreadable_metadata: Vec<(String, String)>,
 }
 
 impl PagePrivacy {
@@ -646,18 +648,23 @@ impl PagePrivacy {
     }
 
     fn finish(self, file: &str) -> Result<Vec<(String, Finding)>> {
-        if !self.findings.is_empty() && self.mode == PrivateText::Refuse {
-            let listed = self
+        if (!self.findings.is_empty() || !self.unreadable_metadata.is_empty())
+            && self.mode == PrivateText::Refuse
+        {
+            let mut listed: Vec<String> = self
                 .findings
                 .iter()
                 .map(|(place, finding)| {
                     format!("  {place}: {} {}", finding.kind.label(), finding.text)
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            for (place, detail) in &self.unreadable_metadata {
+                listed.push(format!("  {place}: {detail}"));
+            }
+            let listed = listed.join("\n");
             bail!(
-                "{file} holds text a published page must not carry:\n{listed}\n\
-                 pass --strip-private to replace each in the page, or remove it from the \
+                "{file} holds text or unverifiable image metadata a published page must not carry:\n{listed}\n\
+                 pass --strip-private to replace private text and strip image metadata, or remove it from the \
                  artifact with `arc journal redact {file}`"
             );
         }
@@ -969,14 +976,19 @@ impl Page<'_> {
                     if let Some(att_id) = AttachmentId::parse_rel_path(&dest_url) {
                         match attachments::read_verified(self.hot, &att_id) {
                             ReadOutcome::Available { bytes, .. } => {
-                                let meta_findings = attachments::scan_metadata(
+                                let meta_scan = attachments::scan_metadata(
                                     att_id.format,
                                     &bytes,
                                     &self.privacy.scanner,
                                 );
                                 let place = att_id.rel_path();
-                                for finding in meta_findings {
+                                for finding in meta_scan.findings {
                                     self.privacy.findings.push((place.clone(), finding));
+                                }
+                                for issue in meta_scan.unreadable {
+                                    self.privacy
+                                        .unreadable_metadata
+                                        .push((place.clone(), issue));
                                 }
                                 let payload = if self.privacy.mode == PrivateText::Strip {
                                     match attachments::strip_metadata(att_id.format, &bytes) {

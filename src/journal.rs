@@ -3186,6 +3186,50 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             merged_body,
         });
     }
+    let mut staged_attachments = Vec::new();
+    let mut seen_staged: BTreeSet<(String, String)> = BTreeSet::new();
+    let by_path: HashMap<&str, &attachments::BundledAttachment> = bundle
+        .attachments
+        .iter()
+        .map(|att| (att.path.as_str(), att))
+        .collect();
+    for entry in &plan {
+        let body = entry
+            .merged_body
+            .as_deref()
+            .unwrap_or(entry.artifact.body.as_str());
+        let mut tiers = vec![entry.artifact.storage.clone()];
+        if entry.artifact.storage == crate::journal_exchange::HOT_STORAGE
+            && cold.join(&entry.artifact.file).is_file()
+        {
+            tiers.push(crate::journal_exchange::COLD_STORAGE.to_string());
+        }
+        let understood = entry.artifact.understood_events()?;
+        for id in attachments::referenced_for_artifact(body, &understood, &entry.artifact.file) {
+            let rel = id.rel_path();
+            if let Some(att) = by_path.get(rel.as_str()) {
+                for tier in &tiers {
+                    let dest_dir = if tier == crate::journal_exchange::COLD_STORAGE {
+                        cold.as_path()
+                    } else {
+                        hot.as_path()
+                    };
+                    attachments::check_destination_available(dest_dir, &id).with_context(|| {
+                        format!(
+                            "cannot install {} for {}; nothing was imported",
+                            rel, entry.artifact.file
+                        )
+                    })?;
+                    if seen_staged.insert((tier.clone(), rel.clone())) {
+                        staged_attachments.push(StagedAttachment {
+                            storage: tier.clone(),
+                            attachment: (*att).clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
     for (file, reasons) in &held_back {
         for reason in reasons {
             println!("held back: {file}: {reason}");
@@ -3268,41 +3312,13 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         }
     }
     let mut bodies = Vec::new();
-    let mut staged_attachments = Vec::new();
-    let mut seen_staged: BTreeSet<(String, String)> = BTreeSet::new();
-    let by_path: HashMap<&str, &attachments::BundledAttachment> = bundle
-        .attachments
-        .iter()
-        .map(|att| (att.path.as_str(), att))
-        .collect();
     for entry in &plan {
+        if entry.local_digest.is_some() && entry.merged_body.is_none() {
+            continue;
+        }
         let mut artifact = entry.artifact.clone();
         if let Some(body) = &entry.merged_body {
             artifact.body = body.clone();
-        }
-        let mut tiers = vec![artifact.storage.clone()];
-        if artifact.storage == crate::journal_exchange::HOT_STORAGE
-            && cold.join(&artifact.file).is_file()
-        {
-            tiers.push(crate::journal_exchange::COLD_STORAGE.to_string());
-        }
-        let understood = artifact.understood_events()?;
-        for id in attachments::referenced_for_artifact(&artifact.body, &understood, &artifact.file)
-        {
-            let rel = id.rel_path();
-            if let Some(att) = by_path.get(rel.as_str()) {
-                for tier in &tiers {
-                    if seen_staged.insert((tier.clone(), rel.clone())) {
-                        staged_attachments.push(StagedAttachment {
-                            storage: tier.clone(),
-                            attachment: (*att).clone(),
-                        });
-                    }
-                }
-            }
-        }
-        if entry.local_digest.is_some() && entry.merged_body.is_none() {
-            continue;
         }
         artifact.digest = crate::journal_exchange::body_digest(&artifact.body);
         if artifact.storage == crate::journal_exchange::HOT_STORAGE
@@ -3550,15 +3566,16 @@ fn commit_exchange_transaction(hot: &Path) -> Result<()> {
             bail!("invalid attachment storage tier in pending journal exchange");
         }
         let (id, bytes) = staged.attachment.validate_and_decode()?;
-        decoded_attachments.push((staged.storage.as_str(), id, bytes));
-    }
-    for (storage, id, bytes) in &decoded_attachments {
-        let dir = if *storage == crate::journal_exchange::COLD_STORAGE {
+        let dir = if staged.storage == crate::journal_exchange::COLD_STORAGE {
             archive_dir(hot)
         } else {
             hot.to_path_buf()
         };
-        attachments::store_bytes(&dir, id, bytes, None, None)?;
+        attachments::check_destination_available(&dir, &id)?;
+        decoded_attachments.push((dir, id, bytes));
+    }
+    for (dir, id, bytes) in &decoded_attachments {
+        attachments::store_bytes(dir, id, bytes, None, None)?;
     }
     for (index, artifact) in pending.bodies.iter().enumerate() {
         let dir = if artifact.storage == crate::journal_exchange::COLD_STORAGE {
@@ -3811,6 +3828,7 @@ fn stage_memory_promotion(
     }
     let mut staged_attachments = Vec::new();
     for id in attachments::referenced_for_artifact(&prepared.body, &source_records, filename) {
+        attachments::check_destination_available(global, &id)?;
         match attachments::read_verified(project, &id) {
             attachments::ReadOutcome::Available { bytes, .. } => {
                 staged_attachments.push(StagedAttachment {
@@ -4439,9 +4457,14 @@ fn promote_one(
     // The identity is carried verbatim: promotion records who filed the write,
     // never who moved it. The promoting caller is named beside it.
     let mut event = spooled.event.clone();
+    let mut decoded_attachments = Vec::with_capacity(spooled.attachments.len());
     for attachment in &spooled.attachments {
         let (id, bytes) = attachment.validate_and_decode()?;
-        attachments::store_bytes(journal, &id, &bytes, None, None)?;
+        attachments::check_destination_available(journal, &id)?;
+        decoded_attachments.push((id, bytes));
+    }
+    for (id, bytes) in &decoded_attachments {
+        attachments::store_bytes(journal, id, bytes, None, None)?;
     }
     if let (Some(filename), Some(body)) = (&spooled.filename, &spooled.body) {
         let (_, _) = check_artifact_name(ctx, filename)?;
@@ -6718,6 +6741,7 @@ fn commit_body_and_event(
     let pending = ExchangeTransaction {
         bodies: vec![artifact],
         body_bases: Some(vec![existing_body_digest.clone()]),
+        attachments: Vec::new(),
         events,
         events_basis: Some(basis.clone()),
         receipt: None,
@@ -20194,9 +20218,17 @@ fn execute_relocation(ctx: &Ctx, hot: &Path, plan: &RelocationPlan, reason: &str
     if !plan.attachments.is_empty() {
         let events = read_events(hot)?;
         let leaving = BTreeSet::from([plan.file.as_str()]);
-        attachments::prune_unreferenced_from_store(hot, &events, &plan.attachments, &leaving)?;
+        let cold = archive_dir(hot);
         attachments::prune_unreferenced_from_store(
-            &archive_dir(hot),
+            hot,
+            &cold,
+            &events,
+            &plan.attachments,
+            &leaving,
+        )?;
+        attachments::prune_unreferenced_from_store(
+            &cold,
+            hot,
             &events,
             &plan.attachments,
             &leaving,
@@ -20730,6 +20762,7 @@ fn move_artifact(
     let leaving = BTreeSet::from([filename]);
     attachments::prune_unreferenced_from_store(
         source_store,
+        dest_store,
         events,
         &copied_attachments,
         &leaving,
