@@ -1062,6 +1062,28 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
 /// object itself. Refusing keeps the guarantee above true: a path that
 /// silently reordered a header or reformatted an identity line would produce a
 /// commit that is not the one it claims to have only re-signed.
+/// Whether Git's effective `commit.gpgsign` setting is enabled in `cwd`.
+///
+/// Git accepts multiple boolean spellings (`true`, `yes`, `on`, `1`, etc.),
+/// so Git itself resolves the value. Unset resolves to `false`.
+pub fn commit_gpgsign(cwd: &Path) -> Result<bool> {
+    let mut command = git_command();
+    command
+        .args(["config", "--get", "--type=bool", "commit.gpgsign"])
+        .current_dir(cwd);
+    let out = command_output(&mut command).context("cannot read git config commit.gpgsign")?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim() == "true")
+    } else if out.status.code() == Some(1) {
+        Ok(false)
+    } else {
+        bail!(
+            "cannot read git config commit.gpgsign: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+}
+
 pub fn commit_tree_as(
     cwd: &Path,
     commit: &RawCommit,

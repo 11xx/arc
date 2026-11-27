@@ -2999,6 +2999,17 @@ enum Cmd {
         /// Recorded as a coordinate and nothing else
         #[arg(long = "route-version", value_name = "VERSION", requires = "debt")]
         route_version: Option<String>,
+        /// Skip automatic contribution trailer stamping on this integration.
+        /// By default (`[trailers] auto = true`), fast-forward integration
+        /// stamps applicable missing projected role trailers (`Planned-by`,
+        /// `Implemented-by`, `Reviewed-by`, `Orchestrated-by`) over
+        /// `target..head` via a `role_additions` rewrite (no-op when nothing
+        /// is missing, respecting `commit.gpgsign` and refusing shared
+        /// commits), and `--shape no-ff` appends applicable missing trailers
+        /// directly onto the merge commit message without rewriting branch
+        /// commits. `--dry-run` previews which trailers would be stamped.
+        #[arg(long = "no-trailers")]
+        no_trailers: bool,
     },
     /// Land several changes on their target in one guarded transition
     ///
@@ -3080,6 +3091,14 @@ enum Cmd {
         /// Finding every failing one of n components takes at most 2n-1
         #[arg(long = "max-attempts", value_name = "N", default_value_t = 1, conflicts_with_all = ["recover", "abandon", "dry_run"])]
         max_attempts: u32,
+        /// Skip automatic contribution trailer stamping for every member of
+        /// this landing. By default (`[trailers] auto = true`), each landed
+        /// layer stamps its own applicable missing projected role trailers
+        /// bottom-to-top onto its commits while preserving trees and
+        /// respecting `commit.gpgsign`. `--dry-run` previews per-member
+        /// trailers without mutating Git state or ledger events.
+        #[arg(long = "no-trailers", conflicts_with_all = ["recover", "abandon"])]
+        no_trailers: bool,
     },
     /// Record a review obligation this change carries but has not discharged
     ///
@@ -8409,6 +8428,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             abandon,
             reason,
             max_attempts,
+            no_trailers,
         } => commands::land::land(
             &ctx,
             commands::land::LandArgs {
@@ -8421,6 +8441,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 abandon,
                 reason,
                 max_attempts,
+                no_trailers,
             },
         ),
         Cmd::Integrate {
@@ -8444,6 +8465,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             assessment,
             qualifiers,
             route_version,
+            no_trailers,
         } => {
             // A list names its own members; `--change` names one, and mixing
             // the two spellings leaves no reading of what the run was asked
@@ -8492,6 +8514,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                             route_version,
                         },
                     }),
+                    no_trailers,
                 },
             )
         }

@@ -213,6 +213,8 @@ pub struct LandArgs {
     pub reason: Option<String>,
     /// How many attempts a landing may make, its first included.
     pub max_attempts: u32,
+    /// Skip automatic contribution trailer stamping for every landed member.
+    pub no_trailers: bool,
 }
 
 pub const PLAN_SCHEMA: &str = "arc-landing-plan/1";
@@ -271,6 +273,10 @@ struct MemberPin {
     policy: serde_json::Value,
     danger: crate::model::DangerScope,
     iterating: bool,
+    /// Contribution trailers that landing would auto-stamp onto this member's
+    /// commits when enabled and non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    auto_trailers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -365,6 +371,11 @@ struct Planned {
     declarations: Vec<crate::integration::Declarations>,
     /// Every gate a member requires, under its one shared declaration.
     gates: Vec<(String, crate::gates::Gate)>,
+    /// Per-member projected contribution trailers (empty when auto-stamping is
+    /// disabled).
+    projected_trailers: Vec<Vec<String>>,
+    /// Whether at least one member has missing applicable trailers to stamp.
+    any_stamping: bool,
 }
 
 fn brief_digest(state: &ChangeState) -> Option<String> {
@@ -420,6 +431,7 @@ fn plan(
     target: Option<&str>,
     debt: Option<&str>,
     attempt: Option<&str>,
+    no_trailers: bool,
 ) -> Result<std::result::Result<Planned, Refusal>> {
     gitio::forget_mutable_answers();
     use crate::blockers::Blocker;
@@ -645,6 +657,8 @@ fn plan(
     let mut reports = Vec::new();
     let mut projected_states = Vec::new();
     let mut declarations_used = Vec::new();
+    let mut projected_trailers_list = Vec::new();
+    let auto_trailers = !no_trailers && policy.trailers.auto;
     let mut union: BTreeMap<String, GateUnion> = BTreeMap::new();
     let mut gate_declarations: BTreeMap<String, crate::gates::Gate> = BTreeMap::new();
     let mut budget_rules = None;
@@ -886,6 +900,34 @@ fn plan(
         if index == top_index {
             top_gates = gates.clone();
         }
+        let (member_projected_trailers, member_auto_trailers) = if auto_trailers {
+            let mut with_ctx = selected.clone();
+            with_ctx.set_review_context(declarations.review_context.clone());
+            let mut preview = super::rewrite::preview_range_trailers(
+                &ctx.cwd,
+                &with_ctx,
+                &policy,
+                &report.danger,
+                &patchset.base,
+                &patchset.head,
+            )?;
+            // A replayed member lands on a base its pre-integration review did
+            // not read (waived as `replayed-unread`), so review credit must not
+            // transfer onto the replayed commits.
+            if replayed[index] {
+                preview
+                    .projected
+                    .trailers
+                    .retain(|line| !line.starts_with("Reviewed-by:"));
+                preview
+                    .trailers
+                    .retain(|line| !line.starts_with("Reviewed-by:"));
+            }
+            (preview.projected.trailers, preview.trailers)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        projected_trailers_list.push(member_projected_trailers);
         let normalized = super::gatekeeping::normalized_declarations(declarations, &selected);
         pins.push(MemberPin {
             change_id: member.change_id.clone(),
@@ -947,6 +989,7 @@ fn plan(
             policy: serde_json::to_value(&normalized.policy)?,
             danger: report.danger.clone(),
             iterating: member.iterating,
+            auto_trailers: member_auto_trailers,
         });
         reports.push(report);
         projected_states.push(selected);
@@ -1007,6 +1050,8 @@ fn plan(
             );
         }
     }
+    let any_stamping = pins.iter().any(|pin| !pin.auto_trailers.is_empty());
+    let target_after = if any_stamping { None } else { target_after };
     if gitio::fresh_branch_head(&ctx.cwd, &target)? != target_before {
         return refuse(1, "landing target moved while planning");
     }
@@ -1027,6 +1072,8 @@ fn plan(
         reports,
         declarations: declarations_used,
         gates: gate_declarations.into_iter().collect(),
+        projected_trailers: projected_trailers_list,
+        any_stamping,
     }))
 }
 
@@ -1166,6 +1213,12 @@ fn print_plan(plan: &Plan, json: bool) -> Result<()> {
             crate::render::short_sha(after),
             crate::render::short_sha(tree)
         ),
+        (None, Some(tree)) => println!(
+            "land onto {} at {} (tree {}, auto-stamping contribution trailers)",
+            plan.target_branch,
+            crate::render::short_sha(&plan.target_before),
+            crate::render::short_sha(tree)
+        ),
         _ => println!(
             "land onto {} at {}, composed by replaying the members marked replayed",
             plan.target_branch,
@@ -1203,6 +1256,9 @@ fn print_plan(plan: &Plan, json: bool) -> Result<()> {
             crate::render::short_sha(&member.head),
             if member.replayed { ", replayed" } else { "" },
         );
+        if !member.auto_trailers.is_empty() {
+            println!("     auto-trailers: {}", member.auto_trailers.join("; "));
+        }
     }
     for component in &plan.components {
         println!("  lands together: {}", component.join(", "));
@@ -1336,6 +1392,7 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
             args.target.as_deref(),
             args.debt.as_deref(),
             None,
+            args.no_trailers,
         )? {
             Ok(planned) => {
                 print_plan(&planned.plan, args.json)?;
@@ -1605,6 +1662,7 @@ fn run_attempt(
         args.target.as_deref(),
         args.debt.as_deref(),
         None,
+        args.no_trailers,
     )? {
         Ok(planned) => planned,
         Err(refusal) => {
@@ -1615,6 +1673,8 @@ fn run_attempt(
     report.plan = Some(planned.plan.clone());
     let mut pinned = planned.plan;
     let gate_declarations = planned.gates;
+    let projected_trailers = planned.projected_trailers;
+    let any_stamping = planned.any_stamping;
     let member_ids: Vec<String> = pinned
         .members
         .iter()
@@ -1673,13 +1733,26 @@ fn run_attempt(
         .context("a plan has members")?
         .change_id
         .clone();
-    // A composed attempt replays first: the head it gates is the one it
+    // A composed attempt replays first, and an attempt with auto-trailers
+    // stamps each layer bottom-to-top first: the head it gates is the one it
     // installs.
-    let composed_evidence = if pinned.shape == Shape::Composed {
-        if let Err(refusal) = compose(ctx, store, &mut pinned, &mut intent)? {
-            abandon(ctx, store, &attempt, &refusal.message)?;
-            eprintln!("Cannot land: {}; nothing closed", refusal.message);
-            return Ok(refusal.code);
+    let composed_evidence = if pinned.shape == Shape::Composed || any_stamping {
+        match compose(ctx, store, &mut pinned, &mut intent, &projected_trailers) {
+            Ok(Ok(())) => {}
+            Ok(Err(refusal)) => {
+                abandon(ctx, store, &attempt, &refusal.message)?;
+                eprintln!("Cannot land: {}; nothing closed", refusal.message);
+                return Ok(refusal.code);
+            }
+            Err(error) => {
+                abandon(
+                    ctx,
+                    store,
+                    &attempt,
+                    &format!("composition failed: {error:#}"),
+                )?;
+                return Err(error);
+            }
         }
         crash_point("composed");
         // The gates every member requires run once at the composed head, in
@@ -1819,71 +1892,111 @@ fn compose(
     store: &Store,
     plan: &mut Plan,
     intent: &mut landing::Intent,
+    projected_trailers: &[Vec<String>],
 ) -> Result<std::result::Result<(), Refusal>> {
+    let sign = gitio::commit_gpgsign(&ctx.cwd)?.then_some(None);
     let mut tip = plan.target_before.clone();
     let mut composed = Vec::new();
-    for member in &plan.members {
-        let landed = if member.replayed {
-            match gitio::replay_range(&ctx.cwd, &member.base, &member.head, &tip)? {
-                gitio::RangeReplay::Replayed { tip } => tip,
-                gitio::RangeReplay::Conflict { detail } => {
-                    return refuse(
-                        crate::blockers::Blocker::NeedsRebase.exit_code(),
-                        format!(
-                            "{} conflicts when replayed onto {}{}; give it a patchset on \
+    for (index, member) in plan.members.iter().enumerate() {
+        let member_trailers = projected_trailers
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (landed, commits) = if member.replayed {
+            let replayed_tip =
+                match gitio::replay_range(&ctx.cwd, &member.base, &member.head, &tip)? {
+                    gitio::RangeReplay::Replayed { tip } => tip,
+                    gitio::RangeReplay::Conflict { detail } => {
+                        return refuse(
+                            crate::blockers::Blocker::NeedsRebase.exit_code(),
+                            format!(
+                                "{} conflicts when replayed onto {}{}; give it a patchset on \
                              the target with `arc rebase {}`, have it reviewed, and land again",
-                            member.change_id,
-                            crate::render::short_sha(&tip),
-                            if detail.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" ({})", detail.lines().next().unwrap_or_default())
-                            },
-                            member.change_id
-                        ),
-                    );
-                }
+                                member.change_id,
+                                crate::render::short_sha(&tip),
+                                if detail.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({})", detail.lines().next().unwrap_or_default())
+                                },
+                                member.change_id
+                            ),
+                        );
+                    }
+                };
+            let original = gitio::git(
+                &ctx.cwd,
+                &[
+                    "rev-list",
+                    "--reverse",
+                    &format!("{}..{}", member.base, member.head),
+                ],
+            )?;
+            let replayed = gitio::git(
+                &ctx.cwd,
+                &["rev-list", "--reverse", &format!("{tip}..{replayed_tip}")],
+            )?;
+            let original: Vec<&str> = original.lines().collect();
+            let replayed: Vec<&str> = replayed.lines().collect();
+            if original.len() != replayed.len() {
+                return refuse(
+                    crate::blockers::Blocker::NeedsRebase.exit_code(),
+                    format!(
+                        "{} replayed onto {} as {} commits from {}; give it a patchset on the \
+                         target with `arc rebase {}`",
+                        member.change_id,
+                        crate::render::short_sha(&tip),
+                        replayed.len(),
+                        original.len(),
+                        member.change_id
+                    ),
+                );
+            }
+            if member_trailers.is_empty() {
+                let pairs = original
+                    .iter()
+                    .zip(&replayed)
+                    .map(|(from, to)| (from.to_string(), to.to_string()))
+                    .collect();
+                (replayed_tip, pairs)
+            } else {
+                let (stamped_tip, stamped_pairs) = super::rewrite::stamp_commit_range(
+                    &ctx.cwd,
+                    &tip,
+                    &replayed_tip,
+                    &tip,
+                    member_trailers,
+                    sign,
+                )?;
+                let by_replayed: BTreeMap<&str, &str> = stamped_pairs
+                    .iter()
+                    .map(|(from, to)| (from.as_str(), to.as_str()))
+                    .collect();
+                let pairs = original
+                    .iter()
+                    .zip(&replayed)
+                    .map(|(from, mid)| {
+                        let to = by_replayed.get(mid).copied().unwrap_or(mid);
+                        (from.to_string(), to.to_string())
+                    })
+                    .collect();
+                (stamped_tip, pairs)
             }
         } else {
-            member.head.clone()
+            super::rewrite::stamp_commit_range(
+                &ctx.cwd,
+                &member.base,
+                &member.head,
+                &tip,
+                member_trailers,
+                sign,
+            )?
         };
-        let original = gitio::git(
-            &ctx.cwd,
-            &[
-                "rev-list",
-                "--reverse",
-                &format!("{}..{}", member.base, member.head),
-            ],
-        )?;
-        let replayed = gitio::git(
-            &ctx.cwd,
-            &["rev-list", "--reverse", &format!("{tip}..{landed}")],
-        )?;
-        let original: Vec<&str> = original.lines().collect();
-        let replayed: Vec<&str> = replayed.lines().collect();
-        if original.len() != replayed.len() {
-            return refuse(
-                crate::blockers::Blocker::NeedsRebase.exit_code(),
-                format!(
-                    "{} replayed onto {} as {} commits from {}; give it a patchset on the \
-                     target with `arc rebase {}`",
-                    member.change_id,
-                    crate::render::short_sha(&tip),
-                    replayed.len(),
-                    original.len(),
-                    member.change_id
-                ),
-            );
-        }
         composed.push(landing::ComposedMember {
             change_id: member.change_id.clone(),
             parent: tip.clone(),
             tip: landed.clone(),
-            commits: original
-                .iter()
-                .zip(&replayed)
-                .map(|(from, to)| (from.to_string(), to.to_string()))
-                .collect(),
+            commits,
         });
         tip = landed;
     }
@@ -2056,6 +2169,7 @@ fn commit(
         Some(&pinned.target_branch),
         args.debt.as_deref(),
         Some(&attempt),
+        args.no_trailers,
     )? {
         Ok(fresh) => fresh,
         Err(refusal) => {
@@ -2064,8 +2178,13 @@ fn commit(
             return Ok(refusal.code);
         }
     };
-    // A plan does not replay; the head this attempt composed is its own.
-    if fresh.plan.shape == Shape::Composed && pinned.shape == Shape::Composed {
+    // A plan does not replay or stamp; the head this attempt composed or
+    // stamped is its own.
+    if !intent.composed.is_empty() && fresh.plan.shape == pinned.shape {
+        if fresh.plan.shape == Shape::Stack && fresh.plan.tree != pinned.tree {
+            abandon_locked(ctx, store, &attempt, "stale-tree")?;
+            bail!("tree moved while landing {attempt} was gated; nothing closed, land again");
+        }
         fresh.plan.target_after = pinned.target_after.clone();
         fresh.plan.tree = pinned.tree.clone();
     }

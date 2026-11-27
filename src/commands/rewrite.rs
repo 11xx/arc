@@ -159,6 +159,499 @@ pub(crate) struct SyncTrailersResult {
     pub rewrite_event_id: Option<String>,
 }
 
+/// Preview of what auto-stamping projected trailers across `base..head` would
+/// change, computed without writing Git objects, refs, or ledger events.
+pub(crate) struct AutoTrailerPlan {
+    pub projected: crate::trailers::ChangeTrailers,
+    /// Distinct trailer lines that would be appended to at least one commit,
+    /// in canonical order.
+    pub trailers: Vec<String>,
+    /// Commits in `base..head` (topo-reverse order) that would be recreated
+    /// (directly gaining trailers or reparented on top of one).
+    pub commits: Vec<String>,
+}
+
+/// Compute which projected contribution trailers would be auto-stamped over
+/// `base_rev..head_rev` without mutating Git objects, refs, or ledger events.
+pub(crate) fn preview_range_trailers(
+    cwd: &Path,
+    state: &ChangeState,
+    policy: &crate::policy::PolicyFile,
+    danger: &crate::status::DangerScope,
+    base_rev: &str,
+    head_rev: &str,
+) -> Result<AutoTrailerPlan> {
+    let projected = crate::trailers::for_change(
+        state,
+        &crate::trailers::ReviewProjection {
+            current_head: Some(head_rev),
+            policy,
+            danger,
+        },
+    );
+    if projected.trailers.is_empty() {
+        return Ok(AutoTrailerPlan {
+            projected,
+            trailers: Vec::new(),
+            commits: Vec::new(),
+        });
+    }
+    let own: Vec<String> = gitio::git(
+        cwd,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            head_rev,
+            &format!("^{base_rev}"),
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect();
+    if own.is_empty() {
+        return Ok(AutoTrailerPlan {
+            projected,
+            trailers: Vec::new(),
+            commits: Vec::new(),
+        });
+    }
+    let revisions: Vec<&str> = own.iter().map(String::as_str).collect();
+    let mut will_rewrite = BTreeSet::new();
+    let mut commits = Vec::new();
+    let mut added_lines = BTreeSet::new();
+    for (old, commit) in own.iter().zip(gitio::read_commits(cwd, &revisions)?) {
+        let per_commit =
+            crate::trailers::applicable_for_commit(&commit.message, &projected.trailers, &[]);
+        let message = crate::trailers::edit(&commit.message, &[], &per_commit);
+        let message_changed = message != commit.message;
+        let parent_changed = commit
+            .parents
+            .iter()
+            .any(|parent| will_rewrite.contains(parent));
+        if message_changed || parent_changed {
+            will_rewrite.insert(old.clone());
+            commits.push(old.clone());
+        }
+        if message_changed {
+            for line in &per_commit {
+                if !crate::trailers::contains(&commit.message, line) {
+                    added_lines.insert(line.clone());
+                }
+            }
+        }
+    }
+    let trailers = projected
+        .trailers
+        .iter()
+        .filter(|line| added_lines.contains(*line))
+        .cloned()
+        .collect();
+    Ok(AutoTrailerPlan {
+        projected,
+        trailers,
+        commits,
+    })
+}
+
+/// Verify that rewriting `candidates` on `state.branch` during `arc integrate`
+/// will not rewrite commits shared by another branch, remote-tracking ref, or
+/// open change (such as a stacked branch). Refuses with actionable guidance.
+pub(crate) fn check_integrate_shared_safety(
+    cwd: &Path,
+    store: &Store,
+    state: &ChangeState,
+    targets: &BTreeSet<String>,
+    candidates: &[String],
+) -> Result<()> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let branch = &state.branch;
+    let states = store.readable_states()?;
+    let mut open_by_branch_ref: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut same_branch_changes = Vec::new();
+    for other in states
+        .values()
+        .filter(|other| !other.is_closed() && other.change_id != state.change_id)
+    {
+        if other.branch == *branch {
+            same_branch_changes.push(other.change_id.clone());
+        } else {
+            open_by_branch_ref
+                .entry(format!("refs/heads/{}", other.branch))
+                .or_default()
+                .push(other.change_id.clone());
+        }
+    }
+    if !same_branch_changes.is_empty() {
+        same_branch_changes.sort();
+        let mut land_ids = vec![state.change_id.clone()];
+        land_ids.extend(same_branch_changes.iter().cloned());
+        bail!(
+            "refusing to auto-stamp contribution trailers on {}: branch {branch} is shared with \
+             open change(s) {}; land stacked changes together with `arc land {}`, or pass \
+             `--no-trailers` (or set `[trailers] auto = false`) to integrate without rewriting \
+             commits",
+            short(&candidates[0]),
+            same_branch_changes.join(", "),
+            land_ids.join(" "),
+        );
+    }
+
+    let mut protected: BTreeMap<String, String> = gitio::local_refs(cwd)?
+        .into_iter()
+        .filter(|reference| {
+            reference.name.starts_with("refs/heads/")
+                && reference.name != format!("refs/heads/{branch}")
+        })
+        .map(|reference| (reference.name, reference.commit))
+        .collect();
+    let mut target_upstreams = BTreeSet::new();
+    for target in targets {
+        if let Some((_, reference)) = gitio::branch_upstream(cwd, target)? {
+            target_upstreams.insert(reference);
+        }
+        let reference = format!("refs/heads/{target}");
+        if let Ok(tip) = gitio::branch_head(cwd, target) {
+            protected.insert(reference, tip);
+        }
+    }
+    let fetches = gitio::FetchMap::read(cwd)?;
+    let own_source = format!("refs/heads/{branch}");
+    for (reference, tip) in gitio::list_refs(cwd, "refs/remotes/")? {
+        let sources: Vec<String> = fetches
+            .sources(&reference)
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect();
+        let target_ref = sources.iter().any(|source| {
+            source
+                .strip_prefix("refs/heads/")
+                .is_some_and(|name| targets.contains(name))
+        }) || target_upstreams.contains(&reference);
+        let own_ref = !sources.is_empty() && sources.iter().all(|source| *source == own_source);
+        if target_ref || !own_ref {
+            protected.insert(reference, tip);
+        }
+    }
+
+    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    if !protected.is_empty() {
+        let tips: Vec<&str> = protected.values().map(String::as_str).collect();
+        let exclusive = gitio::rev_list_excluding(cwd, &candidate_refs, &tips)?;
+        if let Some(commit) = candidate_refs
+            .iter()
+            .find(|commit| !exclusive.contains(**commit))
+        {
+            let containing = gitio::git(
+                cwd,
+                &[
+                    "for-each-ref",
+                    &format!("--contains={commit}"),
+                    "--format=%(refname)",
+                    "refs/heads/",
+                    "refs/remotes/",
+                ],
+            )?;
+            let refs: Vec<&str> = containing
+                .lines()
+                .filter(|name| protected.contains_key(*name))
+                .collect();
+            if refs.is_empty() {
+                bail!(
+                    "protected refs changed during shared-history checking; retry the integration"
+                );
+            }
+            let mut open_changes: BTreeSet<String> = BTreeSet::new();
+            for reference in &refs {
+                if let Some(ids) = open_by_branch_ref.get(*reference) {
+                    open_changes.extend(ids.iter().cloned());
+                }
+            }
+            if !open_changes.is_empty() {
+                let mut land_ids = vec![state.change_id.clone()];
+                land_ids.extend(open_changes.iter().cloned());
+                bail!(
+                    "refusing to auto-stamp contribution trailers on {}: commits are shared with \
+                     {} (open changes: {}); land stacked changes together with `arc land {}`, or \
+                     pass `--no-trailers` (or set `[trailers] auto = false`) to integrate without \
+                     rewriting commits",
+                    short(commit),
+                    refs.join(", "),
+                    open_changes.into_iter().collect::<Vec<_>>().join(", "),
+                    land_ids.join(" "),
+                );
+            }
+            bail!(
+                "refusing to auto-stamp contribution trailers on {}: commits are reachable from \
+                 {}; pass `--no-trailers` (or set `[trailers] auto = false`) to integrate without \
+                 rewriting commits",
+                short(commit),
+                refs.join(", "),
+            );
+        }
+    }
+
+    // Also guard open changes whose recorded patchset head sits on or above a
+    // candidate commit even if their branch ref was moved or deleted.
+    let mut stacked_open = Vec::new();
+    for other in states
+        .values()
+        .filter(|other| !other.is_closed() && other.change_id != state.change_id)
+    {
+        let Some(patchset) = other.latest_patchset() else {
+            continue;
+        };
+        if !gitio::commit_exists(cwd, &patchset.head).unwrap_or(false) {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|commit| gitio::is_ancestor(cwd, commit, &patchset.head).unwrap_or(false))
+        {
+            stacked_open.push(other.change_id.clone());
+        }
+    }
+    if !stacked_open.is_empty() {
+        stacked_open.sort();
+        let mut land_ids = vec![state.change_id.clone()];
+        land_ids.extend(stacked_open.iter().cloned());
+        bail!(
+            "refusing to auto-stamp contribution trailers on {}: open change(s) {} sit on top of \
+             these commits; land stacked changes together with `arc land {}`, or pass \
+             `--no-trailers` (or set `[trailers] auto = false`) to integrate without rewriting \
+             commits",
+            short(&candidates[0]),
+            stacked_open.join(", "),
+            land_ids.join(" "),
+        );
+    }
+    Ok(())
+}
+
+/// Auto-stamp applicable missing projected contribution trailers over
+/// `target_head..approved_head` during fast-forward `arc integrate`, using the
+/// `role_additions` rewrite pipeline and respecting Git's `commit.gpgsign`.
+///
+/// Zero-cost no-op when nothing is missing or applicable. Leaves all refs and
+/// ledger events untouched if shared-commit safety or commit signing fails.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn auto_stamp_change_for_integrate(
+    ctx: &Ctx,
+    store: &Store,
+    state: &ChangeState,
+    target_head: &str,
+    approved_head: &str,
+    policy: &crate::policy::PolicyFile,
+    danger: &crate::status::DangerScope,
+    targets: &BTreeSet<String>,
+) -> Result<SyncTrailersResult> {
+    let cwd = ctx.cwd.clone();
+    let branch = state.branch.clone();
+    let preview = preview_range_trailers(&cwd, state, policy, danger, target_head, approved_head)?;
+    if preview.commits.is_empty() {
+        return Ok(SyncTrailersResult {
+            exit_code: 0,
+            projected: preview.projected,
+            rewritten_commits: 0,
+            new_head: None,
+            rewrite_event_id: None,
+        });
+    }
+    if store.rewrite_intent()?.is_some() {
+        bail!(
+            "an unfinished history rewrite is on record; finish it with `arc rewrite trailers` \
+             or `arc rewrite sign` before integrating, or pass `--no-trailers`"
+        );
+    }
+    if gitio::fresh_read(|| gitio::branch_head(&cwd, &branch))? != approved_head {
+        bail!(
+            "branch {branch} moved away from approved head {} before auto-stamping trailers; \
+             target was not moved",
+            short(approved_head)
+        );
+    }
+    if let Some(issue) = crate::trailers::first_unrecordable_role(
+        &preview.projected.trailers,
+        ctx.session.as_deref(),
+    ) {
+        bail!(
+            "cannot auto-stamp trailer \"{}: {}\": {}",
+            issue.key,
+            issue.value,
+            issue.detail
+        );
+    }
+    check_integrate_shared_safety(&cwd, store, state, targets, &preview.commits)?;
+
+    let own: Vec<String> = gitio::git(
+        &cwd,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            approved_head,
+            &format!("^{target_head}"),
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect();
+    let from = own
+        .first()
+        .cloned()
+        .context("non-empty auto-stamp preview has a first commit")?;
+    let sign = gitio::commit_gpgsign(&cwd)?.then_some(None);
+    let mut walked = Walked::over(
+        &own,
+        branch.clone(),
+        from,
+        approved_head.to_string(),
+        "arc integrate",
+        false,
+    );
+    let mut applied_lines = BTreeSet::new();
+    let revisions: Vec<&str> = own.iter().map(String::as_str).collect();
+    for (old, mut commit) in own.iter().zip(gitio::read_commits(&cwd, &revisions)?) {
+        let per_commit = crate::trailers::applicable_for_commit(
+            &commit.message,
+            &preview.projected.trailers,
+            &[],
+        );
+        let message = crate::trailers::edit(&commit.message, &[], &per_commit);
+        let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
+        if message == commit.message && parents == commit.parents {
+            continue;
+        }
+        for line in &per_commit {
+            if !crate::trailers::contains(&commit.message, line) {
+                applied_lines.insert(line.clone());
+            }
+        }
+        commit.message = message;
+        commit.parents = parents;
+        walked.recreated(&cwd, old, &commit, sign)?;
+    }
+    if walked.mapping.is_empty() {
+        return Ok(SyncTrailersResult {
+            exit_code: 0,
+            projected: preview.projected,
+            rewritten_commits: 0,
+            new_head: None,
+            rewrite_event_id: None,
+        });
+    }
+    let rewritten_keys: Vec<String> = walked.mapping.keys().cloned().collect();
+    check_integrate_shared_safety(&cwd, store, state, targets, &rewritten_keys)?;
+
+    walked.reason = format!(
+        "auto-stamped {} during integration on {} from {}",
+        plural(applied_lines.len(), "trailer line"),
+        walked.branch,
+        short(&walked.from)
+    );
+    let mut moves = plan_ref_moves(&cwd, &walked.branch, &walked.from, &walked.mapping, false)?;
+    let retention = crate::retention::plan(&cwd, store, &walked.mapping, &moves.moves)?;
+    let new_head = walked
+        .mapping
+        .get(&walked.head)
+        .and_then(|new| new.clone())
+        .unwrap_or_else(|| walked.head.clone());
+    moves.moves.insert(
+        format!("refs/heads/{}", walked.branch),
+        RefMove {
+            old: walked.head.clone(),
+            new: new_head.clone(),
+        },
+    );
+    let intent = RewriteIntent {
+        schema_version: crate::model::SCHEMA_VERSION,
+        branch: walked.branch,
+        from: walked.from,
+        reason: walked.reason,
+        tool: Some(walked.tool.to_string()),
+        mapping: walked.mapping,
+        refs: moves.moves,
+        retained: retention.retain,
+        created_at: chrono::Utc::now(),
+    };
+    let refresh_index = !gitio::dirt(&cwd).map(|dirt| dirt.tracked).unwrap_or(true);
+    let event_id = apply_with_options(ctx, store, &intent, true, refresh_index, false)?;
+    Ok(SyncTrailersResult {
+        exit_code: 0,
+        projected: preview.projected,
+        rewritten_commits: intent.mapping.len(),
+        new_head: Some(new_head),
+        rewrite_event_id: Some(event_id),
+    })
+}
+
+/// Recreate commits in `range_base..range_head` onto `new_parent`, appending
+/// applicable missing lines from `projected` to each commit without writing
+/// any refs or ledger events. Returns `(new_tip, old_to_new_pairs)`.
+pub(crate) fn stamp_commit_range(
+    cwd: &Path,
+    range_base: &str,
+    range_head: &str,
+    new_parent: &str,
+    projected: &[String],
+    sign: Option<Option<&str>>,
+) -> Result<(String, Vec<(String, String)>)> {
+    let own: Vec<String> = gitio::git(
+        cwd,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            range_head,
+            &format!("^{range_base}"),
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect();
+    if own.is_empty() {
+        return Ok((new_parent.to_string(), Vec::new()));
+    }
+    let mut mapping: BTreeMap<String, Option<String>> = BTreeMap::new();
+    if new_parent != range_base {
+        mapping.insert(range_base.to_string(), Some(new_parent.to_string()));
+    }
+    let revisions: Vec<&str> = own.iter().map(String::as_str).collect();
+    let mut pairs = Vec::with_capacity(own.len());
+    for (old, mut commit) in own.iter().zip(gitio::read_commits(cwd, &revisions)?) {
+        let per_commit = if projected.is_empty() {
+            Vec::new()
+        } else {
+            crate::trailers::applicable_for_commit(&commit.message, projected, &[])
+        };
+        let message = crate::trailers::edit(&commit.message, &[], &per_commit);
+        let parents = map_parents(cwd, old, &commit.parents, &mapping)?;
+        let landed = if message == commit.message && parents == commit.parents {
+            old.clone()
+        } else {
+            commit.message = message;
+            commit.parents = parents;
+            let new = if commit.commit_tree_writes_it_back() {
+                gitio::commit_tree_as(cwd, &commit, sign)?
+            } else {
+                gitio::write_commit_object(cwd, &commit, sign)?
+            };
+            if new != *old {
+                mapping.insert(old.clone(), Some(new.clone()));
+            }
+            new
+        };
+        pairs.push((old.clone(), landed));
+    }
+    let tip = mapping
+        .get(range_head)
+        .and_then(|new| new.clone())
+        .unwrap_or_else(|| range_head.to_string());
+    Ok((tip, pairs))
+}
+
 /// The portable contribution-trailer specification, embedded at build time.
 const CONTRIBUTION_SPEC: &str = include_str!("contribution-trailers.md");
 
@@ -1009,6 +1502,17 @@ fn resume(ctx: &Ctx, store: &Store, branch: &str, intent: &RewriteIntent) -> Res
 /// Answers with the event holding the map, whether this call recorded it or
 /// an interrupted one already had.
 fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -> Result<String> {
+    apply_with_options(ctx, store, intent, write_intent, true, true)
+}
+
+fn apply_with_options(
+    ctx: &Ctx,
+    store: &Store,
+    intent: &RewriteIntent,
+    write_intent: bool,
+    refresh_index: bool,
+    announce: bool,
+) -> Result<String> {
     let cwd = &ctx.cwd;
     let _repository_events = store.lock_repository_events()?;
     // A commit the intent names has to still be here. Objects nothing points
@@ -1135,10 +1639,12 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
                          retain {} for recovery", store.rewrite_intent_path().display()))),
                 }
             }
-            println!(
-                "history rewrite recorded: {} revisions",
-                intent.mapping.len()
-            );
+            if announce {
+                println!(
+                    "history rewrite recorded: {} revisions",
+                    intent.mapping.len()
+                );
+            }
             event.event_id.clone()
         }
     };
@@ -1147,7 +1653,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
     // teaches the index which commit it is looking at when that branch is
     // checked out here.
     let branch_ref = format!("refs/heads/{}", intent.branch);
-    if gitio::current_branch(cwd)?.as_deref() == Some(intent.branch.as_str()) {
+    if refresh_index && gitio::current_branch(cwd)?.as_deref() == Some(intent.branch.as_str()) {
         if let Some(new_head) = intent.refs.get(&branch_ref) {
             gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new]).with_context(
                 || {

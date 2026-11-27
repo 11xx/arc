@@ -1452,6 +1452,16 @@ RUN A CHANGE
   resolve through local branch refs; same-named tags do not select policy or
   history revisions.
   `--message` names that merge commit and requires a resolved no-ff shape.
+  By default (`[trailers] auto = true`), fast-forward integration auto-stamps
+  applicable missing projected role trailers (`Planned-by`, `Implemented-by`,
+  `Reviewed-by`, `Orchestrated-by`) over `target..head` via a `role_additions`
+  rewrite before advancing the target (no-op when nothing is missing; respects
+  `commit.gpgsign`; refuses shared commits such as a stacked branch, naming
+  `arc land` or `--no-trailers`), while `--shape no-ff` appends applicable
+  missing trailers directly onto the merge commit message without rewriting
+  branch commits. Pass `--no-trailers` or set `[trailers] auto = false` to
+  skip auto-stamping. `--dry-run` previews which trailers would be stamped
+  (as `auto_trailers` in `arc-integration-plan/1`) without mutating Git state.
 
   Several changes, or `--tag`, make `integrate` a queue in dependency order.
   Dry-run prerequisites follow supersession successors through projected
@@ -1598,13 +1608,17 @@ RUN A CHANGE
   abandoned or superseded wedges the rest with the same blocker until the
   relation is withdrawn, and the remedy names that withdrawal.
 
-  `arc land <change>... [--target T] [--debt <why>] [--dry-run [--json]]`
+  `arc land <change>... [--target T] [--debt <why>] [--no-trailers] [--dry-run [--json]]`
   installs several changes in one guarded transition. Members land in
   dependency order: each after every member it is `blocked_by`, ties in the
   order given; a cycle refuses. An earlier member satisfies a prerequisite,
   which the basis records as `landing <attempt>`. A member whose recorded
   base is the revision before it (the target for the first, the previous
-  member's landed head after) lands as it is. When every member does, the
+  member's landed head after) lands as it is; by default (`[trailers] auto =
+  true`), each landed layer stamps its own applicable missing projected role
+  trailers bottom-to-top onto its commits while preserving trees and respecting
+  `commit.gpgsign` (unless `--no-trailers` or `[trailers] auto = false`, or
+  nothing is missing). When every member stands on the revision before it, the
   landing is a stack and nothing is replayed. Otherwise it is composed:
   every other member is replayed onto that revision with `git replay`, run
   as `arc rebase` runs it, after the intent is written. The composed head is
@@ -3895,23 +3909,28 @@ CONTRIBUTION TRAILERS
     check and integrate advise when a commit in target..head lacks any
     projected contribution trailer (`Planned-by`, `Implemented-by`,
     `Reviewed-by`, `Orchestrated-by`) applicable to that commit's resulting
-    block, under missing-contribution-trailers, naming `arc rewrite trailers
-    --sync` (and `--from <rev> --append <line>` only when every advised line
-    applies to every commit that bulk rewrite would touch); only fresh coordinates are
-    advised, and both `--sync` and the advisory omit `Planned-by` and
-    `Orchestrated-by` lines that would violate the single-participant rule on
+    block, under missing-contribution-trailers. By default (`[trailers] auto =
+    true`), `arc integrate` and `arc land` auto-stamp missing applicable
+    trailers at integration time (on `target..head` via `role_additions` for
+    fast-forward / `arc land`, or onto the merge commit message for `--shape
+    no-ff`; `--no-trailers` or `[trailers] auto = false` opts out). For PRs,
+    contribution repos, or manual pre-integration stamping, the advisory names
+    `arc rewrite trailers --sync` (and `--from <rev> --append <line>` only
+    when every advised line applies to every commit that bulk rewrite would
+    touch); only fresh coordinates are advised, and both auto-stamping and
+    `--sync` omit lines that would introduce a single-participant violation on
     that commit. They advise when a commit's role line
     carries a placeholder or a session id, or a person without an email, under
     placeholder-contribution-trailers, naming each commit and line and arc
     rewrite trailers --from <rev> --edits <file>, whose `arc-trailer-edits/1`
     lines drop or replace exactly those lines and leave the valid lines under
     the same key. Neither advice blocks
-    integration or changes ready or the exit code; rewrite before
-    integration. Appending complete role entries preserves approvals, debt
-    waivers, commit-bound gates, and matching budget raises, and the appended
-    text is a declaration, not a verdict; replacing or dropping trailers with
-    `--edits` or any other message rewrite requires fresh snapshot and
-    approval or declared debt (`arc guide rewrites-evidence`).
+    integration or changes ready or the exit code. Appending complete role
+    entries preserves approvals, debt waivers, commit-bound gates, and
+    matching budget raises, and the appended text is a declaration, not a
+    verdict; replacing or dropping trailers with `--edits` or any other
+    message rewrite requires fresh snapshot and approval or declared debt
+    (`arc guide rewrites-evidence`).
     Post-integration audits stay in the ledger.
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
@@ -5589,6 +5608,8 @@ FILES
     [integration] shapes = ["ff-only", "no-ff"], history = "preserve"
     [candidates] evaluation_reuse = "matching-coordinates" | "never"
                                                  no default; `never` wins
+    [trailers] auto = true | false               default true; auto-stamp on
+                                                 integrate/land (`false` wins)
 
   Style precedence is flag, operator defaults, target project defaults, user,
   built-in. Project and operator shape constraints intersect; values outside

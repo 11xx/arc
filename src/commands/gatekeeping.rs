@@ -5375,6 +5375,8 @@ pub struct IntegrateArgs {
     /// A plan an earlier dry run printed, to compare the fresh decision with.
     pub expect_basis: Option<PathBuf>,
     pub debt: Option<DebtDeclaration>,
+    /// Skip automatic contribution trailer stamping on this integration.
+    pub no_trailers: bool,
 }
 
 pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Result<i32> {
@@ -5395,6 +5397,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
         json,
         expect_basis,
         debt,
+        no_trailers,
     } = args;
     if references.is_empty() && tags.is_empty() {
         bail!("provide a change or at least one --tag");
@@ -5476,6 +5479,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                     expect_basis,
                     cleanup_checkout: None,
                     debt,
+                    no_trailers,
                 },
             )
         }
@@ -5512,7 +5516,15 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             } else {
                 QueueSelection::Named(many.to_vec())
             };
-            integrate_queue(ctx, selection, cleanup, discard, dry_run, shape)
+            integrate_queue(
+                ctx,
+                selection,
+                cleanup,
+                discard,
+                dry_run,
+                shape,
+                no_trailers,
+            )
         }
     }
 }
@@ -5542,6 +5554,7 @@ fn integrate_queue(
     discard: Option<crate::style::Discard>,
     dry_run: bool,
     shape: Option<integration::Shape>,
+    no_trailers: bool,
 ) -> Result<i32> {
     let queue_ctx = ctx.with_cwd(gitio::primary_worktree(&ctx.cwd)?);
     let store = queue_ctx.store()?;
@@ -5611,6 +5624,7 @@ fn integrate_queue(
                     discard,
                     ..Default::default()
                 },
+                no_trailers,
                 &mut projected_targets,
                 &mut unresolved_targets,
                 &mut projected_closures,
@@ -5625,6 +5639,7 @@ fn integrate_queue(
                     discard,
                     ..Default::default()
                 },
+                no_trailers,
                 &ctx.cwd,
             )
         };
@@ -5685,6 +5700,7 @@ fn queue_step(
     ctx: &Ctx,
     change_id: &str,
     flags: crate::style::StyleFlags,
+    no_trailers: bool,
     cleanup_checkout: &Path,
 ) -> Result<QueueStep> {
     // Preparation and landing read append policy from the same checkout,
@@ -5810,6 +5826,7 @@ fn queue_step(
             shape,
             style_flags: flags,
             cleanup_checkout: Some(cleanup_checkout.to_path_buf()),
+            no_trailers,
             ..SingleOptions::default()
         },
     )?;
@@ -5835,11 +5852,13 @@ fn queue_step(
 
 /// What the queue would do to one change, reading only what is already
 /// recorded. Nothing is replayed, run, merged, or written.
+#[allow(clippy::too_many_arguments)]
 fn queue_dry_run(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     flags: crate::style::StyleFlags,
+    no_trailers: bool,
     projected_targets: &mut BTreeMap<String, String>,
     unresolved_targets: &mut std::collections::BTreeSet<String>,
     projected_closures: &mut std::collections::BTreeSet<String>,
@@ -5908,7 +5927,10 @@ fn queue_dry_run(
     // Topology and constraints follow the projected destination; review,
     // findings, holds and iteration remain facts of the observed ledger.
     let report = ctx.report_for_queue(store, &st, Some(target))?;
-    advise_role_trailers(&report);
+    advise_role_trailers(
+        &report,
+        !no_trailers && policy.trailers.auto && policy.contribution.is_none(),
+    );
     let mut advancing = None;
     let mut conflicts = report.needs_rebase;
     let mut unresolved = true;
@@ -5999,6 +6021,7 @@ struct SingleOptions {
     /// The plan an earlier dry run printed. It never changes the decision;
     /// what moved since is named beside it.
     expect_basis: Option<IntegrationPlan>,
+    no_trailers: bool,
 }
 
 /// Cleanup uses the style selected before the change is merged.
@@ -6215,6 +6238,7 @@ fn integrate_one(
         dry_run,
         json,
         mut expect_basis,
+        no_trailers,
     } = options;
     let store = ctx.store()?;
     let change_id = initial.change_id.clone();
@@ -6249,8 +6273,10 @@ fn integrate_one(
                 &store,
                 &initial,
                 &target,
+                message.as_deref(),
                 &selection,
                 debt.as_ref(),
+                no_trailers,
             );
         }
         return integrate_dry_run(
@@ -6261,6 +6287,7 @@ fn integrate_one(
             message.as_deref(),
             &selection,
             debt.as_ref(),
+            no_trailers,
         );
     }
     // The same store the merge's closure event will be appended to, so the
@@ -6330,7 +6357,7 @@ fn integrate_one(
     if let Some(worktree) = st.worktree.as_deref() {
         crate::journal::promote_worktree_spool(ctx, Path::new(worktree));
     }
-    let report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
+    let mut report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
         let caller = super::claims::command_identity(ctx).ok();
@@ -6345,11 +6372,12 @@ fn integrate_one(
             );
         }
     }
-    advise_role_trailers(&report);
+    let auto_trailers = !no_trailers && policy.trailers.auto;
+    advise_role_trailers(&report, auto_trailers && policy.contribution.is_none());
     let facts = integration_facts(ctx, &store, &st, &report, &target, &selection, true);
     let outcome = integration::decide(facts, expect_basis.as_ref());
     let moved = integration::describe_moved(&outcome.moved);
-    let plan = match outcome.decision {
+    let mut plan = match outcome.decision {
         Decision::Refused(refusal) => {
             let code = match refusal {
                 Refusal::Diverged => Ok(refuse_divergence(&st, &target, &recorded_target)),
@@ -6384,6 +6412,62 @@ fn integrate_one(
             plan
         }
     };
+    if plan.shape == crate::model::IntegrationShape::FastForward && auto_trailers {
+        let st_with_ctx = state_with_review_context(ctx, &st)?;
+        let targets = targets_for_branch(&store, &st.branch, &recorded_target, &target)?;
+        let stamped = super::rewrite::auto_stamp_change_for_integrate(
+            ctx,
+            &store,
+            &st_with_ctx,
+            &plan.old_target,
+            &plan.approved.head,
+            &policy,
+            &report.danger,
+            &targets,
+        )?;
+        if let Some(new_head) = stamped.new_head {
+            let previous_head = plan.approved.head.clone();
+            let previous_tree = plan.evaluated_tree.clone();
+            println!(
+                "auto-stamped trailers on {}: {} -> {} ({}, rewrite {})",
+                st.branch,
+                render::short_sha(&previous_head),
+                render::short_sha(&new_head),
+                if stamped.rewritten_commits == 1 {
+                    "1 commit".to_string()
+                } else {
+                    format!("{} commits", stamped.rewritten_commits)
+                },
+                stamped.rewrite_event_id.as_deref().unwrap_or("recorded"),
+            );
+            gitio::forget_mutable_answers();
+            st = store.state(&change_id)?;
+            st.target_branch = target.clone();
+            report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
+            let post_facts =
+                integration_facts(ctx, &store, &st, &report, &target, &selection, true);
+            let post_outcome = integration::decide(post_facts, None);
+            plan = match post_outcome.decision {
+                Decision::Merge(post_plan)
+                    if post_plan.shape == crate::model::IntegrationShape::FastForward
+                        && post_plan.approved.head == new_head
+                        && post_plan.evaluated_tree == previous_tree =>
+                {
+                    post_plan
+                }
+                Decision::Refused(Refusal::NotReady) => {
+                    eprint!("{}", render::blocker_explanation(&st, &report));
+                    return Ok(status::check_exit_code(&report));
+                }
+                Decision::Refused(refusal) => return Err(refusal.into_error()),
+                _ => bail!(
+                    "auto-stamping trailers on {} changed the integration plan unexpectedly; \
+                     target {target} was not moved",
+                    st.change_id
+                ),
+            };
+        }
+    }
     let integration::MergePlan {
         old_target,
         approved,
@@ -6398,6 +6482,20 @@ fn integrate_one(
         patchset_id: approved_patchset_id,
         head: approved_head,
     } = approved;
+    let base_merge_msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
+    let merge_msg = if actual_shape == crate::model::IntegrationShape::Merge && auto_trailers {
+        let st_with_ctx = state_with_review_context(ctx, &st)?;
+        let (stamped, _) = plan_merge_commit_trailers(
+            &st_with_ctx,
+            &policy,
+            &report.danger,
+            &approved_head,
+            &base_merge_msg,
+        );
+        stamped
+    } else {
+        base_merge_msg
+    };
 
     let wt = checkout.path.clone();
     let slot_use = crate::slots::exclusive_in(&wt)?;
@@ -6441,7 +6539,7 @@ fn integrate_one(
             })?;
             println!("checked out {target} in {}", checkout.path.display());
         }
-        let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
+        let msg = merge_msg;
 
         // Already-contained integrations retain the observed target; advancing
         // fast-forwards land at the approved head without a merge commit.
@@ -7529,8 +7627,75 @@ fn integration_facts(
     }
 }
 
-fn advise_role_trailers(report: &StatusReport) {
+fn state_with_review_context(ctx: &Ctx, state: &ChangeState) -> Result<ChangeState> {
+    let declarations = crate::declarations::for_change(&ctx.cwd, state)?;
+    let mut with_ctx = state.clone();
+    with_ctx.set_review_context(declarations.review_context);
+    Ok(with_ctx)
+}
+
+fn targets_for_branch(
+    store: &Store,
+    branch: &str,
+    recorded_target: &str,
+    target: &str,
+) -> Result<BTreeSet<String>> {
+    let mut targets: BTreeSet<String> = store
+        .readable_states()?
+        .values()
+        .filter(|state| state.branch == branch)
+        .map(|state| state.target_branch.clone())
+        .collect();
+    targets.insert(recorded_target.to_string());
+    targets.insert(target.to_string());
+    Ok(targets)
+}
+
+fn plan_merge_commit_trailers(
+    state: &ChangeState,
+    policy: &crate::policy::PolicyFile,
+    danger: &status::DangerScope,
+    approved_head: &str,
+    base_msg: &str,
+) -> (String, Option<integration::PlannedTrailers>) {
+    let projected = crate::trailers::for_change(
+        state,
+        &crate::trailers::ReviewProjection {
+            current_head: Some(approved_head),
+            policy,
+            danger,
+        },
+    );
+    if projected.trailers.is_empty() {
+        return (base_msg.to_string(), None);
+    }
+    let applicable =
+        crate::trailers::applicable_for_commit(base_msg.as_bytes(), &projected.trailers, &[]);
+    let added: Vec<String> = applicable
+        .iter()
+        .filter(|line| !crate::trailers::contains(base_msg.as_bytes(), line))
+        .cloned()
+        .collect();
+    if added.is_empty() {
+        return (base_msg.to_string(), None);
+    }
+    let stamped = crate::trailers::edit(base_msg.as_bytes(), &[], &applicable);
+    let message = String::from_utf8(stamped).unwrap_or_else(|_| base_msg.to_string());
+    (
+        message,
+        Some(integration::PlannedTrailers {
+            target: "merge-commit".to_string(),
+            trailers: added,
+            commits: Vec::new(),
+        }),
+    )
+}
+
+fn advise_role_trailers(report: &StatusReport, auto_trailers_active: bool) {
     for advisory in &report.advisories {
+        if advisory.code == "missing-contribution-trailers" && auto_trailers_active {
+            continue;
+        }
         if matches!(
             advisory.code,
             "missing-contribution-trailers"
@@ -7576,13 +7741,16 @@ fn forget_planned_debt_event(plan: &mut IntegrationPlan, debt: Option<integratio
 /// The plan `integrate` would carry out, decided from the same facts and by
 /// the same function as the merge, printed as JSON. Nothing is locked or
 /// written.
+#[allow(clippy::too_many_arguments)]
 fn integrate_dry_run_json(
     ctx: &Ctx,
     store: &Store,
     st: &ChangeState,
     target: &str,
+    message: Option<&str>,
     selection: &IntegrationStyle,
     debt: Option<&DebtDeclaration>,
+    no_trailers: bool,
 ) -> Result<i32> {
     let recorded_target = st.target_branch.clone();
     let mut selected = st.clone();
@@ -7597,7 +7765,12 @@ fn integrate_dry_run_json(
     let (projected, planned_debt) = project_debt(ctx, store, st, debt)?;
     let st = &projected;
     let report = ctx.report_for_integration(store, st, target, shape)?;
-    advise_role_trailers(&report);
+    let policy = gitio::branch_head(&ctx.cwd, target)
+        .ok()
+        .and_then(|head| crate::policy::load_at(&ctx.cwd, &head).ok())
+        .unwrap_or_default();
+    let auto_trailers = !no_trailers && policy.trailers.auto;
+    advise_role_trailers(&report, auto_trailers && policy.contribution.is_none());
     let facts = integration_facts(ctx, store, st, &report, target, selection, false);
     let plan = match integration::decide(facts, None).decision {
         Decision::Refused(Refusal::Diverged) => {
@@ -7630,7 +7803,50 @@ fn integrate_dry_run_json(
                 );
                 return Ok(status::Blocker::NeedsRebase.exit_code());
             }
-            IntegrationPlan::of_merge(&st.change_id, &plan)
+            let mut document = IntegrationPlan::of_merge(&st.change_id, &plan);
+            let merge_policy = crate::policy::load_at(&ctx.cwd, &plan.old_target)?;
+            if !no_trailers && merge_policy.trailers.auto {
+                let st_with_ctx = state_with_review_context(ctx, st)?;
+                if plan.shape == crate::model::IntegrationShape::FastForward {
+                    let preview = super::rewrite::preview_range_trailers(
+                        &ctx.cwd,
+                        &st_with_ctx,
+                        &merge_policy,
+                        &report.danger,
+                        &plan.old_target,
+                        &plan.approved.head,
+                    )?;
+                    if !preview.commits.is_empty() {
+                        let targets =
+                            targets_for_branch(store, &st.branch, &recorded_target, target)?;
+                        super::rewrite::check_integrate_shared_safety(
+                            &ctx.cwd,
+                            store,
+                            &st_with_ctx,
+                            &targets,
+                            &preview.commits,
+                        )?;
+                        document.auto_trailers = Some(integration::PlannedTrailers {
+                            target: "fast-forward".to_string(),
+                            trailers: preview.trailers,
+                            commits: preview.commits,
+                        });
+                    }
+                } else if plan.shape == crate::model::IntegrationShape::Merge {
+                    let base_msg = message
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
+                    let (_, planned) = plan_merge_commit_trailers(
+                        &st_with_ctx,
+                        &merge_policy,
+                        &report.danger,
+                        &plan.approved.head,
+                        &base_msg,
+                    );
+                    document.auto_trailers = planned;
+                }
+            }
+            document
         }
     };
     let mut plan = plan;
@@ -7649,6 +7865,7 @@ fn print_planned_debt(debt: Option<&integration::PlannedDebt>) {
 /// anything: run the same readiness preflight, then simulate the merge with
 /// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
 /// would proceed cleanly, otherwise the first blocker's code.
+#[allow(clippy::too_many_arguments)]
 fn integrate_dry_run(
     ctx: &Ctx,
     store: &Store,
@@ -7657,6 +7874,7 @@ fn integrate_dry_run(
     message: Option<&str>,
     selection: &IntegrationStyle,
     debt: Option<&DebtDeclaration>,
+    no_trailers: bool,
 ) -> Result<i32> {
     let recorded_target = st.target_branch.clone();
     let mut selected = st.clone();
@@ -7673,7 +7891,7 @@ fn integrate_dry_run(
         let st = &projected;
         print_planned_debt(planned_debt.as_ref());
         let report = ctx.report_for_integration(store, st, target, shape)?;
-        advise_role_trailers(&report);
+        advise_role_trailers(&report, false);
         if !report.integrate_ready() {
             eprint!("{}", render::blocker_explanation(st, &report));
             println!(
@@ -7704,8 +7922,11 @@ fn integrate_dry_run(
     print_planned_debt(planned_debt.as_ref());
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;
+    let target_head = gitio::branch_head(&ctx.cwd, target)?;
+    let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
+    let auto_trailers = !no_trailers && policy.trailers.auto;
     let report = ctx.report_for_integration(store, st, target, shape)?;
-    advise_role_trailers(&report);
+    advise_role_trailers(&report, auto_trailers);
     if !report.integrate_ready() {
         eprint!("{}", render::blocker_explanation(st, &report));
         println!(
@@ -7720,7 +7941,6 @@ fn integrate_dry_run(
         .context("no patchset recorded")?
         .head
         .clone();
-    let target_head = gitio::branch_head(&ctx.cwd, target)?;
     let outcome = gitio::merge_outcome(&ctx.cwd, &target_head, &approved_head)?;
     checkout_writes(&checkout, &target_head, outcome.tree.as_deref())?;
     let conflicts = outcome.conflicts;
@@ -7734,6 +7954,41 @@ fn integrate_dry_run(
     let msg = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
+    let planned_trailers = if auto_trailers && !already_contained {
+        let st_with_ctx = state_with_review_context(ctx, st)?;
+        if shape == integration::Shape::FfOnly {
+            let preview = super::rewrite::preview_range_trailers(
+                &ctx.cwd,
+                &st_with_ctx,
+                &policy,
+                &report.danger,
+                &target_head,
+                &approved_head,
+            )?;
+            if preview.commits.is_empty() {
+                None
+            } else {
+                let targets = targets_for_branch(store, &st.branch, &recorded_target, target)?;
+                super::rewrite::check_integrate_shared_safety(
+                    &ctx.cwd,
+                    store,
+                    &st_with_ctx,
+                    &targets,
+                    &preview.commits,
+                )?;
+                Some(integration::PlannedTrailers {
+                    target: "fast-forward".to_string(),
+                    trailers: preview.trailers,
+                    commits: preview.commits,
+                })
+            }
+        } else {
+            plan_merge_commit_trailers(&st_with_ctx, &policy, &report.danger, &approved_head, &msg)
+                .1
+        }
+    } else {
+        None
+    };
 
     println!("dry-run: would integrate {} into {target}", st.change_id);
     if selection.cleanup.enabled {
@@ -7763,6 +8018,26 @@ fn integrate_dry_run(
                 "clean"
             }
         );
+    }
+    if let Some(planned) = &planned_trailers {
+        if planned.target == "fast-forward" {
+            let count = planned.commits.len();
+            println!(
+                "  auto-trailers: would stamp {} in {}..{} (role_additions):",
+                if count == 1 {
+                    "1 commit".to_string()
+                } else {
+                    format!("{count} commits")
+                },
+                render::short_sha(&target_head),
+                render::short_sha(&approved_head),
+            );
+        } else {
+            println!("  auto-trailers: would append to merge commit message:");
+        }
+        for line in &planned.trailers {
+            println!("    + {line}");
+        }
     }
     if let Some(tree) = &outcome.tree {
         println!("  merge tree: {tree}");

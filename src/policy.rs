@@ -92,9 +92,24 @@ pub struct PolicyFile {
     pub contribution: Option<Contribution>,
     pub integration_history: History,
     pub candidates: Candidates,
+    pub trailers: Trailers,
     pub sources: PolicySources,
     /// Parsed project and operator style inputs from this policy reading.
     pub(crate) style_layers: Vec<(String, toml::Value, bool)>,
+}
+
+/// Contribution trailer behavior at integration time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trailers {
+    /// Automatically stamp missing projected contribution trailers during
+    /// `arc integrate` and `arc land`. Defaults to `true`.
+    pub auto: bool,
+}
+
+impl Default for Trailers {
+    fn default() -> Self {
+        Self { auto: true }
+    }
 }
 
 /// How candidate selection treats evidence recorded on another registration.
@@ -294,6 +309,13 @@ struct PolicyLayer {
     danger: Option<DangerLayer>,
     contribution: Option<ContributionLayer>,
     candidates: Option<CandidatesLayer>,
+    trailers: Option<TrailersLayer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrailersLayer {
+    auto: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -480,6 +502,7 @@ fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> 
     let mut contribution: Option<Contribution> = None;
     let mut integration_history = History::Preserve;
     let mut candidates = Candidates::default();
+    let mut trailers = Trailers::default();
 
     for (source, layer) in layers {
         if let Some(raw) = layer.replica {
@@ -622,6 +645,12 @@ fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> 
                 }
             }
         }
+        if let Some(raw) = layer.trailers {
+            if let Some(value) = raw.auto {
+                trailers.auto &= value;
+                sources.record(format!("trailers.auto={value}"), &source);
+            }
+        }
         if let Some(raw) = layer.danger {
             if let Some(entries) = raw.paths {
                 for pattern in entries {
@@ -692,6 +721,7 @@ fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> 
         contribution,
         integration_history,
         candidates,
+        trailers,
         sources,
         style_layers,
     })
@@ -954,5 +984,54 @@ mod tests {
     #[test]
     fn clearance_cutoff_does_nothing_without_assessed_policy() {
         assert!(!Policy::default().clearance_coordinate_required(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn trailers_auto_defaults_true_and_false_wins_across_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let operator = dir.path().join("operator-policy.toml");
+        let empty = layered_with_operator(&operator, None).unwrap();
+        assert!(empty.trailers.auto);
+        assert!(empty.sources.as_map().is_empty());
+
+        let project_false = layered_with_operator(
+            &operator,
+            Some((
+                ".arc/policy.toml".into(),
+                "[trailers]\nauto = false\n".into(),
+            )),
+        )
+        .unwrap();
+        assert!(!project_false.trailers.auto);
+        assert_eq!(
+            project_false.sources.sources_for("trailers.auto=false"),
+            vec![".arc/policy.toml".to_string()]
+        );
+
+        fs::write(&operator, "[trailers]\nauto = true\n").unwrap();
+        let layered_false_wins = layered_with_operator(
+            &operator,
+            Some((
+                ".arc/policy.toml".into(),
+                "[trailers]\nauto = false\n".into(),
+            )),
+        )
+        .unwrap();
+        assert!(!layered_false_wins.trailers.auto);
+
+        fs::write(&operator, "[trailers]\nauto = false\n").unwrap();
+        let operator_disables = layered_with_operator(
+            &operator,
+            Some((
+                ".arc/policy.toml".into(),
+                "[trailers]\nauto = true\n".into(),
+            )),
+        )
+        .unwrap();
+        assert!(!operator_disables.trailers.auto);
+
+        assert!(validate_operator_text("[trailers]\nauto = false\n").is_ok());
+        assert!(validate_operator_text("[trailers]\nauto = \"yes\"\n").is_err());
+        assert!(validate_operator_text("[trailers]\nunknown = true\n").is_err());
     }
 }

@@ -2566,3 +2566,1079 @@ per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, ou
     assert!((share_amounts[0] - 2.0).abs() < 1e-9, "{share_amounts:?}");
     assert!((share_amounts[1] - 3.0).abs() < 1e-9, "{share_amounts:?}");
 }
+
+fn check_clean_trailers(repo: &Repo, cwd: &Path, message: &str) {
+    let checked = repo
+        .arc(cwd)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(message.to_string())
+        .output()
+        .unwrap();
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "instructions git --check failed: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    assert!(
+        checked.stdout.is_empty(),
+        "expected zero trailer issues:\n{}\nfor message:\n{message}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+}
+
+fn history_rewrite_count(repo: &Repo) -> usize {
+    stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--type", "history-rewritten"]),
+    )
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .count()
+}
+
+/// Default-on auto-stamping on `arc integrate` (fast-forward):
+/// - `--dry-run` (text and JSON) previews trailers without mutating Git or ledger
+/// - execution stamps missing projected trailers via `role_additions`, carrying
+///   approvals and commit-bound gates cleanly without re-verifying or re-reviewing
+/// - all landed commits pass `arc instructions git --check` with zero issues.
+#[test]
+fn integrate_ff_auto_stamps_trailers_and_preserves_approvals_and_commit_gates() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\nbinds = \"commit\"\n");
+    let (change, wt) = open(&repo, "auto-ff");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "lead:planner#high",
+        "--orchestrated-by",
+        "lead:coordinator#high",
+    ]));
+    commit_file(&wt, "one.txt", "feat: one");
+    let first = repo.head(&wt);
+    commit_file(&wt, "two.txt", "feat: two");
+    let second = repo.head(&wt);
+    let expected_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "worker-model#medium",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "reviewer-model#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    // `arc check` advisory notes default auto-stamping while keeping `--sync` for PRs.
+    let check = json_stdout(repo.arc(&wt).args(["check", &change, "--json"]));
+    let detail = advisory(&check, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing advisory before integrate: {check}"));
+    assert!(
+        detail.contains("auto-stamp them by default"),
+        "advisory should explain default auto-stamping: {detail}"
+    );
+    assert!(detail.contains("arc rewrite trailers --sync"), "{detail}");
+
+    let master_before = repo.head(&repo.root);
+    let events_before = event_count(&repo, &change);
+
+    // Text `--dry-run` previews auto-stamping and mutates nothing.
+    let dry_text = repo
+        .arc(&repo.root)
+        .args(["integrate", &change, "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(dry_text.status.success(), "{dry_text:?}");
+    let dry_stdout = String::from_utf8_lossy(&dry_text.stdout);
+    let dry_stderr = String::from_utf8_lossy(&dry_text.stderr);
+    assert!(
+        dry_stdout.contains("auto-trailers: would stamp 2 commits"),
+        "{dry_stdout}"
+    );
+    assert!(
+        dry_stdout.contains("Planned-by: lead:planner#high")
+            && dry_stdout.contains("Implemented-by: codex:worker-model#medium")
+            && dry_stdout.contains("Reviewed-by: claude:reviewer-model#high")
+            && dry_stdout.contains("Orchestrated-by: lead:coordinator#high"),
+        "{dry_stdout}"
+    );
+    assert!(
+        !dry_stderr.contains("projected contribution trailers missing"),
+        "dry-run with auto-stamping active must not emit missing-trailer advice: {dry_stderr}"
+    );
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), second);
+    assert_eq!(event_count(&repo, &change), events_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // JSON `--dry-run --json` includes `auto_trailers` without mutating anything.
+    let plan =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &change, "--dry-run", "--json"]),
+        );
+    assert_eq!(plan["schema"], "arc-integration-plan/1", "{plan}");
+    assert_eq!(plan["auto_trailers"]["target"], "fast-forward", "{plan}");
+    assert_eq!(
+        plan["auto_trailers"]["trailers"],
+        serde_json::json!([
+            "Planned-by: lead:planner#high",
+            "Implemented-by: codex:worker-model#medium",
+            "Reviewed-by: claude:reviewer-model#high",
+            "Orchestrated-by: lead:coordinator#high",
+        ])
+    );
+    assert_eq!(
+        plan["auto_trailers"]["commits"],
+        serde_json::json!([first, second])
+    );
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), second);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Real integration auto-stamps both commits, records one `role_additions`
+    // rewrite, preserves approval + commit-bound gate, and fast-forwards master.
+    let integrated = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &change, "--no-cleanup"]),
+    );
+    assert!(
+        integrated.contains("auto-stamped trailers on arc/auto-ff"),
+        "{integrated}"
+    );
+    let master_after = repo.head(&repo.root);
+    assert_ne!(master_after, second, "commits should be stamped");
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "master^{tree}"]),
+        expected_tree
+    );
+    assert_eq!(history_rewrite_count(&repo), 1);
+
+    for rev in ["master~1", "master"] {
+        let msg = git_out(&repo.root, &["show", "-s", "--format=%B", rev]);
+        for expected in [
+            "Planned-by: lead:planner#high",
+            "Implemented-by: codex:worker-model#medium",
+            "Reviewed-by: claude:reviewer-model#high",
+            "Orchestrated-by: lead:coordinator#high",
+        ] {
+            assert!(msg.contains(expected), "{rev} missing {expected}:\n{msg}");
+        }
+        check_clean_trailers(&repo, &repo.root, &msg);
+    }
+
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &change, "--json"]));
+    assert_eq!(state["closure"]["outcome"], "integrated", "{state}");
+    assert_eq!(
+        state["closure"]["integrated_commit"],
+        master_after.as_str(),
+        "{state}"
+    );
+    assert_eq!(state["verdicts"].as_array().unwrap().len(), 1);
+}
+
+/// When commits already carry all projected trailers (or when the only missing
+/// projected trailer would introduce a single-participant violation), FF
+/// integration is a zero-cost no-op with no commits rewritten.
+#[test]
+fn integrate_ff_is_noop_when_nothing_is_missing_or_applicable() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    // Case 1: trailers already present.
+    let (present, present_wt) = open(&repo, "already-stamped");
+    commit_file(
+        &present_wt,
+        "a.txt",
+        "feat: already stamped\n\nImplemented-by: codex:worker#medium\nReviewed-by: claude:rev#high\n",
+    );
+    let original_head = repo.head(&present_wt);
+    stdout(
+        repo.arc(&present_wt)
+            .args(["snapshot", &present, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&present_wt)
+        .args(["verify", &present, "--all"])
+        .assert()
+        .success();
+    repo.arc(&present_wt)
+        .args([
+            "review",
+            &present,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let plan =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &present, "--dry-run", "--json"]),
+        );
+    assert!(
+        plan.get("auto_trailers").is_none(),
+        "no-op dry-run must omit auto_trailers: {plan}"
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &present, "--no-cleanup"]),
+    );
+    assert_eq!(repo.head(&repo.root), original_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Case 2: existing `Planned-by` matches sole projected `Implemented-by`.
+    let (guarded, guarded_wt) = open(&repo, "single-participant-noop");
+    commit_file(
+        &guarded_wt,
+        "b.txt",
+        "feat: planned\n\nPlanned-by: codex:worker#medium\n",
+    );
+    let guarded_head = repo.head(&guarded_wt);
+    stdout(repo.arc(&guarded_wt).args([
+        "snapshot",
+        &guarded,
+        "--contributors",
+        "codex:worker#medium",
+    ]));
+    repo.arc(&guarded_wt)
+        .args(["verify", &guarded, "--all"])
+        .assert()
+        .success();
+    repo.arc(&guarded_wt)
+        .args(["review", &guarded, "--verdict", "approved"])
+        .env("ARC_ACTOR", "reviewer")
+        .assert()
+        .success();
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &guarded, "--no-cleanup"]),
+    );
+    assert_eq!(repo.head(&repo.root), guarded_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+    let msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    check_clean_trailers(&repo, &repo.root, &msg);
+}
+
+/// Escape hatches: `--no-trailers` and `[trailers] auto = false` disable
+/// auto-stamping cleanly; `arc doctor` validates `[trailers]` and `arc status`
+/// reports `trailers.auto=false` in policy sources.
+#[test]
+fn integrate_respects_no_trailers_and_policy_trailers_auto_false() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    // `--no-trailers` skips auto-stamping on FF integration.
+    let (flag_skip, flag_wt) = open(&repo, "flag-skip");
+    commit_file(&flag_wt, "flag.txt", "feat: flag skip");
+    let flag_head = repo.head(&flag_wt);
+    stdout(
+        repo.arc(&flag_wt)
+            .args(["snapshot", &flag_skip, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&flag_wt)
+        .args(["verify", &flag_skip, "--all"])
+        .assert()
+        .success();
+    repo.arc(&flag_wt)
+        .args([
+            "review",
+            &flag_skip,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &flag_skip, "--no-trailers", "--no-cleanup"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("arc rewrite trailers --sync"));
+    assert_eq!(repo.head(&repo.root), flag_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // `[trailers] auto = false` in `.arc/policy.toml`.
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[trailers]\nauto = false\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "chore: disable auto trailers"],
+    );
+
+    repo.arc(&repo.root).args(["doctor"]).assert().success();
+
+    let (policy_skip, policy_wt) = open(&repo, "policy-skip");
+    commit_file(&policy_wt, "policy.txt", "feat: policy skip");
+    let policy_head = repo.head(&policy_wt);
+    stdout(
+        repo.arc(&policy_wt)
+            .args([
+                "snapshot",
+                &policy_skip,
+                "--solo",
+                "--model",
+                "worker#medium",
+            ])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&policy_wt)
+        .args(["verify", &policy_skip, "--all"])
+        .assert()
+        .success();
+    repo.arc(&policy_wt)
+        .args([
+            "review",
+            &policy_skip,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&policy_wt)
+            .args(["status", &policy_skip, "--json"]),
+    );
+    assert_eq!(
+        status["policy_sources"]["trailers.auto=false"],
+        serde_json::json!([".arc/policy.toml"]),
+        "{status}"
+    );
+    let check = json_stdout(repo.arc(&policy_wt).args(["check", &policy_skip, "--json"]));
+    let detail = advisory(&check, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing advisory: {check}"));
+    assert!(
+        !detail.contains("auto-stamp them by default"),
+        "advisory must not claim default auto-stamping when auto=false: {detail}"
+    );
+    assert!(detail.contains("before integration run"), "{detail}");
+
+    repo.arc(&repo.root)
+        .args(["integrate", &policy_skip, "--no-cleanup"])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), policy_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Malformed `[trailers]` fails `arc doctor` cleanly with `policy-unreadable`.
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[trailers]\nauto = \"yes\"\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("policy-unreadable"));
+}
+
+/// Shared-commit safety: FF `arc integrate` refuses to rewrite commits shared
+/// by a stacked open change (both in `--dry-run` and real execution), naming
+/// the stacked branch/change and recommending `arc land` or `--no-trailers`.
+#[test]
+fn integrate_ff_refuses_rewriting_commits_shared_with_stacked_change() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (lower, lower_wt) = open(&repo, "stack-lower");
+    commit_file(&lower_wt, "lower.txt", "feat: lower");
+    let lower_head = repo.head(&lower_wt);
+    stdout(
+        repo.arc(&lower_wt)
+            .args(["snapshot", &lower, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&lower_wt)
+        .args(["verify", &lower, "--all"])
+        .assert()
+        .success();
+    repo.arc(&lower_wt)
+        .args([
+            "review",
+            &lower,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    // Stack `upper` on top of `lower_head`.
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "stack-upper", "--base", &lower_head]),
+    );
+    let upper = opened_change_id(&out);
+    let upper_wt = repo.home.join(".worktrees/repo-stack-upper");
+    commit_file(&upper_wt, "upper.txt", "feat: upper");
+
+    let master_before = repo.head(&repo.root);
+
+    // Dry-run (text + JSON) and execution all refuse with actionable guidance.
+    for args in [
+        vec!["integrate", &lower, "--dry-run"],
+        vec!["integrate", &lower, "--dry-run", "--json"],
+        vec!["integrate", &lower, "--no-cleanup"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/heads/arc/stack-upper"))
+            .stderr(predicates::str::contains(&upper))
+            .stderr(predicates::str::contains("arc land"))
+            .stderr(predicates::str::contains("--no-trailers"));
+    }
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&lower_wt), lower_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Bypassing with `--no-trailers` fast-forwards `lower` cleanly without orphaning `upper`.
+    repo.arc(&repo.root)
+        .args(["integrate", &lower, "--no-trailers", "--no-cleanup"])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), lower_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+}
+
+/// Auto-stamping respects Git's `commit.gpgsign`: signing failure leaves
+/// target and branch untouched, while valid SSH signing signs stamped commits.
+#[test]
+fn integrate_ff_auto_stamping_respects_commit_gpgsign_and_is_atomic_on_failure() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "signed-ff");
+    commit_file(&wt, "signed.txt", "feat: signed work");
+    let orig_head = repo.head(&wt);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+
+    // Broken signing setup: `arc integrate` fails cleanly with target and branch untouched.
+    git(&repo.root, &["config", "commit.gpgsign", "true"]);
+    git(&repo.root, &["config", "gpg.format", "openpgp"]);
+    git(&repo.root, &["config", "gpg.program", "/bin/false"]);
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("git commit-tree failed"));
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Working SSH signing key: `arc integrate` stamps and signs the commit.
+    let key = repo.home.join("auto-stamp-key");
+    assert!(Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap()
+        .success());
+    git(&repo.root, &["config", "gpg.format", "ssh"]);
+    git(
+        &repo.root,
+        &["config", "user.signingkey", key.to_str().unwrap()],
+    );
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .assert()
+        .success();
+    let master_after = repo.head(&repo.root);
+    assert_ne!(master_after, orig_head);
+    let raw = git_out(&repo.root, &["cat-file", "commit", "master"]);
+    assert!(
+        raw.contains("gpgsig -----BEGIN SSH SIGNATURE-----"),
+        "{raw}"
+    );
+    assert!(
+        raw.contains("Implemented-by: codex:worker#medium")
+            && raw.contains("Reviewed-by: claude:rev#high"),
+        "{raw}"
+    );
+}
+
+/// Merge-commit integration (`--shape no-ff`) never rewrites branch commits;
+/// it appends applicable missing projected trailers directly onto the merge
+/// commit message (respecting single-participant safety and `--no-trailers`).
+#[test]
+fn integrate_merge_commit_appends_trailers_without_rewriting_branch_commits() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "merge-trailers");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "lead:planner#high",
+        "--orchestrated-by",
+        "lead:coordinator#high",
+    ]));
+    commit_file(&wt, "m.txt", "feat: branch work");
+    let branch_head = repo.head(&wt);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    // Dry-run previews merge-commit auto-stamping.
+    let plan = json_stdout(repo.arc(&repo.root).args([
+        "integrate",
+        &change,
+        "--shape",
+        "no-ff",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["auto_trailers"]["target"], "merge-commit", "{plan}");
+    assert!(plan["auto_trailers"].get("commits").is_none(), "{plan}");
+    assert_eq!(
+        plan["auto_trailers"]["trailers"],
+        serde_json::json!([
+            "Planned-by: lead:planner#high",
+            "Implemented-by: codex:worker#medium",
+            "Reviewed-by: claude:rev#high",
+            "Orchestrated-by: lead:coordinator#high",
+        ])
+    );
+
+    let dry_text =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &change, "--shape", "no-ff", "--dry-run"]),
+        );
+    assert!(
+        dry_text.contains("auto-trailers: would append to merge commit message:"),
+        "{dry_text}"
+    );
+
+    // Real merge-commit integration leaves branch commit untouched and appends
+    // trailers onto the merge commit itself.
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--shape", "no-ff", "--no-cleanup"])
+        .assert()
+        .success();
+    assert_eq!(history_rewrite_count(&repo), 0);
+    assert_eq!(repo.head(&wt), branch_head);
+    let second_parent = git_out(&repo.root, &["rev-parse", "master^2"]);
+    assert_eq!(
+        second_parent, branch_head,
+        "merge commit must reference untouched branch head"
+    );
+    let branch_msg = git_out(&repo.root, &["show", "-s", "--format=%B", &branch_head]);
+    assert!(
+        !branch_msg.contains("Reviewed-by:"),
+        "branch commit must not be rewritten on merge: {branch_msg}"
+    );
+    let merge_msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    for expected in [
+        "Planned-by: lead:planner#high",
+        "Implemented-by: codex:worker#medium",
+        "Reviewed-by: claude:rev#high",
+        "Orchestrated-by: lead:coordinator#high",
+    ] {
+        assert!(
+            merge_msg.contains(expected),
+            "merge commit missing {expected}:\n{merge_msg}"
+        );
+    }
+    check_clean_trailers(&repo, &repo.root, &merge_msg);
+
+    // Single-participant guard on custom merge message + `--no-trailers` opt-out.
+    let (guarded, guarded_wt) = open(&repo, "merge-single-participant");
+    commit_file(&guarded_wt, "g.txt", "feat: guarded");
+    stdout(repo.arc(&guarded_wt).args([
+        "snapshot",
+        &guarded,
+        "--contributors",
+        "codex:worker#medium",
+    ]));
+    repo.arc(&guarded_wt)
+        .args(["verify", &guarded, "--all"])
+        .assert()
+        .success();
+    repo.arc(&guarded_wt)
+        .args(["review", &guarded, "--verdict", "approved"])
+        .env("ARC_ACTOR", "reviewer")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            &guarded,
+            "--shape",
+            "no-ff",
+            "--no-cleanup",
+            "--message",
+            "merge: custom\n\nPlanned-by: codex:worker#medium",
+        ])
+        .assert()
+        .success();
+    let guarded_merge_msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    assert!(
+        guarded_merge_msg.contains("Planned-by: codex:worker#medium")
+            && !guarded_merge_msg.contains("Implemented-by: codex:worker#medium"),
+        "merge commit must not introduce single-participant violation:\n{guarded_merge_msg}"
+    );
+    check_clean_trailers(&repo, &repo.root, &guarded_merge_msg);
+
+    // `--shape no-ff --no-trailers` appends nothing.
+    let (plain, plain_wt) = open(&repo, "merge-no-trailers");
+    commit_file(&plain_wt, "p.txt", "feat: plain");
+    stdout(
+        repo.arc(&plain_wt)
+            .args(["snapshot", &plain, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&plain_wt)
+        .args(["verify", &plain, "--all"])
+        .assert()
+        .success();
+    repo.arc(&plain_wt)
+        .args([
+            "review",
+            &plain,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            &plain,
+            "--shape",
+            "no-ff",
+            "--no-trailers",
+            "--no-cleanup",
+        ])
+        .assert()
+        .success();
+    let plain_msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    assert!(
+        !plain_msg.contains("Implemented-by:") && !plain_msg.contains("Reviewed-by:"),
+        "merge --no-trailers must not append trailers:\n{plain_msg}"
+    );
+}
+
+/// Stacked `arc land` stamps each layer's own projected contribution trailers
+/// bottom-to-top onto its commits, previews per-member trailers in `--dry-run`,
+/// and respects `--no-trailers` and `[trailers] auto = false`.
+#[test]
+fn land_stamps_stacked_layers_bottom_to_top_and_respects_no_trailers() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"test -f README.md\"\n");
+
+    // Layer 1: lower
+    let (lower, lower_wt) = open(&repo, "land-lower");
+    stdout(
+        repo.arc(&lower_wt)
+            .args(["roles", &lower, "--planned-by", "lead:planner-a#high"]),
+    );
+    commit_file(&lower_wt, "lower.txt", "feat: lower layer");
+    let lower_head = repo.head(&lower_wt);
+    stdout(
+        repo.arc(&lower_wt)
+            .args(["snapshot", &lower, "--solo", "--model", "worker-a#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&lower_wt)
+        .args([
+            "review",
+            &lower,
+            "--verdict",
+            "approved",
+            "--model",
+            "reviewer-a#high",
+        ])
+        .env("ARC_ACTOR", "reviewer-a")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    // Layer 2: upper stacked on lower
+    let upper_out = stdout(repo.arc(&repo.root).args([
+        "begin",
+        "land-upper",
+        "--base",
+        &lower_head,
+        "--blocked-by",
+        &lower,
+    ]));
+    let upper = opened_change_id(&upper_out);
+    let upper_wt = repo.home.join(".worktrees/repo-land-upper");
+    stdout(
+        repo.arc(&upper_wt)
+            .args(["roles", &upper, "--orchestrated-by", "lead:coord-b#high"]),
+    );
+    commit_file(&upper_wt, "upper.txt", "feat: upper layer");
+    let upper_head = repo.head(&upper_wt);
+    let expected_tree = git_out(&upper_wt, &["rev-parse", "HEAD^{tree}"]);
+    stdout(
+        repo.arc(&upper_wt)
+            .args(["snapshot", &upper, "--solo", "--model", "worker-b#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&upper_wt)
+        .args([
+            "review",
+            &upper,
+            "--verdict",
+            "approved",
+            "--model",
+            "reviewer-b#high",
+        ])
+        .env("ARC_ACTOR", "reviewer-b")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+
+    // Dry-run (text + JSON) previews per-member trailers without mutating anything.
+    let dry_text = stdout(
+        repo.arc(&repo.root)
+            .args(["land", &lower, &upper, "--dry-run"]),
+    );
+    assert!(
+        dry_text.contains("auto-stamping contribution trailers"),
+        "{dry_text}"
+    );
+    assert!(
+        dry_text.contains("Implemented-by: codex:worker-a#medium")
+            && dry_text.contains("Implemented-by: codex:worker-b#medium"),
+        "{dry_text}"
+    );
+    let plan =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["land", &lower, &upper, "--dry-run", "--json"]),
+        );
+    assert_eq!(plan["schema"], "arc-landing-plan/1", "{plan}");
+    assert_eq!(plan["shape"], "stack", "{plan}");
+    assert!(plan["target_after"].is_null(), "{plan}");
+    assert_eq!(plan["tree"], expected_tree.as_str(), "{plan}");
+    assert_eq!(
+        plan["members"][0]["auto_trailers"],
+        serde_json::json!([
+            "Planned-by: lead:planner-a#high",
+            "Implemented-by: codex:worker-a#medium",
+            "Reviewed-by: claude:reviewer-a#high",
+        ])
+    );
+    assert_eq!(
+        plan["members"][1]["auto_trailers"],
+        serde_json::json!([
+            "Implemented-by: codex:worker-b#medium",
+            "Reviewed-by: claude:reviewer-b#high",
+            "Orchestrated-by: lead:coord-b#high",
+        ])
+    );
+    assert_eq!(repo.head(&repo.root), master_before);
+
+    // Real `arc land` stamps each layer bottom-to-top with only its own trailers.
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let landed_upper = repo.head(&repo.root);
+    let landed_lower = git_out(&repo.root, &["rev-parse", "master~1"]);
+    assert_ne!(landed_lower, lower_head);
+    assert_ne!(landed_upper, upper_head);
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "master^{tree}"]),
+        expected_tree
+    );
+
+    let lower_msg = git_out(&repo.root, &["show", "-s", "--format=%B", &landed_lower]);
+    assert!(
+        lower_msg.contains("Planned-by: lead:planner-a#high")
+            && lower_msg.contains("Implemented-by: codex:worker-a#medium")
+            && lower_msg.contains("Reviewed-by: claude:reviewer-a#high")
+            && !lower_msg.contains("worker-b")
+            && !lower_msg.contains("coord-b"),
+        "lower layer must carry only lower trailers:\n{lower_msg}"
+    );
+    check_clean_trailers(&repo, &repo.root, &lower_msg);
+
+    let upper_msg = git_out(&repo.root, &["show", "-s", "--format=%B", &landed_upper]);
+    assert!(
+        upper_msg.contains("Implemented-by: codex:worker-b#medium")
+            && upper_msg.contains("Reviewed-by: claude:reviewer-b#high")
+            && upper_msg.contains("Orchestrated-by: lead:coord-b#high")
+            && !upper_msg.contains("worker-a")
+            && !upper_msg.contains("planner-a"),
+        "upper layer must carry only upper trailers:\n{upper_msg}"
+    );
+    check_clean_trailers(&repo, &repo.root, &upper_msg);
+
+    // `--no-trailers` passes through to every landed layer and lands exact SHAs.
+    let (l2, l2_wt) = open(&repo, "land-plain-lower");
+    commit_file(&l2_wt, "l2.txt", "feat: l2");
+    let l2_head = repo.head(&l2_wt);
+    stdout(
+        repo.arc(&l2_wt)
+            .args(["snapshot", &l2, "--solo", "--model", "worker-a#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&l2_wt)
+        .args([
+            "review",
+            &l2,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let u2_out = stdout(repo.arc(&repo.root).args([
+        "begin",
+        "land-plain-upper",
+        "--base",
+        &l2_head,
+        "--blocked-by",
+        &l2,
+    ]));
+    let u2 = opened_change_id(&u2_out);
+    let u2_wt = repo.home.join(".worktrees/repo-land-plain-upper");
+    commit_file(&u2_wt, "u2.txt", "feat: u2");
+    let u2_head = repo.head(&u2_wt);
+    stdout(
+        repo.arc(&u2_wt)
+            .args(["snapshot", &u2, "--solo", "--model", "worker-b#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&u2_wt)
+        .args([
+            "review",
+            &u2,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["land", &l2, &u2, "--no-trailers"])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), u2_head);
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master~1"]), l2_head);
+
+    // Composed (replayed) landing stamps Implemented-by/Planned-by on replayed
+    // commits while omitting Reviewed-by on replayed-unread members, and
+    // respects `[trailers] auto = false` as well as abandoning cleanly on
+    // signing failure.
+    let (p1, p1_wt) = open(&repo, "composed-a");
+    commit_file(&p1_wt, "ca.txt", "feat: ca");
+    stdout(
+        repo.arc(&p1_wt)
+            .args(["snapshot", &p1, "--solo", "--model", "worker-a#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&p1_wt)
+        .args([
+            "review",
+            &p1,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev-a#high",
+        ])
+        .env("ARC_ACTOR", "rev-a")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let (p2, p2_wt) = open(&repo, "composed-b");
+    commit_file(&p2_wt, "cb.txt", "feat: cb");
+    stdout(
+        repo.arc(&p2_wt)
+            .args(["snapshot", &p2, "--solo", "--model", "worker-b#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&p2_wt)
+        .args([
+            "review",
+            &p2,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev-b#high",
+        ])
+        .env("ARC_ACTOR", "rev-b")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    // Signing failure during `arc land` abandons cleanly and leaves target untouched.
+    let before_composed = repo.head(&repo.root);
+    git(&repo.root, &["config", "commit.gpgsign", "true"]);
+    git(&repo.root, &["config", "gpg.format", "openpgp"]);
+    git(&repo.root, &["config", "gpg.program", "/bin/false"]);
+    repo.arc(&repo.root)
+        .args(["land", &p1, &p2, "--debt", "composed replay"])
+        .assert()
+        .failure();
+    assert_eq!(repo.head(&repo.root), before_composed);
+    let p1_status = json_stdout_any_status(repo.arc(&repo.root).args(["status", &p1, "--json"]));
+    assert!(
+        p1_status["pending_landing"].is_null(),
+        "failed landing must abandon cleanly: {p1_status}"
+    );
+    git(&repo.root, &["config", "commit.gpgsign", "false"]);
+
+    repo.arc(&repo.root)
+        .args(["land", &p1, &p2, "--debt", "composed replay"])
+        .assert()
+        .success();
+    let landed_p1_msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master~1"]);
+    let landed_p2_msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    assert!(
+        landed_p1_msg.contains("Implemented-by: codex:worker-a#medium")
+            && landed_p1_msg.contains("Reviewed-by: claude:rev-a#high"),
+        "non-replayed bottom layer keeps Reviewed-by:\n{landed_p1_msg}"
+    );
+    assert!(
+        landed_p2_msg.contains("Implemented-by: codex:worker-b#medium")
+            && !landed_p2_msg.contains("Reviewed-by:"),
+        "replayed-unread layer must stamp Implemented-by without transferring Reviewed-by:\n{landed_p2_msg}"
+    );
+
+    // `[trailers] auto = false` disables auto-stamping on `arc land`.
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[trailers]\nauto = false\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "chore: disable auto trailers"],
+    );
+
+    let (l3, l3_wt) = open(&repo, "land-policy-off");
+    commit_file(&l3_wt, "l3.txt", "feat: l3");
+    let l3_head = repo.head(&l3_wt);
+    stdout(
+        repo.arc(&l3_wt)
+            .args(["snapshot", &l3, "--solo", "--model", "worker-c#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&l3_wt)
+        .args([
+            "review",
+            &l3,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev-c#high",
+        ])
+        .env("ARC_ACTOR", "rev-c")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+    repo.arc(&repo.root).args(["land", &l3]).assert().success();
+    assert_eq!(repo.head(&repo.root), l3_head);
+}

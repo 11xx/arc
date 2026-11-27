@@ -337,6 +337,24 @@ pub struct IntegrationPlan {
     /// debt event for a declaration still to come.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debt: Option<PlannedDebt>,
+    /// Contribution trailers that integration would auto-stamp (on fast-forward
+    /// commits or onto the merge commit message), when enabled and non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_trailers: Option<PlannedTrailers>,
+}
+
+/// Contribution trailers an integration would auto-stamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedTrailers {
+    /// `"fast-forward"` when commits in `target..head` would be rewritten via
+    /// `role_additions`, or `"merge-commit"` when trailers would be appended to
+    /// the merge commit message.
+    pub target: String,
+    /// Distinct trailer lines that would be appended, in canonical order.
+    pub trailers: Vec<String>,
+    /// Commits in `target..head` that would be rewritten (empty for merge-commit).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<String>,
 }
 
 /// Whether a planned debt is already in the ledger.
@@ -436,6 +454,7 @@ impl IntegrationPlan {
             evaluated_tree: plan.evaluated_tree.clone(),
             authorization: plan.authorization.clone(),
             debt: None,
+            auto_trailers: None,
         }
     }
 
@@ -460,6 +479,7 @@ impl IntegrationPlan {
             evaluated_tree: None,
             authorization: plan.authorization.clone(),
             debt: None,
+            auto_trailers: None,
         }
     }
 }
@@ -849,6 +869,7 @@ impl IntegrationPlan {
             evaluated_tree: Some(plan.evaluated_tree.clone()),
             authorization: plan.authorization.clone(),
             debt: None,
+            auto_trailers: None,
         }
     }
 }

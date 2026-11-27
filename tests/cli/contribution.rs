@@ -480,15 +480,38 @@ fn missing_contribution_trailers_do_not_block_integration() {
         );
         commit_file(&wt, "one", "one");
         gate_and_approve(&repo, &wt, "advisory-only");
-        for args in [
-            vec!["integrate", "advisory-only", "--dry-run"],
-            vec!["integrate", "advisory-only", "--no-cleanup"],
-        ] {
+        if contribution {
+            for args in [
+                vec!["integrate", "advisory-only", "--dry-run"],
+                vec!["integrate", "advisory-only", "--no-cleanup"],
+            ] {
+                repo.arc(&wt)
+                    .args(args)
+                    .assert()
+                    .success()
+                    .stderr(predicates::str::contains("arc rewrite trailers"));
+            }
+        } else {
+            // With `--no-trailers`, missing trailers remain advisory-only and never block.
             repo.arc(&wt)
-                .args(args)
+                .args(["integrate", "advisory-only", "--no-trailers", "--dry-run"])
                 .assert()
                 .success()
                 .stderr(predicates::str::contains("arc rewrite trailers"));
+            // By default (`[trailers] auto = true`), dry-run previews auto-stamping
+            // and integration stamps the missing projected trailer automatically.
+            repo.arc(&wt)
+                .args(["integrate", "advisory-only", "--dry-run"])
+                .assert()
+                .success()
+                .stdout(predicates::str::contains("auto-trailers:"))
+                .stdout(predicates::str::contains("Planned-by: lead:planner"));
+            repo.arc(&wt)
+                .args(["integrate", "advisory-only", "--no-cleanup"])
+                .assert()
+                .success();
+            let msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+            assert!(msg.contains("Planned-by: lead:planner"), "{msg}");
         }
     }
 }

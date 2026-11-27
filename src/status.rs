@@ -3958,13 +3958,23 @@ fn missing_role_trailers_advisory(
     } else {
         "`arc rewrite trailers --sync`".to_string()
     };
-    Some(Advisory {
-        code: "missing-contribution-trailers",
-        detail: format!(
+    let detail = if policy.contribution.is_none() && policy.trailers.auto {
+        format!(
+            "projected contribution trailers missing: {details}; `arc integrate` and `arc land` \
+             auto-stamp them by default (or run {remedy} before integration for PRs or with \
+             `--no-trailers`); appending complete role trailers preserves approvals, debt waivers, \
+             and gates"
+        )
+    } else {
+        format!(
             "projected contribution trailers missing: {details}; before integration run \
              {remedy}; appending complete role trailers preserves approvals, debt waivers, \
              and gates"
-        ),
+        )
+    };
+    Some(Advisory {
+        code: "missing-contribution-trailers",
+        detail,
     })
 }
 
