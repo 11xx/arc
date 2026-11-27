@@ -810,11 +810,11 @@ struct TrackedHunk {
 
 #[derive(Debug, Clone)]
 enum CommitBlobState {
-    Blob {
+    Tracked {
         oid: String,
         hunks: Vec<TrackedHunk>,
     },
-    NonRegular,
+    Unprojectable,
 }
 
 fn init_tracked_hunks(
@@ -879,7 +879,12 @@ fn init_tracked_hunks(
     tracked
 }
 
-fn project_tracked_hunk(tracked: &mut TrackedHunk, p_lines: &[&[u8]], hunks: &[U0Hunk]) {
+fn project_tracked_hunk(
+    tracked: &mut TrackedHunk,
+    p_lines: &[&[u8]],
+    c_lines: &[&[u8]],
+    hunks: &[U0Hunk],
+) {
     let s = tracked.start;
     let e = tracked.end;
 
@@ -969,6 +974,21 @@ fn project_tracked_hunk(tracked: &mut TrackedHunk, p_lines: &[&[u8]], hunks: &[U
         }
     }
 
+    // Clamp `removed_baseline` to the count still present in `c_lines[new_start..new_end]`
+    // so an absorbed neighboring duplicate that disappears in this commit cannot
+    // offset a later commit restoring the defective line at the fixed site.
+    for (rem, base) in tracked
+        .removed_lines
+        .iter()
+        .zip(&mut tracked.removed_baseline)
+    {
+        let present_in_new = c_lines[new_start..new_end]
+            .iter()
+            .filter(|&&line| line == rem.as_slice())
+            .count();
+        *base = (*base).min(present_in_new);
+    }
+
     tracked.start = new_start;
     tracked.end = new_end;
 }
@@ -1019,7 +1039,7 @@ fn project_hunks_between_blobs(
     tighten_matches_left(&from_lines, &to_lines, &mut matches);
     let tight_hunks = u0_hunks_from_matches(from_lines.len(), to_lines.len(), &matches);
     for tracked in hunks {
-        project_tracked_hunk(tracked, &from_lines, &tight_hunks);
+        project_tracked_hunk(tracked, &from_lines, &to_lines, &tight_hunks);
     }
     Some(())
 }
@@ -1077,7 +1097,7 @@ fn text_blob_survives_along_history(
         std::collections::HashMap::new();
     states.insert(
         fix_commit,
-        CommitBlobState::Blob {
+        CommitBlobState::Tracked {
             oid: entry.new_oid.clone(),
             hunks: initial_hunks.clone(),
         },
@@ -1094,10 +1114,13 @@ fn text_blob_survives_along_history(
         }
 
         // Prefer any reachable parent whose tree entry for this path equals
-        // `commit`'s entry (so merges such as `-s ours` inherit the surviving
-        // branch's tracked spans with zero diff).
-        let mut inherited = None;
-        let mut first_change: Option<(&str, String, String)> = None;
+        // `commit`'s entry AND has usable tracked spans (so `-s ours` merges
+        // discarding a binary side branch inherit the first parent's exact
+        // tracked text state, including rollbacks).
+        let mut inherited_tracked = None;
+        let mut inherited_unprojectable = false;
+        let mut changed_tracked: Option<(&str, String, String)> = None;
+        let mut changed_unprojectable: Option<(String, String)> = None;
         for &parent in &reachable {
             let key = (parent.to_string(), commit.clone());
             let entries = match edge_diffs.entry(key) {
@@ -1110,49 +1133,66 @@ fn text_blob_survives_along_history(
                 }
             };
             match entries.iter().find(|e| e.path == entry.path) {
-                None => {
-                    inherited = Some(states[parent].clone());
-                    break;
-                }
-                Some(changed) => {
-                    if first_change.is_none() {
-                        first_change =
-                            Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
+                None => match &states[parent] {
+                    CommitBlobState::Tracked { .. } => {
+                        inherited_tracked = Some(states[parent].clone());
+                        break;
                     }
-                }
+                    CommitBlobState::Unprojectable => {
+                        inherited_unprojectable = true;
+                    }
+                },
+                Some(changed) => match &states[parent] {
+                    CommitBlobState::Tracked { .. } => {
+                        if changed_tracked.is_none() {
+                            changed_tracked =
+                                Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
+                        }
+                    }
+                    CommitBlobState::Unprojectable => {
+                        if changed_unprojectable.is_none() {
+                            changed_unprojectable =
+                                Some((changed.new_mode.clone(), changed.new_oid.clone()));
+                        }
+                    }
+                },
             }
         }
 
-        let next_state = if let Some(state) = inherited {
+        let next_state = if let Some(state) = inherited_tracked {
             state
-        } else if let Some((parent, c_mode, c_oid)) = first_change {
+        } else if inherited_unprojectable {
+            CommitBlobState::Unprojectable
+        } else if let Some((parent, c_mode, c_oid)) = changed_tracked {
             if !is_regular_blob_mode(&c_mode) {
-                CommitBlobState::NonRegular
+                CommitBlobState::Unprojectable
+            } else if let CommitBlobState::Tracked { oid: p_oid, hunks } = &states[parent] {
+                let mut projected = hunks.clone();
+                if project_hunks_between_blobs(cwd, p_oid, &c_oid, &mut projected).is_some() {
+                    CommitBlobState::Tracked {
+                        oid: c_oid,
+                        hunks: projected,
+                    }
+                } else {
+                    CommitBlobState::Unprojectable
+                }
             } else {
-                match &states[parent] {
-                    CommitBlobState::Blob { oid: p_oid, hunks } => {
-                        let mut projected = hunks.clone();
-                        if project_hunks_between_blobs(cwd, p_oid, &c_oid, &mut projected).is_none()
-                        {
-                            return true;
-                        }
-                        CommitBlobState::Blob {
-                            oid: c_oid,
-                            hunks: projected,
-                        }
+                CommitBlobState::Unprojectable
+            }
+        } else if let Some((c_mode, c_oid)) = changed_unprojectable {
+            if !is_regular_blob_mode(&c_mode) {
+                CommitBlobState::Unprojectable
+            } else {
+                let mut projected = initial_hunks.clone();
+                if project_hunks_between_blobs(cwd, &entry.new_oid, &c_oid, &mut projected)
+                    .is_some()
+                {
+                    CommitBlobState::Tracked {
+                        oid: c_oid,
+                        hunks: projected,
                     }
-                    CommitBlobState::NonRegular => {
-                        let mut projected = initial_hunks.clone();
-                        if project_hunks_between_blobs(cwd, &entry.new_oid, &c_oid, &mut projected)
-                            .is_none()
-                        {
-                            return true;
-                        }
-                        CommitBlobState::Blob {
-                            oid: c_oid,
-                            hunks: projected,
-                        }
-                    }
+                } else {
+                    CommitBlobState::Unprojectable
                 }
             }
         } else {
@@ -1162,12 +1202,12 @@ fn text_blob_survives_along_history(
     }
 
     let final_hunks = match states.get(head) {
-        Some(CommitBlobState::Blob { hunks, .. }) => hunks.clone(),
+        Some(CommitBlobState::Tracked { hunks, .. }) => hunks.clone(),
         _ => {
             let mut projected = initial_hunks;
             if project_hunks_between_blobs(cwd, &entry.new_oid, head_oid, &mut projected).is_none()
             {
-                return true;
+                return false;
             }
             projected
         }

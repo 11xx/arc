@@ -1805,3 +1805,178 @@ fn multi_commit_span_tracking_handles_adjacent_expansion_and_neighbor_duplicate_
         "refining GOOD to GOOD_V2 with historical copy elsewhere must stay resolved: {status2_control}"
     );
 }
+
+#[test]
+fn intermediate_binary_and_removed_adjacent_duplicate_still_reopen_rollbacks() {
+    let repo = Repo::new();
+
+    // Case 1a: Intermediate binary blob followed by restored text with BAD + appended line must reopen.
+    let begin1a = stdout(repo.arc(&repo.root).args(["begin", "binary-intermediate"]));
+    let change1a = opened_change_id(&begin1a);
+    let wt1a = repo.home.join(".worktrees/repo-binary-intermediate");
+    repo.commit(&wt1a, "f.txt", "A\nBAD\nB\nC\n", "feat: initial");
+    stdout(repo.arc(&wt1a).args(["snapshot", "binary-intermediate"]));
+    let fid1a = stdout(repo.arc(&wt1a).args([
+        "finding",
+        "binary-intermediate",
+        "--summary",
+        "fix BAD",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1a, "f.txt", "A\nGOOD\nB\nC\n", "fix: BAD -> GOOD");
+    let fix1a = repo.head(&wt1a);
+    stdout(repo.arc(&wt1a).args([
+        "resolve",
+        "binary-intermediate",
+        &fid1a,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1a,
+    ]));
+    repo.commit(
+        &wt1a,
+        "f.txt",
+        "A\nGOOD\nB\nC\nEXTRA\n",
+        "chore: append line",
+    );
+    fs::write(wt1a.join("f.txt"), b"A\x00\nGOOD\nB\nC\nEXTRA\n").unwrap();
+    git(&wt1a, &["add", "f.txt"]);
+    git(&wt1a, &["commit", "-m", "chore: temporary binary NUL"]);
+    repo.commit(
+        &wt1a,
+        "f.txt",
+        "A\nBAD\nB\nC\nEXTRA\n",
+        "chore: restore text with BAD",
+    );
+    stdout(repo.arc(&wt1a).args(["snapshot", "binary-intermediate"]));
+    let status1a = json_stdout(repo.arc(&wt1a).args(["status", &change1a, "--json"]));
+    assert_eq!(
+        status1a["open_blocking_findings"],
+        serde_json::json!([fid1a]),
+        "intermediate binary commit must not hide final text rollback: {status1a}"
+    );
+    repo.arc(&wt1a).args(["check", &change1a]).assert().code(2);
+
+    // Case 1b: `-s ours` merge discarding a binary side branch while preserving the first
+    // parent's rolled-back text must still reopen.
+    let begin1b = stdout(repo.arc(&repo.root).args(["begin", "binary-side-merge"]));
+    let change1b = opened_change_id(&begin1b);
+    let wt1b = repo.home.join(".worktrees/repo-binary-side-merge");
+    repo.commit(&wt1b, "f.txt", "A\nBAD\nB\nC\n", "feat: initial");
+    stdout(repo.arc(&wt1b).args(["snapshot", "binary-side-merge"]));
+    let fid1b = stdout(repo.arc(&wt1b).args([
+        "finding",
+        "binary-side-merge",
+        "--summary",
+        "fix BAD",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1b, "f.txt", "A\nGOOD\nB\nC\n", "fix: BAD -> GOOD");
+    let fix1b = repo.head(&wt1b);
+    stdout(repo.arc(&wt1b).args([
+        "resolve",
+        "binary-side-merge",
+        &fid1b,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1b,
+    ]));
+    // Side branch introduces a NUL binary blob.
+    git(&wt1b, &["checkout", "-b", "side-binary"]);
+    fs::write(wt1b.join("f.txt"), b"A\x00\nGOOD\nB\nC\n").unwrap();
+    git(&wt1b, &["add", "f.txt"]);
+    git(&wt1b, &["commit", "-m", "chore: binary on side branch"]);
+    // Main branch rolls back BAD + appends unrelated line, then merges side branch with `-s ours`.
+    git(&wt1b, &["checkout", "arc/binary-side-merge"]);
+    repo.commit(
+        &wt1b,
+        "f.txt",
+        "A\nBAD\nB\nC\nEXTRA\n",
+        "chore: roll back BAD with extra line",
+    );
+    git(&wt1b, &["merge", "-s", "ours", "--no-edit", "side-binary"]);
+    git(&wt1b, &["branch", "-D", "side-binary"]);
+    stdout(repo.arc(&wt1b).args(["snapshot", "binary-side-merge"]));
+    let status1b = json_stdout(repo.arc(&wt1b).args(["status", &change1b, "--json"]));
+    assert_eq!(
+        status1b["open_blocking_findings"],
+        serde_json::json!([fid1b]),
+        "ours merge discarding binary side branch must preserve first parent's rollback: {status1b}"
+    );
+    repo.arc(&wt1b).args(["check", &change1b]).assert().code(2);
+
+    // Case 2: Refining GOOD -> GOOD_V2 while removing adjacent BAD -> OTHER in commit 2
+    // stays resolved, and then changing ONLY GOOD_V2 -> BAD in commit 3 must reopen.
+    let begin2 = stdout(repo.arc(&repo.root).args(["begin", "removed-adj-dup"]));
+    let change2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-removed-adj-dup");
+    repo.commit(&wt2, "f.txt", "A\nBAD\nBAD\nC\n", "feat: adjacent BADs");
+    stdout(repo.arc(&wt2).args(["snapshot", "removed-adj-dup"]));
+    let fid2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "removed-adj-dup",
+        "--summary",
+        "fix first BAD",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt2, "f.txt", "A\nGOOD\nBAD\nC\n", "fix: first BAD -> GOOD");
+    let fix2 = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "removed-adj-dup",
+        &fid2,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix2,
+    ]));
+    // Commit 2: refine GOOD -> GOOD_V2 AND replace adjacent BAD -> OTHER -> must stay resolved.
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nGOOD_V2\nOTHER\nC\n",
+        "refactor: refine GOOD and remove adjacent BAD",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "removed-adj-dup"]));
+    let status2_refined = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2_refined["open_blocking_findings"],
+        serde_json::json!([]),
+        "refining GOOD -> GOOD_V2 while removing adjacent BAD must stay resolved: {status2_refined}"
+    );
+    // Commit 3: restore ONLY GOOD_V2 -> BAD -> must reopen.
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nBAD\nOTHER\nC\n",
+        "chore: restore BAD at fixed line",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "removed-adj-dup"]));
+    let status2_reopened = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2_reopened["open_blocking_findings"],
+        serde_json::json!([fid2]),
+        "restoring BAD after adjacent duplicate disappeared must reopen finding: {status2_reopened}"
+    );
+    repo.arc(&wt2).args(["check", &change2]).assert().code(2);
+}
