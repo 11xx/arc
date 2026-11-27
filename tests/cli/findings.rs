@@ -1980,3 +1980,101 @@ fn intermediate_binary_and_removed_adjacent_duplicate_still_reopen_rollbacks() {
     );
     repo.arc(&wt2).args(["check", &change2]).assert().code(2);
 }
+
+#[test]
+fn binary_detour_after_adjacent_split_preserves_guard_span_on_restoration() {
+    let repo = Repo::new();
+
+    let begin = stdout(repo.arc(&repo.root).args(["begin", "binary-guard-split"]));
+    let change = opened_change_id(&begin);
+    let wt = repo.home.join(".worktrees/repo-binary-guard-split");
+    repo.commit(&wt, "f.txt", "A\nB\nC\n", "feat: initial");
+    stdout(repo.arc(&wt).args(["snapshot", "binary-guard-split"]));
+    let fid = stdout(repo.arc(&wt).args([
+        "finding",
+        "binary-guard-split",
+        "--summary",
+        "insert guard before B",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+    let fix = repo.head(&wt);
+    stdout(repo.arc(&wt).args([
+        "resolve",
+        "binary-guard-split",
+        &fid,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix,
+    ]));
+    // Split adjacent line B while retaining GUARD, then temporarily turn A into a NUL binary blob.
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nGUARD\nB part one\nB part two\nC\n",
+        "refactor: split B while keeping guard",
+    );
+    fs::write(
+        wt.join("f.txt"),
+        b"A\x00\nGUARD\nB part one\nB part two\nC\n",
+    )
+    .unwrap();
+    git(&wt, &["add", "f.txt"]);
+    git(&wt, &["commit", "-m", "chore: temporary binary NUL on A"]);
+    let binary_head = repo.head(&wt);
+
+    // Restore text while deleting ONLY GUARD -> must reopen finding (matching the all-text control).
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nB part one\nB part two\nC\n",
+        "chore: restore text and drop guard",
+    );
+    stdout(repo.arc(&wt).args(["snapshot", "binary-guard-split"]));
+    let status_reopened = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+    assert_eq!(
+        status_reopened["open_blocking_findings"],
+        serde_json::json!([fid]),
+        "deleting guard on text restoration after binary detour must reopen finding: {status_reopened}"
+    );
+    repo.arc(&wt).args(["check", &change]).assert().code(2);
+
+    // Positive control 1: restoring text with GUARD preserved -> stays resolved.
+    git(&wt, &["reset", "--hard", &binary_head]);
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nGUARD\nB part one\nB part two\nC\n",
+        "chore: restore text with guard intact",
+    );
+    stdout(repo.arc(&wt).args(["snapshot", "binary-guard-split"]));
+    let status_preserved = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+    assert_eq!(
+        status_preserved["open_blocking_findings"],
+        serde_json::json!([]),
+        "restoring text with guard preserved must stay resolved: {status_preserved}"
+    );
+
+    // Positive control 2: restoring text with GUARD refined to GUARD_V2 -> stays resolved.
+    git(&wt, &["reset", "--hard", &binary_head]);
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nGUARD_V2\nB part one\nB part two\nC\n",
+        "refactor: restore text with GUARD_V2",
+    );
+    stdout(repo.arc(&wt).args(["snapshot", "binary-guard-split"]));
+    let status_refined = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+    assert_eq!(
+        status_refined["open_blocking_findings"],
+        serde_json::json!([]),
+        "restoring text with GUARD_V2 must stay resolved: {status_refined}"
+    );
+}

@@ -814,7 +814,13 @@ enum CommitBlobState {
         oid: String,
         hunks: Vec<TrackedHunk>,
     },
-    Unprojectable,
+    /// Opaque (binary or non-regular) intermediate state preserving the last
+    /// usable text blob OID and its tracked spans so text restoration projects
+    /// from the pre-opaque state rather than resetting to `fix_commit`.
+    Unprojectable {
+        last_oid: String,
+        last_hunks: Vec<TrackedHunk>,
+    },
 }
 
 fn init_tracked_hunks(
@@ -1118,9 +1124,9 @@ fn text_blob_survives_along_history(
         // discarding a binary side branch inherit the first parent's exact
         // tracked text state, including rollbacks).
         let mut inherited_tracked = None;
-        let mut inherited_unprojectable = false;
+        let mut inherited_unprojectable = None;
         let mut changed_tracked: Option<(&str, String, String)> = None;
-        let mut changed_unprojectable: Option<(String, String)> = None;
+        let mut changed_unprojectable: Option<(&str, String, String)> = None;
         for &parent in &reachable {
             let key = (parent.to_string(), commit.clone());
             let entries = match edge_diffs.entry(key) {
@@ -1138,8 +1144,10 @@ fn text_blob_survives_along_history(
                         inherited_tracked = Some(states[parent].clone());
                         break;
                     }
-                    CommitBlobState::Unprojectable => {
-                        inherited_unprojectable = true;
+                    CommitBlobState::Unprojectable { .. } => {
+                        if inherited_unprojectable.is_none() {
+                            inherited_unprojectable = Some(states[parent].clone());
+                        }
                     }
                 },
                 Some(changed) => match &states[parent] {
@@ -1149,10 +1157,10 @@ fn text_blob_survives_along_history(
                                 Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
                         }
                     }
-                    CommitBlobState::Unprojectable => {
+                    CommitBlobState::Unprojectable { .. } => {
                         if changed_unprojectable.is_none() {
                             changed_unprojectable =
-                                Some((changed.new_mode.clone(), changed.new_oid.clone()));
+                                Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
                         }
                     }
                 },
@@ -1161,39 +1169,65 @@ fn text_blob_survives_along_history(
 
         let next_state = if let Some(state) = inherited_tracked {
             state
-        } else if inherited_unprojectable {
-            CommitBlobState::Unprojectable
+        } else if let Some(state) = inherited_unprojectable {
+            state
         } else if let Some((parent, c_mode, c_oid)) = changed_tracked {
-            if !is_regular_blob_mode(&c_mode) {
-                CommitBlobState::Unprojectable
-            } else if let CommitBlobState::Tracked { oid: p_oid, hunks } = &states[parent] {
-                let mut projected = hunks.clone();
-                if project_hunks_between_blobs(cwd, p_oid, &c_oid, &mut projected).is_some() {
-                    CommitBlobState::Tracked {
-                        oid: c_oid,
-                        hunks: projected,
+            if let CommitBlobState::Tracked { oid: p_oid, hunks } = &states[parent] {
+                if !is_regular_blob_mode(&c_mode) {
+                    CommitBlobState::Unprojectable {
+                        last_oid: p_oid.clone(),
+                        last_hunks: hunks.clone(),
                     }
                 } else {
-                    CommitBlobState::Unprojectable
+                    let mut projected = hunks.clone();
+                    if project_hunks_between_blobs(cwd, p_oid, &c_oid, &mut projected).is_some() {
+                        CommitBlobState::Tracked {
+                            oid: c_oid,
+                            hunks: projected,
+                        }
+                    } else {
+                        CommitBlobState::Unprojectable {
+                            last_oid: p_oid.clone(),
+                            last_hunks: hunks.clone(),
+                        }
+                    }
                 }
             } else {
-                CommitBlobState::Unprojectable
+                continue;
             }
-        } else if let Some((c_mode, c_oid)) = changed_unprojectable {
-            if !is_regular_blob_mode(&c_mode) {
-                CommitBlobState::Unprojectable
-            } else {
-                let mut projected = initial_hunks.clone();
-                if project_hunks_between_blobs(cwd, &entry.new_oid, &c_oid, &mut projected)
-                    .is_some()
-                {
+        } else if let Some((parent, c_mode, c_oid)) = changed_unprojectable {
+            if let CommitBlobState::Unprojectable {
+                last_oid,
+                last_hunks,
+            } = &states[parent]
+            {
+                if !is_regular_blob_mode(&c_mode) {
+                    CommitBlobState::Unprojectable {
+                        last_oid: last_oid.clone(),
+                        last_hunks: last_hunks.clone(),
+                    }
+                } else if c_oid == *last_oid {
                     CommitBlobState::Tracked {
                         oid: c_oid,
-                        hunks: projected,
+                        hunks: last_hunks.clone(),
                     }
                 } else {
-                    CommitBlobState::Unprojectable
+                    let mut projected = last_hunks.clone();
+                    if project_hunks_between_blobs(cwd, last_oid, &c_oid, &mut projected).is_some()
+                    {
+                        CommitBlobState::Tracked {
+                            oid: c_oid,
+                            hunks: projected,
+                        }
+                    } else {
+                        CommitBlobState::Unprojectable {
+                            last_oid: last_oid.clone(),
+                            last_hunks: last_hunks.clone(),
+                        }
+                    }
                 }
+            } else {
+                continue;
             }
         } else {
             continue;
@@ -1203,7 +1237,21 @@ fn text_blob_survives_along_history(
 
     let final_hunks = match states.get(head) {
         Some(CommitBlobState::Tracked { hunks, .. }) => hunks.clone(),
-        _ => {
+        Some(CommitBlobState::Unprojectable {
+            last_oid,
+            last_hunks,
+        }) => {
+            if last_oid == head_oid {
+                last_hunks.clone()
+            } else {
+                let mut projected = last_hunks.clone();
+                if project_hunks_between_blobs(cwd, last_oid, head_oid, &mut projected).is_none() {
+                    return false;
+                }
+                projected
+            }
+        }
+        None => {
             let mut projected = initial_hunks;
             if project_hunks_between_blobs(cwd, &entry.new_oid, head_oid, &mut projected).is_none()
             {
