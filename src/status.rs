@@ -826,36 +826,66 @@ enum CommitBlobState {
     Unprojectable {
         saved: Vec<(String, Vec<TrackedHunk>)>,
     },
+    /// Tracked configuration set exceeded `MAX_TRACKED_CONFIGS`; fails closed
+    /// when needed to prove survival so parent order cannot hide a rollback.
+    Overflowed,
 }
 
-fn push_unique_config(dest: &mut Vec<Vec<TrackedHunk>>, hunks: Vec<TrackedHunk>) {
-    if dest.len() < MAX_TRACKED_CONFIGS && !dest.contains(&hunks) {
-        dest.push(hunks);
+#[derive(Debug)]
+enum ResolvedConfigs {
+    Tracked(Vec<Vec<TrackedHunk>>),
+    Unprojectable,
+    Overflowed,
+}
+
+fn push_unique_config(dest: &mut Vec<Vec<TrackedHunk>>, hunks: Vec<TrackedHunk>) -> bool {
+    if dest.contains(&hunks) {
+        return true;
     }
+    if dest.len() >= MAX_TRACKED_CONFIGS {
+        return false;
+    }
+    dest.push(hunks);
+    true
 }
 
 fn push_unique_saved(
     dest: &mut Vec<(String, Vec<TrackedHunk>)>,
     oid: String,
     hunks: Vec<TrackedHunk>,
-) {
-    if dest.len() < MAX_TRACKED_CONFIGS && !dest.iter().any(|(o, h)| o == &oid && h == &hunks) {
-        dest.push((oid, hunks));
+) -> bool {
+    if dest.iter().any(|(o, h)| o == &oid && h == &hunks) {
+        return true;
     }
+    if dest.len() >= MAX_TRACKED_CONFIGS {
+        return false;
+    }
+    dest.push((oid, hunks));
+    true
 }
 
-fn collect_saved_from_state(state: &CommitBlobState, dest: &mut Vec<(String, Vec<TrackedHunk>)>) {
+fn collect_saved_from_state(
+    state: &CommitBlobState,
+    dest: &mut Vec<(String, Vec<TrackedHunk>)>,
+) -> bool {
     match state {
         CommitBlobState::Tracked { oid, configs } => {
             for hunks in configs {
-                push_unique_saved(dest, oid.clone(), hunks.clone());
+                if !push_unique_saved(dest, oid.clone(), hunks.clone()) {
+                    return false;
+                }
             }
+            true
         }
         CommitBlobState::Unprojectable { saved } => {
             for (oid, hunks) in saved {
-                push_unique_saved(dest, oid.clone(), hunks.clone());
+                if !push_unique_saved(dest, oid.clone(), hunks.clone()) {
+                    return false;
+                }
             }
+            true
         }
+        CommitBlobState::Overflowed => false,
     }
 }
 
@@ -866,34 +896,44 @@ fn collect_saved_from_state(state: &CommitBlobState, dest: &mut Vec<(String, Vec
 /// - Otherwise project every candidate `src_oid -> target_oid` and retain all
 ///   distinct projected configurations so downstream commits check survival
 ///   against every eligible parent's tracked spans regardless of parent order.
+/// - Exceeding `MAX_TRACKED_CONFIGS` returns `Overflowed` rather than silently
+///   truncating candidates.
 fn resolve_all_configs(
     cwd: &Path,
     target_oid: &str,
     candidates: &[(String, Vec<TrackedHunk>)],
-) -> Option<Vec<Vec<TrackedHunk>>> {
-    let target_bytes = gitio::read_blob(cwd, target_oid).ok()?;
+) -> ResolvedConfigs {
+    let Ok(target_bytes) = gitio::read_blob(cwd, target_oid) else {
+        return ResolvedConfigs::Unprojectable;
+    };
     if target_bytes.contains(&0) {
-        return None;
+        return ResolvedConfigs::Unprojectable;
     }
 
     let mut exact = Vec::new();
     for (src_oid, src_hunks) in candidates {
-        if src_oid == target_oid {
-            push_unique_config(&mut exact, src_hunks.clone());
+        if src_oid == target_oid && !push_unique_config(&mut exact, src_hunks.clone()) {
+            return ResolvedConfigs::Overflowed;
         }
     }
     if !exact.is_empty() {
-        return Some(exact);
+        return ResolvedConfigs::Tracked(exact);
     }
 
     let mut projected_all = Vec::new();
     for (src_oid, src_hunks) in candidates {
         let mut projected = src_hunks.clone();
-        if project_hunks_between_blobs(cwd, src_oid, target_oid, &mut projected).is_some() {
-            push_unique_config(&mut projected_all, projected);
+        if project_hunks_between_blobs(cwd, src_oid, target_oid, &mut projected).is_some()
+            && !push_unique_config(&mut projected_all, projected)
+        {
+            return ResolvedConfigs::Overflowed;
         }
     }
-    (!projected_all.is_empty()).then_some(projected_all)
+    if projected_all.is_empty() {
+        ResolvedConfigs::Unprojectable
+    } else {
+        ResolvedConfigs::Tracked(projected_all)
+    }
 }
 
 fn init_tracked_hunks(
@@ -1201,9 +1241,11 @@ fn text_blob_survives_along_history(
         // resulting configs so downstream commits remain parent-order invariant.
         let mut inherited_tracked_oid: Option<String> = None;
         let mut inherited_tracked_configs: Vec<Vec<TrackedHunk>> = Vec::new();
+        let mut inherited_overflowed = false;
         let mut has_inherited_unprojectable = false;
         let mut changed_entry: Option<(String, String)> = None;
         let mut all_saved: Vec<(String, Vec<TrackedHunk>)> = Vec::new();
+        let mut all_saved_overflowed = false;
         for &parent in &reachable {
             let key = (parent.to_string(), commit.clone());
             let entries = match edge_diffs.entry(key) {
@@ -1215,7 +1257,9 @@ fn text_blob_survives_along_history(
                     vac.insert(diff)
                 }
             };
-            collect_saved_from_state(&states[parent], &mut all_saved);
+            if !all_saved_overflowed && !collect_saved_from_state(&states[parent], &mut all_saved) {
+                all_saved_overflowed = true;
+            }
             match entries.iter().find(|e| e.path == entry.path) {
                 None => match &states[parent] {
                     CommitBlobState::Tracked { oid, configs } => {
@@ -1223,11 +1267,18 @@ fn text_blob_survives_along_history(
                             inherited_tracked_oid = Some(oid.clone());
                         }
                         for cfg in configs {
-                            push_unique_config(&mut inherited_tracked_configs, cfg.clone());
+                            if !inherited_overflowed
+                                && !push_unique_config(&mut inherited_tracked_configs, cfg.clone())
+                            {
+                                inherited_overflowed = true;
+                            }
                         }
                     }
                     CommitBlobState::Unprojectable { .. } => {
                         has_inherited_unprojectable = true;
+                    }
+                    CommitBlobState::Overflowed => {
+                        inherited_overflowed = true;
                     }
                 },
                 Some(changed) => {
@@ -1238,23 +1289,34 @@ fn text_blob_survives_along_history(
             }
         }
 
-        let next_state = if let Some(oid) = inherited_tracked_oid {
+        let next_state = if inherited_overflowed {
+            CommitBlobState::Overflowed
+        } else if let Some(oid) = inherited_tracked_oid {
             CommitBlobState::Tracked {
                 oid,
                 configs: inherited_tracked_configs,
             }
         } else if has_inherited_unprojectable {
-            CommitBlobState::Unprojectable { saved: all_saved }
+            if all_saved_overflowed {
+                CommitBlobState::Overflowed
+            } else {
+                CommitBlobState::Unprojectable { saved: all_saved }
+            }
         } else if let Some((c_mode, c_oid)) = changed_entry {
-            if !is_regular_blob_mode(&c_mode) {
+            if all_saved_overflowed {
+                CommitBlobState::Overflowed
+            } else if !is_regular_blob_mode(&c_mode) {
                 CommitBlobState::Unprojectable { saved: all_saved }
             } else {
                 match resolve_all_configs(cwd, &c_oid, &all_saved) {
-                    Some(configs) => CommitBlobState::Tracked {
+                    ResolvedConfigs::Tracked(configs) => CommitBlobState::Tracked {
                         oid: c_oid,
                         configs,
                     },
-                    None => CommitBlobState::Unprojectable { saved: all_saved },
+                    ResolvedConfigs::Unprojectable => {
+                        CommitBlobState::Unprojectable { saved: all_saved }
+                    }
+                    ResolvedConfigs::Overflowed => CommitBlobState::Overflowed,
                 }
             }
         } else {
@@ -1267,10 +1329,11 @@ fn text_blob_survives_along_history(
         Some(CommitBlobState::Tracked { configs, .. }) => configs.clone(),
         Some(CommitBlobState::Unprojectable { saved }) => {
             match resolve_all_configs(cwd, head_oid, saved) {
-                Some(configs) => configs,
-                None => return false,
+                ResolvedConfigs::Tracked(configs) => configs,
+                ResolvedConfigs::Unprojectable | ResolvedConfigs::Overflowed => return false,
             }
         }
+        Some(CommitBlobState::Overflowed) => return false,
         None => {
             let mut projected = initial_hunks;
             if project_hunks_between_blobs(cwd, &entry.new_oid, head_oid, &mut projected).is_none()

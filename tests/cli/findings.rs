@@ -2405,3 +2405,171 @@ fn mixed_merge_and_post_merge_guard_deletion_are_parent_order_invariant() {
         repo.arc(&wt).args(["check", &change]).assert().code(2);
     }
 }
+
+#[test]
+fn tracked_config_cap_overflow_fails_closed_symmetrically() {
+    // Fan out 64 distinct text parents + 1 opaque binary parent that dropped GUARD,
+    // merging to parent 2's pre-binary guardless text + MERGE NOTE. Both parent
+    // orderings (binary first and binary last) must reopen the finding (check exit 2),
+    // while a 64-parent surviving merge (<= cap) stays resolved.
+    let repo = Repo::new();
+    let slug = "config-cap-overflow";
+    let begin = stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let change = opened_change_id(&begin);
+    let wt = repo.home.join(format!(".worktrees/repo-{slug}"));
+
+    repo.commit(&wt, "f.txt", "A\nB\nC\n", "feat: initial");
+    stdout(repo.arc(&wt).args(["snapshot", slug]));
+    let fid = stdout(repo.arc(&wt).args([
+        "finding",
+        slug,
+        "--summary",
+        "insert guard before B",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+    let fix = repo.head(&wt);
+    stdout(repo.arc(&wt).args([
+        "resolve", slug, &fid, "--status", "resolved", "--commit", &fix,
+    ]));
+
+    // Build 64 distinct text parent commits directly via plumbing (fast, no worktree churn).
+    let mut text_parents = Vec::with_capacity(64);
+    for i in 0..64 {
+        let blob = {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(&wt)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            let mut child = cmd.spawn().unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(format!("A\nGUARD\nB\nC\nTAIL-{i}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let tree = {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(&wt)
+                .args(["mktree"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            let mut child = cmd.spawn().unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(format!("100644 blob {blob}\tf.txt\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let commit = git_out(
+            &wt,
+            &["commit-tree", &tree, "-p", &fix, "-m", &format!("tail {i}")],
+        );
+        text_parents.push(commit);
+    }
+
+    // Build the opaque binary parent that split B, deleted GUARD, then turned A binary.
+    git(&wt, &["checkout", "-b", "cap-bin", &fix]);
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nGUARD\nB part one\nB part two\nC\n",
+        "refactor: split B keeping guard",
+    );
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nB part one\nB part two\nC\n",
+        "chore: delete guard",
+    );
+    fs::write(wt.join("f.txt"), b"A\x00\nB part one\nB part two\nC\n").unwrap();
+    git(&wt, &["add", "f.txt"]);
+    git(&wt, &["commit", "-m", "chore: binary parent"]);
+    let binary_parent = repo.head(&wt);
+
+    // Prepare guardless merge tree (+ MERGE NOTE) and surviving merge tree (<= 64 control).
+    git(&wt, &["checkout", "-b", "cap-trees", &fix]);
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nB part one\nB part two\nC\nMERGE NOTE\n",
+        "tmp: guardless merge tree",
+    );
+    let guardless_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    repo.commit(
+        &wt,
+        "f.txt",
+        "A\nGUARD\nB\nC\nMERGE NOTE\n",
+        "tmp: surviving merge tree",
+    );
+    let surviving_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    git(&wt, &["checkout", &format!("arc/{slug}")]);
+    git(&wt, &["branch", "-D", "cap-bin", "cap-trees"]);
+
+    // Control at exact cap (64 distinct text parents, GUARD intact): must stay resolved.
+    let mut args_64 = vec!["commit-tree".to_string(), surviving_tree];
+    for p in &text_parents {
+        args_64.push("-p".to_string());
+        args_64.push(p.clone());
+    }
+    args_64.push("-m".to_string());
+    args_64.push("merge: 64 surviving parents".to_string());
+    let arg_refs: Vec<&str> = args_64.iter().map(String::as_str).collect();
+    let merge_64 = git_out(&wt, &arg_refs);
+    git(&wt, &["reset", "--hard", &merge_64]);
+    stdout(repo.arc(&wt).args(["snapshot", slug]));
+    let status_64 = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+    assert_eq!(
+        status_64["open_blocking_findings"],
+        serde_json::json!([]),
+        "64 surviving parents at cap must remain resolved: {status_64}"
+    );
+
+    // Overflow (64 text parents + 1 binary parent = 65 > cap): must fail closed
+    // (reopen finding, check exit 2) regardless of whether binary is first or last.
+    for binary_last in [false, true] {
+        let mut args = vec!["commit-tree".to_string(), guardless_tree.clone()];
+        if !binary_last {
+            args.push("-p".to_string());
+            args.push(binary_parent.clone());
+        }
+        for p in &text_parents {
+            args.push("-p".to_string());
+            args.push(p.clone());
+        }
+        if binary_last {
+            args.push("-p".to_string());
+            args.push(binary_parent.clone());
+        }
+        args.push("-m".to_string());
+        args.push(format!("merge: 65 parents binary_last={binary_last}"));
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let merge_65 = git_out(&wt, &refs);
+        git(&wt, &["reset", "--hard", &merge_65]);
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let status = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+        assert_eq!(
+            status["open_blocking_findings"],
+            serde_json::json!([fid]),
+            "65-parent cap overflow must fail closed symmetrically (binary_last={binary_last}): {status}"
+        );
+        repo.arc(&wt).args(["check", &change]).assert().code(2);
+    }
+}
