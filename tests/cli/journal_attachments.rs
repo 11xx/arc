@@ -151,6 +151,21 @@ const VALID_WEBP_PREDICTOR: &[u8] = &[
     0,
 ];
 
+/// Genuine decoder-valid 33x32 lossless WebP with reversed simple Huffman pair (1, 0) in its
+/// meta-prefix image (Pillow-verified).
+const VALID_WEBP_REVERSED_SIMPLE_PAIR: &[u8] = &[
+    0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x16, 0x00, 0x00, 0x00, 0x2f, 0x20, 0xc0, 0x07, 0x00, 0x9c, 0x05, 0x88, 0x88, 0x30, 0x22, 0xfa,
+    0x1f, 0x13, 0x10, 0xd1, 0xff, 0x50, 0x55, 0x55, 0x55, 0x05,
+];
+
+/// Genuine decoder-valid 64x1 lossless WebP with duplicate simple Huffman symbols collapsing to a
+/// 0-bit singleton (Pillow-verified).
+const VALID_WEBP_DUP_SIMPLE_SYMBOL: &[u8] = &[
+    0x52, 0x49, 0x46, 0x46, 0x16, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x09, 0x00, 0x00, 0x00, 0x2f, 0x3f, 0x00, 0x00, 0x00, 0x18, 0x80, 0x88, 0x08, 0x00,
+];
+
 /// Genuine decoder-valid 2-frame animated WebP (Pillow-verified).
 const VALID_WEBP_ANIM: &[u8] = &[
     82, 73, 70, 70, 168, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
@@ -451,6 +466,16 @@ fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
         b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x07\x00\x00\x00\x00",
     )
     .unwrap();
+    let truncated_reversed_pair_vp8l = dir.join("truncated-reversed-pair.webp");
+    fs::write(
+        &truncated_reversed_pair_vp8l,
+        [
+            0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50,
+            0x38, 0x4c, 0x16, 0x00, 0x00, 0x00, 0x2f, 0x20, 0xc0, 0x07, 0x00, 0x9c, 0x05, 0x88,
+            0x88, 0x70, 0x02, 0x22, 0xfa, 0x1f, 0x11, 0xd1, 0xff, 0x50, 0x55, 0x55, 0x55, 0x05,
+        ],
+    )
+    .unwrap();
     let payloadless_anmf = dir.join("payloadless-anmf.webp");
     let mut bad_anim = Vec::new();
     bad_anim.extend_from_slice(b"RIFF");
@@ -487,6 +512,7 @@ fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
         &predictor_zero_vp8l,
         &color_zero_vp8l,
         &palette_zero_vp8l,
+        &truncated_reversed_pair_vp8l,
         &payloadless_anmf,
         &sig_only_gif,
         &huge,
@@ -527,11 +553,15 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
     let png_path = dir.join("shot.png");
     let webp_path = dir.join("shot.webp");
     let pred_webp_path = dir.join("pred.webp");
+    let rev_pair_webp_path = dir.join("rev-pair.webp");
+    let dup_sym_webp_path = dir.join("dup-sym.webp");
     let anim_webp_path = dir.join("anim.webp");
     let gif_path = dir.join("shot.gif");
     fs::write(&png_path, sample_png(2)).unwrap();
     fs::write(&webp_path, sample_webp()).unwrap();
     fs::write(&pred_webp_path, VALID_WEBP_PREDICTOR).unwrap();
+    fs::write(&rev_pair_webp_path, VALID_WEBP_REVERSED_SIMPLE_PAIR).unwrap();
+    fs::write(&dup_sym_webp_path, VALID_WEBP_DUP_SIMPLE_SYMBOL).unwrap();
     fs::write(&anim_webp_path, VALID_WEBP_ANIM).unwrap();
     fs::write(&gif_path, sample_gif()).unwrap();
 
@@ -549,6 +579,10 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
                 webp_path.to_str().unwrap(),
                 "--attach",
                 pred_webp_path.to_str().unwrap(),
+                "--attach",
+                rev_pair_webp_path.to_str().unwrap(),
+                "--attach",
+                dup_sym_webp_path.to_str().unwrap(),
                 "--attach",
                 anim_webp_path.to_str().unwrap(),
                 "--attach",

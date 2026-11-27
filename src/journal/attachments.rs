@@ -976,7 +976,14 @@ fn read_vp8l_prefix_code(reader: &mut BitReader<'_>, alphabet_size: usize) -> Re
         if usize::from(sym1) >= alphabet_size {
             bail!("WebP VP8L simple Huffman symbol out of range");
         }
-        return Ok(Vp8lHuffman::Pair(sym0, sym1));
+        // RFC 9649 §3.7.2.1.1 assigns code length 1 to both symbol indexes and
+        // builds a canonical prefix code: distinct pairs decode in ascending
+        // symbol order, and duplicate symbols collapse to a 0-bit singleton.
+        return Ok(match sym0.cmp(&sym1) {
+            std::cmp::Ordering::Equal => Vp8lHuffman::Single(sym0),
+            std::cmp::Ordering::Less => Vp8lHuffman::Pair(sym0, sym1),
+            std::cmp::Ordering::Greater => Vp8lHuffman::Pair(sym1, sym0),
+        });
     }
 
     let num_code_lengths = usize::from(reader.read_bits(4)?) + 4;
@@ -3427,6 +3434,21 @@ mod tests {
         15, 48, 53, 243, 48, 97, 243, 31, 120, 120, 149, 106, 68, 255, 163, 10, 0,
     ];
 
+    /// Decoder-valid 33x32 lossless WebP with reversed-transmission simple Huffman pair (1, 0) in
+    /// its meta-prefix image (Pillow-verified).
+    const VALID_WEBP_REVERSED_SIMPLE_PAIR: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x4c, 0x16, 0x00, 0x00, 0x00, 0x2f, 0x20, 0xc0, 0x07, 0x00, 0x9c, 0x05, 0x88, 0x88, 0x30,
+        0x22, 0xfa, 0x1f, 0x13, 0x10, 0xd1, 0xff, 0x50, 0x55, 0x55, 0x55, 0x05,
+    ];
+
+    /// Decoder-valid 64x1 lossless WebP with duplicate symbols in a 2-symbol simple Huffman code
+    /// collapsing to a 0-bit singleton (Pillow-verified).
+    const VALID_WEBP_DUP_SIMPLE_SYMBOL: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x16, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x4c, 0x09, 0x00, 0x00, 0x00, 0x2f, 0x3f, 0x00, 0x00, 0x00, 0x18, 0x80, 0x88, 0x08, 0x00,
+    ];
+
     /// Decoder-valid 1x1 GIF87a (Pillow-verified).
     const VALID_GIF: &[u8] = &[
         71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44,
@@ -3547,8 +3569,22 @@ mod tests {
             validate_image_bytes(VALID_WEBP_LOSSLESS_PALETTE).unwrap(),
             ImageFormat::Webp
         );
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_REVERSED_SIMPLE_PAIR).unwrap(),
+            ImageFormat::Webp
+        );
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_DUP_SIMPLE_SYMBOL).unwrap(),
+            ImageFormat::Webp
+        );
         assert_eq!(validate_image_bytes(VALID_GIF).unwrap(), ImageFormat::Gif);
 
+        // Truncated 42-byte 33x32 VP8L with reversed simple Huffman pair (1, 0) in meta-prefix image.
+        let truncated_reversed_pair_vp8l: &[u8] = &[
+            0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50,
+            0x38, 0x4c, 0x16, 0x00, 0x00, 0x00, 0x2f, 0x20, 0xc0, 0x07, 0x00, 0x9c, 0x05, 0x88,
+            0x88, 0x70, 0x02, 0x22, 0xfa, 0x1f, 0x11, 0xd1, 0xff, 0x50, 0x55, 0x55, 0x55, 0x05,
+        ];
         // Header-only VP8L (5-byte chunk payload `2f 00 00 00 00` + RIFF pad byte).
         let header_only_vp8l =
             b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2f\x00\x00\x00\x00\x00";
@@ -3599,6 +3635,7 @@ mod tests {
             color_zero_vp8l.as_slice(),
             palette_zero_vp8l.as_slice(),
             trunc_predictor_vp8l.as_slice(),
+            truncated_reversed_pair_vp8l,
             empty_anmf.as_slice(),
             b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".as_slice(),
             // Active / non-image payloads.
