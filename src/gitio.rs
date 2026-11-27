@@ -461,16 +461,17 @@ pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
     })
 }
 
-/// Exact local branches under `refs/heads/` and their raw target OIDs, read
-/// once per mutable observation span via `for-each-ref`.
+/// Exact local branches under `refs/heads/` keyed by raw refname bytes and
+/// their target OIDs, read once per mutable observation span via `for-each-ref`.
 ///
-/// Strictly listing `refs/heads/` prevents DWIM ref lookup from resolving a
-/// tag such as `refs/tags/refs/heads/<name>` as a local branch.
-fn local_branches(cwd: &Path) -> Result<BTreeMap<String, String>> {
+/// Storing raw refname bytes avoids lossy UTF-8 decoding (so a non-UTF-8 branch
+/// cannot collide with a `U+FFFD` lookup), and strictly listing `refs/heads/`
+/// prevents DWIM ref lookup from resolving tags or remotes as local branches.
+fn local_branches(cwd: &Path) -> Result<BTreeMap<Vec<u8>, String>> {
     let admin = answers::repository(cwd).map(|repo| repo.admin);
     let scope = admin.as_deref().unwrap_or(cwd);
-    let out = answers::text(scope, &["local_branches"], false, || {
-        git(
+    let out = answers::optional_bytes(scope, &["local_branches"], false, || {
+        git_bytes(
             cwd,
             &[
                 "for-each-ref",
@@ -478,14 +479,23 @@ fn local_branches(cwd: &Path) -> Result<BTreeMap<String, String>> {
                 "refs/heads/",
             ],
         )
-    })?;
-    Ok(out
-        .lines()
-        .filter_map(|line| {
-            let (name, oid) = line.split_once('\0')?;
-            Some((name.to_string(), oid.to_string()))
-        })
-        .collect())
+        .map(Some)
+    })?
+    .expect("local_branches returns bytes");
+    let mut branches = BTreeMap::new();
+    for line in out.split(|b| *b == b'\n') {
+        let Some(nul) = line.iter().position(|b| *b == 0) else {
+            continue;
+        };
+        let name = &line[..nul];
+        let Ok(oid) = std::str::from_utf8(&line[nul + 1..]) else {
+            continue;
+        };
+        if !name.is_empty() && !oid.is_empty() {
+            branches.insert(name.to_vec(), oid.to_string());
+        }
+    }
+    Ok(branches)
 }
 
 /// Whether `branch` is a plain branch name that cannot trigger Git revision
@@ -571,7 +581,7 @@ pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
             LocalBranchProbe::NeedsListing => {}
         }
         let branches = local_branches(cwd)?;
-        let Some(oid) = branches.get(&refname) else {
+        let Some(oid) = branches.get(refname.as_bytes()) else {
             bail!(
                 "git rev-parse --verify {refname}^{{commit}} failed: local branch {branch:?} does not exist"
             );
@@ -1635,10 +1645,17 @@ fn piped_output_with(
     Ok(out.stdout)
 }
 
+/// File-type bits of a Git tree entry mode (`S_IFMT` and its four Git types).
+const TREE_MODE_TYPE_MASK: u32 = 0o170000;
+const TREE_MODE_DIR: u32 = 0o040000;
+const TREE_MODE_REG: u32 = 0o100000;
+const TREE_MODE_SYMLINK: u32 = 0o120000;
+const TREE_MODE_GITLINK: u32 = 0o160000;
+
 /// Outcome of walking raw Git tree objects for `path` at a full commit/tree OID.
 enum TreeEntry {
     /// Entry exists in its parent tree (its blob object need not be present).
-    Present { mode: String, oid: String },
+    Present { mode: u32, oid: String },
     /// Every ancestor tree object was present and parsed cleanly, and `path` is
     /// absent (or an intermediate component is not a directory).
     Absent,
@@ -1650,18 +1667,19 @@ enum TreeEntry {
 /// Locate one direct child entry named `wanted` in a raw Git tree object.
 /// Returns `None` if the tree bytes are malformed, `Some(None)` if every entry
 /// parsed cleanly and `wanted` is absent, or `Some(Some((mode, oid_hex)))`.
-fn find_tree_entry<'a>(
-    mut bytes: &'a [u8],
+fn find_tree_entry(
+    mut bytes: &[u8],
     oid_bytes: usize,
     wanted: &[u8],
-) -> Option<Option<(&'a str, String)>> {
+) -> Option<Option<(u32, String)>> {
     let mut found = None;
     while !bytes.is_empty() {
         let space = bytes.iter().position(|b| *b == b' ')?;
-        let mode = std::str::from_utf8(&bytes[..space]).ok()?;
-        if mode.is_empty() || !mode.bytes().all(|b| matches!(b, b'0'..=b'7')) {
+        let mode_str = std::str::from_utf8(&bytes[..space]).ok()?;
+        if mode_str.is_empty() || !mode_str.bytes().all(|b| matches!(b, b'0'..=b'7')) {
             return None;
         }
+        let mode = u32::from_str_radix(mode_str, 8).ok()?;
         bytes = &bytes[space + 1..];
         let nul = bytes.iter().position(|b| *b == 0)?;
         let name = &bytes[..nul];
@@ -1703,24 +1721,22 @@ fn lookup_tree_entry(cwd: &Path, rev: &str, path: &str) -> TreeEntry {
         match find_tree_entry(&current_tree, oid_bytes, dir.as_bytes()) {
             None => return TreeEntry::Unavailable,
             Some(None) => return TreeEntry::Absent,
-            Some(Some((mode, oid))) => {
-                if mode != "40000" && mode != "040000" {
-                    return TreeEntry::Absent;
-                }
-                match batch_contents(cwd, oid.as_bytes()) {
+            Some(Some((mode, oid))) => match mode & TREE_MODE_TYPE_MASK {
+                TREE_MODE_DIR => match batch_contents(cwd, oid.as_bytes()) {
                     Some(Object::Found { kind, bytes }) if kind == "tree" => current_tree = bytes,
                     _ => return TreeEntry::Unavailable,
+                },
+                TREE_MODE_REG | TREE_MODE_SYMLINK | TREE_MODE_GITLINK => {
+                    return TreeEntry::Absent;
                 }
-            }
+                _ => return TreeEntry::Unavailable,
+            },
         }
     }
     match find_tree_entry(&current_tree, oid_bytes, leaf[0].as_bytes()) {
         None => TreeEntry::Unavailable,
         Some(None) => TreeEntry::Absent,
-        Some(Some((mode, oid))) => TreeEntry::Present {
-            mode: mode.to_string(),
-            oid,
-        },
+        Some(Some((mode, oid))) => TreeEntry::Present { mode, oid },
     }
 }
 
@@ -1787,7 +1803,10 @@ pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
                     match lookup_tree_entry(cwd, rev, path) {
                         TreeEntry::Absent => return Ok((None, immutable)),
                         TreeEntry::Present { mode, oid }
-                            if mode != "40000" && mode != "040000" && mode != "160000" =>
+                            if matches!(
+                                mode & TREE_MODE_TYPE_MASK,
+                                TREE_MODE_REG | TREE_MODE_SYMLINK
+                            ) =>
                         {
                             // Entry exists in the tree: either the commit
                             // arrived concurrently or its blob is unavailable
@@ -2090,7 +2109,7 @@ pub fn branch_exists(cwd: &Path, branch: &str) -> bool {
     ) {
         return true;
     }
-    local_branches(cwd).is_ok_and(|branches| branches.contains_key(&refname))
+    local_branches(cwd).is_ok_and(|branches| branches.contains_key(refname.as_bytes()))
 }
 
 pub fn create_branch(cwd: &Path, branch: &str, base: &str) -> Result<()> {
@@ -5246,6 +5265,101 @@ mod tests {
             close_object_readers();
         }
         reader_thread.join().unwrap();
+        close_object_readers();
+    }
+
+    /// Claim: a local branch whose raw refname contains invalid UTF-8 bytes
+    /// never matches a UTF-8 lookup spelling `U+FFFD`, including when a DWIM
+    /// tag forces `branch_exists` and `branch_head` through `local_branches`.
+    #[test]
+    fn non_utf8_branch_does_not_match_replacement_char_query() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let commit = head(&root).unwrap();
+
+        let raw_ref = std::ffi::OsStr::from_bytes(b"refs/heads/topic-\xff");
+        assert!(git_command()
+            .current_dir(&root)
+            .arg("update-ref")
+            .arg(raw_ref)
+            .arg(&commit)
+            .counted_output()
+            .unwrap()
+            .status
+            .success());
+
+        let fffd_branch = "topic-\u{FFFD}";
+        assert!(!branch_exists(&root, fffd_branch));
+        assert!(branch_head(&root, fffd_branch).is_err());
+
+        // Add a tag shadowing `refs/heads/topic-U+FFFD` to force the
+        // `local_branches` disambiguation path.
+        git(&root, &["tag", &format!("refs/heads/{fffd_branch}")]).unwrap();
+        assert!(!branch_exists(&root, fffd_branch));
+        assert!(branch_head(&root, fffd_branch).is_err());
+        close_object_readers();
+    }
+
+    /// Claim: a Git-readable zero-padded directory mode (`0040000`) in a raw
+    /// tree object is walked identically to canonical `40000`, so a missing
+    /// loose blob beneath it errors rather than caching false absence.
+    #[test]
+    fn zero_padded_tree_directory_mode_matches_canonical_mode() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let gate_blob = hash_object(&root, "blob", b"[budget]\ntotal = '2s'\n").unwrap();
+        let gate_blob_bytes = hex::decode(&gate_blob).unwrap();
+
+        let mut arc_tree_bytes = Vec::new();
+        arc_tree_bytes.extend_from_slice(b"100644 gates.toml\0");
+        arc_tree_bytes.extend_from_slice(&gate_blob_bytes);
+        let arc_tree = hash_object(&root, "tree", &arc_tree_bytes).unwrap();
+        let arc_tree_bytes_oid = hex::decode(&arc_tree).unwrap();
+
+        let mut root_tree_bytes = Vec::new();
+        root_tree_bytes.extend_from_slice(b"0040000 .arc\0");
+        root_tree_bytes.extend_from_slice(&arc_tree_bytes_oid);
+        let root_tree = String::from_utf8(
+            git_piped(
+                &root,
+                &["hash-object", "-w", "-t", "tree", "--literally", "--stdin"],
+                &root_tree_bytes,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let commit = commit_tree_unsigned(&root, &root_tree, &[], "test: zero-padded dir").unwrap();
+
+        // Remove only the loose gate blob; the tree entry remains present.
+        let loose_blob = root
+            .join(".git/objects")
+            .join(&gate_blob[..2])
+            .join(&gate_blob[2..]);
+        let saved_blob = std::fs::read(&loose_blob).unwrap();
+        std::fs::remove_file(&loose_blob).unwrap();
+        close_object_readers();
+
+        assert_eq!(
+            blob_oid(&root, &commit, ".arc/gates.toml").as_deref(),
+            Some(gate_blob.as_str())
+        );
+        assert!(
+            file_at(&root, &commit, ".arc/gates.toml").is_err(),
+            "missing blob under zero-padded 0040000 directory must error, not return absent"
+        );
+
+        // Restoring the loose blob directly without invalidation must succeed.
+        std::fs::write(&loose_blob, &saved_blob).unwrap();
+        assert_eq!(
+            file_at(&root, &commit, ".arc/gates.toml")
+                .unwrap()
+                .as_deref(),
+            Some("[budget]\ntotal = '2s'\n")
+        );
         close_object_readers();
     }
 }

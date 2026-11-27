@@ -3789,3 +3789,63 @@ fn begin_ignores_dwim_tag_shadowing_refs_heads_namespace() {
         &["show-ref", "--verify", "--quiet", "refs/heads/ghost"],
     );
 }
+
+/// Claim: a non-UTF-8 local branch (`refs/heads/topic-<FF>`) does not collide
+/// with the UTF-8 branch name `topic-U+FFFD` during `arc begin --adopt` or
+/// `arc begin --branch`, even when a tag shadows `refs/heads/topic-U+FFFD`.
+#[test]
+fn begin_does_not_collide_non_utf8_branch_with_replacement_char_name() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let repo = Repo::new();
+    let head = repo.head(&repo.root);
+    let raw_ref = std::ffi::OsStr::from_bytes(b"refs/heads/topic-\xff");
+    assert!(std::process::Command::new("git")
+        .current_dir(&repo.root)
+        .arg("update-ref")
+        .arg(raw_ref)
+        .arg(&head)
+        .status()
+        .unwrap()
+        .success());
+
+    let fffd_branch = "topic-\u{FFFD}";
+    git(&repo.root, &["tag", &format!("refs/heads/{fffd_branch}")]);
+
+    let adopt = repo
+        .arc(&repo.root)
+        .args([
+            "begin",
+            "adoption-probe",
+            "--adopt",
+            fffd_branch,
+            "--no-worktree",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let adopt_err = String::from_utf8(adopt).unwrap();
+    assert!(adopt_err.contains("does not exist"), "{adopt_err}");
+
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "creation-probe",
+            "--branch",
+            fffd_branch,
+            "--no-worktree",
+        ])
+        .assert()
+        .success();
+    git(
+        &repo.root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{fffd_branch}"),
+        ],
+    );
+}
