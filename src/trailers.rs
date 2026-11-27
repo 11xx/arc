@@ -811,40 +811,87 @@ pub(crate) struct ReviewProjection<'a> {
     pub danger: &'a crate::status::DangerScope,
 }
 
+/// The multiset of `(key_lower, value)` single-participant issues in `message`,
+/// using [`check_contribution`] as the single source of truth.
+fn single_participant_issues(
+    message: &[u8],
+) -> std::collections::BTreeMap<(String, String), usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for issue in check_contribution(message) {
+        if issue.kind == "single-participant" {
+            *counts
+                .entry((issue.key.to_ascii_lowercase(), issue.value))
+                .or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Whether rewriting `before` into `after` introduces any `single-participant`
+/// issue (on an existing or newly appended line) that `before` did not already
+/// carry.
+pub(crate) fn introduces_single_participant_issue(before: &[u8], after: &[u8]) -> bool {
+    let before_issues = single_participant_issues(before);
+    let after_issues = single_participant_issues(after);
+    after_issues
+        .into_iter()
+        .any(|(key, count)| count > before_issues.get(&key).copied().unwrap_or(0))
+}
+
 /// Projected trailer lines applicable to one commit's resulting trailer block.
 ///
-/// Filters projected `Planned-by` and `Orchestrated-by` lines that would
-/// violate the single-participant rule against the commit's resulting
-/// `Implemented-by` participants (existing commit lines plus projected and
-/// extra lines), matching [`check_contribution`]. Explicit `extra` lines are
-/// kept after applicable projected lines, deduplicated verbatim.
+/// Evaluates candidate additions against the commit's existing trailer block
+/// so neither projected `Implemented-by` lines nor projected
+/// `Planned-by`/`Orchestrated-by` lines introduce a new `single-participant`
+/// violation on any existing or newly appended line. Explicit `extra` lines
+/// are preserved after applicable projected lines, deduplicated verbatim.
 pub(crate) fn applicable_for_commit(
     message: &[u8],
     projected: &[String],
     extra: &[String],
 ) -> Vec<String> {
-    let mut implementers: Vec<String> = block_values(message, "Implemented-by")
-        .into_iter()
-        .filter(|value| crate::coordinate::coordinate_defect(value, None).is_none())
-        .collect();
+    let is_implemented_by = |line: &str| {
+        trailer_key(line.as_bytes()).is_some_and(|key| same_key(&key, "Implemented-by"))
+    };
+    let mut impl_group: Vec<String> = Vec::new();
     for line in projected.iter().chain(extra.iter()) {
-        let bytes = line.as_bytes();
-        if let Some(key) = trailer_key(bytes) {
-            if same_key(&key, "Implemented-by") {
-                let value = String::from_utf8_lossy(&bytes[key.len() + 1..])
-                    .trim()
-                    .to_string();
-                if crate::coordinate::coordinate_defect(&value, None).is_none()
-                    && !implementers.contains(&value)
-                {
-                    implementers.push(value);
-                }
+        if is_implemented_by(line) && !impl_group.contains(line) {
+            impl_group.push(line.clone());
+        }
+    }
+    let include_projected_impls = if impl_group.is_empty() {
+        true
+    } else {
+        let with_impls = edit(message, &[], &impl_group);
+        !introduces_single_participant_issue(message, &with_impls)
+    };
+    let mut base_appends: Vec<String> = Vec::new();
+    if include_projected_impls {
+        for line in projected {
+            if is_implemented_by(line) && !base_appends.contains(line) {
+                base_appends.push(line.clone());
             }
         }
     }
+    for line in extra {
+        if is_implemented_by(line) && !base_appends.contains(line) {
+            base_appends.push(line.clone());
+        }
+    }
+    let baseline = edit(message, &[], &base_appends);
+    let mut seen_impl = std::collections::BTreeSet::new();
+    let implementers: Vec<String> = block_values(&baseline, "Implemented-by")
+        .into_iter()
+        .filter(|value| crate::coordinate::coordinate_defect(value, None).is_none())
+        .filter(|value| seen_impl.insert(value.clone()))
+        .collect();
     let mut kept = Vec::new();
     for line in projected {
-        if single_participant_line_issue(line.as_bytes(), &implementers).is_some() {
+        if is_implemented_by(line) {
+            if !include_projected_impls {
+                continue;
+            }
+        } else if single_participant_line_issue(line.as_bytes(), &implementers).is_some() {
             continue;
         }
         if !kept.contains(line) {
@@ -1924,5 +1971,43 @@ mod tests {
         let bad = b"feat: bad\n\nPlanned-by: codex:unknown\nImplemented-by: codex:unknown\n";
         let issues = check_contribution(bad);
         assert!(issues.iter().all(|issue| issue.kind == "placeholder"));
+    }
+
+    #[test]
+    fn applicable_for_commit_withholds_implementer_that_would_invalidate_existing_planner() {
+        let planned_only = b"feat: planned\n\nPlanned-by: codex:worker#medium\n";
+        assert!(check_contribution(planned_only).is_empty());
+
+        // Appending Implemented-by for the sole existing Planned-by participant
+        // would introduce a single-participant violation on Planned-by, so it is
+        // withheld while unrelated safe lines (like Reviewed-by) still apply.
+        let solo_projected = vec![
+            "Implemented-by: codex:worker#medium".to_string(),
+            "Reviewed-by: claude:reviewer#high".to_string(),
+        ];
+        let kept = applicable_for_commit(planned_only, &solo_projected, &[]);
+        assert_eq!(kept, vec!["Reviewed-by: claude:reviewer#high".to_string()]);
+        let rewritten = edit(planned_only, &[], &kept);
+        assert!(!introduces_single_participant_issue(
+            planned_only,
+            &rewritten
+        ));
+        assert!(check_contribution(&rewritten).is_empty());
+
+        // When a second distinct Implemented-by is also projected, the combined
+        // block has two implementers, so existing Planned-by stays clean and both
+        // Implemented-by lines apply.
+        let multi_projected = vec![
+            "Implemented-by: codex:worker#medium".to_string(),
+            "Implemented-by: claude:other#high".to_string(),
+        ];
+        let kept_multi = applicable_for_commit(planned_only, &multi_projected, &[]);
+        assert_eq!(kept_multi, multi_projected);
+        let rewritten_multi = edit(planned_only, &[], &kept_multi);
+        assert!(!introduces_single_participant_issue(
+            planned_only,
+            &rewritten_multi
+        ));
+        assert!(check_contribution(&rewritten_multi).is_empty());
     }
 }

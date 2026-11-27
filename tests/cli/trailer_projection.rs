@@ -1331,3 +1331,163 @@ fn missing_advisory_omits_unsafe_bulk_append_on_merged_solo_sibling() {
         "{after}"
     );
 }
+
+/// Appending `Implemented-by` for the sole existing `Planned-by` participant
+/// would introduce a `single-participant` violation into a clean commit
+/// message. Neither `missing-contribution-trailers` nor `arc rewrite trailers
+/// --sync` may recommend or apply that unsafe append; when a second distinct
+/// implementer is also present/projected, both apply cleanly.
+#[test]
+fn sync_and_advisory_never_introduce_single_participant_violation_on_existing_planner() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    // Case 1: single commit whose only trailer is `Planned-by: codex:worker#medium`,
+    // snapshotted with `--contributors codex:worker#medium`.
+    let (solo, solo_wt) = open(&repo, "existing-planner-solo");
+    commit_file(
+        &solo_wt,
+        "work.txt",
+        "feat: planned work\n\nPlanned-by: codex:worker#medium",
+    );
+    let initial_head = repo.head(&solo_wt);
+    let initial_msg = git_out(&solo_wt, &["show", "-s", "--format=%B", "HEAD"]);
+    let initial_check = repo
+        .arc(&solo_wt)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(initial_msg.clone())
+        .output()
+        .unwrap();
+    assert_eq!(initial_check.status.code(), Some(0));
+    assert!(initial_check.stdout.is_empty());
+
+    stdout(
+        repo.arc(&solo_wt)
+            .args(["snapshot", &solo, "--contributors", "codex:worker#medium"]),
+    );
+
+    let check = json_stdout_any_status(repo.arc(&solo_wt).args(["check", &solo, "--json"]));
+    assert_eq!(
+        advisory(&check, "missing-contribution-trailers"),
+        None,
+        "must not recommend appending Implemented-by that invalidates existing Planned-by: {check}"
+    );
+
+    let sync_out = stdout(
+        repo.arc(&solo_wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    assert!(sync_out.contains("changed none of them"), "{sync_out}");
+    assert_eq!(repo.head(&solo_wt), initial_head);
+    let after_msg = git_out(&solo_wt, &["show", "-s", "--format=%B", "HEAD"]);
+    assert_eq!(after_msg, initial_msg);
+    let after_check = repo
+        .arc(&solo_wt)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(after_msg)
+        .output()
+        .unwrap();
+    assert_eq!(after_check.status.code(), Some(0));
+    assert!(after_check.stdout.is_empty());
+
+    // Case 2: mixed two-commit range where commit 1 has no trailers and commit 2
+    // has only `Planned-by: codex:worker#medium` (`--contributors codex:worker#medium`).
+    // Advisory must report missing only on commit 1, omit the unsafe bulk `--from/--append`,
+    // and `--sync` must stamp commit 1 while leaving commit 2 clean.
+    let (mixed, mixed_wt) = open(&repo, "existing-planner-mixed");
+    commit_file(&mixed_wt, "one.txt", "feat: bare first");
+    let first_commit = repo.head(&mixed_wt);
+    commit_file(
+        &mixed_wt,
+        "two.txt",
+        "feat: planned second\n\nPlanned-by: codex:worker#medium",
+    );
+    let second_commit = repo.head(&mixed_wt);
+    stdout(
+        repo.arc(&mixed_wt)
+            .args(["snapshot", &mixed, "--contributors", "codex:worker#medium"]),
+    );
+
+    let mixed_check = json_stdout_any_status(repo.arc(&mixed_wt).args(["check", &mixed, "--json"]));
+    let detail = advisory(&mixed_check, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing advisory on bare first commit: {mixed_check}"));
+    assert!(detail.contains(&first_commit), "{detail}");
+    assert!(!detail.contains(&second_commit), "{detail}");
+    assert!(detail.contains("arc rewrite trailers --sync"), "{detail}");
+    assert!(
+        !detail.contains("--from") && !detail.contains("--append"),
+        "bulk --from/--append would violate single-participant on second commit: {detail}"
+    );
+    stdout(
+        repo.arc(&mixed_wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    let first_msg = git_out(&mixed_wt, &["show", "-s", "--format=%B", "HEAD~1"]);
+    let second_msg = git_out(&mixed_wt, &["show", "-s", "--format=%B", "HEAD"]);
+    assert!(
+        first_msg.contains("Implemented-by: codex:worker#medium"),
+        "{first_msg}"
+    );
+    assert!(
+        second_msg.contains("Planned-by: codex:worker#medium")
+            && !second_msg.contains("Implemented-by: codex:worker#medium"),
+        "second commit must keep existing Planned-by without unsafe Implemented-by:\n{second_msg}"
+    );
+    for msg in [first_msg, second_msg] {
+        let checked = repo
+            .arc(&mixed_wt)
+            .args(["instructions", "git", "--check", "-"])
+            .write_stdin(msg)
+            .output()
+            .unwrap();
+        assert_eq!(checked.status.code(), Some(0));
+        assert!(checked.stdout.is_empty());
+    }
+
+    // Case 3: commit with only `Planned-by: codex:worker#medium` snapshotted with
+    // TWO contributors (`codex:worker#medium` and `claude:other#high`): combined
+    // result has two distinct implementers, so both apply cleanly.
+    let (pair, pair_wt) = open(&repo, "existing-planner-multi");
+    commit_file(
+        &pair_wt,
+        "pair.txt",
+        "feat: paired work\n\nPlanned-by: codex:worker#medium",
+    );
+    stdout(repo.arc(&pair_wt).args([
+        "snapshot",
+        &pair,
+        "--contributors",
+        "codex:worker#medium",
+        "--contributors",
+        "claude:other#high",
+    ]));
+    let pair_before = json_stdout_any_status(repo.arc(&pair_wt).args(["check", &pair, "--json"]));
+    let pair_detail =
+        advisory(&pair_before, "missing-contribution-trailers").unwrap_or_else(|| {
+            panic!("expected missing advisory for paired contributors: {pair_before}")
+        });
+    assert!(
+        pair_detail.contains("Implemented-by: codex:worker#medium")
+            && pair_detail.contains("Implemented-by: claude:other#high"),
+        "{pair_detail}"
+    );
+    stdout(
+        repo.arc(&pair_wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    let pair_msg = git_out(&pair_wt, &["show", "-s", "--format=%B", "HEAD"]);
+    assert!(
+        pair_msg.contains("Planned-by: codex:worker#medium")
+            && pair_msg.contains("Implemented-by: codex:worker#medium")
+            && pair_msg.contains("Implemented-by: claude:other#high"),
+        "{pair_msg}"
+    );
+    let pair_checked = repo
+        .arc(&pair_wt)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(pair_msg)
+        .output()
+        .unwrap();
+    assert_eq!(pair_checked.status.code(), Some(0));
+    assert!(pair_checked.stdout.is_empty());
+}

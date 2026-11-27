@@ -2943,6 +2943,7 @@ fn missing_role_trailers_advisory(
         .iter()
         .map(|(commit, message)| (commit.as_str(), message.as_slice()))
         .collect();
+    let missing_lines: Vec<String> = missing.iter().map(|(line, _)| line.clone()).collect();
     let bulk_safe = gitio::commits_from(cwd, first, head)
         .ok()
         .filter(|range| !range.is_empty())
@@ -2951,7 +2952,11 @@ fn missing_role_trailers_advisory(
                 by_commit.get(commit.as_str()).is_some_and(|message| {
                     let applicable =
                         crate::trailers::applicable_for_commit(message, &projected.trailers, &[]);
-                    missing.iter().all(|(line, _)| applicable.contains(line))
+                    let rewritten = crate::trailers::edit(message, &[], &missing_lines);
+                    missing_lines.iter().all(|line| applicable.contains(line))
+                        && !crate::trailers::introduces_single_participant_issue(
+                            message, &rewritten,
+                        )
                 })
             })
         });
