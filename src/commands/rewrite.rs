@@ -269,12 +269,13 @@ pub(crate) fn check_integrate_shared_safety(
     }
     let branch = &state.branch;
     let states = store.readable_states()?;
-    let mut open_by_branch_ref: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut same_branch_changes = Vec::new();
-    for other in states
+    let open_others: Vec<&ChangeState> = states
         .values()
         .filter(|other| !other.is_closed() && other.change_id != state.change_id)
-    {
+        .collect();
+    let mut open_by_branch_ref: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut same_branch_changes = Vec::new();
+    for other in &open_others {
         if other.branch == *branch {
             same_branch_changes.push(other.change_id.clone());
         } else {
@@ -396,10 +397,7 @@ pub(crate) fn check_integrate_shared_safety(
     // Also guard open changes whose recorded patchset head sits on or above a
     // candidate commit even if their branch ref was moved or deleted.
     let mut stacked_open = Vec::new();
-    for other in states
-        .values()
-        .filter(|other| !other.is_closed() && other.change_id != state.change_id)
-    {
+    for other in &open_others {
         let Some(patchset) = other.latest_patchset() else {
             continue;
         };
