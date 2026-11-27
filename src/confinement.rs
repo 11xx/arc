@@ -836,11 +836,46 @@ fn effective_env_value(command: &Command, key: &str) -> Option<std::ffi::OsStrin
 
 /// Returns `true` only when neither command/process environment nor Cargo
 /// configuration files redirect Cargo's target directory away from
-/// `<checkout>/target`. Honors Cargo's precedence (`.cargo/config` before
-/// `.cargo/config.toml` in each directory) and fails closed on unreadable or
+/// `<checkout>/target` for either the checkout itself or the command's actual
+/// launch working directory (such as a separate path-stable build directory).
+/// Honors Cargo's precedence (`.cargo/config` before `.cargo/config.toml` in
+/// each directory) and fails closed on `include`, unreadable, special, or
 /// unparseable Cargo configuration.
 fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
     let default_target = checkout.join("target");
+    let mut candidate_cwds = vec![checkout.to_path_buf()];
+    let launch_cwd = command
+        .get_current_dir()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(launch) = launch_cwd {
+        let launch_abs = if launch.is_absolute() {
+            launch
+        } else {
+            match std::env::current_dir() {
+                Ok(base) => base.join(launch),
+                Err(_) => return false,
+            }
+        };
+        if !candidate_cwds.contains(&launch_abs) {
+            candidate_cwds.push(launch_abs.clone());
+        }
+        if let Ok(canonical_launch) = fs::canonicalize(&launch_abs) {
+            if !candidate_cwds.contains(&canonical_launch) {
+                candidate_cwds.push(canonical_launch);
+            }
+        }
+    }
+    candidate_cwds
+        .iter()
+        .all(|cwd| cargo_uses_default_root_target_from_cwd(command, cwd, &default_target))
+}
+
+fn cargo_uses_default_root_target_from_cwd(
+    command: &Command,
+    cwd: &Path,
+    default_target: &Path,
+) -> bool {
     for var in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
         if let Some(value) = effective_env_value(command, var) {
             if !value.is_empty() {
@@ -848,16 +883,18 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
                 let resolved = if candidate.is_absolute() {
                     candidate
                 } else {
-                    checkout.join(candidate)
+                    cwd.join(candidate)
                 };
-                let normalized = resolve_missing(&resolved).unwrap_or(resolved);
+                let Ok(normalized) = resolve_missing(&resolved) else {
+                    return false;
+                };
                 if normalized != default_target {
                     return false;
                 }
             }
         }
     }
-    let mut config_dirs: Vec<PathBuf> = checkout
+    let mut config_dirs: Vec<PathBuf> = cwd
         .ancestors()
         .map(|ancestor| ancestor.join(".cargo"))
         .collect();
@@ -868,7 +905,7 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         let dir = if candidate.is_absolute() {
             candidate
         } else {
-            checkout.join(candidate)
+            cwd.join(candidate)
         };
         config_dirs.push(dir);
     } else if let Some(home) = effective_env_value(command, "HOME").filter(|v| !v.is_empty()) {
@@ -876,7 +913,7 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
         let dir = if candidate.is_absolute() {
             candidate
         } else {
-            checkout.join(candidate)
+            cwd.join(candidate)
         };
         config_dirs.push(dir);
     }
@@ -912,14 +949,16 @@ fn cargo_uses_default_root_target(command: &Command, checkout: &Path) -> bool {
             };
             // Cargo resolves relative `build.target-dir` from the lexical parent
             // of the config directory regardless of whether it is named `.cargo`.
-            let base = dir.parent().unwrap_or(checkout);
+            let base = dir.parent().unwrap_or(cwd);
             let candidate = Path::new(target_dir);
             let resolved = if candidate.is_absolute() {
                 candidate.to_path_buf()
             } else {
                 base.join(candidate)
             };
-            let normalized = resolve_missing(&resolved).unwrap_or(resolved);
+            let Ok(normalized) = resolve_missing(&resolved) else {
+                return false;
+            };
             return normalized == default_target;
         }
     }

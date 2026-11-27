@@ -923,6 +923,83 @@ fn cargo_target_roots_created_by_confinement_get_cachedir_tag() {
     assert!(command.status().unwrap().success());
     assert!(exp_wt.join("target/CACHEDIR.TAG").is_file());
 
+    // When a command launches from a separate working directory (e.g., path-stable
+    // build storage), relative env overrides and ancestor configs of that launch
+    // directory prevent tagging `<checkout>/target`.
+    let scratch_launch = scratch();
+    let launch_wt = scratch_launch.path().join("wt");
+    let launch_build = scratch_launch.path().join("build-dir");
+    fs::create_dir(&launch_wt).unwrap();
+    fs::create_dir(&launch_build).unwrap();
+    init_git(&launch_wt);
+    fs::write(launch_wt.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        launch_wt.join("Cargo.toml"),
+        "[package]\nname='launchpkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let mut launch_env_cmd = crate::child_command::command("true");
+    launch_env_cmd
+        .current_dir(&launch_build)
+        .env("CARGO_BUILD_TARGET_DIR", "./target");
+    apply_declared(
+        &mut launch_env_cmd,
+        &launch_wt,
+        &Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        },
+    )
+    .unwrap();
+    assert!(launch_env_cmd.status().unwrap().success());
+    assert!(launch_wt.join("target").is_dir());
+    assert!(
+        !launch_wt.join("target/CACHEDIR.TAG").exists(),
+        "CARGO_BUILD_TARGET_DIR=./target in separate launch cwd must not tag checkout/target"
+    );
+
+    let scratch_launch_cfg = scratch();
+    let lcfg_wt = scratch_launch_cfg.path().join("wt");
+    let lcfg_build_root = scratch_launch_cfg.path().join("storage");
+    let lcfg_build = lcfg_build_root.join("nested");
+    fs::create_dir(&lcfg_wt).unwrap();
+    fs::create_dir_all(lcfg_build_root.join(".cargo")).unwrap();
+    fs::create_dir_all(&lcfg_build).unwrap();
+    init_git(&lcfg_wt);
+    fs::write(lcfg_wt.join(".gitignore"), "/target\n").unwrap();
+    fs::write(
+        lcfg_wt.join("Cargo.toml"),
+        "[package]\nname='lcfgpkg'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        lcfg_build_root.join(".cargo/extra.toml"),
+        "[build]\ntarget-dir = \"out\"\n",
+    )
+    .unwrap();
+    fs::write(
+        lcfg_build_root.join(".cargo/config.toml"),
+        "include = [\"extra.toml\"]\n",
+    )
+    .unwrap();
+    let mut lcfg_cmd = crate::child_command::command("true");
+    lcfg_cmd.current_dir(&lcfg_build);
+    apply_declared(
+        &mut lcfg_cmd,
+        &lcfg_wt,
+        &Declaration {
+            writes: vec!["target".into()],
+            required: true,
+        },
+    )
+    .unwrap();
+    assert!(lcfg_cmd.status().unwrap().success());
+    assert!(lcfg_wt.join("target").is_dir());
+    assert!(
+        !lcfg_wt.join("target/CACHEDIR.TAG").exists(),
+        "Cargo config include in launch cwd ancestor must not tag checkout/target"
+    );
+
     // A FIFO at `.cargo/config` never blocks confinement; it fails closed and leaves
     // `target/` unmarked while still shadowing `.cargo/config.toml`.
     let scratch_fifo = scratch();
