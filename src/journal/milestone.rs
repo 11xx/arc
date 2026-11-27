@@ -647,6 +647,7 @@ fn publish_start(dir: &Path, file: &str, body: String, records: &[JournalEvent])
             events: raw_records,
         }],
         body_bases: Some(vec![None]),
+        attachments: Vec::new(),
         events,
         events_basis: Some(basis),
         receipt: None,

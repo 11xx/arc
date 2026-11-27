@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod attachments;
 pub(crate) mod guide_topics;
 pub(crate) mod milestone;
 mod page;
@@ -803,6 +804,11 @@ pub struct KindWrite {
     /// Preserve unknown planner authorship when transporting a plan.
     #[arg(long, conflicts_with = "planned_by")]
     pub no_planner: bool,
+    /// Attach a raster image (PNG, JPEG, WebP, or GIF, up to 5 MiB) content-addressed
+    /// under `attachments/<sha256>.<ext>` and append its Markdown reference; repeatable.
+    /// Source paths are never written into the artifact or event log
+    #[arg(long = "attach", value_name = "FILE")]
+    pub attach: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -1081,6 +1087,10 @@ pub enum JournalCmd {
         /// Explicitly append to an unresolved discussion in cold storage.
         #[arg(long)]
         archived: bool,
+        /// Attach a raster image (PNG, JPEG, WebP, or GIF, up to 5 MiB) content-addressed
+        /// under `attachments/<sha256>.<ext>` and append its Markdown reference; repeatable
+        #[arg(long = "attach", value_name = "FILE")]
+        attach: Vec<PathBuf>,
     },
     /// Append an evidence block to a live artifact of any kind and emit a typed
     /// `evidence` event. Use it to add a finding, an option, or a revised
@@ -1101,15 +1111,19 @@ pub enum JournalCmd {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
         /// Body source: a file path, or '-' for stdin (written verbatim below
-        /// a tool-computed `### Evidence` heading)
-        #[arg(long)]
-        body_file: String,
+        /// a tool-computed `### Evidence` heading). Optional when `--attach` is given
+        #[arg(long, required_unless_present = "attach")]
+        body_file: Option<String>,
         /// One line naming the block, written after the heading's writer and
         /// time and recorded on the event; a rendered page and its contents
         /// use it in place of "Evidence". `journal correct --target <evd-id>
         /// --field title` amends it
         #[arg(long)]
         title: Option<String>,
+        /// Attach a raster image (PNG, JPEG, WebP, or GIF, up to 5 MiB) content-addressed
+        /// under `attachments/<sha256>.<ext>` and append its Markdown reference; repeatable
+        #[arg(long = "attach", value_name = "FILE")]
+        attach: Vec<PathBuf>,
     },
     /// Record that an artifact was checked against the project's source at the
     /// current anchor revision. The revision is omitted when the anchor has no
@@ -1165,13 +1179,17 @@ pub enum JournalCmd {
     /// under its title, and a table of contents, which a narrow screen shows
     /// folded when it has more than eight entries. The page has no scripts and
     /// sends no referrer; raw HTML shows as code, links keep only http(s),
-    /// mailto and in-page anchors, and images load only over https. An
+    /// mailto and in-page anchors, and images load over https or from verified
+    /// journal attachments (`attachments/<sha256>.<ext>`) embedded inline as
+    /// `data:` raster image URIs. Missing or corrupt attachments degrade to an
+    /// escaped notice and warn on stderr. An
     /// artifact address in the text links to that artifact's published copy,
     /// or to its block on this page. A home-directory path, a path under a
     /// directory arc knows is local, a private, shared or link-local address,
     /// or a private host name refuses, naming each; `--strip-private`
-    /// replaces them in the page and `--keep-private` renders them as
-    /// written. This includes withdrawal reasons and published destinations.
+    /// replaces them in the page (and strips embedded image metadata) and
+    /// `--keep-private` renders them as written. This includes embedded image
+    /// metadata, withdrawal reasons, and published destinations.
     /// Stripping a private destination leaves the citation as text.
     /// Reads the address forms `show` takes. Several addresses
     /// render in one run with `--json`, which reads each journal's event log
@@ -1289,6 +1307,10 @@ pub enum JournalCmd {
         /// one takeover. Every target stays readable
         #[arg(long)]
         supersedes: Vec<String>,
+        /// Attach a raster image (PNG, JPEG, WebP, or GIF, up to 5 MiB) content-addressed
+        /// under `attachments/<sha256>.<ext>` and append its Markdown reference; repeatable
+        #[arg(long = "attach", value_name = "FILE")]
+        attach: Vec<PathBuf>,
     },
     /// List the scaffolds a write can add to its body, and print one before
     /// using it. A journal artifact is append-only, so choosing between
@@ -2299,6 +2321,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             question,
             option,
             archived,
+            attach,
         } => position(
             ctx,
             &filename,
@@ -2308,12 +2331,20 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             question.as_deref(),
             option.as_deref(),
             archived,
+            &attach,
         ),
         JournalCmd::Evidence {
             filename,
             body_file,
             title,
-        } => evidence(ctx, &filename, &body_file, title.as_deref()),
+            attach,
+        } => evidence(
+            ctx,
+            &filename,
+            body_file.as_deref(),
+            title.as_deref(),
+            &attach,
+        ),
         JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
         JournalCmd::Pin {
             filename,
@@ -2426,6 +2457,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             gate,
             blocker,
             supersedes,
+            attach,
         } => checkpoint(
             ctx,
             &filename,
@@ -2434,6 +2466,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             gate.as_deref(),
             blocker.as_deref(),
             &supersedes,
+            &attach,
         ),
         JournalCmd::Questions { json } => questions(ctx, json),
         JournalCmd::Events { limit } => events(ctx, limit),
@@ -2668,15 +2701,22 @@ fn export_artifacts(ctx: &Ctx, files: &[String], output: &str) -> Result<()> {
     };
     let events = read_events(&hot)?;
     let records = read_physical_records(&hot)?;
-    let artifacts = collect_exchange_artifacts(&hot, &events, &records, files)?;
-    let bundle = crate::journal_exchange::JournalBundle::new(project_id, local, artifacts)?;
+    let (artifacts, bundled_attachments) =
+        collect_exchange_artifacts(&hot, &events, &records, files)?;
+    let bundle = crate::journal_exchange::JournalBundle::new(
+        project_id,
+        local,
+        artifacts,
+        bundled_attachments,
+    )?;
     let digest = bundle.digest()?;
     let bytes = bundle.to_bytes()?;
     let reported = format!(
-        "source replica: {} ({})\nartifacts: {}\nsha256: {digest}",
+        "source replica: {} ({})\nartifacts: {}\nattachments: {}\nsha256: {digest}",
         bundle.source_replica.name,
         bundle.source_replica.repository_id,
-        bundle.artifacts.len()
+        bundle.artifacts.len(),
+        bundle.attachments.len()
     );
     if output == "-" {
         use std::io::Write as _;
@@ -2734,7 +2774,10 @@ fn collect_exchange_artifacts(
     events: &[JournalEvent],
     records: &[PhysicalRecord],
     requested: &[String],
-) -> Result<Vec<crate::journal_exchange::BundledArtifact>> {
+) -> Result<(
+    Vec<crate::journal_exchange::BundledArtifact>,
+    Vec<attachments::BundledAttachment>,
+)> {
     let mut selected: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut pending: BTreeMap<String, Option<String>> =
         requested.iter().map(|file| (file.clone(), None)).collect();
@@ -2787,17 +2830,47 @@ fn collect_exchange_artifacts(
         selected.insert(file, storage);
     }
     let mut artifacts = Vec::with_capacity(selected.len());
+    let mut bundled_attachments: BTreeMap<
+        attachments::AttachmentId,
+        attachments::BundledAttachment,
+    > = BTreeMap::new();
     for (file, storage) in selected {
-        let path = if storage == crate::journal_exchange::COLD_STORAGE {
-            archive_dir(hot).join(&file)
+        let store_dir = if storage == crate::journal_exchange::COLD_STORAGE {
+            archive_dir(hot)
         } else {
-            hot.join(&file)
+            hot.to_path_buf()
         };
+        let path = store_dir.join(&file);
         let bytes =
             std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let body = String::from_utf8(bytes).with_context(|| {
             format!("{file} is not UTF-8 text; journal bundles carry Markdown artifacts")
         })?;
+        for id in attachments::referenced_for_artifact(&body, events, &file) {
+            if bundled_attachments.contains_key(&id) {
+                continue;
+            }
+            let raw = match attachments::read_verified_in_store(&store_dir, &id) {
+                attachments::ReadOutcome::Available { bytes, .. } => bytes,
+                attachments::ReadOutcome::Missing => match attachments::read_verified(hot, &id) {
+                    attachments::ReadOutcome::Available { bytes, .. } => bytes,
+                    attachments::ReadOutcome::Missing => bail!(
+                        "{file} references {}, which is missing from this journal; export nothing",
+                        id.rel_path()
+                    ),
+                    attachments::ReadOutcome::Corrupt(reason) => bail!(
+                        "{file} references {}, which is corrupt ({reason}); export nothing",
+                        id.rel_path()
+                    ),
+                },
+                attachments::ReadOutcome::Corrupt(reason) => bail!(
+                    "{file} references {}, which is corrupt ({reason}); export nothing",
+                    id.rel_path()
+                ),
+            };
+            let bundled = attachments::BundledAttachment::from_verified(&id, &raw);
+            bundled_attachments.insert(id, bundled);
+        }
         let digest = crate::journal_exchange::body_digest(&body);
         let recorded = records
             .iter()
@@ -2812,7 +2885,7 @@ fn collect_exchange_artifacts(
             events: recorded,
         });
     }
-    Ok(artifacts)
+    Ok((artifacts, bundled_attachments.into_values().collect()))
 }
 
 /// Where one artifact's body lives for an exchange, refusing a name that is
@@ -3195,13 +3268,41 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         }
     }
     let mut bodies = Vec::new();
+    let mut staged_attachments = Vec::new();
+    let mut seen_staged: BTreeSet<(String, String)> = BTreeSet::new();
+    let by_path: HashMap<&str, &attachments::BundledAttachment> = bundle
+        .attachments
+        .iter()
+        .map(|att| (att.path.as_str(), att))
+        .collect();
     for entry in &plan {
-        if entry.local_digest.is_some() && entry.merged_body.is_none() {
-            continue;
-        }
         let mut artifact = entry.artifact.clone();
         if let Some(body) = &entry.merged_body {
             artifact.body = body.clone();
+        }
+        let mut tiers = vec![artifact.storage.clone()];
+        if artifact.storage == crate::journal_exchange::HOT_STORAGE
+            && cold.join(&artifact.file).is_file()
+        {
+            tiers.push(crate::journal_exchange::COLD_STORAGE.to_string());
+        }
+        let understood = artifact.understood_events()?;
+        for id in attachments::referenced_for_artifact(&artifact.body, &understood, &artifact.file)
+        {
+            let rel = id.rel_path();
+            if let Some(att) = by_path.get(rel.as_str()) {
+                for tier in &tiers {
+                    if seen_staged.insert((tier.clone(), rel.clone())) {
+                        staged_attachments.push(StagedAttachment {
+                            storage: tier.clone(),
+                            attachment: (*att).clone(),
+                        });
+                    }
+                }
+            }
+        }
+        if entry.local_digest.is_some() && entry.merged_body.is_none() {
+            continue;
         }
         artifact.digest = crate::journal_exchange::body_digest(&artifact.body);
         if artifact.storage == crate::journal_exchange::HOT_STORAGE
@@ -3220,6 +3321,7 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let pending = ExchangeTransaction {
         bodies,
         body_bases: Some(body_bases),
+        attachments: staged_attachments,
         events,
         events_basis,
         receipt: Some(receipt),
@@ -3273,6 +3375,15 @@ fn print_exchange_import(
     }
 }
 
+/// One verified attachment staged inside an [`ExchangeTransaction`] for a
+/// specific storage tier (`hot` or `cold`).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagedAttachment {
+    storage: String,
+    attachment: attachments::BundledAttachment,
+}
+
 /// The prepared bodies, complete event log, and receipt are one recoverable unit.
 /// Imports require explicit recovery; ordinary appends and promotions recover before writes.
 #[derive(Serialize, Deserialize)]
@@ -3281,6 +3392,8 @@ struct ExchangeTransaction {
     bodies: Vec<crate::journal_exchange::BundledArtifact>,
     #[serde(default)]
     body_bases: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<StagedAttachment>,
     events: String,
     #[serde(default)]
     events_basis: Option<String>,
@@ -3427,6 +3540,25 @@ fn commit_exchange_transaction(hot: &Path) -> Result<()> {
     // publishes its complete body before recording the relation.
     if pending.promotion.is_none() {
         writable_event_log(hot)?;
+    }
+    let mut decoded_attachments = Vec::with_capacity(pending.attachments.len());
+    for staged in &pending.attachments {
+        if !matches!(
+            staged.storage.as_str(),
+            crate::journal_exchange::HOT_STORAGE | crate::journal_exchange::COLD_STORAGE
+        ) {
+            bail!("invalid attachment storage tier in pending journal exchange");
+        }
+        let (id, bytes) = staged.attachment.validate_and_decode()?;
+        decoded_attachments.push((staged.storage.as_str(), id, bytes));
+    }
+    for (storage, id, bytes) in &decoded_attachments {
+        let dir = if *storage == crate::journal_exchange::COLD_STORAGE {
+            archive_dir(hot)
+        } else {
+            hot.to_path_buf()
+        };
+        attachments::store_bytes(&dir, id, bytes, None, None)?;
     }
     for (index, artifact) in pending.bodies.iter().enumerate() {
         let dir = if artifact.storage == crate::journal_exchange::COLD_STORAGE {
@@ -3677,9 +3809,34 @@ fn stage_memory_promotion(
     {
         bail!("recorded promotion destination is missing; recovery refuses");
     }
+    let mut staged_attachments = Vec::new();
+    for id in attachments::referenced_for_artifact(&prepared.body, &source_records, filename) {
+        match attachments::read_verified(project, &id) {
+            attachments::ReadOutcome::Available { bytes, .. } => {
+                staged_attachments.push(StagedAttachment {
+                    storage: crate::journal_exchange::HOT_STORAGE.to_string(),
+                    attachment: attachments::BundledAttachment::from_verified(&id, &bytes),
+                });
+            }
+            attachments::ReadOutcome::Missing => {
+                bail!(
+                    "{filename} references {}, which is missing from {}; cannot promote",
+                    id.rel_path(),
+                    project.display()
+                );
+            }
+            attachments::ReadOutcome::Corrupt(reason) => {
+                bail!(
+                    "{filename} references {}, which is corrupt ({reason}); cannot promote",
+                    id.rel_path()
+                );
+            }
+        }
+    }
     let pending = ExchangeTransaction {
         bodies: vec![artifact],
         body_bases: Some(vec![None]),
+        attachments: staged_attachments,
         events,
         events_basis: Some(events_basis),
         receipt: None,
@@ -3952,6 +4109,8 @@ pub(crate) struct SpooledWrite {
     filename: Option<String>,
     event: JournalEvent,
     body: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<attachments::BundledAttachment>,
 }
 
 /// The outbox a checkout rooted at `toplevel` holds. A linked worktree is its
@@ -4059,6 +4218,7 @@ fn spool_write(
     topic: &str,
     event: &JournalEvent,
     body: Option<&str>,
+    attachments: Vec<attachments::BundledAttachment>,
 ) -> Result<i32> {
     let dir = outbox_dir(&ctx.cwd)?;
     ensure_outbox(&dir, &ctx.cwd)?;
@@ -4071,6 +4231,7 @@ fn spool_write(
         filename: event.file.clone(),
         event: event.clone(),
         body: body.map(str::to_string),
+        attachments,
     };
     let contents = serde_json::to_string_pretty(&spooled)?;
     // Exclusive creation, like the artifact write it stands in for: a
@@ -4261,10 +4422,13 @@ fn read_spooled(path: &Path) -> Result<SpooledWrite> {
             path.display()
         );
     }
+    for attachment in &spooled.attachments {
+        attachment.validate_and_decode()?;
+    }
     Ok(spooled)
 }
 
-/// File one spooled write, artifact first and event last.
+/// File one spooled write, attachments and artifact first and event last.
 fn promote_one(
     ctx: &Ctx,
     journal: &Path,
@@ -4275,6 +4439,10 @@ fn promote_one(
     // The identity is carried verbatim: promotion records who filed the write,
     // never who moved it. The promoting caller is named beside it.
     let mut event = spooled.event.clone();
+    for attachment in &spooled.attachments {
+        let (id, bytes) = attachment.validate_and_decode()?;
+        attachments::store_bytes(journal, &id, &bytes, None, None)?;
+    }
     if let (Some(filename), Some(body)) = (&spooled.filename, &spooled.body) {
         let (_, _) = check_artifact_name(ctx, filename)?;
         // The name is allocated where the journal is reachable, which is here
@@ -5305,6 +5473,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     inspect_entry_blocks(&dir, &cold, &events, &mut problems)?;
     inspect_relocations_and_redactions(&dir, &cold, &events, &mut problems)?;
     workbench::inspect(&dir, &events, &mut problems)?;
+    attachments::inspect(&dir, &cold, &events, &mut problems, &mut advice)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -7135,6 +7304,14 @@ fn scaffolded(template: &str, content: &str) -> String {
     }
 }
 
+fn privacy_scanner_for_journal(ctx: &Ctx, hot: &Path) -> private_text::Scanner {
+    let mut roots = vec![ctx.cwd.clone(), hot.to_path_buf(), archive_dir(hot)];
+    roots.extend(config::real_home().ok());
+    roots.extend(config::ai_home().ok());
+    roots.extend(recorded_anchor(hot).ok().flatten().map(PathBuf::from));
+    private_text::Scanner::new(roots)
+}
+
 fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) -> Result<i32> {
     let topic = write.topic.as_str();
     let title = write.title.as_deref();
@@ -7161,10 +7338,10 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         println!("{existing}");
         return Ok(0);
     }
-    // Read the body before touching the filesystem so a bad source path or
-    // scaffold name leaves nothing written. The body fills the scaffold
-    // template's slot, or follows a template that has none; a scaffold with no
-    // --body-file records the template alone.
+    // Validate attachments and read the body before touching the filesystem so
+    // a bad attachment, source path, or scaffold name leaves nothing written.
+    let scanner = privacy_scanner_for_journal(ctx, &dir);
+    let loaded_attachments = attachments::load_sources(&write.attach, &scanner)?;
     let template = match scaffold {
         Some(name) => crate::commands::scaffold::resolve(ctx, name)?,
         None => String::new(),
@@ -7173,12 +7350,15 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         Some(source) => read_body_verbatim(source)?,
         None => String::new(),
     };
-    let body = scaffolded(&template, &content);
+    let body = attachments::append_markdown_references(
+        &scaffolded(&template, &content),
+        &loaded_attachments,
+    );
     // An artifact with nothing in it is a queue entry that says nothing. A
     // repo-local template may be empty, so the check is on what would be
     // written rather than on which options were passed.
     if body.trim().is_empty() && title.is_none_or(|t| t.trim().is_empty()) {
-        bail!("nothing to record: pass --body-file, --scaffold, or --title");
+        bail!("nothing to record: pass --body-file, --attach, --scaffold, or --title");
     }
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -7199,31 +7379,90 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     event.source = source;
     event.item_key = item_key;
     event.planners = planners;
+    event.attachments = loaded_attachments
+        .iter()
+        .map(attachments::ValidatedAttachment::reference)
+        .collect();
     if kind == JournalKind::Discussion {
         event.outcome = Some("unresolved".to_string());
     }
 
+    let spooled_attachments = || {
+        loaded_attachments
+            .iter()
+            .map(attachments::ValidatedAttachment::to_bundled)
+            .collect::<Vec<_>>()
+    };
     if write.spool {
-        return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
+        return spool_write(
+            ctx,
+            &stamp,
+            kind.as_str(),
+            topic,
+            &event,
+            Some(&contents),
+            spooled_attachments(),
+        );
     }
     let _transition = match lock_journal_transition(&dir) {
         Ok(lock) => lock,
         Err(error) if out_of_reach(&error) => {
-            return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
+            return spool_write(
+                ctx,
+                &stamp,
+                kind.as_str(),
+                topic,
+                &event,
+                Some(&contents),
+                spooled_attachments(),
+            );
         }
         Err(error) => return Err(error),
     };
+    for att in &loaded_attachments {
+        match attachments::store_bytes(&dir, &att.id, &att.bytes, None, None) {
+            Ok(()) => {}
+            Err(error) if out_of_reach(&error) => {
+                return spool_write(
+                    ctx,
+                    &stamp,
+                    kind.as_str(),
+                    topic,
+                    &event,
+                    Some(&contents),
+                    spooled_attachments(),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
     // The artifact is the first thing written, so a journal this process
     // cannot reach fails here with nothing on disk and the write spools
     // instead. Anything else is a real failure and is reported as one.
     match create_artifact(&dir, &path, &contents) {
         Ok(()) => {}
         Err(error) if out_of_reach(&error) => {
-            return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
+            return spool_write(
+                ctx,
+                &stamp,
+                kind.as_str(),
+                topic,
+                &event,
+                Some(&contents),
+                spooled_attachments(),
+            );
         }
         Err(error) => return Err(error),
     }
     append_event(ctx, &dir, &event)?;
+    for att in &loaded_attachments {
+        eprintln!(
+            "attached: {} ({}, {} bytes)",
+            att.id.rel_path(),
+            att.id.format.media_type(),
+            att.bytes.len()
+        );
+    }
     println!("{}", path.display());
     Ok(0)
 }
@@ -7317,7 +7556,7 @@ fn log_line(
     // A spooled write cannot consult the journal, so the rescan check belongs
     // on the path that reaches it.
     if spool {
-        return spool_write(ctx, &stamp, "log", topic, &event, None);
+        return spool_write(ctx, &stamp, "log", topic, &event, None, Vec::new());
     }
     let written = std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create archive dir {}", dir.display()))
@@ -7336,7 +7575,9 @@ fn log_line(
         });
     match written {
         Ok(()) => Ok(0),
-        Err(error) if out_of_reach(&error) => spool_write(ctx, &stamp, "log", topic, &event, None),
+        Err(error) if out_of_reach(&error) => {
+            spool_write(ctx, &stamp, "log", topic, &event, None, Vec::new())
+        }
         Err(error) => Err(error),
     }
 }
@@ -8026,6 +8267,7 @@ fn position(
     question: Option<&str>,
     option: Option<&str>,
     archived: bool,
+    attach: &[PathBuf],
 ) -> Result<i32> {
     // A branch needs both halves: which question, and which of its answers.
     // Refusing here keeps a half-declared branch out of the log, where it
@@ -8050,6 +8292,9 @@ fn position(
     } else {
         open_artifact(ctx, filename)?;
     }
+    let dir_preview = resolve_dir(&ctx.cwd)?;
+    let scanner = privacy_scanner_for_journal(ctx, &dir_preview);
+    let loaded_attachments = attachments::load_sources(attach, &scanner)?;
     // Body reads hold no transition lock; the target is checked again under it.
     let body = read_body_verbatim(body_file)?;
     if let Some(requested) = stance {
@@ -8144,11 +8389,20 @@ fn position(
         heading_stamp(attribution(ctx, harness.as_deref()), &ts),
         if archived { " [archived]" } else { "" }
     );
+    let body = attachments::append_markdown_references(&body, &loaded_attachments);
     let position_body = match stance {
         Some(stance) => format!("Position: {}\n{body}", stance.as_str()),
         None => body,
     };
     let block = format!("\n{heading}\n\n{}\n", position_body.trim_end_matches('\n'));
+    let attachment_store = if archived {
+        archive_dir(&dir)
+    } else {
+        dir.clone()
+    };
+    for att in &loaded_attachments {
+        attachments::store_bytes(&attachment_store, &att.id, &att.bytes, None, None)?;
+    }
 
     // Append-only write: O_APPEND places the block at the current end even if
     // another writer added a position since, so concurrent appends never clobber
@@ -8169,11 +8423,23 @@ fn position(
     event.reference = reference.map(str::to_string);
     event.stance = stance.map(|stance| stance.as_str().to_string());
     event.storage_at_write = Some(storage.to_string());
+    event.attachments = loaded_attachments
+        .iter()
+        .map(attachments::ValidatedAttachment::reference)
+        .collect();
     if let Some((question, option)) = branch {
         event.question_id = Some(question);
         event.option = Some(option);
     }
     append_event(ctx, &dir, &event)?;
+    for att in &loaded_attachments {
+        eprintln!(
+            "attached: {} ({}, {} bytes)",
+            att.id.rel_path(),
+            att.id.format.media_type(),
+            att.bytes.len()
+        );
+    }
     println!("{}", path.display());
     Ok(0)
 }
@@ -8184,12 +8450,25 @@ fn position(
 /// rather than filing a successor. It carries no stance and no reply edge, so
 /// it never enters a stance tally; the event supplies the stable id, the
 /// activity time, and the writer.
-fn evidence(ctx: &Ctx, filename: &str, body_file: &str, title: Option<&str>) -> Result<i32> {
+fn evidence(
+    ctx: &Ctx,
+    filename: &str,
+    body_file: Option<&str>,
+    title: Option<&str>,
+    attach: &[PathBuf],
+) -> Result<i32> {
     let title = title.map(block_title).transpose()?;
     // Check target availability before waiting on a body source.
     open_artifact(ctx, filename)?;
-    let body = read_body_verbatim(body_file)?;
-    let recorded = read_events(&resolve_dir(&ctx.cwd)?)?;
+    let dir_preview = resolve_dir(&ctx.cwd)?;
+    let scanner = privacy_scanner_for_journal(ctx, &dir_preview);
+    let loaded_attachments = attachments::load_sources(attach, &scanner)?;
+    let raw_body = match body_file {
+        Some(source) => read_body_verbatim(source)?,
+        None => String::new(),
+    };
+    let body = attachments::append_markdown_references(&raw_body, &loaded_attachments);
+    let recorded = read_events(&dir_preview)?;
     let mut scan = EntryScan::after_recorded(&recorded, filename);
     for line in body.lines() {
         if !quoted_entry_line(line, &mut scan, &recorded, filename) && is_position_heading(line) {
@@ -8197,12 +8476,15 @@ fn evidence(ctx: &Ctx, filename: &str, body_file: &str, title: Option<&str>) -> 
         }
     }
     if body.trim().is_empty() {
-        bail!("evidence needs a body: say what was found");
+        bail!("evidence needs a body or --attach: say what was found");
     }
 
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
     let (dir, path, topic, _kind) = open_artifact(ctx, filename)?;
+    for att in &loaded_attachments {
+        attachments::store_bytes(&dir, &att.id, &att.bytes, None, None)?;
+    }
 
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -8223,7 +8505,19 @@ fn evidence(ctx: &Ctx, filename: &str, body_file: &str, title: Option<&str>) -> 
     event.title = title;
     event.evidence_id = Some(evidence_id);
     event.storage_at_write = Some("hot".to_string());
+    event.attachments = loaded_attachments
+        .iter()
+        .map(attachments::ValidatedAttachment::reference)
+        .collect();
     append_event(ctx, &dir, &event)?;
+    for att in &loaded_attachments {
+        eprintln!(
+            "attached: {} ({}, {} bytes)",
+            att.id.rel_path(),
+            att.id.format.media_type(),
+            att.bytes.len()
+        );
+    }
     println!("{}", path.display());
     Ok(0)
 }
@@ -10107,6 +10401,10 @@ pub(crate) struct JournalEvent {
     /// pre-change lanes appear on the item before `arc begin` runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lane_item: Option<LaneItem>,
+    /// Content-addressed image attachments stored beside the artifact when this
+    /// event was written. Never carries host source paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attachments: Vec<attachments::AttachmentRef>,
     /// What a progress series' events carry: the plan a series follows, the
     /// item an `item-*` event acts on and where it goes, a split's parts, a
     /// linked change, and a related series.
@@ -10439,6 +10737,7 @@ impl JournalEvent {
             feedback_key: None,
             feedback_route: None,
             lane_item: None,
+            attachments: Vec::new(),
             series: series::SeriesFields::default(),
             milestone: milestone::MilestoneFields::default(),
         }
@@ -10568,6 +10867,13 @@ impl JournalEvent {
             .feedback_route
             .as_deref()
             .is_none_or(|route| FeedbackRoute::parse(route).is_some())
+        {
+            return false;
+        }
+        if !self
+            .attachments
+            .iter()
+            .all(attachments::AttachmentRef::well_formed)
         {
             return false;
         }
@@ -11563,6 +11869,7 @@ fn write_events(dir: &Path, records: &[JournalEvent]) -> Result<()> {
     let pending = ExchangeTransaction {
         bodies: Vec::new(),
         body_bases: Some(Vec::new()),
+        attachments: Vec::new(),
         events,
         events_basis: Some(basis),
         receipt: None,
@@ -13036,6 +13343,7 @@ pub fn stage_artifact(
 /// it said from one whose prose has been rewritten underneath. A correction
 /// is another checkpoint naming the one it supersedes, because a reader who
 /// cannot see that a direction was contested cannot judge either.
+#[allow(clippy::too_many_arguments)]
 pub fn checkpoint(
     ctx: &Ctx,
     file: &str,
@@ -13044,10 +13352,16 @@ pub fn checkpoint(
     gate: Option<&str>,
     blocker: Option<&str>,
     supersedes: &[String],
+    attach: &[PathBuf],
 ) -> Result<i32> {
     let owner = require_claim_identity(ctx)?;
     let context = claim_context(ctx, file)?;
-    let body = read_body_verbatim(body_file)?;
+    let scanner = privacy_scanner_for_journal(ctx, &context.dir);
+    let loaded_attachments = attachments::load_sources(attach, &scanner)?;
+    let body = attachments::append_markdown_references(
+        &read_body_verbatim(body_file)?,
+        &loaded_attachments,
+    );
     let _lock = lock_journal_transition(&context.dir)?;
     let context = claim_context(ctx, file)?;
     let events = read_events(&context.dir)?;
@@ -13083,6 +13397,9 @@ pub fn checkpoint(
             bail!("no checkpoint {target} on {file}");
         }
     }
+    for att in &loaded_attachments {
+        attachments::store_bytes(&context.dir, &att.id, &att.bytes, None, None)?;
+    }
     let checkpoint_id = new_checkpoint_id();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let heading = format!(
@@ -13103,7 +13420,19 @@ pub fn checkpoint(
     event.supersedes_checkpoint = targets.first().cloned();
     event.supersedes_checkpoints = (targets.len() > 1).then_some(targets);
     event.digest = Some(format!("sha256:{}", hex::encode(Sha256::digest(&block))));
+    event.attachments = loaded_attachments
+        .iter()
+        .map(attachments::ValidatedAttachment::reference)
+        .collect();
     append_event(ctx, &context.dir, &event)?;
+    for att in &loaded_attachments {
+        eprintln!(
+            "attached: {} ({}, {} bytes)",
+            att.id.rel_path(),
+            att.id.format.media_type(),
+            att.bytes.len()
+        );
+    }
     println!("checkpoint: {checkpoint_id} on {file}");
     println!("{}", path.display());
     Ok(0)
@@ -16770,12 +17099,41 @@ fn show_artifact(location: &ArtifactLocation, json: bool) -> Result<i32> {
         let recorded = recorded_identity(&events, filename);
         let amendments = Amendments::collect(&events, filename);
         let blocks = artifact_entry_blocks(&body, &events, filename);
+        let attachment_rows: Vec<serde_json::Value> =
+            attachments::referenced_for_artifact(&body, &events, filename)
+                .into_iter()
+                .map(|id| match attachments::read_verified(&location.hot, &id) {
+                    attachments::ReadOutcome::Available { bytes, .. } => serde_json::json!({
+                        "path": id.rel_path(),
+                        "sha256": id.digest(),
+                        "media_type": id.format.media_type(),
+                        "bytes": bytes.len(),
+                        "status": "available",
+                    }),
+                    attachments::ReadOutcome::Missing => serde_json::json!({
+                        "path": id.rel_path(),
+                        "sha256": id.digest(),
+                        "media_type": id.format.media_type(),
+                        "bytes": null,
+                        "status": "missing",
+                    }),
+                    attachments::ReadOutcome::Corrupt(reason) => serde_json::json!({
+                        "path": id.rel_path(),
+                        "sha256": id.digest(),
+                        "media_type": id.format.media_type(),
+                        "bytes": null,
+                        "status": "corrupt",
+                        "error": reason,
+                    }),
+                })
+                .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": "arc-journal-artifact/3",
                 "file": filename,
                 "body": body,
+                "attachments": attachment_rows,
                 "positions": structured_entries("position", &blocks, &events, filename, &amendments),
                 "evidence": structured_entries("evidence", &blocks, &events, filename, &amendments),
                 "corrections": amendment_events(&events, filename).into_iter()
@@ -19545,6 +19903,8 @@ struct RelocationPlan {
     /// Whether the tombstone is already recorded: an interrupted relocation.
     recorded: bool,
     claims: Vec<String>,
+    /// Content-addressed attachments referenced by this artifact.
+    attachments: Vec<attachments::AttachmentId>,
 }
 
 fn relocate(
@@ -19695,6 +20055,12 @@ fn plan_relocation(
                 recorded.display()
             );
         }
+        let dest_dir = recorded
+            .parent()
+            .context("recorded relocation destination has no parent")?;
+        let body_text = std::fs::read_to_string(&recorded).unwrap_or_default();
+        let planned_attachments =
+            attachments::plan_relocation_attachments(hot, events, file, &body_text, dest_dir)?;
         return Ok(RelocationPlan {
             file: file.to_string(),
             topic,
@@ -19704,6 +20070,7 @@ fn plan_relocation(
             copied: true,
             recorded: true,
             claims: Vec::new(),
+            attachments: planned_attachments,
         });
     }
     let Some(body) = artifact_body_path(hot, file) else {
@@ -19716,6 +20083,9 @@ fn plan_relocation(
             bail!("conflicting hot and cold bodies for {file}");
         }
     }
+    let body_text = std::fs::read_to_string(&body).unwrap_or_default();
+    let planned_attachments =
+        attachments::plan_relocation_attachments(hot, events, file, &body_text, destination)?;
     let unfinished = pending_storage(events, file).is_some()
         || pending_transition(hot, events, file)
         || events.iter().any(|event| {
@@ -19762,6 +20132,7 @@ fn plan_relocation(
             .into_iter()
             .map(|claim| claim.state.claim_id)
             .collect(),
+        attachments: planned_attachments,
     })
 }
 
@@ -19771,11 +20142,11 @@ fn plan_relocation(
 fn execute_relocation(ctx: &Ctx, hot: &Path, plan: &RelocationPlan, reason: &str) -> Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let directory = plan
+        .destination
+        .parent()
+        .context("destination has no parent")?;
     if !plan.copied {
-        let directory = plan
-            .destination
-            .parent()
-            .context("destination has no parent")?;
         if !directory.is_dir() {
             std::fs::create_dir_all(directory)
                 .with_context(|| format!("cannot create {}", directory.display()))?;
@@ -19805,6 +20176,7 @@ fn execute_relocation(ctx: &Ctx, hot: &Path, plan: &RelocationPlan, reason: &str
             plan.file
         );
     }
+    attachments::copy_relocation_attachments(hot, directory, &plan.attachments)?;
     if !plan.recorded {
         let mut event = JournalEvent::base(ctx, Utc::now(), &plan.topic, "relocated");
         event.file = Some(plan.file.clone());
@@ -19818,6 +20190,17 @@ fn execute_relocation(ctx: &Ctx, hot: &Path, plan: &RelocationPlan, reason: &str
     for copy in &plan.copies {
         std::fs::remove_file(copy).with_context(|| format!("cannot remove {}", copy.display()))?;
         File::open(copy.parent().context("copy has no parent")?)?.sync_all()?;
+    }
+    if !plan.attachments.is_empty() {
+        let events = read_events(hot)?;
+        let leaving = BTreeSet::from([plan.file.as_str()]);
+        attachments::prune_unreferenced_from_store(hot, &events, &plan.attachments, &leaving)?;
+        attachments::prune_unreferenced_from_store(
+            &archive_dir(hot),
+            &events,
+            &plan.attachments,
+            &leaving,
+        )?;
     }
     Ok(())
 }
@@ -20327,6 +20710,15 @@ fn move_artifact(
     if source_exists && destination_exists && !same_storage_body(&source, &destination)? {
         bail!("conflicting storage bodies for {filename}");
     }
+    let (source_store, dest_store) = if operation == "archive" {
+        (hot, cold.as_path())
+    } else {
+        (cold.as_path(), hot)
+    };
+    let body_path = if source_exists { &source } else { &destination };
+    let body_text = std::fs::read_to_string(body_path).unwrap_or_default();
+    let copied_attachments =
+        attachments::copy_for_artifact(source_store, dest_store, &body_text, events, filename)?;
     if source_exists {
         if !destination_exists {
             std::fs::create_dir_all(destination.parent().context("destination has no parent")?)?;
@@ -20335,6 +20727,13 @@ fn move_artifact(
         }
         std::fs::remove_file(&source)?;
     }
+    let leaving = BTreeSet::from([filename]);
+    attachments::prune_unreferenced_from_store(
+        source_store,
+        events,
+        &copied_attachments,
+        &leaving,
+    )?;
     append_event(ctx, hot, &storage_completed(ctx, &topic, &intent))?;
     Ok(())
 }

@@ -4,9 +4,12 @@
 //!
 //! The page is static by construction. Raw HTML in the Markdown is shown as
 //! code, links keep only web and mail schemes or in-page anchors, images load
-//! only over https, and nothing the renderer writes runs. Private text is
-//! refused before anything is written, or replaced when the caller asks.
+//! over https or from verified journal raster attachments embedded as `data:`
+//! URIs, and nothing the renderer writes runs. Private text and embedded image
+//! metadata are refused before anything is written, or replaced/stripped when
+//! the caller asks.
 
+use super::attachments::{self, AttachmentId, ReadOutcome};
 use super::private_text::{Finding, Scanner};
 use super::{
     append_event, archive_dir, artifact_body_path, canonical_dir, check_artifact_name,
@@ -128,6 +131,9 @@ pub(super) fn render(
         };
         let page = run.page(address, private, output.fragment)?;
         write_output(output.out, &page.html)?;
+        for warning in &page.warnings {
+            eprintln!("warning: {}: {warning}", page.file);
+        }
         let stretches = match (private, page.findings.len()) {
             (_, 0) | (PrivateText::Refuse, _) => String::new(),
             (PrivateText::Strip, count) => format!(", {count} private stretches replaced"),
@@ -153,19 +159,24 @@ pub(super) fn render(
         .iter()
         .map(
             |address| match run.page(address, private, output.fragment) {
-                Ok(page) => PageRecord::Rendered {
-                    address: address.clone(),
-                    journal_dir: page.hot.display().to_string(),
-                    file: page.file,
-                    title: page.title,
-                    kind: page.kind,
-                    blocks: page.blocks,
-                    sha256: page.sha256,
-                    bytes: page.bytes,
-                    private_stretches: page.findings.len(),
-                    published: page.published,
-                    html: page.html,
-                },
+                Ok(page) => {
+                    for warning in &page.warnings {
+                        eprintln!("warning: {}: {warning}", page.file);
+                    }
+                    PageRecord::Rendered {
+                        address: address.clone(),
+                        journal_dir: page.hot.display().to_string(),
+                        file: page.file,
+                        title: page.title,
+                        kind: page.kind,
+                        blocks: page.blocks,
+                        sha256: page.sha256,
+                        bytes: page.bytes,
+                        private_stretches: page.findings.len(),
+                        published: page.published,
+                        html: page.html,
+                    }
+                }
                 Err(error) => PageRecord::Failed {
                     address: address.clone(),
                     error: format!("{error:#}"),
@@ -246,6 +257,7 @@ struct Rendered {
     sha256: String,
     bytes: usize,
     findings: Vec<(String, Finding)>,
+    warnings: Vec<String>,
     published: Option<String>,
     html: String,
 }
@@ -386,11 +398,12 @@ impl<'c> Run<'c> {
             scanner,
             findings: Vec::new(),
         };
-        let sha256 = hex::encode(Sha256::digest(body.as_bytes()));
+        let sha256 = render_digest(&location.hot, &body);
         let bytes = body.len();
         let body = privacy.text(None, &body);
         let published = published_url(&events, &file).map(str::to_string);
         let page = Page {
+            hot: &location.hot,
             file: &file,
             title: amendments
                 .title()
@@ -410,6 +423,7 @@ impl<'c> Run<'c> {
             amendments: &amendments,
             links: Links::new(&location, &events, &mut self.reads),
             privacy: &mut privacy,
+            warnings: Vec::new(),
         };
         let drawn = page.html(&body, fragment)?;
         let findings = privacy.finish(&file)?;
@@ -422,10 +436,34 @@ impl<'c> Run<'c> {
             sha256,
             bytes,
             findings,
+            warnings: drawn.warnings,
             published,
             html: drawn.html,
         })
     }
+}
+
+/// Digest of the rendered inputs: plain SHA-256 of `body` when the body
+/// references no journal attachments, and otherwise includes the verified
+/// availability state of every referenced attachment so a missing or restored
+/// image changes the digest.
+fn render_digest(hot: &Path, body: &str) -> String {
+    let referenced = attachments::referenced_in_body(body);
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    if !referenced.is_empty() {
+        for id in referenced {
+            hasher.update(b"\0attachment\0");
+            hasher.update(id.rel_path().as_bytes());
+            hasher.update(b"\0");
+            match attachments::read_verified(hot, &id) {
+                ReadOutcome::Available { .. } => hasher.update(b"available"),
+                ReadOutcome::Missing => hasher.update(b"missing"),
+                ReadOutcome::Corrupt(_) => hasher.update(b"corrupt"),
+            }
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// The name a page shows for the journal it came from: the project
@@ -628,6 +666,7 @@ impl PagePrivacy {
 }
 
 struct Page<'a> {
+    hot: &'a Path,
     file: &'a str,
     title: Option<String>,
     reason: Option<String>,
@@ -637,6 +676,7 @@ struct Page<'a> {
     amendments: &'a Amendments,
     links: Links<'a>,
     privacy: &'a mut PagePrivacy,
+    warnings: Vec<String>,
 }
 
 struct TocEntry {
@@ -654,6 +694,7 @@ struct Drawn {
     blocks: usize,
     title: String,
     kind: String,
+    warnings: Vec<String>,
 }
 
 impl Page<'_> {
@@ -804,6 +845,7 @@ impl Page<'_> {
             blocks,
             title,
             kind,
+            warnings: self.warnings,
         })
     }
 
@@ -860,16 +902,30 @@ impl Page<'_> {
         used: &mut BTreeSet<String>,
         toc: &mut Vec<TocEntry>,
     ) -> String {
+        enum ImageState {
+            Kept,
+            Dropped,
+            Fallback { label: String, alt: String },
+        }
         let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
         let mut events: Vec<Event<'_>> = Vec::new();
         let mut kept_links: Vec<bool> = Vec::new();
-        let mut kept_images: Vec<bool> = Vec::new();
+        let mut kept_images: Vec<ImageState> = Vec::new();
         let mut heading: Option<(usize, u8, String)> = None;
         for event in Parser::new_ext(text, options) {
             let inside_link = kept_links.iter().any(|kept| *kept) || !kept_images.is_empty();
+            let in_fallback = matches!(kept_images.last(), Some(ImageState::Fallback { .. }));
             match event {
-                Event::Html(raw) => events.push(Event::Text(raw)),
-                Event::InlineHtml(raw) => events.push(Event::Code(raw)),
+                Event::Html(raw) => {
+                    if !in_fallback {
+                        events.push(Event::Text(raw));
+                    }
+                }
+                Event::InlineHtml(raw) => {
+                    if !in_fallback {
+                        events.push(Event::Code(raw));
+                    }
+                }
                 Event::Start(Tag::Table(alignments)) => {
                     events.push(Event::Html(CowStr::from("<div class=\"table-scroll\">\n")));
                     events.push(Event::Start(Tag::Table(alignments)));
@@ -910,22 +966,101 @@ impl Page<'_> {
                     title,
                     id,
                 }) => {
-                    let kept = dest_url.to_ascii_lowercase().starts_with("https://");
-                    kept_images.push(kept);
-                    if kept {
+                    if let Some(att_id) = AttachmentId::parse_rel_path(&dest_url) {
+                        match attachments::read_verified(self.hot, &att_id) {
+                            ReadOutcome::Available { bytes, .. } => {
+                                let meta_findings = attachments::scan_metadata(
+                                    att_id.format,
+                                    &bytes,
+                                    &self.privacy.scanner,
+                                );
+                                let place = att_id.rel_path();
+                                for finding in meta_findings {
+                                    self.privacy.findings.push((place.clone(), finding));
+                                }
+                                let payload = if self.privacy.mode == PrivateText::Strip {
+                                    match attachments::strip_metadata(att_id.format, &bytes) {
+                                        Ok(stripped) => Ok(stripped),
+                                        Err(error) => {
+                                            Err(format!("metadata strip failed: {error}"))
+                                        }
+                                    }
+                                } else {
+                                    Ok(bytes)
+                                };
+                                match payload {
+                                    Ok(payload) => {
+                                        let data_uri = format!(
+                                            "data:{};base64,{}",
+                                            att_id.format.media_type(),
+                                            attachments::encode_base64(&payload)
+                                        );
+                                        kept_images.push(ImageState::Kept);
+                                        events.push(Event::Start(Tag::Image {
+                                            link_type,
+                                            dest_url: CowStr::from(data_uri),
+                                            title,
+                                            id,
+                                        }));
+                                    }
+                                    Err(reason) => {
+                                        let label = format!(
+                                            "corrupt attachment: {} ({reason})",
+                                            att_id.rel_path()
+                                        );
+                                        self.warnings.push(label.clone());
+                                        kept_images.push(ImageState::Fallback {
+                                            label,
+                                            alt: String::new(),
+                                        });
+                                    }
+                                }
+                            }
+                            ReadOutcome::Missing => {
+                                let label = format!("missing attachment: {}", att_id.rel_path());
+                                self.warnings.push(label.clone());
+                                kept_images.push(ImageState::Fallback {
+                                    label,
+                                    alt: String::new(),
+                                });
+                            }
+                            ReadOutcome::Corrupt(reason) => {
+                                let label =
+                                    format!("corrupt attachment: {} ({reason})", att_id.rel_path());
+                                self.warnings.push(label.clone());
+                                kept_images.push(ImageState::Fallback {
+                                    label,
+                                    alt: String::new(),
+                                });
+                            }
+                        }
+                    } else if dest_url.to_ascii_lowercase().starts_with("https://") {
+                        kept_images.push(ImageState::Kept);
                         events.push(Event::Start(Tag::Image {
                             link_type,
                             dest_url,
                             title,
                             id,
                         }));
+                    } else {
+                        kept_images.push(ImageState::Dropped);
                     }
                 }
-                Event::End(TagEnd::Image) => {
-                    if kept_images.pop().unwrap_or(false) {
-                        events.push(Event::End(TagEnd::Image));
+                Event::End(TagEnd::Image) => match kept_images.pop() {
+                    Some(ImageState::Kept) => events.push(Event::End(TagEnd::Image)),
+                    Some(ImageState::Fallback { label, alt }) => {
+                        let note = if alt.trim().is_empty() {
+                            format!("[{label}]")
+                        } else {
+                            format!("[{label} — {}]", alt.trim())
+                        };
+                        events.push(Event::Html(CowStr::from(format!(
+                            "<span class=\"attachment-missing\" role=\"note\">{}</span>",
+                            escape(&note)
+                        ))));
                     }
-                }
+                    Some(ImageState::Dropped) | None => {}
+                },
                 Event::Start(Tag::Heading { level, .. }) => {
                     let level = shift.level(level);
                     heading = Some((events.len(), level, String::new()));
@@ -957,6 +1092,10 @@ impl Page<'_> {
                     }
                 }
                 Event::Text(text) => {
+                    if let Some(ImageState::Fallback { alt, .. }) = kept_images.last_mut() {
+                        alt.push_str(&text);
+                        continue;
+                    }
                     if let Some((_, _, heading)) = heading.as_mut() {
                         heading.push_str(&text);
                     }
@@ -967,6 +1106,10 @@ impl Page<'_> {
                     }
                 }
                 Event::Code(code) => {
+                    if let Some(ImageState::Fallback { alt, .. }) = kept_images.last_mut() {
+                        alt.push_str(&code);
+                        continue;
+                    }
                     if let Some((_, _, heading)) = heading.as_mut() {
                         heading.push_str(&code);
                     }
@@ -989,7 +1132,11 @@ impl Page<'_> {
                 Event::InlineMath(math) | Event::DisplayMath(math) => {
                     events.push(Event::Code(math));
                 }
-                other => events.push(other),
+                other => {
+                    if !in_fallback {
+                        events.push(other);
+                    }
+                }
             }
         }
         let mut html = String::new();

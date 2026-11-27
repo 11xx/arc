@@ -2272,7 +2272,7 @@ STANDING REFERENCES (what a project keeps coming back to)
   archive` or `journal relocate` refuses until it is unpinned.
 
   A living document grows by appended sections, not by successors:
-    arc journal append <file.md> --body-file - [--title TEXT]
+    arc journal append <file.md> [--body-file -] [--title TEXT] [--attach FILE]...
                          `journal evidence` under the name that fits. The
                          title is one line, written after the heading's
                          writer and time (`### Evidence <id> (<who>, <ts>):
@@ -2280,6 +2280,16 @@ STANDING REFERENCES (what a project keeps coming back to)
                          still keys on the ID. `journal correct --target
                          <evd-id> --field title` amends it; corrections and
                          retractions are not counted as appended blocks.
+
+  Attached raster images (`--attach FILE`, repeatable on filing verbs,
+  `journal append`, `journal position`, and `journal checkpoint`) are validated
+  by magic bytes (PNG, JPEG, WebP, or GIF, up to 5 MiB; SVG and HTML refuse),
+  stored content-addressed under `attachments/<sha256>.<ext>` without following
+  symbolic links, referenced in Markdown as `![<alt>](attachments/<sha256>.<ext>)`,
+  and recorded on the event without host source paths. Attachments travel with
+  `archive`, `unarchive`, `relocate`, `promote --global`, `spool --promote`,
+  and `export`/`import`; `journal doctor` reports missing, corrupt, malformed,
+  symlinked, and orphaned blobs.
 
   A page is the readable copy of one artifact away from the terminal:
     arc journal render <address> [--out FILE] [--strip-private|--keep-private]
@@ -2291,7 +2301,10 @@ STANDING REFERENCES (what a project keeps coming back to)
                          where they apply. Other headings, such as
                          “Correction notes”, retain their text. Raw HTML shows
                          as code, links keep http(s), mailto and in-page
-                         anchors, images load only over https. The page has
+                         anchors, and images load over https or from verified
+                         journal attachments embedded inline as raster `data:`
+                         URIs (missing or corrupt attachments degrade to an
+                         escaped notice). The page has
                          no scripts and sends no referrer. Takes the
                          addresses and regular artifact files `show` takes.
                          A home-directory path, a path under a directory arc
@@ -2299,9 +2312,10 @@ STANDING REFERENCES (what a project keeps coming back to)
                          the checkout), a private, shared or link-local
                          address, or a `.local`, `.lan`, `.home.arpa` or
                          `.ts.net` host refuses with each line and text;
-                         the check includes recorded withdrawal reasons and
-                         published destinations used as links. `--strip-private`
-                         replaces private text and leaves a private citation
+                         the check includes embedded image metadata, recorded
+                         withdrawal reasons and published destinations used as
+                         links. `--strip-private` replaces private text, strips
+                         embedded image metadata, and leaves a private citation
                          as unlinked text. `--keep-private` preserves those
                          values for a page on its owner's network.
                          `journal redact` removes private text from the body.
@@ -2309,7 +2323,8 @@ STANDING REFERENCES (what a project keeps coming back to)
                          Many pages in one run, each journal's log read once:
                          `arc-journal-render/1` carries the stylesheet, then
                          per address its file, title, kind, block count, the
-                         sha256 and length of the body as read, and its HTML,
+                         sha256 (covering body and referenced attachment
+                         states) and length of the body as read, and its HTML,
                          or the error that stopped it (exit 16; the rest still
                          render). `--fragment` drops the document shell, the
                          stylesheet and the dated footer, for a host page that
@@ -7371,10 +7386,13 @@ SCHEMAS
 
   A `pinned` event may carry an optional `guide` topic name, a `consumed`
   event may carry an optional `promoted_to_global` memory filename, a
-  `reopened` event may carry an optional `reopens` consumption digest, and
+  `reopened` event may carry an optional `reopens` consumption digest,
   `note` and `evidence` events may carry optional `feedback_key` and
-  `feedback_route` fields. These additive input fields keep
-  `journal-events/2`; events without them remain valid.
+  `feedback_route` fields, and write/append events may carry optional
+  `attachments` metadata (`path`, `sha256`, `media_type`, `bytes`). These
+  additive input fields keep `journal-events/2`; events without them remain
+  valid. `arc-journal-bundle/2` and `arc-journal-spool/2` carry optional
+  `attachments` arrays for referenced raster images.
 
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;

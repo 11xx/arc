@@ -248,6 +248,10 @@ paths = [
   # published page may carry.
   "src/journal/page.rs",
   "src/journal/private_text.rs",
+  # Validates, confines without following links, moves, and strips metadata from
+  # content-addressed journal image attachments: a defect admits active content,
+  # traverses outside the journal, loses attached bytes, or leaks metadata.
+  "src/journal/attachments.rs",
   # A pin refuses archive and relocation of a standing reference and exempts
   # it from archive sweeps; a defect moves an artifact its pin protects.
   "src/journal/pins.rs",

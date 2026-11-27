@@ -90,6 +90,7 @@ mod ineligible_review;
 mod intake;
 mod integrate;
 mod journal;
+mod journal_attachments;
 mod journal_bind;
 mod journal_exchange;
 mod journal_living;

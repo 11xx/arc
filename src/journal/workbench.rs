@@ -2235,6 +2235,7 @@ mod tests {
         let pending = super::super::ExchangeTransaction {
             bodies: Vec::new(),
             body_bases: Some(Vec::new()),
+            attachments: Vec::new(),
             events,
             events_basis: Some(String::new()),
             receipt: None,

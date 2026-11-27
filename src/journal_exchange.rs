@@ -10,6 +10,7 @@
 //! machine that holds it.
 
 use crate::ids;
+use crate::journal::attachments::{referenced_in_body, AttachmentId, BundledAttachment};
 use crate::journal::{artifact_references, parse_artifact_name, ArtifactReference, JournalEvent};
 use crate::replica::{validate_identity, ReplicaIdentity};
 use anyhow::{bail, Context, Result};
@@ -47,10 +48,14 @@ pub(crate) struct JournalBundle {
     pub(crate) schema: String,
     pub(crate) project_id: String,
     pub(crate) source_replica: ReplicaIdentity,
-    /// Checksum over the artifacts as carried, so a bundle altered after it
-    /// was written is refused rather than imported.
+    /// Checksum over the artifacts (and any bundled attachments) as carried, so
+    /// a bundle altered after it was written is refused rather than imported.
     pub(crate) artifacts_sha256: String,
     pub(crate) artifacts: Vec<BundledArtifact>,
+    /// Content-addressed raster image attachments referenced by the bundled
+    /// artifacts, sorted by canonical relative path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attachments: Vec<BundledAttachment>,
 }
 
 /// One artifact a receipt says arrived, with the digest it arrived at and how
@@ -154,14 +159,18 @@ impl JournalBundle {
         project_id: String,
         source_replica: ReplicaIdentity,
         mut artifacts: Vec<BundledArtifact>,
+        mut attachments: Vec<BundledAttachment>,
     ) -> Result<Self> {
         artifacts.sort_by(|left, right| left.file.cmp(&right.file));
+        attachments.sort_by(|left, right| left.path.cmp(&right.path));
+        attachments.dedup_by(|left, right| left.path == right.path);
         let bundle = Self {
             schema: BUNDLE_SCHEMA.to_string(),
             project_id,
             source_replica,
-            artifacts_sha256: artifacts_digest(&artifacts)?,
+            artifacts_sha256: artifacts_digest(&artifacts, &attachments)?,
             artifacts,
+            attachments,
         };
         bundle.validate()?;
         Ok(bundle)
@@ -258,14 +267,57 @@ impl JournalBundle {
                 bail!("journal bundle carries {} more than once", artifact.file);
             }
         }
-        if artifacts_digest(&self.artifacts)? != self.artifacts_sha256 {
+        let mut carried_attachments = BTreeSet::new();
+        for attachment in &self.attachments {
+            let (id, _) = attachment.validate_and_decode()?;
+            if !carried_attachments.insert(id) {
+                bail!(
+                    "journal bundle carries attachment {} more than once",
+                    attachment.path
+                );
+            }
+        }
+        if artifacts_digest(&self.artifacts, &self.attachments)? != self.artifacts_sha256 {
             bail!("journal bundle artifact checksum does not match");
         }
         for artifact in &self.artifacts {
             validate_references(artifact, &files)?;
+            validate_attachment_references(artifact, &carried_attachments)?;
         }
         Ok(())
     }
+}
+
+/// Every attachment referenced by a bundled artifact's body or understood
+/// events must be carried in the bundle.
+fn validate_attachment_references(
+    artifact: &BundledArtifact,
+    carried: &BTreeSet<AttachmentId>,
+) -> Result<()> {
+    let mut needed = referenced_in_body(&artifact.body);
+    for raw in &artifact.events {
+        let Ok(event) = serde_json::from_str::<JournalEvent>(raw.get()) else {
+            continue;
+        };
+        if !event.known() {
+            continue;
+        }
+        for att in &event.attachments {
+            if let Some(id) = AttachmentId::parse_rel_path(&att.path) {
+                needed.insert(id);
+            }
+        }
+    }
+    for id in needed {
+        if !carried.contains(&id) {
+            bail!(
+                "journal bundle artifact {} references {}, which the bundle does not carry",
+                artifact.file,
+                id.rel_path()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Every artifact reference one bundled event makes must resolve inside the
@@ -354,11 +406,21 @@ pub(crate) fn body_digest(body: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())))
 }
 
-fn artifacts_digest(artifacts: &[BundledArtifact]) -> Result<String> {
+fn artifacts_digest(
+    artifacts: &[BundledArtifact],
+    attachments: &[BundledAttachment],
+) -> Result<String> {
     let mut hasher = Sha256::new();
     for artifact in artifacts {
         hasher.update(serde_json::to_vec(artifact)?);
         hasher.update(b"\n");
+    }
+    if !attachments.is_empty() {
+        hasher.update(b"\0attachments\n");
+        for attachment in attachments {
+            hasher.update(serde_json::to_vec(attachment)?);
+            hasher.update(b"\n");
+        }
     }
     Ok(hex::encode(hasher.finalize()))
 }

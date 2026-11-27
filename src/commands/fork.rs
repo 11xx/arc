@@ -98,6 +98,7 @@ fn journal_marker(ctx: &Ctx, slug: &str, title: &str, body: &str) -> Result<()> 
             spool: false,
             planned_by: Vec::new(),
             no_planner: false,
+            attach: Vec::new(),
         },
     );
     let _ = std::fs::remove_file(&temp);

@@ -54,6 +54,16 @@ body {
 a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: .15em; }
 a:hover { text-decoration-thickness: 2px; }
 img { max-width: 100%; height: auto; }
+.attachment-missing {
+  display: inline-block;
+  padding: .25em .6em;
+  border: 1px dashed var(--rule);
+  border-radius: 3px;
+  background: var(--wash);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: .82rem;
+}
 hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
 del { color: var(--muted); }
 
