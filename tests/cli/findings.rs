@@ -1650,3 +1650,158 @@ fn exterior_window_fix_survival_covers_insertion_interhunk_relocation_partial_an
     );
     repo.arc(&wt5).args(["check", &change5]).assert().code(2);
 }
+
+#[test]
+fn multi_commit_span_tracking_handles_adjacent_expansion_and_neighbor_duplicate_removal() {
+    let repo = Repo::new();
+
+    // Case 1: Insertion-only fix followed by splitting adjacent line B into two lines,
+    // then removing ONLY GUARD in a separate commit must reopen; replacing GUARD with
+    // GUARD_V2 alongside the split B must stay resolved.
+    let begin1 = stdout(repo.arc(&repo.root).args(["begin", "split-neighbor-guard"]));
+    let change1 = opened_change_id(&begin1);
+    let wt1 = repo.home.join(".worktrees/repo-split-neighbor-guard");
+    repo.commit(&wt1, "f.txt", "A\nB\nC\n", "feat: initial");
+    stdout(repo.arc(&wt1).args(["snapshot", "split-neighbor-guard"]));
+    let fid1 = stdout(repo.arc(&wt1).args([
+        "finding",
+        "split-neighbor-guard",
+        "--summary",
+        "insert guard before B",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+    let fix1 = repo.head(&wt1);
+    stdout(repo.arc(&wt1).args([
+        "resolve",
+        "split-neighbor-guard",
+        &fid1,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1,
+    ]));
+    // Commit 2: split B into two lines while retaining GUARD.
+    repo.commit(
+        &wt1,
+        "f.txt",
+        "A\nGUARD\nB part one\nB part two\nC\n",
+        "refactor: split B while retaining guard",
+    );
+    let split_head = repo.head(&wt1);
+    // Commit 3: remove ONLY GUARD.
+    repo.commit(
+        &wt1,
+        "f.txt",
+        "A\nB part one\nB part two\nC\n",
+        "chore: remove guard after splitting B",
+    );
+    stdout(repo.arc(&wt1).args(["snapshot", "split-neighbor-guard"]));
+    let status1_reopened = json_stdout(repo.arc(&wt1).args(["status", &change1, "--json"]));
+    assert_eq!(
+        status1_reopened["open_blocking_findings"],
+        serde_json::json!([fid1]),
+        "removing GUARD after splitting adjacent B must reopen finding: {status1_reopened}"
+    );
+    repo.arc(&wt1).args(["check", &change1]).assert().code(2);
+    // Control: from split_head, replace GUARD with GUARD_V2 while keeping split B -> stays resolved.
+    git(&wt1, &["reset", "--hard", &split_head]);
+    repo.commit(
+        &wt1,
+        "f.txt",
+        "A\nGUARD_V2\nB part one\nB part two\nC\n",
+        "refactor: refine guard while keeping split B",
+    );
+    stdout(repo.arc(&wt1).args(["snapshot", "split-neighbor-guard"]));
+    let status1_control = json_stdout(repo.arc(&wt1).args(["status", &change1, "--json"]));
+    assert_eq!(
+        status1_control["open_blocking_findings"],
+        serde_json::json!([]),
+        "replacing GUARD with GUARD_V2 alongside split B must stay resolved: {status1_control}"
+    );
+
+    // Case 2: Removing a neighboring duplicate BAD in commit 2 and restoring the fixed
+    // first BAD in commit 3 must reopen; refining GOOD -> GOOD_V2 with the same
+    // neighboring changes (and even appending a historical copy elsewhere) must stay resolved.
+    let begin2 = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "neighbor-dup-rollback"]),
+    );
+    let change2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-neighbor-dup-rollback");
+    repo.commit(&wt2, "f.txt", "A\nBAD\nB\nBAD\nC\n", "feat: two BAD lines");
+    stdout(repo.arc(&wt2).args(["snapshot", "neighbor-dup-rollback"]));
+    let fid2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "neighbor-dup-rollback",
+        "--summary",
+        "fix first BAD",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nGOOD\nB\nBAD\nC\n",
+        "fix: first BAD -> GOOD",
+    );
+    let fix2 = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "neighbor-dup-rollback",
+        &fid2,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix2,
+    ]));
+    // Commit 2: edit B and remove the second BAD while keeping GOOD intact.
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nGOOD\nB edited\nOTHER\nC\n",
+        "refactor: edit B and replace second BAD",
+    );
+    let neighbor_edited = repo.head(&wt2);
+    // Commit 3: restore the first BAD at the fixed site.
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nBAD\nB edited\nOTHER\nC\n",
+        "chore: restore first BAD",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "neighbor-dup-rollback"]));
+    let status2_reopened = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2_reopened["open_blocking_findings"],
+        serde_json::json!([fid2]),
+        "restoring fixed BAD after removing neighboring duplicate must reopen finding: {status2_reopened}"
+    );
+    repo.arc(&wt2).args(["check", &change2]).assert().code(2);
+    // Control: refine GOOD -> GOOD_V2 with same neighboring changes + historical copy elsewhere -> stays resolved.
+    git(&wt2, &["reset", "--hard", &neighbor_edited]);
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nGOOD_V2\nB edited\nOTHER\nC\n\n# old example:\nBAD\n",
+        "refactor: refine GOOD to GOOD_V2 with historical note",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "neighbor-dup-rollback"]));
+    let status2_control = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2_control["open_blocking_findings"],
+        serde_json::json!([]),
+        "refining GOOD to GOOD_V2 with historical copy elsewhere must stay resolved: {status2_control}"
+    );
+}

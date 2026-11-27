@@ -611,6 +611,7 @@ fn fix_survives_in_head(cwd: &Path, fix_commit: &str, head: &str) -> bool {
         })
         .collect();
 
+    let mut modified_text_entries = Vec::new();
     for entry in &fix_entries {
         let Some(&(head_mode, head_oid)) = head_by_path.get(entry.path.as_slice()) else {
             // Tree entry at `head` is identical to `fix_commit`.
@@ -631,8 +632,29 @@ fn fix_survives_in_head(cwd: &Path, fix_commit: &str, head: &str) -> bool {
             && is_regular_blob_mode(head_mode)
             && entry.old_oid != entry.new_oid
             && head_oid != entry.new_oid
-            && !text_blob_survives(cwd, &entry.old_oid, &entry.new_oid, head_oid)
         {
+            modified_text_entries.push((entry, head_oid));
+        }
+    }
+    if modified_text_entries.is_empty() {
+        return true;
+    }
+
+    let Ok(commits) = gitio::range_commits_with_parents(cwd, fix_commit, head) else {
+        return false;
+    };
+    let mut edge_diffs: std::collections::HashMap<(String, String), Vec<gitio::RawTreeDiffEntry>> =
+        std::collections::HashMap::new();
+    for (entry, head_oid) in modified_text_entries {
+        if !text_blob_survives_along_history(
+            cwd,
+            fix_commit,
+            head,
+            entry,
+            head_oid,
+            &commits,
+            &mut edge_diffs,
+        ) {
             return false;
         }
     }
@@ -741,13 +763,282 @@ fn tighten_matches_left(old_lines: &[&[u8]], new_lines: &[&[u8]], matches: &mut 
     }
 }
 
-/// Whether all `fix_commit` hunks (and any EOF newline termination change) on a
-/// modified regular text file survive in `head_oid` within their strict
-/// exterior 3-way anchor windows.
-fn text_blob_survives(cwd: &Path, pre_oid: &str, fix_oid: &str, head_oid: &str) -> bool {
+/// Convert sorted matched line pairs `(old_i, new_i)` back into sorted
+/// non-overlapping zero-context hunks.
+fn u0_hunks_from_matches(
+    old_len: usize,
+    new_len: usize,
+    matches: &[(usize, usize)],
+) -> Vec<U0Hunk> {
+    let mut hunks = Vec::new();
+    let mut oi = 0usize;
+    let mut ni = 0usize;
+    for &(mo, mn) in matches {
+        if oi < mo || ni < mn {
+            hunks.push(U0Hunk {
+                old_start: oi,
+                old_end: mo,
+                new_start: ni,
+                new_end: mn,
+            });
+        }
+        oi = mo + 1;
+        ni = mn + 1;
+    }
+    if oi < old_len || ni < new_len {
+        hunks.push(U0Hunk {
+            old_start: oi,
+            old_end: old_len,
+            new_start: ni,
+            new_end: new_len,
+        });
+    }
+    hunks
+}
+
+#[derive(Debug, Clone)]
+struct TrackedHunk {
+    start: usize,
+    end: usize,
+    removed_lines: Vec<Vec<u8>>,
+    removed_baseline: Vec<usize>,
+    inserted_lines: Vec<Vec<u8>>,
+    inserted_target: Vec<usize>,
+    is_insertion: bool,
+    absorbed_neighbor_count: usize,
+}
+
+#[derive(Debug, Clone)]
+enum CommitBlobState {
+    Blob {
+        oid: String,
+        hunks: Vec<TrackedHunk>,
+    },
+    NonRegular,
+}
+
+fn init_tracked_hunks(
+    pre_lines: &[&[u8]],
+    fix_lines: &[&[u8]],
+    fix_hunks: &[U0Hunk],
+) -> Vec<TrackedHunk> {
+    let mut tracked = Vec::with_capacity(fix_hunks.len());
+    for hunk in fix_hunks {
+        let old_lines = &pre_lines[hunk.old_start..hunk.old_end];
+        let new_lines = &fix_lines[hunk.new_start..hunk.new_end];
+        let is_insertion = old_lines.is_empty() && !new_lines.is_empty();
+
+        let mut removed_lines = Vec::new();
+        let mut removed_baseline = Vec::new();
+        if !old_lines.is_empty() {
+            let mut new_counts: std::collections::HashMap<&[u8], usize> =
+                std::collections::HashMap::new();
+            for &line in new_lines {
+                *new_counts.entry(line).or_insert(0) += 1;
+            }
+            let mut seen = std::collections::HashSet::new();
+            for &line in old_lines {
+                if let Some(count) = new_counts.get_mut(line) {
+                    if *count > 0 {
+                        *count -= 1;
+                        continue;
+                    }
+                }
+                if seen.insert(line) {
+                    let baseline = new_lines.iter().filter(|&&l| l == line).count();
+                    removed_lines.push(line.to_vec());
+                    removed_baseline.push(baseline);
+                }
+            }
+        }
+
+        let mut inserted_lines = Vec::new();
+        let mut inserted_target = Vec::new();
+        if is_insertion {
+            let mut seen = std::collections::HashSet::new();
+            for &line in new_lines {
+                if seen.insert(line) {
+                    let target = new_lines.iter().filter(|&&l| l == line).count();
+                    inserted_lines.push(line.to_vec());
+                    inserted_target.push(target);
+                }
+            }
+        }
+
+        tracked.push(TrackedHunk {
+            start: hunk.new_start,
+            end: hunk.new_end,
+            removed_lines,
+            removed_baseline,
+            inserted_lines,
+            inserted_target,
+            is_insertion,
+            absorbed_neighbor_count: 0,
+        });
+    }
+    tracked
+}
+
+fn project_tracked_hunk(tracked: &mut TrackedHunk, p_lines: &[&[u8]], hunks: &[U0Hunk]) {
+    let s = tracked.start;
+    let e = tracked.end;
+
+    // When separate diff hunks touch both boundaries of `span` and shift it
+    // across inserted/deleted lines (or insert right at `s` or `e`), include
+    // both boundary hunks so relocating a copy of fixed text across edited
+    // neighbors cannot detach `span` from a rollback at the original site.
+    let left_touch = hunks.iter().find(|d| d.old_end == s);
+    let right_touch = hunks.iter().find(|d| d.old_start == e);
+    let boundary_relocation = if s < e {
+        if let (Some(dl), Some(dr)) = (left_touch, right_touch) {
+            let dl_delta =
+                (dl.new_end - dl.new_start) as isize - (dl.old_end - dl.old_start) as isize;
+            let dr_delta =
+                (dr.new_end - dr.new_start) as isize - (dr.old_end - dr.old_start) as isize;
+            dl.old_start == s
+                || dr.old_end == e
+                || (dl_delta > 0 && dr_delta < 0)
+                || (dl_delta < 0 && dr_delta > 0)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let mut delta_before: isize = 0;
+    let mut first_overlap: Option<usize> = None;
+    let mut last_overlap: Option<usize> = None;
+
+    for (idx, d) in hunks.iter().enumerate() {
+        let overlaps = if s == e {
+            d.old_start <= s && d.old_end >= e
+        } else if (d.old_start < e && d.old_end > s)
+            || (boundary_relocation && (d.old_end == s || d.old_start == e))
+        {
+            true
+        } else {
+            tracked.is_insertion
+                && tracked.absorbed_neighbor_count > 0
+                && (e - s) <= tracked.absorbed_neighbor_count
+                && d.old_start == d.old_end
+                && (d.old_start == s || d.old_start == e)
+        };
+
+        if overlaps {
+            if first_overlap.is_none() {
+                first_overlap = Some(idx);
+            }
+            last_overlap = Some(idx);
+        } else if d.old_end <= s && first_overlap.is_none() {
+            delta_before += (d.new_end - d.new_start) as isize - (d.old_end - d.old_start) as isize;
+        }
+    }
+
+    let (Some(first_idx), Some(last_idx)) = (first_overlap, last_overlap) else {
+        tracked.start = (s as isize + delta_before) as usize;
+        tracked.end = (e as isize + delta_before) as usize;
+        return;
+    };
+
+    let first = hunks[first_idx];
+    let last = hunks[last_idx];
+
+    let (new_start, left_absorbed) = if first.old_start <= s {
+        (first.new_start, &p_lines[first.old_start..s])
+    } else {
+        ((s as isize + delta_before) as usize, &p_lines[0..0])
+    };
+    let (new_end, right_absorbed) = if last.old_end >= e {
+        (last.new_end, &p_lines[e..last.old_end])
+    } else {
+        (last.new_end + (e - last.old_end), &p_lines[0..0])
+    };
+
+    for &line in left_absorbed.iter().chain(right_absorbed.iter()) {
+        tracked.absorbed_neighbor_count += 1;
+        for (i, rem) in tracked.removed_lines.iter().enumerate() {
+            if rem.as_slice() == line {
+                tracked.removed_baseline[i] += 1;
+            }
+        }
+        for (i, ins) in tracked.inserted_lines.iter().enumerate() {
+            if ins.as_slice() == line {
+                tracked.inserted_target[i] += 1;
+            }
+        }
+    }
+
+    tracked.start = new_start;
+    tracked.end = new_end;
+}
+
+fn tracked_hunk_survives(tracked: &TrackedHunk, head_lines: &[&[u8]]) -> bool {
+    let end = tracked.end.min(head_lines.len());
+    let start = tracked.start.min(end);
+    let head_win = &head_lines[start..end];
+    if !tracked.is_insertion {
+        for (rem, &baseline) in tracked.removed_lines.iter().zip(&tracked.removed_baseline) {
+            let count = head_win.iter().filter(|&&l| l == rem.as_slice()).count();
+            if count > baseline {
+                return false;
+            }
+        }
+        true
+    } else if !tracked.inserted_lines.is_empty() {
+        let intact = tracked
+            .inserted_lines
+            .iter()
+            .zip(&tracked.inserted_target)
+            .all(|(ins, &target)| {
+                head_win.iter().filter(|&&l| l == ins.as_slice()).count() >= target
+            });
+        intact || head_win.len() > tracked.absorbed_neighbor_count
+    } else {
+        true
+    }
+}
+
+/// Project `initial` tracked hunks across a single blob transition `from_oid -> to_oid`.
+fn project_hunks_between_blobs(
+    cwd: &Path,
+    from_oid: &str,
+    to_oid: &str,
+    hunks: &mut [TrackedHunk],
+) -> Option<()> {
+    let from_bytes = gitio::read_blob(cwd, from_oid).ok()?;
+    let to_bytes = gitio::read_blob(cwd, to_oid).ok()?;
+    if from_bytes.contains(&0) || to_bytes.contains(&0) {
+        return None;
+    }
+    let from_lines = split_lines(&from_bytes);
+    let to_lines = split_lines(&to_bytes);
+    let diff = gitio::diff_blobs_u0(cwd, from_oid, to_oid).ok()?;
+    let raw_hunks = parse_u0_hunks(&diff)?;
+    let mut matches = matched_pairs_from_u0(from_lines.len(), to_lines.len(), &raw_hunks);
+    tighten_matches_left(&from_lines, &to_lines, &mut matches);
+    let tight_hunks = u0_hunks_from_matches(from_lines.len(), to_lines.len(), &matches);
+    for tracked in hunks {
+        project_tracked_hunk(tracked, &from_lines, &tight_hunks);
+    }
+    Some(())
+}
+
+/// Track each `fix_commit` hunk's line span commit-by-commit along
+/// `fix_commit..head` so edits to neighboring lines in intermediate commits do
+/// not widen the tracked span before a later rollback or refactor.
+fn text_blob_survives_along_history(
+    cwd: &Path,
+    fix_commit: &str,
+    head: &str,
+    entry: &gitio::RawTreeDiffEntry,
+    head_oid: &str,
+    commits: &[(String, Vec<String>)],
+    edge_diffs: &mut std::collections::HashMap<(String, String), Vec<gitio::RawTreeDiffEntry>>,
+) -> bool {
     let (Ok(pre_bytes), Ok(fix_bytes), Ok(head_bytes)) = (
-        gitio::read_blob(cwd, pre_oid),
-        gitio::read_blob(cwd, fix_oid),
+        gitio::read_blob(cwd, &entry.old_oid),
+        gitio::read_blob(cwd, &entry.new_oid),
         gitio::read_blob(cwd, head_oid),
     ) else {
         return false;
@@ -771,107 +1062,120 @@ fn text_blob_survives(cwd: &Path, pre_oid: &str, fix_oid: &str, head_oid: &str) 
         return true;
     }
 
-    let (Ok(pf_diff), Ok(fh_diff)) = (
-        gitio::diff_blobs_u0(cwd, pre_oid, fix_oid),
-        gitio::diff_blobs_u0(cwd, fix_oid, head_oid),
-    ) else {
+    let Ok(pf_diff) = gitio::diff_blobs_u0(cwd, &entry.old_oid, &entry.new_oid) else {
         return false;
     };
-    let (Some(fix_hunks), Some(fh_hunks)) = (parse_u0_hunks(&pf_diff), parse_u0_hunks(&fh_diff))
-    else {
+    let Some(fix_hunks) = parse_u0_hunks(&pf_diff) else {
         return true;
     };
     if fix_hunks.is_empty() {
         return true;
     }
 
-    let mut fix_to_pre = vec![None; fix_lines.len()];
-    for (pi, fi) in matched_pairs_from_u0(pre_lines.len(), fix_lines.len(), &fix_hunks) {
-        fix_to_pre[fi] = Some(pi);
-    }
+    let initial_hunks = init_tracked_hunks(&pre_lines, &fix_lines, &fix_hunks);
+    let mut states: std::collections::HashMap<&str, CommitBlobState> =
+        std::collections::HashMap::new();
+    states.insert(
+        fix_commit,
+        CommitBlobState::Blob {
+            oid: entry.new_oid.clone(),
+            hunks: initial_hunks.clone(),
+        },
+    );
 
-    let mut fix_to_head = matched_pairs_from_u0(fix_lines.len(), head_lines.len(), &fh_hunks);
-    tighten_matches_left(&fix_lines, &head_lines, &mut fix_to_head);
-
-    for hunk in &fix_hunks {
-        // Bound the affected region strictly by exterior 3-way anchors
-        // (lines unchanged between `pre`, `fix`, and `head` outside the hunk).
-        let left_anchor = fix_to_head
+    for (commit, parents) in commits {
+        let reachable: Vec<&str> = parents
             .iter()
-            .rev()
-            .find(|&&(fi, _)| fi < hunk.new_start && fix_to_pre[fi].is_some())
-            .copied();
-        let right_anchor = fix_to_head
-            .iter()
-            .find(|&&(fi, _)| fi >= hunk.new_end && fix_to_pre[fi].is_some())
-            .copied();
-
-        let (fix_win_start, head_win_start) = match left_anchor {
-            Some((lfi, lhi)) => (lfi + 1, lhi + 1),
-            None => (0, 0),
-        };
-        let (fix_win_end, head_win_end) = match right_anchor {
-            Some((rfi, rhi)) => (rfi, rhi),
-            None => (fix_lines.len(), head_lines.len()),
-        };
-
-        let fix_win = &fix_lines[fix_win_start..fix_win_end];
-        let head_win = &head_lines[head_win_start..head_win_end];
-        if fix_win == head_win {
+            .map(String::as_str)
+            .filter(|parent| states.contains_key(parent))
+            .collect();
+        if reachable.is_empty() {
             continue;
         }
 
-        let old_lines = &pre_lines[hunk.old_start..hunk.old_end];
-        let new_lines = &fix_lines[hunk.new_start..hunk.new_end];
-
-        if !old_lines.is_empty() {
-            // Modification or deletion hunk: if any line eliminated by `fix`
-            // (`old_lines \ new_lines`) reappeared in `head_win` above its
-            // multiplicity in `fix_win`, at least part of the fix was rolled
-            // back inside its anchored window.
-            let mut new_counts: std::collections::HashMap<&[u8], usize> =
-                std::collections::HashMap::new();
-            for &line in new_lines {
-                *new_counts.entry(line).or_insert(0) += 1;
-            }
-            let mut removed_lines: std::collections::HashSet<&[u8]> =
-                std::collections::HashSet::new();
-            for &line in old_lines {
-                if let Some(count) = new_counts.get_mut(line) {
-                    if *count > 0 {
-                        *count -= 1;
-                        continue;
+        // Prefer any reachable parent whose tree entry for this path equals
+        // `commit`'s entry (so merges such as `-s ours` inherit the surviving
+        // branch's tracked spans with zero diff).
+        let mut inherited = None;
+        let mut first_change: Option<(&str, String, String)> = None;
+        for &parent in &reachable {
+            let key = (parent.to_string(), commit.clone());
+            let entries = match edge_diffs.entry(key) {
+                std::collections::hash_map::Entry::Occupied(occ) => occ.into_mut(),
+                std::collections::hash_map::Entry::Vacant(vac) => {
+                    let Ok(diff) = gitio::raw_tree_diff_between(cwd, parent, commit) else {
+                        return false;
+                    };
+                    vac.insert(diff)
+                }
+            };
+            match entries.iter().find(|e| e.path == entry.path) {
+                None => {
+                    inherited = Some(states[parent].clone());
+                    break;
+                }
+                Some(changed) => {
+                    if first_change.is_none() {
+                        first_change =
+                            Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
                     }
-                }
-                removed_lines.insert(line);
-            }
-            for line in removed_lines {
-                let head_count = head_win.iter().filter(|&&l| l == line).count();
-                let fix_count = fix_win.iter().filter(|&&l| l == line).count();
-                if head_count > fix_count {
-                    return false;
-                }
-            }
-        } else if !new_lines.is_empty() {
-            // Pure-insertion hunk: survives if every inserted line stays
-            // present in `head_win` at its `fix_win` multiplicity; otherwise
-            // it survives only if `head_win` retains more lines than the
-            // non-inserted context lines in `fix_win` (indicating a replacement
-            // rather than deleting the insertion alongside an adjacent edit).
-            let inserted_intact = new_lines.iter().all(|&line| {
-                let head_count = head_win.iter().filter(|&&l| l == line).count();
-                let fix_count = fix_win.iter().filter(|&&l| l == line).count();
-                head_count >= fix_count
-            });
-            if !inserted_intact {
-                let other_fix_lines = fix_win.len().saturating_sub(new_lines.len());
-                if head_win.len() <= other_fix_lines {
-                    return false;
                 }
             }
         }
+
+        let next_state = if let Some(state) = inherited {
+            state
+        } else if let Some((parent, c_mode, c_oid)) = first_change {
+            if !is_regular_blob_mode(&c_mode) {
+                CommitBlobState::NonRegular
+            } else {
+                match &states[parent] {
+                    CommitBlobState::Blob { oid: p_oid, hunks } => {
+                        let mut projected = hunks.clone();
+                        if project_hunks_between_blobs(cwd, p_oid, &c_oid, &mut projected).is_none()
+                        {
+                            return true;
+                        }
+                        CommitBlobState::Blob {
+                            oid: c_oid,
+                            hunks: projected,
+                        }
+                    }
+                    CommitBlobState::NonRegular => {
+                        let mut projected = initial_hunks.clone();
+                        if project_hunks_between_blobs(cwd, &entry.new_oid, &c_oid, &mut projected)
+                            .is_none()
+                        {
+                            return true;
+                        }
+                        CommitBlobState::Blob {
+                            oid: c_oid,
+                            hunks: projected,
+                        }
+                    }
+                }
+            }
+        } else {
+            continue;
+        };
+        states.insert(commit.as_str(), next_state);
     }
-    true
+
+    let final_hunks = match states.get(head) {
+        Some(CommitBlobState::Blob { hunks, .. }) => hunks.clone(),
+        _ => {
+            let mut projected = initial_hunks;
+            if project_hunks_between_blobs(cwd, &entry.new_oid, head_oid, &mut projected).is_none()
+            {
+                return true;
+            }
+            projected
+        }
+    };
+
+    final_hunks
+        .iter()
+        .all(|tracked| tracked_hunk_survives(tracked, &head_lines))
 }
 
 fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {

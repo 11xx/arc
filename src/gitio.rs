@@ -3230,6 +3230,30 @@ pub fn read_blob(cwd: &Path, oid: &str) -> Result<Vec<u8>> {
     git_bytes(cwd, &["cat-file", "blob", oid])
 }
 
+/// Commits in `from..to` in reverse topological order, each paired with its
+/// parent commit ids.
+pub fn range_commits_with_parents(
+    cwd: &Path,
+    from: &str,
+    to: &str,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let range = format!("{from}..{to}");
+    let out = git(
+        cwd,
+        &["rev-list", "--topo-order", "--reverse", "--parents", &range],
+    )?;
+    let mut commits = Vec::new();
+    for line in out.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(commit) = parts.next() else {
+            continue;
+        };
+        let parents = parts.map(str::to_string).collect();
+        commits.push((commit.to_string(), parents));
+    }
+    Ok(commits)
+}
+
 /// The stable patch id of the combined diff from `base` to `head`, or `None`
 /// when both commits carry the same tree.
 pub fn range_patch_id(cwd: &Path, base: &str, head: &str) -> Result<Option<String>> {
