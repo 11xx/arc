@@ -1720,3 +1720,308 @@ fn feedback_non_git_parent_prefix_distinguishes_relative_and_absolute_nested_rep
     assert_eq!(abs_open["feedback"].as_array().unwrap().len(), 1);
     assert_eq!(abs_open["feedback"][0]["feedback_key"], "parent-abs-bug");
 }
+
+#[test]
+fn feedback_accepts_pre_upgrade_relative_journal_with_prefix_binding() {
+    let repo = Repo::new();
+    let outer = repo.home.join("outer-legacy");
+    fs::create_dir_all(&outer).unwrap();
+    git(&outer, &["init", "-b", "master"]);
+    git(&outer, &["config", "user.name", "Fixture"]);
+    git(&outer, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(outer.join("README.md"), "# outer-legacy\n").unwrap();
+    git(&outer, &["add", "."]);
+    git(&outer, &["commit", "-m", "initial"]);
+
+    let scope = outer.join("scope");
+    let inner = scope.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "-b", "master"]);
+    git(&inner, &["config", "user.name", "Fixture"]);
+    git(&inner, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(inner.join("README.md"), "# inner\n").unwrap();
+    git(&inner, &["add", "."]);
+    git(&inner, &["commit", "-m", "initial"]);
+
+    // Also create a second nested repo whose journal carries a binding pointing
+    // to a completely unrelated directory, verifying binding safeguards stay intact.
+    let foreign_other = repo.home.join("elsewhere-foreign");
+    fs::create_dir_all(&foreign_other).unwrap();
+    let foreign_other_canon = fs::canonicalize(&foreign_other).unwrap();
+    let foreign_inner = scope.join("foreign-inner");
+    fs::create_dir_all(&foreign_inner).unwrap();
+    git(&foreign_inner, &["init", "-b", "master"]);
+    git(&foreign_inner, &["config", "user.name", "Fixture"]);
+    git(
+        &foreign_inner,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(foreign_inner.join("README.md"), "# foreign-inner\n").unwrap();
+    git(&foreign_inner, &["add", "."]);
+    git(&foreign_inner, &["commit", "-m", "initial"]);
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let inner_canon = fs::canonicalize(&inner).unwrap();
+    let inner_journal = inner_canon.join("relative-journal");
+    let foreign_inner_canon = fs::canonicalize(&foreign_inner).unwrap();
+    let foreign_inner_journal = foreign_inner_canon.join("relative-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Seed pre-upgrade journal data at `inner/relative-journal`: events.jsonl plus
+    // a bindings.jsonl recording the configured prefix (`outer/scope`) rather than `inner`,
+    // and no `relative-checkouts.jsonl` index entry.
+    fs::create_dir_all(&inner_journal).unwrap();
+    fs::write(
+        inner_journal.join("bindings.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": "journal-binding/1",
+                "ts": "2026-01-01T00:00:00Z",
+                "event": "bound",
+                "anchor": scope_canon.display().to_string(),
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        inner_journal.join("events.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": "journal-event/1",
+                "ts": "2026-01-01T00:00:01Z",
+                "event": "logged",
+                "topic": "legacy-entry",
+                "summary": "pre-upgrade log",
+            })
+        ),
+    )
+    .unwrap();
+
+    // Seed a foreign-bound journal at `foreign-inner/relative-journal` whose
+    // binding names an unrelated directory (`elsewhere-foreign`).
+    fs::create_dir_all(&foreign_inner_journal).unwrap();
+    fs::write(
+        foreign_inner_journal.join("bindings.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": "journal-binding/1",
+                "ts": "2026-01-01T00:00:00Z",
+                "event": "bound",
+                "anchor": foreign_other_canon.display().to_string(),
+            })
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        PathBuf::from(stdout(repo.arc(&inner).args(["journal", "dir"])).trim()),
+        inner_journal
+    );
+
+    let scratch = repo.home.join("outside-legacy");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Pre-upgrade `inner/relative-journal` with prefix binding `outer/scope` is
+    // selectable by `inner` for both listing and writing.
+    let listed = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "inner", "--list", "--json"]),
+    );
+    assert_eq!(listed["schema"], "arc-feedback-list/1");
+    assert_eq!(
+        PathBuf::from(listed["journal_dir"].as_str().unwrap()),
+        inner_journal
+    );
+
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "inner",
+                "--key",
+                "pre-upgrade-relative",
+                "--title",
+                "Pre-upgrade relative report",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Filed against pre-upgrade prefix-bound relative journal.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        inner_journal.as_path()
+    );
+
+    let open = json_stdout(repo.arc(&inner).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "pre-upgrade-relative");
+
+    // Prefix name `scope` must still refuse, and the foreign-bound journal must
+    // keep its recorded foreign binding rather than silently re-attributing to `foreign-inner`.
+    repo.arc(&scratch)
+        .args(["feedback", "scope", "--list"])
+        .assert()
+        .failure();
+    repo.arc(&scratch)
+        .args(["feedback", "foreign-inner", "--list"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn feedback_preserves_registered_relative_checkout_past_scan_limit_and_surfaces_truncation() {
+    let repo = Repo::new();
+    let outer = repo.home.join("outer-broad");
+    fs::create_dir_all(&outer).unwrap();
+    git(&outer, &["init", "-b", "master"]);
+    git(&outer, &["config", "user.name", "Fixture"]);
+    git(&outer, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(outer.join("README.md"), "# outer-broad\n").unwrap();
+    git(&outer, &["add", "."]);
+    git(&outer, &["commit", "-m", "initial"]);
+
+    let scope = outer.join("scope");
+    let inner = scope.join("zz-parent").join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "-b", "master"]);
+    git(&inner, &["config", "user.name", "Fixture"]);
+    git(&inner, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(inner.join("README.md"), "# inner\n").unwrap();
+    git(&inner, &["add", "."]);
+    git(&inner, &["commit", "-m", "initial"]);
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let inner_canon = fs::canonicalize(&inner).unwrap();
+    let expected_journal = inner_canon.join("relative-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Populate `inner`'s journal and confirm `feedback inner --list` works.
+    repo.arc(&inner)
+        .args([
+            "journal",
+            "log",
+            "broad-bootstrap",
+            "populated before siblings",
+        ])
+        .assert()
+        .success();
+
+    let scratch = repo.home.join("outside-broad");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let before = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "inner", "--list", "--json"]),
+    );
+    assert_eq!(
+        PathBuf::from(before["journal_dir"].as_str().unwrap()),
+        expected_journal
+    );
+
+    // Add 4,096 empty sibling directories sorting ahead of `zz-parent`.
+    for i in 0..4096 {
+        fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
+    }
+
+    assert_eq!(
+        PathBuf::from(stdout(repo.arc(&inner).args(["journal", "dir"])).trim()),
+        expected_journal
+    );
+
+    // Registered checkout remains addressable for both listing and writing,
+    // while incomplete scan discovery under `scope` is surfaced on stderr.
+    let list_out = repo
+        .arc(&scratch)
+        .args(["feedback", "inner", "--list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        list_out.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&list_out.stderr)
+    );
+    let list_json: serde_json::Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    assert_eq!(
+        PathBuf::from(list_json["journal_dir"].as_str().unwrap()),
+        expected_journal
+    );
+    let list_stderr = String::from_utf8_lossy(&list_out.stderr);
+    assert!(
+        list_stderr.contains("4096 directory scan limit")
+            && list_stderr.contains(&scope_canon.display().to_string()),
+        "expected incomplete discovery warning on stderr, got: {list_stderr}"
+    );
+
+    let write_out = repo
+        .arc(&scratch)
+        .args([
+            "feedback",
+            "inner",
+            "--key",
+            "broad-prefix-bug",
+            "--title",
+            "Filed past scan limit",
+            "--body-file",
+            "-",
+            "--json",
+        ])
+        .write_stdin("Still lands in zz-parent/inner/relative-journal.\n")
+        .output()
+        .unwrap();
+    assert!(
+        write_out.status.success(),
+        "write failed: {}",
+        String::from_utf8_lossy(&write_out.stderr)
+    );
+    let write_json: serde_json::Value = serde_json::from_slice(&write_out.stdout).unwrap();
+    assert_eq!(
+        PathBuf::from(write_json["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        expected_journal.as_path()
+    );
+
+    let open = json_stdout(repo.arc(&inner).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "broad-prefix-bug");
+
+    // When an unindexed checkout sits past the scan limit (remove the checkout
+    // index to simulate an unindexed pre-upgrade checkout), refusal must
+    // surface incomplete discovery explicitly rather than failing silently.
+    let index_path = repo.home.join(".local/ai/arc/relative-checkouts.jsonl");
+    assert!(index_path.is_file());
+    fs::remove_file(&index_path).unwrap();
+
+    let missing_out = repo
+        .arc(&scratch)
+        .args(["feedback", "inner", "--list"])
+        .assert()
+        .failure();
+    let missing_stderr = String::from_utf8_lossy(&missing_out.get_output().stderr);
+    assert!(
+        missing_stderr.contains("incomplete relative [journals.dirs] discovery")
+            && missing_stderr.contains("4096 directory scan limit")
+            && missing_stderr.contains(&scope_canon.display().to_string()),
+        "expected explicit truncation notice on refusal, got: {missing_stderr}"
+    );
+}

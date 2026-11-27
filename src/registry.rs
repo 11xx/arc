@@ -17,7 +17,8 @@ use crate::config::Config;
 use crate::store::Store;
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// How an entry's anchor was arrived at. A recorded binding is the project's
@@ -170,53 +171,139 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Maximum directories scanned per relative `[journals.dirs]` prefix when
+/// looking for unindexed populated journals beneath it.
+pub(crate) const RELATIVE_DISCOVERY_LIMIT: usize = MAX_DIRS_READ;
+
+const RELATIVE_CHECKOUTS_INDEX: &str = "relative-checkouts.jsonl";
+
+fn relative_checkouts_index_path(cfg: &Config) -> PathBuf {
+    cfg.ai_home.join("arc").join(RELATIVE_CHECKOUTS_INDEX)
+}
+
+/// Record a checkout root whose journal lives under a relative
+/// `[journals.dirs]` destination so registry lookups find it reliably even
+/// when unrelated sibling directories under a broad prefix exceed the
+/// filesystem scan limit.
+pub(crate) fn remember_relative_checkout(cfg: &Config, checkout: &Path) -> Result<()> {
+    let canonical = canonical_or_normalized(checkout);
+    let recorded = canonical.to_string_lossy().into_owned();
+    let index_path = relative_checkouts_index_path(cfg);
+    if read_remembered_relative_checkouts(cfg).contains(&canonical) {
+        return Ok(());
+    }
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    let mut line = serde_json::to_string(&recorded)?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&index_path)
+        .with_context(|| format!("cannot open {}", index_path.display()))?;
+    file.write_all(line.as_bytes())
+        .with_context(|| format!("cannot append to {}", index_path.display()))?;
+    Ok(())
+}
+
+fn read_remembered_relative_checkouts(cfg: &Config) -> BTreeSet<PathBuf> {
+    let index_path = relative_checkouts_index_path(cfg);
+    let Ok(text) = std::fs::read_to_string(&index_path) else {
+        return BTreeSet::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<String>(line).ok())
+        .map(PathBuf::from)
+        .map(|path| canonical_or_normalized(&path))
+        .collect()
+}
+
 /// Discover concrete `(owner, journal_dir)` pairs for a relative
 /// `[journals.dirs]` destination under an existing absolute prefix `anchor`.
 ///
 /// Relative destinations resolve against each matching checkout root rather
 /// than the prefix directory itself, so an enclosing Git prefix or a parent
 /// container holding nested repositories can own one relative journal per
-/// checkout. Populated journals under `anchor` whose own resolution agrees are
-/// discovered in breadth-first order up to `MAX_DIRS_READ`; `anchor` itself is
-/// included while unpopulated only when it resolves directly to
-/// `anchor.join(relative_dir)` and does not act as a non-Git container for
-/// nested checkouts.
+/// checkout. Remembered checkouts under `anchor` are validated first so
+/// registered checkouts remain addressable regardless of sibling directory
+/// count. A bounded breadth-first scan up to `RELATIVE_DISCOVERY_LIMIT`
+/// additionally discovers unindexed populated journals beneath `anchor` and
+/// reports whether the scan hit its limit; `anchor` itself is included while
+/// unpopulated only when it resolves directly to `anchor.join(relative_dir)`
+/// and does not act as a non-Git container for nested checkouts.
 fn discover_relative_configured_journals(
     cfg: &Config,
     anchor: &Path,
     relative_dir: &Path,
-) -> Result<Vec<(PathBuf, PathBuf)>> {
+    remembered: &BTreeSet<PathBuf>,
+) -> Result<(Vec<(PathBuf, PathBuf)>, bool)> {
     let canonical_anchor = std::fs::canonicalize(anchor)
         .with_context(|| format!("cannot canonicalize configured scope {}", anchor.display()))?;
     let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut found_owners: HashSet<PathBuf> = HashSet::new();
     let mut discovered_journals: HashSet<PathBuf> = HashSet::new();
     let mut has_nested_owner = false;
+
+    for raw_owner in remembered {
+        if !raw_owner.is_dir() {
+            continue;
+        }
+        let owner = canonical_or_normalized(raw_owner);
+        if !owner.starts_with(&canonical_anchor) {
+            continue;
+        }
+        let candidate = canonical_or_normalized(&owner.join(relative_dir));
+        if candidate.is_dir() && crate::journal::is_journal_directory(&candidate).unwrap_or(false) {
+            if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &owner) {
+                if canonical_or_normalized(&resolved) == candidate
+                    && found_owners.insert(owner.clone())
+                {
+                    if owner != canonical_anchor {
+                        has_nested_owner = true;
+                    }
+                    found.push((owner, candidate.clone()));
+                    discovered_journals.insert(candidate);
+                }
+            }
+        }
+    }
+
     let mut queue = VecDeque::new();
     queue.push_back(canonical_anchor.clone());
-    let mut budget = MAX_DIRS_READ;
+    let mut budget = RELATIVE_DISCOVERY_LIMIT;
+    let mut truncated = false;
 
     while let Some(dir) = queue.pop_front() {
         let candidate = canonical_or_normalized(&dir.join(relative_dir));
-        if candidate.is_dir() && crate::journal::is_journal_directory(&candidate).unwrap_or(false) {
-            if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &dir) {
-                if canonical_or_normalized(&resolved) == candidate {
-                    found.push((dir.clone(), candidate.clone()));
-                    discovered_journals.insert(candidate.clone());
-                    if dir != canonical_anchor {
+        if !found_owners.contains(&dir) {
+            if candidate.is_dir()
+                && crate::journal::is_journal_directory(&candidate).unwrap_or(false)
+            {
+                if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &dir) {
+                    if canonical_or_normalized(&resolved) == candidate
+                        && found_owners.insert(dir.clone())
+                    {
+                        found.push((dir.clone(), candidate.clone()));
+                        discovered_journals.insert(candidate.clone());
+                        if dir != canonical_anchor {
+                            has_nested_owner = true;
+                        }
+                    }
+                }
+            }
+            if dir != canonical_anchor && !has_nested_owner && dir.join(".git").exists() {
+                if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &dir) {
+                    if canonical_or_normalized(&resolved) == candidate {
                         has_nested_owner = true;
                     }
                 }
             }
         }
-        if dir != canonical_anchor && !has_nested_owner && dir.join(".git").exists() {
-            if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &dir) {
-                if canonical_or_normalized(&resolved) == candidate {
-                    has_nested_owner = true;
-                }
-            }
-        }
         if budget == 0 {
-            continue;
+            truncated = true;
+            break;
         }
         budget -= 1;
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -234,28 +321,51 @@ fn discover_relative_configured_journals(
     }
 
     let direct_target = canonical_or_normalized(&canonical_anchor.join(relative_dir));
-    let anchor_already_found = found.iter().any(|(owner, _)| owner == &canonical_anchor);
-    if !anchor_already_found {
+    if !found_owners.contains(&canonical_anchor) {
         let resolves_directly =
             crate::journal::resolve_project_dir_without_env(cfg, &canonical_anchor)
                 .map(|resolved| canonical_or_normalized(&resolved) == direct_target)
                 .unwrap_or(false);
         let is_git_root = canonical_anchor.join(".git").exists();
-        if resolves_directly && (is_git_root || !has_nested_owner) {
+        if resolves_directly && (is_git_root || (!has_nested_owner && !truncated)) {
             found.push((canonical_anchor, direct_target));
         }
     }
 
-    Ok(found)
+    Ok((found, truncated))
 }
 
 struct KnownJournal {
     slug: String,
     journal_dir: PathBuf,
     configured_anchor: Option<PathBuf>,
+    /// The configured `[journals.dirs]` prefix when this entry was discovered
+    /// through a relative destination rule. Used to recognize pre-upgrade
+    /// `bindings.jsonl` records that named the prefix rather than the checkout
+    /// root, without weakening unrelated binding safeguards.
+    relative_prefix: Option<PathBuf>,
 }
 
-fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
+pub(crate) struct RegistryDiscovery {
+    pub projects: Vec<Project>,
+    pub truncated_relative_prefixes: Vec<PathBuf>,
+}
+
+fn emit_truncation_warnings(truncated: &[PathBuf]) {
+    for prefix in truncated {
+        eprintln!(
+            "warning: relative [journals.dirs] discovery under {} reached the {} directory scan limit; unindexed checkouts beneath it may be omitted",
+            prefix.display(),
+            RELATIVE_DISCOVERY_LIMIT
+        );
+    }
+}
+
+fn known_journal_entries_with_diagnostics(
+    cfg: &Config,
+) -> Result<(Vec<KnownJournal>, Vec<PathBuf>)> {
+    let remembered = read_remembered_relative_checkouts(cfg);
+    let mut truncated_prefixes: Vec<PathBuf> = Vec::new();
     let mut entries: Vec<KnownJournal> = journal_directories(cfg)?
         .into_iter()
         .map(|(slug, journal_dir)| {
@@ -264,6 +374,7 @@ fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
                 slug,
                 journal_dir,
                 configured_anchor,
+                relative_prefix: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -295,6 +406,7 @@ fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
                 slug,
                 journal_dir: directory,
                 configured_anchor: Some(anchor),
+                relative_prefix: None,
             });
             continue;
         }
@@ -311,12 +423,18 @@ fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
                 slug,
                 journal_dir: directory,
                 configured_anchor: Some(anchor),
+                relative_prefix: None,
             });
             continue;
         }
 
-        for (owner, journal_dir) in discover_relative_configured_journals(cfg, &anchor, &directory)?
-        {
+        let canonical_prefix = canonical_or_normalized(&anchor);
+        let (discovered, truncated) =
+            discover_relative_configured_journals(cfg, &anchor, &directory, &remembered)?;
+        if truncated && !truncated_prefixes.contains(&canonical_prefix) {
+            truncated_prefixes.push(canonical_prefix.clone());
+        }
+        for (owner, journal_dir) in discovered {
             let normalized = canonical_or_normalized(&journal_dir);
             if let Some(existing) = entries
                 .iter_mut()
@@ -325,6 +443,9 @@ fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
                 if existing.configured_anchor.is_none() {
                     existing.configured_anchor = Some(owner);
                 }
+                if existing.relative_prefix.is_none() {
+                    existing.relative_prefix = Some(canonical_prefix.clone());
+                }
                 continue;
             }
             let slug = crate::config::path_slug(&owner);
@@ -332,18 +453,22 @@ fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
                 slug,
                 journal_dir,
                 configured_anchor: Some(owner),
+                relative_prefix: Some(canonical_prefix.clone()),
             });
         }
     }
 
     entries.sort_by(|a, b| (&a.slug, &a.journal_dir).cmp(&(&b.slug, &b.journal_dir)));
-    Ok(entries)
+    truncated_prefixes.sort();
+    Ok((entries, truncated_prefixes))
 }
 
 /// Every hot journal directory arc knows about, with its slug, sorted: those
 /// under the default root and those `[journals] dirs` routes elsewhere.
 pub(crate) fn known_journals(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
-    Ok(known_journal_entries(cfg)?
+    let (entries, truncated) = known_journal_entries_with_diagnostics(cfg)?;
+    emit_truncation_warnings(&truncated);
+    Ok(entries
         .into_iter()
         .map(|entry| (entry.slug, entry.journal_dir))
         .collect())
@@ -375,18 +500,50 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
 /// ledger lives: `ledger` is `None` on every one. Enough to resolve a project
 /// by slug or label.
 pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
+    let discovery = journal_projects_with_diagnostics(cfg)?;
+    emit_truncation_warnings(&discovery.truncated_relative_prefixes);
+    Ok(discovery.projects)
+}
+
+/// Same as [`journal_projects`], returning any relative `[journals.dirs]`
+/// prefixes whose filesystem discovery hit [`RELATIVE_DISCOVERY_LIMIT`] so the
+/// caller can surface incomplete discovery explicitly.
+pub(crate) fn journal_projects_with_diagnostics(cfg: &Config) -> Result<RegistryDiscovery> {
+    let (entries, truncated_relative_prefixes) = known_journal_entries_with_diagnostics(cfg)?;
     let mut projects = Vec::new();
-    for entry in known_journal_entries(cfg)? {
+    for entry in entries {
         let slug = entry.slug;
         let journal_dir = entry.journal_dir;
         let configured = entry.configured_anchor;
+        let relative_prefix = entry.relative_prefix;
         let recorded = if journal_dir.is_absolute() {
             crate::journal::recorded_anchor(&journal_dir)?
         } else {
             None
         };
         let (anchor, anchor_source) = match recorded {
-            Some(recorded) => (Some(PathBuf::from(recorded)), AnchorSource::Binding),
+            Some(recorded) => {
+                // Historical relative-destination journals recorded the
+                // `[journals.dirs]` prefix rather than the concrete checkout
+                // root. When current configuration and checkout resolution
+                // prove this journal belongs to a checkout strictly beneath
+                // that recorded prefix, surface the checkout root while keeping
+                // binding safeguards intact for any unrelated binding.
+                let legacy_prefix_binding = configured
+                    .as_ref()
+                    .zip(relative_prefix.as_ref())
+                    .and_then(|(owner, prefix)| {
+                        let recorded_norm = canonical_or_normalized(Path::new(&recorded));
+                        let prefix_norm = canonical_or_normalized(prefix);
+                        let owner_norm = canonical_or_normalized(owner);
+                        (recorded_norm == prefix_norm && owner_norm != prefix_norm)
+                            .then(|| owner.clone())
+                    });
+                match legacy_prefix_binding {
+                    Some(owner) => (Some(owner), AnchorSource::Configured),
+                    None => (Some(PathBuf::from(recorded)), AnchorSource::Binding),
+                }
+            }
             None => match configured {
                 Some(path) => (Some(path), AnchorSource::Configured),
                 None => match unslug(&slug) {
@@ -412,7 +569,10 @@ pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
             retired,
         });
     }
-    Ok(projects)
+    Ok(RegistryDiscovery {
+        projects,
+        truncated_relative_prefixes,
+    })
 }
 
 /// Whether `name` is another journal's cold archive rather than a project of

@@ -5470,6 +5470,7 @@ struct JournalResolution {
     directory: PathBuf,
     source: ResolutionSource,
     anchor: Option<PathBuf>,
+    relative_config_prefix: bool,
 }
 
 /// Resolve the journal directory from an explicit directory, a configured
@@ -5502,6 +5503,7 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
             directory: config::global_journal_dir()?,
             source: ResolutionSource::Global,
             anchor: None,
+            relative_config_prefix: false,
         });
     }
     if let Some(dir) = std::env::var_os("ARC_JOURNAL_DIR") {
@@ -5509,6 +5511,7 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
             directory: anchor_journal_destination(cwd, PathBuf::from(dir))?,
             source: ResolutionSource::Env,
             anchor: None,
+            relative_config_prefix: false,
         });
     }
     let cfg = config::load()?;
@@ -5541,15 +5544,17 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
         }
     }
     if let Some((_, anchor, directory)) = configured {
-        let resolved_anchor = if directory.is_absolute() {
-            anchor
-        } else {
+        let is_relative = !directory.is_absolute();
+        let resolved_anchor = if is_relative {
             prefix_path.to_path_buf()
+        } else {
+            anchor
         };
         return Ok(JournalResolution {
             directory: anchor_journal_destination(cwd, directory)?,
             source: ResolutionSource::ConfigPrefix,
             anchor: Some(resolved_anchor),
+            relative_config_prefix: is_relative,
         });
     }
     if let Some(root) = repository {
@@ -5557,6 +5562,7 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
             directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
             source: ResolutionSource::Git,
             anchor: Some(root),
+            relative_config_prefix: false,
         });
     }
 
@@ -5565,6 +5571,7 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
             directory,
             source,
             anchor: Some(canonical_cwd),
+            relative_config_prefix: false,
         });
     }
 
@@ -5589,6 +5596,7 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
             directory: proposed,
             source: ResolutionSource::SluggedPath,
             anchor: Some(canonical_cwd),
+            relative_config_prefix: false,
         });
     }
     bail!(
@@ -11428,6 +11436,11 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
     let Some(anchor) = resolution.anchor else {
         return Ok(());
     };
+    if resolution.relative_config_prefix {
+        if let Ok(cfg) = config::load() {
+            let _ = crate::registry::remember_relative_checkout(&cfg, &anchor);
+        }
+    }
     // A write from the project re-registers a retired journal.
     let retired = registration_retirement(dir)?.is_some();
     if let Some(recorded) = recorded.as_deref() {

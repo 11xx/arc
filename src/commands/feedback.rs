@@ -101,9 +101,10 @@ struct FeedbackWriteOutput {
     existing: Option<String>,
 }
 
-fn resolve_project(name: &str) -> Result<Project> {
-    let cfg = config::load()?;
-    let active: Vec<Project> = registry::journal_projects(&cfg)?
+fn resolve_project(cfg: &config::Config, name: &str) -> Result<Project> {
+    let discovery = registry::journal_projects_with_diagnostics(cfg)?;
+    let active: Vec<Project> = discovery
+        .projects
         .into_iter()
         .filter(|project| project.retired.is_none())
         .collect();
@@ -112,11 +113,37 @@ fn resolve_project(name: &str) -> Result<Project> {
         .filter(|project| project.slug == name || project.label() == name)
         .collect();
     match matches.len() {
-        1 => Ok(matches[0].clone()),
+        1 => {
+            for prefix in &discovery.truncated_relative_prefixes {
+                eprintln!(
+                    "warning: relative [journals.dirs] discovery under {} reached the {} directory scan limit; unindexed checkouts beneath it may be omitted",
+                    prefix.display(),
+                    registry::RELATIVE_DISCOVERY_LIMIT
+                );
+            }
+            Ok(matches[0].clone())
+        }
         0 => {
+            let truncation_note = if discovery.truncated_relative_prefixes.is_empty() {
+                String::new()
+            } else {
+                let prefixes = discovery
+                    .truncated_relative_prefixes
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "; incomplete relative [journals.dirs] discovery under {prefixes} \
+                     (reached the {} directory scan limit — run a journal write inside \
+                     the target checkout to register it, or configure a narrower \
+                     [journals.dirs] prefix)",
+                    registry::RELATIVE_DISCOVERY_LIMIT
+                )
+            };
             if active.is_empty() {
                 bail!(
-                    "unknown project {name:?}; no projects are registered in the workspace registry"
+                    "unknown project {name:?}; no projects are registered in the workspace registry{truncation_note}"
                 );
             }
             let mut label_counts: HashMap<String, usize> = HashMap::new();
@@ -137,7 +164,7 @@ fn resolve_project(name: &str) -> Result<Project> {
             registered.sort();
             registered.dedup();
             bail!(
-                "unknown project {name:?}; registered projects: {}",
+                "unknown project {name:?}; registered projects: {}{truncation_note}",
                 registered.join(", ")
             );
         }
@@ -204,7 +231,7 @@ fn journal_has_recorded_state(dir: &Path) -> bool {
 
 pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
     let cfg = config::load()?;
-    let project = resolve_project(&args.project)?;
+    let project = resolve_project(&cfg, &args.project)?;
     let label = project.label();
     if !project.journal_dir.is_absolute() {
         bail!(
@@ -282,6 +309,15 @@ pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
         source: &args.source,
     };
     let outcome = feedback_file(ctx, &write)?;
+    if let Some(anchor) = scaffold_anchor.filter(|path| path.is_dir()) {
+        if !project
+            .journal_dir
+            .starts_with(registry::journals_root(&cfg))
+            && !is_configured_absolute_journal(&cfg, anchor, &project.journal_dir)?
+        {
+            let _ = registry::remember_relative_checkout(&cfg, anchor);
+        }
+    }
     match outcome {
         FeedbackOutcome::Created {
             file,
