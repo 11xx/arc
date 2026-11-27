@@ -727,20 +727,19 @@ fn descend_all(at: &Path, rest: &str, walk: &mut Walk, truncated: &mut bool) {
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if name == ".git" {
+        let raw_name = entry.file_name();
+        if raw_name == ".git" {
             continue;
         }
-        let slugged: String = name
+        let lossy = raw_name.to_string_lossy();
+        let slugged: String = lossy
             .chars()
             .map(|c| if c == '.' { '-' } else { c })
             .collect();
         let Some(tail) = rest.strip_prefix(slugged.as_str()) else {
             continue;
         };
-        let next = at.join(&name);
+        let next = entry.path();
         if tail.is_empty() {
             walk.found.push(next);
         } else if let Some(deeper) = tail.strip_prefix('-') {

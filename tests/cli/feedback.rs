@@ -2712,3 +2712,117 @@ fn feedback_truncated_slug_fallback_rejects_ordinary_git_subdir_and_keeps_non_gi
         "non-git-owner-report"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn feedback_truncated_slug_lookup_matches_non_utf8_directory_name_collision() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let repo = Repo::new();
+    let scope = repo.home.join("non-utf8-collision-scope");
+    fs::create_dir_all(&scope).unwrap();
+
+    // Two non-Git project directories whose names differ only by literal U+FFFD
+    // vs raw 0xFF, so `Path::to_string_lossy` produces the exact same path slug.
+    let utf8_owner = scope.join("zzz-unicode-\u{FFFD}");
+    let raw_bytes_name = OsStr::from_bytes(b"zzz-unicode-\xff");
+    let raw_owner = scope.join(raw_bytes_name);
+    for owner in [&utf8_owner, &raw_owner] {
+        fs::create_dir_all(owner).unwrap();
+    }
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let utf8_canon = fs::canonicalize(&utf8_owner).unwrap();
+    let raw_canon = fs::canonicalize(&raw_owner).unwrap();
+    let shared_slug = journal_slug(&utf8_canon);
+    assert_eq!(shared_slug, journal_slug(&raw_canon));
+
+    let utf8_journal = utf8_canon.join("relative-journal");
+    let raw_journal = raw_canon.join("relative-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    for journal in [&utf8_journal, &raw_journal] {
+        fs::create_dir_all(journal).unwrap();
+        fs::write(
+            journal.join("bindings.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-binding/1",
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "bound",
+                    "anchor": scope_canon.display().to_string(),
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            journal.join("events.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-event/1",
+                    "ts": "2026-01-01T00:00:01Z",
+                    "event": "logged",
+                    "topic": "legacy-seed",
+                    "summary": "pre-upgrade",
+                })
+            ),
+        )
+        .unwrap();
+    }
+
+    let scratch = repo.home.join("outside-non-utf8-collision");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Complete scan refuses the shared path slug as ambiguous.
+    repo.arc(&scratch)
+        .args(["feedback", &shared_slug, "--list"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "matched multiple registered projects",
+        ));
+
+    // Index only the valid UTF-8 owner, then add 4,096 shallow siblings to truncate BFS.
+    repo.arc(&utf8_owner)
+        .args(["journal", "log", "index-utf8", "index valid utf-8 owner"])
+        .assert()
+        .success();
+    for i in 0..4096 {
+        fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
+    }
+
+    // A keyed feedback write using the shared slug MUST still refuse as ambiguous,
+    // leaving both journals untouched.
+    repo.arc(&scratch)
+        .args([
+            "feedback",
+            &shared_slug,
+            "--key",
+            "non-utf8-collision-bug",
+            "--title",
+            "Must refuse lossy slug collision",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must refuse when non-UTF-8 sibling shares lossy slug.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "matched multiple registered projects",
+        ));
+
+    let utf8_open = json_stdout(repo.arc(&utf8_owner).args(["journal", "open", "--json"]));
+    assert!(utf8_open["feedback"].as_array().unwrap().is_empty());
+    let raw_open = json_stdout(repo.arc(&raw_owner).args(["journal", "open", "--json"]));
+    assert!(raw_open["feedback"].as_array().unwrap().is_empty());
+}
