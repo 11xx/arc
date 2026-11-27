@@ -986,3 +986,64 @@ fn stats_by_model_mixed_source_session_ambiguity_persists_across_snapshots() {
     assert_eq!(r_bare["identity_kind"], "label");
     assert_eq!(r_bare["patchsets"], 2);
 }
+
+/// Regression test for labeled session alias + explicit `--model` conflict:
+/// `--on-behalf-of "S (alias)" --model gpt-beta#medium --contributors "S:gpt-alpha#high,S"`
+/// must detect the conflict on the recording snapshot itself (crediting `alpha`
+/// once and bare `S` once, never `beta`), and a subsequent snapshot with bare
+/// `S` must credit bare `S` a second time.
+#[test]
+fn stats_by_model_labeled_session_alias_flag_model_conflicts_immediately_and_persists() {
+    let repo = Repo::new();
+    let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d94121";
+    let bare = format!("codex:{uuid}");
+    let alias = format!("{bare} (alias)");
+    let alpha = format!("codex:{uuid}:gpt-alpha#high");
+
+    let (_change_id, wt) = begin_with_worktree(&repo, "labeled-alias-flag-conflict", |cmd| {
+        cmd.args(["--actor", "lead", "--on-behalf-of", "observer"]);
+    });
+    commit_file(&repo, &wt, "work.txt", "v1\n", "feat: v1");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            &alias,
+            "--model",
+            "gpt-beta#medium",
+            "snapshot",
+            "--contributors",
+            &format!("{alpha},{bare}"),
+        ])
+        .assert()
+        .success();
+
+    commit_file(&repo, &wt, "work.txt", "v2\n", "feat: v2");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "observer",
+            "snapshot",
+            "--contributors",
+            &bare,
+        ])
+        .assert()
+        .success();
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    let models = stats["models"].as_array().expect("models array");
+    let has = |id: &str| models.iter().any(|row| row["identity"] == id);
+
+    assert!(!has("codex:gpt-beta#medium"), "{stats}");
+
+    let r_alpha = find_row(&stats, "codex:gpt-alpha#high");
+    assert_eq!(r_alpha["identity_kind"], "coordinate");
+    assert_eq!(r_alpha["patchsets"], 1);
+
+    let r_bare = find_row(&stats, &bare);
+    assert_eq!(r_bare["identity_kind"], "label");
+    assert_eq!(r_bare["patchsets"], 2);
+}
