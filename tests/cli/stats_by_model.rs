@@ -844,3 +844,67 @@ fn stats_by_model_bare_session_stays_label_after_multi_model_snapshot() {
         assert_eq!(r_bare["patchsets"], 1, "{contributors_arg}");
     }
 }
+
+/// Regression test for current-patchset session ambiguity blocking historical
+/// session inference: when `ps-01` establishes only a session-qualified prior
+/// model (`S:gpt-prior#low`) and `ps-02` declares competing explicit models
+/// alongside the bare session (`S:gpt-alpha#high,S:gpt-beta#medium,S`), bare
+/// `S` must stay a label instead of falling back to `gpt-prior#low`.
+#[test]
+fn stats_by_model_current_ambiguous_session_blocks_historical_fallback() {
+    let repo = Repo::new();
+    let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d94999";
+    let bare = format!("codex:{uuid}");
+    let prior = format!("codex:{uuid}:gpt-prior#low");
+    let alpha = format!("codex:{uuid}:gpt-alpha#high");
+    let beta = format!("codex:{uuid}:gpt-beta#medium");
+
+    let (_change_id, wt) = begin_with_worktree(&repo, "ambiguous-blocks-history", |cmd| {
+        cmd.args(["--actor", "lead", "--on-behalf-of", "observer"]);
+    });
+    commit_file(&repo, &wt, "work.txt", "v1\n", "feat: v1");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "observer",
+            "snapshot",
+            "--contributors",
+            &prior,
+        ])
+        .assert()
+        .success();
+
+    commit_file(&repo, &wt, "work.txt", "v2\n", "feat: v2");
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "lead",
+            "--on-behalf-of",
+            "observer",
+            "snapshot",
+            "--contributors",
+            &format!("{alpha},{beta},{bare}"),
+        ])
+        .assert()
+        .success();
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+
+    let r_prior = find_row(&stats, "codex:gpt-prior#low");
+    assert_eq!(r_prior["identity_kind"], "coordinate");
+    assert_eq!(r_prior["patchsets"], 1);
+
+    let r_alpha = find_row(&stats, "codex:gpt-alpha#high");
+    assert_eq!(r_alpha["identity_kind"], "coordinate");
+    assert_eq!(r_alpha["patchsets"], 1);
+
+    let r_beta = find_row(&stats, "codex:gpt-beta#medium");
+    assert_eq!(r_beta["identity_kind"], "coordinate");
+    assert_eq!(r_beta["patchsets"], 1);
+
+    let r_bare = find_row(&stats, &bare);
+    assert_eq!(r_bare["identity_kind"], "label");
+    assert_eq!(r_bare["patchsets"], 1);
+}

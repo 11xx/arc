@@ -584,8 +584,10 @@ fn resolve_contributor_coordinate(
     // 5. Same-session inference for bare session names (`harness:<session>`)
     //    only: unique retained author, delegated `--on-behalf-of`, or a unique
     //    explicit peer coordinate for the same session on this patchset.
+    //    Competing coordinates on the current patchset mark this session
+    //    ambiguous and block historical fallback.
     if let Some(bare_key) = bare_session_key(contributor) {
-        let inherited_coords: BTreeSet<String> = patchset
+        let mut current_coords: BTreeSet<String> = patchset
             .inherited_authors
             .iter()
             .filter_map(|inherited| {
@@ -603,20 +605,30 @@ fn resolve_contributor_coordinate(
                 }
             })
             .collect();
-        if inherited_coords.len() == 1 {
-            return inherited_coords.into_iter().next();
-        }
+        let mut current_ambiguous = current_coords.len() > 1;
         if let Some(obo_str) = obo {
             if let Some((h2, s2, Some(model))) = crate::coordinate::session_subject(obo_str) {
                 if bare_key.0 == h2 && bare_key.1 == s2 {
                     if let Some(coord) = canonical_coordinate(h2, model, Some(s2)) {
-                        return Some(coord);
+                        current_coords.insert(coord);
                     }
                 }
             }
         }
-        if let Some(Some(coord)) = peer_session_coords.get(&bare_key) {
-            return Some(coord.clone());
+        match peer_session_coords.get(&bare_key) {
+            Some(Some(coord)) => {
+                current_coords.insert(coord.clone());
+            }
+            Some(None) => {
+                current_ambiguous = true;
+            }
+            None => {}
+        }
+        if current_ambiguous || current_coords.len() > 1 {
+            return None;
+        }
+        if let Some(coord) = current_coords.into_iter().next() {
+            return Some(coord);
         }
     }
 
@@ -3785,5 +3797,68 @@ mod tests {
             assert_eq!(by_id[bare.as_str()].identity_kind, "label");
             assert_eq!(by_id[bare.as_str()].patchsets, 1);
         }
+    }
+
+    #[test]
+    fn by_model_current_ambiguous_session_blocks_prior_session_fallback() {
+        let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d94999";
+        let bare = format!("codex:{uuid}");
+        let prior = format!("codex:{uuid}:gpt-prior#low");
+        let alpha = format!("codex:{uuid}:gpt-alpha#high");
+        let beta = format!("codex:{uuid}:gpt-beta#medium");
+
+        let mut ps1 = with_identity(
+            ps_event("2", 10, "ps-01", "h1"),
+            "lead",
+            Some("observer"),
+            Some("claude"),
+            None,
+            None,
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps1.payload
+        {
+            contributors.push(prior);
+        }
+
+        let mut ps2 = with_identity(
+            ps_event("3", 20, "ps-02", "h2"),
+            "lead",
+            Some("observer"),
+            Some("claude"),
+            None,
+            None,
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps2.payload
+        {
+            contributors.push(alpha);
+            contributors.push(beta);
+            contributors.push(bare.clone());
+        }
+
+        let rows = summarize_by_model(&[change_tuple(
+            "c1",
+            vec![
+                with_identity(opened_event("1", "c1"), "lead", None, None, None, None),
+                ps1,
+                ps2,
+            ],
+        )]);
+        let by_id: BTreeMap<&str, &ModelStats> =
+            rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+        assert_eq!(by_id["codex:gpt-prior#low"].identity_kind, "coordinate");
+        assert_eq!(by_id["codex:gpt-prior#low"].patchsets, 1);
+        assert_eq!(by_id["codex:gpt-alpha#high"].identity_kind, "coordinate");
+        assert_eq!(by_id["codex:gpt-alpha#high"].patchsets, 1);
+        assert_eq!(by_id["codex:gpt-beta#medium"].identity_kind, "coordinate");
+        assert_eq!(by_id["codex:gpt-beta#medium"].patchsets, 1);
+        assert_eq!(by_id[bare.as_str()].identity_kind, "label");
+        assert_eq!(by_id[bare.as_str()].patchsets, 1);
     }
 }
