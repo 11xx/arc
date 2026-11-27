@@ -5779,13 +5779,6 @@ pub(crate) fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Resu
     Ok(base.join(directory))
 }
 
-/// The shared Git repository root for `path`, when `path` lies inside a Git
-/// repository. Matches `resolve`'s scope-matching anchor.
-pub(crate) fn repo_root_if_git(path: &Path) -> Option<PathBuf> {
-    let canonical = std::fs::canonicalize(path).ok()?;
-    repo_root(&canonical).ok()
-}
-
 /// Resolve the effective journal directory for an existing project path under
 /// `cfg`, matching `resolve` without honoring `ARC_JOURNAL_DIR`.
 pub(crate) fn resolve_project_dir_without_env(cfg: &config::Config, cwd: &Path) -> Result<PathBuf> {

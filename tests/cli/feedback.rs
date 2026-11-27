@@ -1286,3 +1286,164 @@ fn feedback_never_copies_caller_repo_scaffold_into_different_target_journal() {
         .assert()
         .success();
 }
+
+#[test]
+fn feedback_discovers_populated_configured_scope_for_independent_nested_git_repo() {
+    let repo = Repo::new();
+    let outer = repo.home.join("projects").join("outer");
+    let scope = outer.join("scope");
+    let inner = scope.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+
+    // Initialize `outer` as a Git repo and `outer/scope/inner` as an independent Git repo.
+    git(&outer, &["init", "-b", "master"]);
+    git(&outer, &["config", "user.name", "Fixture"]);
+    git(&outer, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(outer.join("README.md"), "# outer\n").unwrap();
+    git(&outer, &["add", "README.md"]);
+    git(&outer, &["commit", "-m", "init outer"]);
+
+    git(&inner, &["init", "-b", "master"]);
+    git(&inner, &["config", "user.name", "Fixture"]);
+    git(&inner, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(inner.join("README.md"), "# inner\n").unwrap();
+    git(&inner, &["add", "README.md"]);
+    git(&inner, &["commit", "-m", "init inner"]);
+
+    let scope_canon = scope.canonicalize().unwrap();
+    let abs_journal = repo.home.join("journals").join("nested-scope-journal");
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = {}\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+        serde_json::to_string(&abs_journal.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // From `inner`, `arc journal dir` resolves to `abs_journal` and `journal log` populates it.
+    let inner_dir = PathBuf::from(stdout(repo.arc(&inner).args(["journal", "dir"])).trim());
+    assert_eq!(inner_dir, abs_journal);
+    repo.arc(&inner)
+        .args([
+            "journal",
+            "log",
+            "bootstrap",
+            "populate nested scope journal",
+        ])
+        .assert()
+        .success();
+
+    // From outside Git, `arc feedback scope --list` discovers the populated journal
+    // and `arc feedback scope` files into it so `inner`'s `arc journal open` sees it.
+    let scratch = repo.home.join("outside-nested-repo");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let empty_list = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "scope", "--list", "--json"]),
+    );
+    assert_eq!(empty_list["schema"], "arc-feedback-list/1");
+    assert_eq!(
+        PathBuf::from(empty_list["journal_dir"].as_str().unwrap()),
+        abs_journal
+    );
+    assert!(empty_list["items"].as_array().unwrap().is_empty());
+
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "scope",
+                "--key",
+                "nested-repo-bug",
+                "--title",
+                "Nested repo friction",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Observed in inner repo.\n"),
+    );
+    let filed_path = PathBuf::from(created["path"].as_str().unwrap());
+    assert_eq!(filed_path.parent().unwrap(), abs_journal.as_path());
+
+    let listed = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "scope", "--list", "--json"]),
+    );
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["items"][0]["key"], "nested-repo-bug");
+
+    let open = json_stdout(repo.arc(&inner).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "nested-repo-bug");
+}
+
+#[test]
+fn feedback_refuses_ambiguous_duplicated_rootless_binding_like_journal_dir() {
+    let repo = Repo::new();
+    let rootless = repo.home.join("rootless-project");
+    fs::create_dir_all(&rootless).unwrap();
+
+    // Bind a rootless directory via `arc journal bind`.
+    let bound_journal = PathBuf::from(stdout(repo.arc(&rootless).args(["journal", "bind"])).trim());
+    assert!(bound_journal.join("bindings.jsonl").is_file());
+
+    // Copy the bound journal to a second directory under the default journal root.
+    let second_slug = format!(
+        "{}-dup",
+        bound_journal.file_name().unwrap().to_string_lossy()
+    );
+    let second_journal = bound_journal.parent().unwrap().join(&second_slug);
+    fs::create_dir_all(&second_journal).unwrap();
+    fs::copy(
+        bound_journal.join("bindings.jsonl"),
+        second_journal.join("bindings.jsonl"),
+    )
+    .unwrap();
+
+    // From the rootless project, `arc journal dir` refuses due to multiple journals recording this anchor.
+    repo.arc(&rootless)
+        .args(["journal", "dir"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "multiple journals record this anchor",
+        ));
+
+    // From outside the project, `arc feedback <second-slug>` (both write and `--list`) must refuse identically.
+    let scratch = repo.home.join("outside-ambiguous");
+    fs::create_dir_all(&scratch).unwrap();
+
+    repo.arc(&scratch)
+        .args([
+            "feedback",
+            &second_slug,
+            "--key",
+            "ambiguous-target",
+            "--title",
+            "Should refuse",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must not write to duplicated binding.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "multiple journals record this anchor",
+        ));
+
+    repo.arc(&scratch)
+        .args(["feedback", &second_slug, "--list"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "multiple journals record this anchor",
+        ));
+
+    assert!(
+        !second_journal.join("events.jsonl").exists(),
+        "refused write must not touch the duplicated journal"
+    );
+}

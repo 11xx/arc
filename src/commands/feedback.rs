@@ -20,6 +20,7 @@ pub const FEEDBACK_LIST_SCHEMA: &str = "arc-feedback-list/1";
 #[derive(Args)]
 pub struct FeedbackArgs {
     /// Registered project name (label or slug) from the workspace registry
+    #[arg(allow_hyphen_values = true)]
     pub project: String,
     /// Body source: a file path, or '-' for stdin
     #[arg(long)]
@@ -172,6 +173,35 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Whether `cfg.journal_dirs` explicitly maps `anchor` to the absolute
+/// destination `journal_dir`.
+fn is_configured_absolute_journal(
+    cfg: &config::Config,
+    anchor: &Path,
+    journal_dir: &Path,
+) -> Result<bool> {
+    let target_anchor = canonical_or_normalized(anchor);
+    let target_journal = canonical_or_normalized(journal_dir);
+    for (raw_anchor, raw_directory) in &cfg.journal_dirs {
+        let dir = config::expand_tilde(raw_directory)?;
+        if !dir.is_absolute() {
+            continue;
+        }
+        let configured_anchor = config::expand_tilde(raw_anchor)?;
+        if canonical_or_normalized(&configured_anchor) == target_anchor
+            && canonical_or_normalized(&dir) == target_journal
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `dir` holds recorded journal state written by an active checkout.
+fn journal_has_recorded_state(dir: &Path) -> bool {
+    dir.join("events.jsonl").is_file() || dir.join("bindings.jsonl").is_file()
+}
+
 pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
     let cfg = config::load()?;
     let project = resolve_project(&args.project)?;
@@ -182,9 +212,20 @@ pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
             project.journal_dir.display()
         );
     }
+    let mut scaffold_anchor = project.anchor.as_deref();
     if let Some(anchor) = project.anchor.as_deref().filter(|path| path.is_dir()) {
-        if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(&cfg, anchor) {
-            if canonical_or_normalized(&resolved) != canonical_or_normalized(&project.journal_dir) {
+        let resolved = crate::journal::resolve_project_dir_without_env(&cfg, anchor)?;
+        if canonical_or_normalized(&resolved) != canonical_or_normalized(&project.journal_dir) {
+            // A configured absolute prefix inside an enclosing Git repository
+            // (for example, `outer/scope` covering an independent nested
+            // `outer/scope/inner` repository) resolves `outer` when queried at
+            // `outer/scope` itself, yet owns a real populated journal for its
+            // nested checkouts. Do not copy the enclosing repository's local
+            // templates into that prefix journal.
+            let populated_configured_prefix =
+                is_configured_absolute_journal(&cfg, anchor, &project.journal_dir)?
+                    && journal_has_recorded_state(&project.journal_dir);
+            if !populated_configured_prefix {
                 bail!(
                     "project {label:?} at {} resolves to journal {} rather than {}; \
                      refusing to target an unreachable journal",
@@ -193,6 +234,7 @@ pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
                     project.journal_dir.display()
                 );
             }
+            scaffold_anchor = None;
         }
     }
     if args.list {
@@ -230,7 +272,7 @@ pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
 
     let write = FeedbackWrite {
         dir: &project.journal_dir,
-        anchor: project.anchor.as_deref(),
+        anchor: scaffold_anchor,
         body_file: args.body_file.as_deref(),
         key: args.key.as_deref(),
         title: args.title.as_deref(),
