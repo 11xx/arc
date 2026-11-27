@@ -2011,6 +2011,258 @@ fn verify_all_parallel_preparation_stays_pinned_to_original_source_across_move_a
 }
 
 #[test]
+fn verify_all_parallel_python_close_fds_subprocess_reads_pinned_source_unmoved_and_moved() {
+    // Part A: unmoved ordinary execution across both preparation modes, where
+    // Python preparation hooks, environment probes, and gate commands spawn
+    // grandchildren with Python's default `close_fds=True` reading
+    // `$ARC_WORKTREE_PATH/source.txt`.
+    for mode in ["path-stable", "source-bound"] {
+        let repo = Repo::new();
+        let markers = repo.home.join(format!("py-unmoved-{mode}"));
+        fs::create_dir_all(&markers).unwrap();
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(repo.root.join("source.txt"), "original-source\n").unwrap();
+        let prep_script = repo.home.join(format!("prep-unmoved-{mode}.py"));
+        fs::write(
+            &prep_script,
+            format!(
+                "import os, pathlib, subprocess\n\
+                 p = os.path.join(os.environ['ARC_WORKTREE_PATH'], 'source.txt')\n\
+                 out = subprocess.run(['cat', p], check=True, capture_output=True, text=True).stdout\n\
+                 pathlib.Path({out:?}).write_text(out)\n",
+                out = markers.join("prep-cat.txt").to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let gate_script = repo.home.join(format!("gate-unmoved-{mode}.py"));
+        fs::write(
+            &gate_script,
+            format!(
+                "import os, pathlib, subprocess\n\
+                 p = os.path.join(os.environ['ARC_WORKTREE_PATH'], 'source.txt')\n\
+                 out = subprocess.run(['cat', p], check=True, capture_output=True, text=True).stdout\n\
+                 pathlib.Path({out:?}).write_text(out)\n",
+                out = markers.join("gate-cat.txt").to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let probe_cmd = "python3 -c \"import os, subprocess; p = os.path.join(os.environ['ARC_WORKTREE_PATH'], 'source.txt'); print(subprocess.run(['cat', p], check=True, capture_output=True, text=True).stdout, end='')\"";
+        fs::write(
+            repo.root.join(".arc/worktrees.toml"),
+            format!(
+                "[prepare]\nmode = {mode:?}\ncommand = \"python3 '{}'\"\ntimeout = \"15s\"\n",
+                prep_script.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!(
+                "[gates.alpha]\ncommand = \"python3 '{}'\"\nenvironment = {probe_cmd:?}\n",
+                gate_script.display()
+            ),
+        )
+        .unwrap();
+        git(
+            &repo.root,
+            &[
+                "add",
+                "source.txt",
+                ".arc/worktrees.toml",
+                ".arc/gates.toml",
+            ],
+        );
+        git(
+            &repo.root,
+            &["commit", "-m", "test: python close_fds unmoved prep/gate"],
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "parallel-py-unmoved", "--no-worktree"]),
+        );
+        let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+        repo.arc(&repo.root)
+            .args([
+                "verify",
+                "parallel-py-unmoved",
+                "--all",
+                "--parallel",
+                "--rerun",
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("gates: 1/1 pass"));
+        assert_eq!(
+            fs::read_to_string(markers.join("prep-cat.txt")).unwrap(),
+            "original-source\n",
+            "mode={mode}: Python grandchild in prep hook failed to read ARC_WORKTREE_PATH"
+        );
+        assert_eq!(
+            fs::read_to_string(markers.join("gate-cat.txt")).unwrap(),
+            "original-source\n",
+            "mode={mode}: Python grandchild in gate failed to read ARC_WORKTREE_PATH"
+        );
+        assert_eq!(
+            git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+            worktrees_before
+        );
+    }
+
+    // Part B: checkout is moved and replaced mid-hook while a Python
+    // preparation hook spawns `subprocess.run(['cat', ...])` with default
+    // `close_fds=True`. The grandchild must still read the original pinned
+    // checkout's source rather than the replacement's.
+    {
+        let repo = Repo::new();
+        let markers = repo.home.join("py-moved");
+        fs::create_dir_all(&markers).unwrap();
+        let moved = repo.home.join("py-moved-original");
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(repo.root.join("source.txt"), "original-source\n").unwrap();
+        let prep_script = repo.home.join("prep-moved.py");
+        fs::write(
+            &prep_script,
+            format!(
+                "import os, pathlib, subprocess, time\n\
+                 markers = pathlib.Path({m:?})\n\
+                 (markers / 'entered').write_text('1')\n\
+                 deadline = time.monotonic() + 10.0\n\
+                 while not (markers / 'swapped').exists() and time.monotonic() < deadline:\n\
+                 \x20   time.sleep(0.01)\n\
+                 assert (markers / 'swapped').exists()\n\
+                 p = os.path.join(os.environ['ARC_WORKTREE_PATH'], 'source.txt')\n\
+                 out = subprocess.run(['cat', p], check=True, capture_output=True, text=True).stdout\n\
+                 (markers / 'observed.txt').write_text(out)\n",
+                m = markers.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            repo.root.join(".arc/worktrees.toml"),
+            format!(
+                "[prepare]\nmode = \"path-stable\"\ncommand = \"python3 '{}'\"\ntimeout = \"15s\"\n",
+                prep_script.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!(
+                "[gates.alpha]\ncommand = \"touch '{}/gate-ran'\"\n",
+                markers.display()
+            ),
+        )
+        .unwrap();
+        git(
+            &repo.root,
+            &[
+                "add",
+                "source.txt",
+                ".arc/worktrees.toml",
+                ".arc/gates.toml",
+            ],
+        );
+        git(
+            &repo.root,
+            &["commit", "-m", "test: python close_fds moved prep"],
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "parallel-py-moved", "--no-worktree"]),
+        );
+
+        let mut child = repo.spawn_arc_piped(
+            &repo.root,
+            &[
+                "verify",
+                "parallel-py-moved",
+                "--all",
+                "--parallel",
+                "--rerun",
+            ],
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !markers.join("entered").exists() && Instant::now() < deadline {
+            if let Some(status) = child.try_wait().unwrap() {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "arc verify exited early ({status:?}):\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(markers.join("entered").exists());
+
+        let scratch_root = repo.home.join(".worktrees/.arc-parallel");
+        let scratch_path = fs::read_dir(&scratch_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+            .expect("live parallel scratch directory not found");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "move",
+                scratch_path.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                scratch_path.to_str().unwrap(),
+                "-b",
+                "py-prep-replacement",
+            ],
+        );
+        fs::write(scratch_path.join("source.txt"), "replacement-source\n").unwrap();
+        fs::write(scratch_path.join("sentinel.txt"), "keep-py\n").unwrap();
+        fs::write(markers.join("swapped"), "").unwrap();
+
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !output.status.success(),
+            "verify must refuse after mid-hook move and replacement"
+        );
+        assert!(
+            !markers.join("gate-ran").exists(),
+            "gate ran after mid-hook move and replacement"
+        );
+        assert_eq!(
+            fs::read_to_string(markers.join("observed.txt")).unwrap(),
+            "original-source\n",
+            "Python close_fds grandchild read replacement source instead of pinned original"
+        );
+        assert_eq!(
+            fs::read_to_string(scratch_path.join("sentinel.txt")).unwrap(),
+            "keep-py\n"
+        );
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                scratch_path.to_str().unwrap(),
+            ],
+        );
+        if moved.exists() {
+            git(
+                &repo.root,
+                &["worktree", "remove", "--force", moved.to_str().unwrap()],
+            );
+        }
+    }
+}
+
+#[test]
 fn verify_all_parallel_overlapping_invocations_wait_on_shared_build_and_cache_leases() {
     // Part A: explicit shared `prepare.directory` across two overlapping
     // `arc verify --all --parallel --rerun` processes.

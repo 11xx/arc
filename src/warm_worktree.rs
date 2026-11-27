@@ -527,24 +527,18 @@ fn dup_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::OwnedFd> 
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duped) })
 }
 
-fn inherit_fd(command: &mut Command, fd: std::os::fd::RawFd) {
-    // SAFETY: fcntl is async-signal-safe. Only the owned child clears
-    // CLOEXEC; the parent keeps CLOEXEC so unrelated execs never inherit `fd`.
-    unsafe {
-        command.pre_exec(move || {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
+/// Expose a kernel-pinned path to the open directory descriptor held by this
+/// `arc` process. Addressing `/proc/<arc_pid>/fd/<fd>` works across arbitrary
+/// descendant processes even when runtimes such as Python close inherited file
+/// descriptors by default (`close_fds=True`), while keeping resolution pinned
+/// to the original directory inode across moves and replacements.
 fn source_env_path(path: &Path, pinned_source_fd: Option<std::os::fd::RawFd>) -> PathBuf {
     #[cfg(target_os = "linux")]
     if let Some(fd) = pinned_source_fd {
-        return PathBuf::from(format!("/proc/self/fd/{fd}"));
+        let proc_fd = PathBuf::from(format!("/proc/{}/fd/{fd}", std::process::id()));
+        if fs::metadata(&proc_fd).is_ok_and(|meta| meta.is_dir()) {
+            return proc_fd;
+        }
     }
     let _ = pinned_source_fd;
     path.to_path_buf()
@@ -606,9 +600,6 @@ impl PreparedStorage {
             ))
             .env_remove("CARGO_TARGET_DIR")
             .env("GIT_OPTIONAL_LOCKS", "0");
-        if let Some(fd) = pinned_fd {
-            inherit_fd(command, fd);
-        }
         inner.lease.inherit(command);
     }
 }
@@ -1188,9 +1179,6 @@ fn run_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    if let Some(fd) = pinned_source_fd {
-        inherit_fd(command, fd);
-    }
     lease.inherit(command);
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
