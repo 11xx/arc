@@ -3106,58 +3106,68 @@ pub fn patch_id(cwd: &Path, commit: &str) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
-/// The object id of Git's empty tree for this repository's hash algorithm.
-pub fn empty_tree_oid(cwd: &Path) -> Result<String> {
-    let out = git_piped(cwd, &["hash-object", "-t", "tree", "--stdin"], b"")?;
-    Ok(String::from_utf8(out)?.trim().to_string())
+/// One entry from `git diff-tree --raw --no-renames --no-abbrev -r -z`,
+/// preserving raw path bytes so non-UTF-8 Git pathnames are never dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawTreeDiffEntry {
+    pub old_mode: String,
+    pub new_mode: String,
+    pub old_oid: String,
+    pub new_oid: String,
+    pub path: Vec<u8>,
 }
 
-/// The stable patch id of the diff from `from` to `to`, optionally restricted
-/// to a single path, with fixed `a/` and `b/` prefixes so forward and reverse
-/// diffs hash identically to standalone commits such as `git revert`.
-pub fn diff_patch_id(
-    cwd: &Path,
-    from: &str,
-    to: &str,
-    path: Option<&str>,
-) -> Result<Option<String>> {
-    let mut args = vec![
-        "diff",
-        "--patch",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-renames",
-        "--full-index",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        from,
-        to,
-    ];
-    if let Some(path) = path {
-        args.push("--");
-        args.push(path);
+fn parse_raw_tree_diff(raw: &[u8]) -> Result<Vec<RawTreeDiffEntry>> {
+    let mut parts = raw.split(|&b| b == 0);
+    let mut entries = Vec::new();
+    while let Some(header) = parts.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let header_str = std::str::from_utf8(header)
+            .context("invalid UTF-8 in git diff-tree --raw metadata header")?;
+        let rest = header_str
+            .strip_prefix(':')
+            .with_context(|| format!("unexpected git diff-tree --raw header: {header_str}"))?;
+        let mut fields = rest.split_whitespace();
+        let (Some(old_mode), Some(new_mode), Some(old_oid), Some(new_oid), Some(_status)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            bail!("incomplete git diff-tree --raw header: {header_str}");
+        };
+        let path = parts
+            .next()
+            .filter(|slice| !slice.is_empty())
+            .with_context(|| {
+                format!("missing path after git diff-tree --raw header: {header_str}")
+            })?;
+        entries.push(RawTreeDiffEntry {
+            old_mode: old_mode.to_string(),
+            new_mode: new_mode.to_string(),
+            old_oid: old_oid.to_string(),
+            new_oid: new_oid.to_string(),
+            path: path.to_vec(),
+        });
     }
-    let diff = git_bytes(cwd, &args)?;
-    if diff.is_empty() {
-        return Ok(None);
-    }
-    let out = git_piped(cwd, &["patch-id", "--stable"], &diff)?;
-    Ok(String::from_utf8(out)?
-        .split_whitespace()
-        .next()
-        .map(str::to_string))
+    Ok(entries)
 }
 
-/// Paths modified by `commit` relative to its first parent (or empty tree for
-/// a root commit).
-pub fn commit_changed_paths(cwd: &Path, commit: &str) -> Result<Vec<String>> {
+/// Raw tree entries changed by `commit` relative to its first parent (or the
+/// empty tree for a root commit), preserving non-UTF-8 path bytes.
+pub fn commit_raw_tree_diff(cwd: &Path, commit: &str) -> Result<Vec<RawTreeDiffEntry>> {
     let raw = git_bytes(
         cwd,
         &[
             "diff-tree",
+            "--raw",
             "--root",
             "--no-commit-id",
-            "--name-only",
+            "--no-renames",
+            "--no-abbrev",
             "-r",
             "-z",
             "-m",
@@ -3165,91 +3175,48 @@ pub fn commit_changed_paths(cwd: &Path, commit: &str) -> Result<Vec<String>> {
             commit,
         ],
     )?;
-    Ok(raw
-        .split(|&b| b == 0)
-        .filter(|slice| !slice.is_empty())
-        .filter_map(|slice| std::str::from_utf8(slice).ok().map(str::to_string))
-        .collect())
+    parse_raw_tree_diff(&raw)
 }
 
-/// Subset of `paths` whose tree entries differ between `left` and `right`.
-pub fn changed_paths_between(
-    cwd: &Path,
-    left: &str,
-    right: &str,
-    paths: &[String],
-) -> Result<Vec<String>> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut args = vec!["diff", "--name-only", "-z", left, right, "--"];
-    args.extend(paths.iter().map(String::as_str));
-    let raw = git_bytes(cwd, &args)?;
-    Ok(raw
-        .split(|&b| b == 0)
-        .filter(|slice| !slice.is_empty())
-        .filter_map(|slice| std::str::from_utf8(slice).ok().map(str::to_string))
-        .collect())
-}
-
-/// Commits in `from..to` in reverse topological order, each paired with its
-/// parent commit ids.
-pub fn range_commits_with_parents(
-    cwd: &Path,
-    from: &str,
-    to: &str,
-) -> Result<Vec<(String, Vec<String>)>> {
-    let range = format!("{from}..{to}");
-    let out = git(
+/// Raw tree entries differing between `left` and `right`, preserving non-UTF-8
+/// path bytes.
+pub fn raw_tree_diff_between(cwd: &Path, left: &str, right: &str) -> Result<Vec<RawTreeDiffEntry>> {
+    let raw = git_bytes(
         cwd,
-        &["rev-list", "--topo-order", "--reverse", "--parents", &range],
+        &[
+            "diff-tree",
+            "--raw",
+            "--no-commit-id",
+            "--no-renames",
+            "--no-abbrev",
+            "-r",
+            "-z",
+            left,
+            right,
+        ],
     )?;
-    let mut commits = Vec::new();
-    for line in out.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(commit) = parts.next() else {
-            continue;
-        };
-        let parents = parts.map(str::to_string).collect();
-        commits.push((commit.to_string(), parents));
-    }
-    Ok(commits)
+    parse_raw_tree_diff(&raw)
 }
 
-/// Unified diff bytes for a single `path` between `left` and `right`.
-pub fn diff_for_path(cwd: &Path, left: &str, right: &str, path: &str) -> Result<Vec<u8>> {
+/// Zero-context unified diff bytes between two Git blob object ids.
+pub fn diff_blobs_u0(cwd: &Path, left_oid: &str, right_oid: &str) -> Result<Vec<u8>> {
     git_bytes(
         cwd,
         &[
             "diff",
-            "-U3",
+            "-U0",
             "--no-color",
             "--no-ext-diff",
             "--no-renames",
-            left,
-            right,
-            "--",
-            path,
+            left_oid,
+            right_oid,
         ],
     )
 }
 
-/// Blob contents of `path` at `commit`, or `None` if `path` is absent or not a
-/// regular file blob in `commit`.
-pub fn blob_at_commit(cwd: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
-    let spec = format!("{commit}:{path}");
-    let kind_out = git_command()
-        .args(["cat-file", "-t", &spec])
-        .current_dir(cwd)
-        .counted_output()
-        .context("failed to inspect blob type")?;
-    if !kind_out.status.success() {
-        return Ok(None);
-    }
-    if String::from_utf8_lossy(&kind_out.stdout).trim() != "blob" {
-        return Ok(None);
-    }
-    Ok(Some(git_bytes(cwd, &["cat-file", "blob", &spec])?))
+/// Raw bytes of a Git blob object id.
+pub fn read_blob(cwd: &Path, oid: &str) -> Result<Vec<u8>> {
+    git_bytes(cwd, &["cat-file", "blob", oid])
 }
 
 /// The stable patch id of the combined diff from `base` to `head`, or `None`

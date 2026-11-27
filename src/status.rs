@@ -573,219 +573,324 @@ pub(crate) fn evaluate_finding_resolutions(
 /// survives in `head` rather than having been reverted or partially rolled back
 /// by subsequent commits.
 ///
-/// Checks three independent signals for paths modified by `fix_commit` that
-/// changed again between `fix_commit` and `head`:
-/// 1. Per-path state restoration: any modified path returned to its exact
-///    pre-fix tree entry at `head`.
-/// 2. DAG-aware revert propagation along `fix_commit..head`: a subsequent
-///    commit applies the exact per-path reverse patch-id of `fix_commit`
-///    without being re-applied or discarded by a later merge.
-/// 3. Final-tree hunk survival: any unified diff hunk of `fix_commit` on a
-///    subsequently modified path has its pre-fix lines restored and its fixed
-///    lines absent at `head`.
+/// Compares the final tree at `head` directly against `fix_commit` and its
+/// pre-fix parent using raw path bytes and zero-context blob-OID diffs:
+/// - Any path unchanged between `fix_commit` and `head` survives immediately.
+/// - Any path whose `(mode, oid)` returned to its pre-fix state (including
+///   deleted additions, restored deletions, mode rollbacks, or single-file
+///   rollbacks in a multi-file fix) fails closed as reverted.
+/// - For regular text blobs modified again after `fix_commit`, each hunk of
+///   `diff -U0 (pre_oid, fix_oid)` is tracked to its aligned region in `head`
+///   via `diff -U0 (fix_oid, head_oid)` with left-tightening minimum-displacement
+///   anchor relaxation so nearby context edits, unrelated copies of old text
+///   elsewhere in the file, and reverts followed by reapplication with adjacent
+///   edits are all judged accurately at the affected region.
 fn fix_survives_in_head(cwd: &Path, fix_commit: &str, head: &str) -> bool {
     if fix_commit == head {
         return true;
     }
-    let Ok(parents) = gitio::commit_parents(cwd, fix_commit) else {
+    let Ok(fix_entries) = gitio::commit_raw_tree_diff(cwd, fix_commit) else {
         return false;
     };
-    let Ok(paths) = gitio::commit_changed_paths(cwd, fix_commit) else {
-        return false;
-    };
-    if paths.is_empty() {
+    if fix_entries.is_empty() {
         return true;
     }
-    let Ok(changed_since_fix) = gitio::changed_paths_between(cwd, fix_commit, head, &paths) else {
+    let Ok(head_diff_entries) = gitio::raw_tree_diff_between(cwd, fix_commit, head) else {
         return false;
     };
-    if changed_since_fix.is_empty() {
+    if head_diff_entries.is_empty() {
         return true;
     }
-    let pre_fix = match parents.first() {
-        Some(parent) => parent.clone(),
-        None => match gitio::empty_tree_oid(cwd) {
-            Ok(oid) => oid,
-            Err(_) => return false,
-        },
-    };
-    let Ok(still_differs_from_pre_fix) =
-        gitio::changed_paths_between(cwd, &pre_fix, head, &changed_since_fix)
-    else {
-        return false;
-    };
-    if still_differs_from_pre_fix.len() < changed_since_fix.len() {
-        return false;
-    }
-    if parents.len() <= 1
-        && dag_shows_unreapplied_revert(cwd, &pre_fix, fix_commit, head, &changed_since_fix)
-    {
-        return false;
-    }
-    for path in &changed_since_fix {
-        if path_hunk_reverted_in_head(cwd, &pre_fix, fix_commit, head, path) {
+    let head_by_path: std::collections::HashMap<&[u8], (&str, &str)> = head_diff_entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.path.as_slice(),
+                (entry.new_mode.as_str(), entry.new_oid.as_str()),
+            )
+        })
+        .collect();
+
+    for entry in &fix_entries {
+        let Some(&(head_mode, head_oid)) = head_by_path.get(entry.path.as_slice()) else {
+            // Tree entry at `head` is identical to `fix_commit`.
+            continue;
+        };
+        if head_mode == entry.old_mode && head_oid == entry.old_oid {
+            return false;
+        }
+        if entry.old_mode != "000000"
+            && entry.new_mode != "000000"
+            && entry.old_mode != entry.new_mode
+            && head_mode == entry.old_mode
+        {
+            return false;
+        }
+        if is_regular_blob_mode(&entry.old_mode)
+            && is_regular_blob_mode(&entry.new_mode)
+            && is_regular_blob_mode(head_mode)
+            && entry.old_oid != entry.new_oid
+            && head_oid != entry.new_oid
+            && !text_blob_survives(cwd, &entry.old_oid, &entry.new_oid, head_oid)
+        {
             return false;
         }
     }
     true
 }
 
-/// Propagate per-path revert state through the commit DAG `fix_commit..head`.
-///
-/// Only parents reachable from `fix_commit` participate in merge decisions so
-/// unrelated upstream branches merged in do not mask a revert, and a merge
-/// between a reverted branch and a branch that kept the fix is resolved by
-/// checking which side's tree or diff `merge` actually took on that path.
-fn dag_shows_unreapplied_revert(
-    cwd: &Path,
-    pre_fix: &str,
-    fix_commit: &str,
-    head: &str,
-    changed_paths: &[String],
-) -> bool {
-    let Ok(commits) = gitio::range_commits_with_parents(cwd, fix_commit, head) else {
-        return false;
-    };
-    if commits.is_empty() {
-        return false;
-    }
-    let empty_tree = gitio::empty_tree_oid(cwd).ok();
-    for path in changed_paths {
-        let (Ok(Some(forward_pid)), Ok(Some(reverse_pid))) = (
-            gitio::diff_patch_id(cwd, pre_fix, fix_commit, Some(path)),
-            gitio::diff_patch_id(cwd, fix_commit, pre_fix, Some(path)),
-        ) else {
-            continue;
-        };
-        let path_slice = std::slice::from_ref(path);
-        let mut reverted: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
-        reverted.insert(fix_commit, false);
-        for (commit, c_parents) in &commits {
-            let state = if c_parents.len() <= 1 {
-                let mut is_rev = c_parents
-                    .first()
-                    .and_then(|p| reverted.get(p.as_str()).copied())
-                    .unwrap_or(false);
-                let parent_ref = c_parents
-                    .first()
-                    .map(String::as_str)
-                    .or(empty_tree.as_deref());
-                if let Some(parent_ref) = parent_ref {
-                    if let Ok(Some(pid)) = gitio::diff_patch_id(cwd, parent_ref, commit, Some(path))
-                    {
-                        if pid == reverse_pid {
-                            is_rev = true;
-                        } else if pid == forward_pid {
-                            is_rev = false;
-                        }
-                    }
-                }
-                is_rev
-            } else {
-                let mut reverted_parents = Vec::new();
-                let mut kept_parents = Vec::new();
-                for parent in c_parents {
-                    if let Some(&parent_rev) = reverted.get(parent.as_str()) {
-                        if parent_rev {
-                            reverted_parents.push(parent.as_str());
-                        } else {
-                            kept_parents.push(parent.as_str());
-                        }
-                    }
-                }
-                match (reverted_parents.is_empty(), kept_parents.is_empty()) {
-                    (true, true) => false,
-                    (true, false) => {
-                        let base = kept_parents[0];
-                        gitio::diff_patch_id(cwd, base, commit, Some(path))
-                            .ok()
-                            .flatten()
-                            .is_some_and(|pid| pid == reverse_pid)
-                    }
-                    (false, true) => {
-                        let base = reverted_parents[0];
-                        !gitio::diff_patch_id(cwd, base, commit, Some(path))
-                            .ok()
-                            .flatten()
-                            .is_some_and(|pid| pid == forward_pid)
-                    }
-                    (false, false) => {
-                        let kept_exact = kept_parents.iter().any(|kp| {
-                            gitio::changed_paths_between(cwd, kp, commit, path_slice)
-                                .is_ok_and(|diff| diff.is_empty())
-                        });
-                        if kept_exact {
-                            false
-                        } else {
-                            let reverted_exact = reverted_parents.iter().any(|rp| {
-                                gitio::changed_paths_between(cwd, rp, commit, path_slice)
-                                    .is_ok_and(|diff| diff.is_empty())
-                            });
-                            reverted_exact
-                                || kept_parents.iter().any(|kp| {
-                                    gitio::diff_patch_id(cwd, kp, commit, Some(path))
-                                        .ok()
-                                        .flatten()
-                                        .is_some_and(|pid| pid == reverse_pid)
-                                })
-                        }
-                    }
-                }
-            };
-            reverted.insert(commit.as_str(), state);
-        }
-        if reverted.get(head).copied().unwrap_or(false) {
-            return true;
-        }
-    }
-    false
+fn is_regular_blob_mode(mode: &str) -> bool {
+    matches!(mode, "100644" | "100755")
 }
 
-/// Check whether any unified diff hunk introduced by `fix_commit` on `path`
-/// has reverted back to its pre-fix lines at `head` (even when unrelated edits
-/// were also applied to the same file).
-fn path_hunk_reverted_in_head(
-    cwd: &Path,
-    pre_fix: &str,
-    fix_commit: &str,
-    head: &str,
-    path: &str,
-) -> bool {
-    let Ok(diff) = gitio::diff_for_path(cwd, pre_fix, fix_commit, path) else {
-        return false;
-    };
-    if diff.is_empty() {
-        return false;
-    }
-    let Ok(Some(head_blob)) = gitio::blob_at_commit(cwd, head, path) else {
-        return false;
-    };
-    let head_lines = split_lines(&head_blob);
-    let mut in_hunk = false;
-    let mut hunk_lines: Vec<&[u8]> = Vec::new();
-    for line in split_lines(&diff) {
+/// Zero-context diff hunk with 0-based half-open line ranges in `old` and `new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct U0Hunk {
+    old_start: usize,
+    old_end: usize,
+    new_start: usize,
+    new_end: usize,
+}
+
+fn parse_u0_hunks(diff: &[u8]) -> Option<Vec<U0Hunk>> {
+    let mut hunks = Vec::new();
+    for line in split_lines(diff) {
         if line.starts_with(b"Binary files ") {
+            return None;
+        }
+        let Some(rest) = line.strip_prefix(b"@@ -") else {
+            continue;
+        };
+        let rest = std::str::from_utf8(rest).ok()?;
+        let header = rest.split(" @@").next()?;
+        let (old_part, new_part) = header.split_once(" +")?;
+        let (old_start, old_end) = parse_u0_range(old_part)?;
+        let (new_start, new_end) = parse_u0_range(new_part)?;
+        hunks.push(U0Hunk {
+            old_start,
+            old_end,
+            new_start,
+            new_end,
+        });
+    }
+    Some(hunks)
+}
+
+fn parse_u0_range(part: &str) -> Option<(usize, usize)> {
+    let (start_s, count) = match part.split_once(',') {
+        Some((s, c)) => (s, c.parse::<usize>().ok()?),
+        None => (part, 1usize),
+    };
+    let start = start_s.parse::<usize>().ok()?;
+    if count == 0 {
+        // In `git diff -U0`, `start,0` names the insertion/deletion boundary
+        // immediately after 1-based line `start`, which is 0-based index `start`.
+        Some((start, start))
+    } else {
+        let zero_start = start.checked_sub(1)?;
+        Some((zero_start, zero_start + count))
+    }
+}
+
+/// Reconstruct 0-based matched line pairs `(old_i, new_i)` from `old_len`,
+/// `new_len`, and the sorted non-overlapping zero-context hunks between them.
+fn matched_pairs_from_u0(old_len: usize, new_len: usize, hunks: &[U0Hunk]) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    let mut oi = 0usize;
+    let mut ni = 0usize;
+    for hunk in hunks {
+        while oi < hunk.old_start && ni < hunk.new_start {
+            pairs.push((oi, ni));
+            oi += 1;
+            ni += 1;
+        }
+        oi = hunk.old_end;
+        ni = hunk.new_end;
+    }
+    while oi < old_len && ni < new_len {
+        pairs.push((oi, ni));
+        oi += 1;
+        ni += 1;
+    }
+    pairs
+}
+
+/// Relax matched pairs leftwards to undo `git diff`'s hunk compaction toward
+/// EOF when an identical line exists closer to the expected local position.
+fn tighten_matches_left(old_lines: &[&[u8]], new_lines: &[&[u8]], matches: &mut [(usize, usize)]) {
+    for idx in 0..matches.len() {
+        let (oi, ni) = matches[idx];
+        let lo = if idx == 0 { 0 } else { matches[idx - 1].1 + 1 };
+        let expected = if idx == 0 {
+            oi
+        } else {
+            matches[idx - 1].1 + oi.saturating_sub(matches[idx - 1].0)
+        };
+        let mut best_ni = ni;
+        let mut best_key = (ni.abs_diff(expected), ni);
+        for (cand, line) in new_lines.iter().enumerate().take(ni + 1).skip(lo) {
+            if *line == old_lines[oi] {
+                let key = (cand.abs_diff(expected), cand);
+                if key < best_key {
+                    best_key = key;
+                    best_ni = cand;
+                }
+            }
+        }
+        matches[idx].1 = best_ni;
+    }
+}
+
+/// Whether all `fix_commit` hunks on a modified regular text file survive in
+/// `head_oid` when anchored to their changed regions.
+fn text_blob_survives(cwd: &Path, pre_oid: &str, fix_oid: &str, head_oid: &str) -> bool {
+    let (Ok(pre_bytes), Ok(fix_bytes), Ok(head_bytes)) = (
+        gitio::read_blob(cwd, pre_oid),
+        gitio::read_blob(cwd, fix_oid),
+        gitio::read_blob(cwd, head_oid),
+    ) else {
+        return false;
+    };
+    if pre_bytes.contains(&0) || fix_bytes.contains(&0) || head_bytes.contains(&0) {
+        return true;
+    }
+    let pre_lines = split_lines(&pre_bytes);
+    let fix_lines = split_lines(&fix_bytes);
+    let head_lines = split_lines(&head_bytes);
+    if pre_lines == fix_lines {
+        let pre_nl = pre_bytes.ends_with(b"\n");
+        let fix_nl = fix_bytes.ends_with(b"\n");
+        let head_nl = head_bytes.ends_with(b"\n");
+        return !(pre_nl != fix_nl && head_nl == pre_nl);
+    }
+
+    let (Ok(pf_diff), Ok(fh_diff)) = (
+        gitio::diff_blobs_u0(cwd, pre_oid, fix_oid),
+        gitio::diff_blobs_u0(cwd, fix_oid, head_oid),
+    ) else {
+        return false;
+    };
+    let (Some(fix_hunks), Some(fh_hunks)) = (parse_u0_hunks(&pf_diff), parse_u0_hunks(&fh_diff))
+    else {
+        return true;
+    };
+    if fix_hunks.is_empty() {
+        return true;
+    }
+
+    let mut fix_to_pre = vec![None; fix_lines.len()];
+    for (pi, fi) in matched_pairs_from_u0(pre_lines.len(), fix_lines.len(), &fix_hunks) {
+        fix_to_pre[fi] = Some(pi);
+    }
+
+    let mut fix_to_head = matched_pairs_from_u0(fix_lines.len(), head_lines.len(), &fh_hunks);
+    tighten_matches_left(&fix_lines, &head_lines, &mut fix_to_head);
+    let mut fix_match = vec![None; fix_lines.len()];
+    for &(fi, hi) in &fix_to_head {
+        fix_match[fi] = Some(hi);
+    }
+
+    for hunk in &fix_hunks {
+        if hunk.new_start < hunk.new_end
+            && (hunk.new_start..hunk.new_end).all(|fi| fix_match[fi].is_some())
+        {
+            continue;
+        }
+
+        let left_anchor = fix_to_head
+            .iter()
+            .rev()
+            .find(|&&(fi, _)| fi < hunk.new_start)
+            .copied();
+        let right_anchor = fix_to_head
+            .iter()
+            .find(|&&(fi, _)| fi >= hunk.new_end)
+            .copied();
+
+        let (head_start, pre_gap_start) = match left_anchor {
+            Some((lfi, lhi)) => {
+                let pre_start = fix_to_pre[lfi]
+                    .map(|lp| lp + 1)
+                    .unwrap_or(hunk.old_start)
+                    .min(hunk.old_start);
+                (lhi + 1, pre_start)
+            }
+            None => (0, 0),
+        };
+        let (head_end, pre_gap_end) = match right_anchor {
+            Some((rfi, rhi)) => {
+                let pre_end = fix_to_pre[rfi].unwrap_or(hunk.old_end).max(hunk.old_end);
+                (rhi, pre_end)
+            }
+            None => (head_lines.len(), pre_lines.len()),
+        };
+
+        let head_region = &head_lines[head_start..head_end];
+        if hunk.old_start == hunk.old_end {
+            // Pure insertion hunk: reverted if the aligned region at `head`
+            // became empty (the inserted lines were removed with no replacement).
+            if head_region.is_empty() {
+                return false;
+            }
+            continue;
+        }
+
+        if head_region.is_empty() {
+            continue;
+        }
+        let pre_region = &pre_lines[pre_gap_start..pre_gap_end];
+        let local_start = hunk.old_start - pre_gap_start;
+        let local_end = hunk.old_end - pre_gap_start;
+        if lcs_covers_range(pre_region, head_region, local_start, local_end) {
             return false;
         }
-        if line.starts_with(b"@@ ") {
-            if in_hunk && hunk_reverted(&hunk_lines, &head_lines) {
-                return true;
-            }
-            in_hunk = true;
-            hunk_lines.clear();
-        } else if in_hunk {
-            if line.starts_with(b"diff --git ") {
-                if hunk_reverted(&hunk_lines, &head_lines) {
-                    return true;
-                }
-                in_hunk = false;
-                hunk_lines.clear();
-            } else if !line.starts_with(b"\\") {
-                hunk_lines.push(line);
-            }
+    }
+    true
+}
+
+/// Whether an LCS alignment between `pre_region` and `head_region` matches
+/// every line in `pre_region[range_start..range_end]`.
+fn lcs_covers_range(
+    pre_region: &[&[u8]],
+    head_region: &[&[u8]],
+    range_start: usize,
+    range_end: usize,
+) -> bool {
+    let n = pre_region.len();
+    let m = head_region.len();
+    if range_start >= range_end || range_end > n || m == 0 {
+        return false;
+    }
+    const MAX_DP_CELLS: usize = 200_000;
+    if n.saturating_mul(m) > MAX_DP_CELLS {
+        return contains_subslice(head_region, &pre_region[range_start..range_end]);
+    }
+    let cols = m + 1;
+    let mut dp = vec![0u32; (n + 1) * cols];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i * cols + j] = if pre_region[i] == head_region[j] {
+                dp[(i + 1) * cols + (j + 1)] + 1
+            } else {
+                dp[(i + 1) * cols + j].max(dp[i * cols + (j + 1)])
+            };
         }
     }
-    in_hunk && hunk_reverted(&hunk_lines, &head_lines)
+    let mut pre_matched = vec![false; n];
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < n && j < m {
+        if pre_region[i] == head_region[j] && dp[i * cols + j] == dp[(i + 1) * cols + (j + 1)] + 1 {
+            pre_matched[i] = true;
+            i += 1;
+            j += 1;
+        } else if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    pre_matched[range_start..range_end].iter().all(|&m| m)
 }
 
 fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
@@ -803,59 +908,6 @@ fn contains_subslice(haystack: &[&[u8]], needle: &[&[u8]]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
-}
-
-fn hunk_reverted(hunk_lines: &[&[u8]], head_lines: &[&[u8]]) -> bool {
-    let mut pre: Vec<&[u8]> = Vec::new();
-    let mut post: Vec<&[u8]> = Vec::new();
-    let mut has_removed = false;
-    let mut has_added = false;
-    let mut seen_change = false;
-    let mut leading_ctx = 0usize;
-    let mut trailing_ctx = 0usize;
-
-    for &line in hunk_lines {
-        match line.first().copied() {
-            Some(b' ') => {
-                let text = &line[1..];
-                pre.push(text);
-                post.push(text);
-                if !seen_change {
-                    leading_ctx += 1;
-                } else {
-                    trailing_ctx += 1;
-                }
-            }
-            Some(b'-') => {
-                pre.push(&line[1..]);
-                has_removed = true;
-                seen_change = true;
-                trailing_ctx = 0;
-            }
-            Some(b'+') => {
-                post.push(&line[1..]);
-                has_added = true;
-                seen_change = true;
-                trailing_ctx = 0;
-            }
-            _ => {}
-        }
-    }
-    if (!has_removed && !has_added) || pre.is_empty() {
-        return false;
-    }
-    if !post.is_empty() && contains_subslice(head_lines, &post) {
-        return false;
-    }
-    if has_removed || (leading_ctx > 0 && trailing_ctx > 0) {
-        contains_subslice(head_lines, &pre)
-    } else if leading_ctx == 0 && trailing_ctx > 0 {
-        head_lines.starts_with(&pre)
-    } else if leading_ctx > 0 && trailing_ctx == 0 {
-        head_lines.ends_with(&pre)
-    } else {
-        head_lines.is_empty()
-    }
 }
 
 /// Open blocking finding IDs for `state` at `current_head`, combining

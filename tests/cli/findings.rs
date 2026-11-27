@@ -1116,3 +1116,254 @@ fn reverted_fix_with_unrelated_edit_partial_rollback_and_merges() {
     );
     assert_eq!(status4b["findings"][0]["status"], "resolved", "{status4b}");
 }
+
+#[test]
+fn region_bound_fix_survival_handles_nearby_edits_copies_reapply_and_raw_paths() {
+    let repo = Repo::new();
+
+    // Case 1a: Nearby context edit (`setting=old -> setting=new`) then rollback (`fixed -> broken`)
+    // in separate commits must reopen the blocking finding.
+    let begin1a = stdout(repo.arc(&repo.root).args(["begin", "nearby-separate"]));
+    let change1a = opened_change_id(&begin1a);
+    let wt1a = repo.home.join(".worktrees/repo-nearby-separate");
+    repo.commit(&wt1a, "f.txt", "broken\nsetting=old\n", "feat: initial");
+    stdout(repo.arc(&wt1a).args(["snapshot", "nearby-separate"]));
+    let fid1a = stdout(repo.arc(&wt1a).args([
+        "finding",
+        "nearby-separate",
+        "--summary",
+        "fix line 1",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1a, "f.txt", "fixed\nsetting=old\n", "fix: repair line 1");
+    let fix1a = repo.head(&wt1a);
+    stdout(repo.arc(&wt1a).args([
+        "resolve",
+        "nearby-separate",
+        &fid1a,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1a,
+    ]));
+    repo.commit(
+        &wt1a,
+        "f.txt",
+        "fixed\nsetting=new\n",
+        "chore: edit nearby line",
+    );
+    repo.commit(
+        &wt1a,
+        "f.txt",
+        "broken\nsetting=new\n",
+        "chore: restore broken",
+    );
+    stdout(repo.arc(&wt1a).args(["snapshot", "nearby-separate"]));
+    let status1a = json_stdout(repo.arc(&wt1a).args(["status", &change1a, "--json"]));
+    assert_eq!(
+        status1a["open_blocking_findings"],
+        serde_json::json!([fid1a]),
+        "nearby edit + rollback in separate commits must reopen finding: {status1a}"
+    );
+    assert_eq!(status1a["findings"][0]["status"], "open", "{status1a}");
+    repo.arc(&wt1a).args(["check", &change1a]).assert().code(2);
+
+    // Case 1b: Rollback (`fixed -> broken`) and nearby edit (`setting=old -> setting=new`)
+    // combined in ONE commit must reopen the blocking finding.
+    let begin1b = stdout(repo.arc(&repo.root).args(["begin", "nearby-combined"]));
+    let change1b = opened_change_id(&begin1b);
+    let wt1b = repo.home.join(".worktrees/repo-nearby-combined");
+    repo.commit(&wt1b, "f.txt", "broken\nsetting=old\n", "feat: initial");
+    stdout(repo.arc(&wt1b).args(["snapshot", "nearby-combined"]));
+    let fid1b = stdout(repo.arc(&wt1b).args([
+        "finding",
+        "nearby-combined",
+        "--summary",
+        "fix line 1",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1b, "f.txt", "fixed\nsetting=old\n", "fix: repair line 1");
+    let fix1b = repo.head(&wt1b);
+    stdout(repo.arc(&wt1b).args([
+        "resolve",
+        "nearby-combined",
+        &fid1b,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1b,
+    ]));
+    repo.commit(
+        &wt1b,
+        "f.txt",
+        "broken\nsetting=new\n",
+        "chore: restore broken and update setting",
+    );
+    stdout(repo.arc(&wt1b).args(["snapshot", "nearby-combined"]));
+    let status1b = json_stdout(repo.arc(&wt1b).args(["status", &change1b, "--json"]));
+    assert_eq!(
+        status1b["open_blocking_findings"],
+        serde_json::json!([fid1b]),
+        "nearby edit + rollback in one commit must reopen finding: {status1b}"
+    );
+    assert_eq!(status1b["findings"][0]["status"], "open", "{status1b}");
+    repo.arc(&wt1b).args(["check", &change1b]).assert().code(2);
+
+    // Case 2: Valid refactor (`fixed -> fixed-v2`) + unrelated historical copy of
+    // `broken\nsetting=old` appended later in the same file must STAY RESOLVED.
+    let begin2 = stdout(repo.arc(&repo.root).args(["begin", "unrelated-copy"]));
+    let change2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-unrelated-copy");
+    repo.commit(&wt2, "f.txt", "broken\nsetting=old\n", "feat: initial");
+    stdout(repo.arc(&wt2).args(["snapshot", "unrelated-copy"]));
+    let fid2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "unrelated-copy",
+        "--summary",
+        "fix line 1",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt2, "f.txt", "fixed\nsetting=old\n", "fix: repair line 1");
+    let fix2 = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "unrelated-copy",
+        &fid2,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix2,
+    ]));
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "fixed-v2\nsetting=old\n\nbroken\nsetting=old\n",
+        "refactor: refine line 1 and append historical example",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "unrelated-copy"]));
+    let status2 = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2["open_blocking_findings"],
+        serde_json::json!([]),
+        "unrelated copy of old hunk elsewhere in file must not reopen finding: {status2}"
+    );
+    assert_eq!(status2["findings"][0]["status"], "resolved", "{status2}");
+
+    // Case 3: `git revert` followed by reapplying `fixed` + editing `setting=new`
+    // in one commit must STAY RESOLVED.
+    let begin3 = stdout(repo.arc(&repo.root).args(["begin", "revert-reapply-edit"]));
+    let change3 = opened_change_id(&begin3);
+    let wt3 = repo.home.join(".worktrees/repo-revert-reapply-edit");
+    repo.commit(&wt3, "f.txt", "broken\nsetting=old\n", "feat: initial");
+    stdout(repo.arc(&wt3).args(["snapshot", "revert-reapply-edit"]));
+    let fid3 = stdout(repo.arc(&wt3).args([
+        "finding",
+        "revert-reapply-edit",
+        "--summary",
+        "fix line 1",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt3, "f.txt", "fixed\nsetting=old\n", "fix: repair line 1");
+    let fix3 = repo.head(&wt3);
+    stdout(repo.arc(&wt3).args([
+        "resolve",
+        "revert-reapply-edit",
+        &fid3,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix3,
+    ]));
+    git(&wt3, &["revert", "--no-edit", &fix3]);
+    repo.commit(
+        &wt3,
+        "f.txt",
+        "fixed\nsetting=new\n",
+        "fix: reapply fix with updated setting",
+    );
+    stdout(repo.arc(&wt3).args(["snapshot", "revert-reapply-edit"]));
+    let status3 = json_stdout(repo.arc(&wt3).args(["status", &change3, "--json"]));
+    assert_eq!(
+        status3["open_blocking_findings"],
+        serde_json::json!([]),
+        "reapplying fix with adjacent edit must keep finding resolved: {status3}"
+    );
+    assert_eq!(status3["findings"][0]["status"], "resolved", "{status3}");
+
+    // Case 4: Clean revert on a tracked file whose pathname contains raw non-UTF-8 byte 0xff
+    // must reopen the blocking finding.
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let begin4 = stdout(repo.arc(&repo.root).args(["begin", "non-utf8-path"]));
+        let change4 = opened_change_id(&begin4);
+        let wt4 = repo.home.join(".worktrees/repo-non-utf8-path");
+        let raw_name = OsStr::from_bytes(b"bad\xffname.txt");
+        let raw_path = wt4.join(raw_name);
+        fs::write(&raw_path, b"broken\n").unwrap();
+        git(&wt4, &["add", "."]);
+        git(&wt4, &["commit", "-m", "feat: non-utf8 initial"]);
+        stdout(repo.arc(&wt4).args(["snapshot", "non-utf8-path"]));
+        let fid4 = stdout(repo.arc(&wt4).args([
+            "finding",
+            "non-utf8-path",
+            "--summary",
+            "fix non-utf8 file",
+            "--blocking",
+            "--severity",
+            "major",
+        ]))
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+        fs::write(&raw_path, b"fixed\n").unwrap();
+        git(&wt4, &["add", "."]);
+        git(&wt4, &["commit", "-m", "fix: repair non-utf8 file"]);
+        let fix4 = repo.head(&wt4);
+        stdout(repo.arc(&wt4).args([
+            "resolve",
+            "non-utf8-path",
+            &fid4,
+            "--status",
+            "resolved",
+            "--commit",
+            &fix4,
+        ]));
+        git(&wt4, &["revert", "--no-edit", &fix4]);
+        stdout(repo.arc(&wt4).args(["snapshot", "non-utf8-path"]));
+        let status4 = json_stdout(repo.arc(&wt4).args(["status", &change4, "--json"]));
+        assert_eq!(
+            status4["open_blocking_findings"],
+            serde_json::json!([fid4]),
+            "clean revert on non-UTF-8 pathname must reopen blocking finding: {status4}"
+        );
+        assert_eq!(status4["findings"][0]["status"], "open", "{status4}");
+        repo.arc(&wt4).args(["check", &change4]).assert().code(2);
+    }
+}
