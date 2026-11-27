@@ -144,6 +144,13 @@ const VALID_WEBP: &[u8] = &[
     80, 138, 42, 212, 163, 255, 129, 136, 232, 127, 0, 0,
 ];
 
+/// Genuine decoder-valid 16x16 gradient lossless WebP using SubtractGreen + Predictor transforms (Pillow-verified).
+const VALID_WEBP_PREDICTOR: &[u8] = &[
+    82, 73, 70, 70, 40, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 27, 0, 0, 0, 47, 15, 192, 3, 0,
+    205, 101, 68, 255, 3, 68, 218, 54, 179, 48, 5, 243, 175, 244, 240, 52, 34, 38, 0, 215, 238, 2,
+    0,
+];
+
 /// Genuine decoder-valid 2-frame animated WebP (Pillow-verified).
 const VALID_WEBP_ANIM: &[u8] = &[
     82, 73, 70, 70, 168, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
@@ -426,6 +433,24 @@ fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
         b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2f\x00\x00\x00\x00\x00",
     )
     .unwrap();
+    let predictor_zero_vp8l = dir.join("predictor-zero-vp8l.webp");
+    fs::write(
+        &predictor_zero_vp8l,
+        b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x01\x00\x00\x00\x00",
+    )
+    .unwrap();
+    let color_zero_vp8l = dir.join("color-zero-vp8l.webp");
+    fs::write(
+        &color_zero_vp8l,
+        b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x03\x00\x00\x00\x00",
+    )
+    .unwrap();
+    let palette_zero_vp8l = dir.join("palette-zero-vp8l.webp");
+    fs::write(
+        &palette_zero_vp8l,
+        b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x07\x00\x00\x00\x00",
+    )
+    .unwrap();
     let payloadless_anmf = dir.join("payloadless-anmf.webp");
     let mut bad_anim = Vec::new();
     bad_anim.extend_from_slice(b"RIFF");
@@ -459,6 +484,9 @@ fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
         &sig_only_jpg,
         &sig_only_webp,
         &header_only_vp8l,
+        &predictor_zero_vp8l,
+        &color_zero_vp8l,
+        &palette_zero_vp8l,
         &payloadless_anmf,
         &sig_only_gif,
         &huge,
@@ -498,10 +526,12 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
     fs::create_dir_all(&dir).unwrap();
     let png_path = dir.join("shot.png");
     let webp_path = dir.join("shot.webp");
+    let pred_webp_path = dir.join("pred.webp");
     let anim_webp_path = dir.join("anim.webp");
     let gif_path = dir.join("shot.gif");
     fs::write(&png_path, sample_png(2)).unwrap();
     fs::write(&webp_path, sample_webp()).unwrap();
+    fs::write(&pred_webp_path, VALID_WEBP_PREDICTOR).unwrap();
     fs::write(&anim_webp_path, VALID_WEBP_ANIM).unwrap();
     fs::write(&gif_path, sample_gif()).unwrap();
 
@@ -517,6 +547,8 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
                 png_path.to_str().unwrap(),
                 "--attach",
                 webp_path.to_str().unwrap(),
+                "--attach",
+                pred_webp_path.to_str().unwrap(),
                 "--attach",
                 anim_webp_path.to_str().unwrap(),
                 "--attach",

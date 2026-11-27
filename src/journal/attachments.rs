@@ -758,18 +758,489 @@ fn validate_webp_vp8(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+const VP8L_CL_ORDER: [usize; 19] = [
+    17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+];
+
+const VP8L_DISTANCE_MAP: [(i32, i32); 120] = [
+    (0, 1),
+    (1, 0),
+    (1, 1),
+    (-1, 1),
+    (0, 2),
+    (2, 0),
+    (1, 2),
+    (-1, 2),
+    (2, 1),
+    (-2, 1),
+    (2, 2),
+    (-2, 2),
+    (0, 3),
+    (3, 0),
+    (1, 3),
+    (-1, 3),
+    (3, 1),
+    (-3, 1),
+    (2, 3),
+    (-2, 3),
+    (3, 2),
+    (-3, 2),
+    (0, 4),
+    (4, 0),
+    (1, 4),
+    (-1, 4),
+    (4, 1),
+    (-4, 1),
+    (3, 3),
+    (-3, 3),
+    (2, 4),
+    (-2, 4),
+    (4, 2),
+    (-4, 2),
+    (0, 5),
+    (3, 4),
+    (-3, 4),
+    (4, 3),
+    (-4, 3),
+    (5, 0),
+    (1, 5),
+    (-1, 5),
+    (5, 1),
+    (-5, 1),
+    (2, 5),
+    (-2, 5),
+    (5, 2),
+    (-5, 2),
+    (4, 4),
+    (-4, 4),
+    (3, 5),
+    (-3, 5),
+    (5, 3),
+    (-5, 3),
+    (0, 6),
+    (6, 0),
+    (1, 6),
+    (-1, 6),
+    (6, 1),
+    (-6, 1),
+    (2, 6),
+    (-2, 6),
+    (6, 2),
+    (-6, 2),
+    (4, 5),
+    (-4, 5),
+    (5, 4),
+    (-5, 4),
+    (3, 6),
+    (-3, 6),
+    (6, 3),
+    (-6, 3),
+    (0, 7),
+    (7, 0),
+    (1, 7),
+    (-1, 7),
+    (5, 5),
+    (-5, 5),
+    (7, 1),
+    (-7, 1),
+    (4, 6),
+    (-4, 6),
+    (6, 4),
+    (-6, 4),
+    (2, 7),
+    (-2, 7),
+    (7, 2),
+    (-7, 2),
+    (3, 7),
+    (-3, 7),
+    (7, 3),
+    (-7, 3),
+    (5, 6),
+    (-5, 6),
+    (6, 5),
+    (-6, 5),
+    (8, 0),
+    (4, 7),
+    (-4, 7),
+    (7, 4),
+    (-7, 4),
+    (8, 1),
+    (8, 2),
+    (6, 6),
+    (-6, 6),
+    (8, 3),
+    (5, 7),
+    (-5, 7),
+    (7, 5),
+    (-7, 5),
+    (8, 4),
+    (6, 7),
+    (-6, 7),
+    (7, 6),
+    (-7, 6),
+    (8, 5),
+    (7, 7),
+    (-7, 7),
+    (8, 6),
+    (8, 7),
+];
+
+/// Bounds for VP8L bitstream validation so crafted headers cannot trigger
+/// unbounded memory or CPU work.
+const MAX_VP8L_META_PIXELS: usize = 4 * 1024 * 1024;
+const MAX_VP8L_PREFIX_GROUPS: usize = 16_384;
+const MAX_VP8L_DECODE_STEPS: usize = 33_554_432;
+
+enum Vp8lHuffman {
+    Single(u16),
+    Pair(u16, u16),
+    Tree(Huffman),
+}
+
+impl Vp8lHuffman {
+    fn from_lengths(lengths: &[u8]) -> Result<Self> {
+        let mut nonzero_count = 0usize;
+        let mut single_sym = 0u16;
+        let mut single_len = 0u8;
+        let mut counts = [0u16; 16];
+        for (sym, &len) in lengths.iter().enumerate() {
+            if len as usize >= counts.len() {
+                bail!("invalid WebP VP8L Huffman code length");
+            }
+            if len > 0 {
+                nonzero_count += 1;
+                single_sym = sym as u16;
+                single_len = len;
+                counts[len as usize] += 1;
+            }
+        }
+        if nonzero_count == 0 {
+            bail!("empty WebP VP8L Huffman table");
+        }
+        if nonzero_count == 1 {
+            if single_len != 1 {
+                bail!("invalid single-symbol WebP VP8L Huffman code length");
+            }
+            return Ok(Self::Single(single_sym));
+        }
+        let mut left = 1i32;
+        for &count in &counts[1..] {
+            left = (left << 1) - i32::from(count);
+            if left < 0 {
+                bail!("over-subscribed WebP VP8L Huffman tree");
+            }
+        }
+        if left != 0 {
+            bail!("under-subscribed WebP VP8L Huffman tree");
+        }
+        Ok(Self::Tree(Huffman::from_lengths(lengths)?))
+    }
+
+    fn single_symbol(&self) -> Option<u16> {
+        match self {
+            Self::Single(sym) => Some(*sym),
+            _ => None,
+        }
+    }
+
+    fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16> {
+        match self {
+            Self::Single(sym) => Ok(*sym),
+            Self::Pair(s0, s1) => Ok(if reader.read_bits(1)? == 0 { *s0 } else { *s1 }),
+            Self::Tree(tree) => tree.decode(reader),
+        }
+    }
+}
+
+struct Vp8lPrefixGroup {
+    green: Vp8lHuffman,
+    red: Vp8lHuffman,
+    blue: Vp8lHuffman,
+    alpha: Vp8lHuffman,
+    dist: Vp8lHuffman,
+}
+
+fn read_vp8l_prefix_code(reader: &mut BitReader<'_>, alphabet_size: usize) -> Result<Vp8lHuffman> {
+    let is_simple = reader.read_bits(1)? != 0;
+    if is_simple {
+        let num_symbols = usize::from(reader.read_bits(1)?) + 1;
+        let is_first_8bits = reader.read_bits(1)? != 0;
+        let sym0 = reader.read_bits(if is_first_8bits { 8 } else { 1 })?;
+        if usize::from(sym0) >= alphabet_size {
+            bail!("WebP VP8L simple Huffman symbol out of range");
+        }
+        if num_symbols == 1 {
+            return Ok(Vp8lHuffman::Single(sym0));
+        }
+        let sym1 = reader.read_bits(8)?;
+        if usize::from(sym1) >= alphabet_size {
+            bail!("WebP VP8L simple Huffman symbol out of range");
+        }
+        return Ok(Vp8lHuffman::Pair(sym0, sym1));
+    }
+
+    let num_code_lengths = usize::from(reader.read_bits(4)?) + 4;
+    let mut cl_lengths = [0u8; 19];
+    for &slot in &VP8L_CL_ORDER[..num_code_lengths] {
+        cl_lengths[slot] = reader.read_bits(3)? as u8;
+    }
+    let cl_tree = Vp8lHuffman::from_lengths(&cl_lengths)?;
+
+    let max_symbol = if reader.read_bits(1)? != 0 {
+        let length_nbits = 2 + 2 * u32::from(reader.read_bits(3)?);
+        let max_sym = 2 + usize::from(reader.read_bits(length_nbits)?);
+        if max_sym > alphabet_size {
+            bail!("WebP VP8L max_symbol exceeds alphabet size");
+        }
+        max_sym
+    } else {
+        alphabet_size
+    };
+
+    let mut code_lengths = vec![0u8; alphabet_size];
+    let mut prev_nonzero = 8u8;
+    let mut sym = 0usize;
+    let mut remaining = max_symbol;
+    while sym < alphabet_size && remaining > 0 {
+        remaining -= 1;
+        let code = cl_tree.decode(reader)?;
+        match code {
+            0..=15 => {
+                code_lengths[sym] = code as u8;
+                sym += 1;
+                if code != 0 {
+                    prev_nonzero = code as u8;
+                }
+            }
+            16 => {
+                let repeat = usize::from(reader.read_bits(2)?) + 3;
+                if sym + repeat > alphabet_size {
+                    bail!("WebP VP8L Huffman repeat overflow");
+                }
+                code_lengths[sym..sym + repeat].fill(prev_nonzero);
+                sym += repeat;
+            }
+            17 => {
+                let repeat = usize::from(reader.read_bits(3)?) + 3;
+                if sym + repeat > alphabet_size {
+                    bail!("WebP VP8L Huffman zero-repeat overflow");
+                }
+                sym += repeat;
+            }
+            18 => {
+                let repeat = usize::from(reader.read_bits(7)?) + 11;
+                if sym + repeat > alphabet_size {
+                    bail!("WebP VP8L Huffman zero-repeat overflow");
+                }
+                sym += repeat;
+            }
+            _ => bail!("invalid WebP VP8L code-length symbol"),
+        }
+    }
+    Vp8lHuffman::from_lengths(&code_lengths)
+}
+
+fn decode_vp8l_prefix_val(reader: &mut BitReader<'_>, prefix_code: u16) -> Result<usize> {
+    if prefix_code < 4 {
+        return Ok(usize::from(prefix_code) + 1);
+    }
+    let extra_bits = u32::from((prefix_code - 2) >> 1);
+    let offset = (2 + usize::from(prefix_code & 1)) << extra_bits;
+    Ok(offset + usize::from(reader.read_bits(extra_bits)?) + 1)
+}
+
+fn decode_vp8l_image_stream(
+    reader: &mut BitReader<'_>,
+    width: usize,
+    height: usize,
+    is_top_level: bool,
+    capture_meta: bool,
+    steps: &mut usize,
+) -> Result<Option<Vec<u16>>> {
+    let total_pixels = width
+        .checked_mul(height)
+        .ok_or_else(|| anyhow::anyhow!("WebP VP8L pixel count overflow"))?;
+    if total_pixels == 0 {
+        bail!("WebP VP8L image stream has zero pixels");
+    }
+    if capture_meta && total_pixels > MAX_VP8L_META_PIXELS {
+        bail!("WebP VP8L meta-prefix image exceeds size limit");
+    }
+
+    let use_color_cache = reader.read_bits(1)? != 0;
+    let (cc_bits, cc_size) = if use_color_cache {
+        let bits = u32::from(reader.read_bits(4)?);
+        if !(1..=11).contains(&bits) {
+            bail!("invalid WebP VP8L color cache size");
+        }
+        (bits, 1usize << bits)
+    } else {
+        (0u32, 0usize)
+    };
+
+    let (prefix_bits, prefix_width, meta_groups, num_groups) =
+        if is_top_level && reader.read_bits(1)? != 0 {
+            let pbits = usize::from(reader.read_bits(3)?) + 2;
+            let pwidth = width.div_ceil(1usize << pbits);
+            let pheight = height.div_ceil(1usize << pbits);
+            let groups = decode_vp8l_image_stream(reader, pwidth, pheight, false, true, steps)?
+                .ok_or_else(|| anyhow::anyhow!("missing WebP VP8L meta-prefix image"))?;
+            let max_group = groups.iter().copied().max().unwrap_or(0) as usize;
+            let count = max_group + 1;
+            if count > MAX_VP8L_PREFIX_GROUPS {
+                bail!("WebP VP8L prefix-code group count exceeds limit");
+            }
+            (pbits, pwidth, Some(groups), count)
+        } else {
+            (0usize, 0usize, None, 1usize)
+        };
+
+    let mut groups = Vec::with_capacity(num_groups);
+    for _ in 0..num_groups {
+        groups.push(Vp8lPrefixGroup {
+            green: read_vp8l_prefix_code(reader, 256 + 24 + cc_size)?,
+            red: read_vp8l_prefix_code(reader, 256)?,
+            blue: read_vp8l_prefix_code(reader, 256)?,
+            alpha: read_vp8l_prefix_code(reader, 256)?,
+            dist: read_vp8l_prefix_code(reader, 40)?,
+        });
+    }
+
+    // Fast-path constant 0-bit single-symbol images when not capturing meta-groups
+    // so large solid-color lossless images validate in O(1) time.
+    if !capture_meta && meta_groups.is_none() {
+        let g = &groups[0];
+        if let Some(gs) = g.green.single_symbol() {
+            if gs < 256
+                && g.red.single_symbol().is_some()
+                && g.blue.single_symbol().is_some()
+                && g.alpha.single_symbol().is_some()
+            {
+                return Ok(None);
+            }
+            if gs >= 280 {
+                let idx = usize::from(gs - 280);
+                if idx >= cc_size {
+                    bail!("WebP VP8L color cache index out of bounds");
+                }
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut out_meta = if capture_meta {
+        Vec::with_capacity(total_pixels)
+    } else {
+        Vec::new()
+    };
+    let mut out_argb = if capture_meta {
+        Vec::with_capacity(total_pixels)
+    } else {
+        Vec::new()
+    };
+    let mut cache = if capture_meta && cc_size > 0 {
+        vec![0u32; cc_size]
+    } else {
+        Vec::new()
+    };
+
+    let mut px = 0usize;
+    while px < total_pixels {
+        *steps += 1;
+        if *steps > MAX_VP8L_DECODE_STEPS {
+            bail!("WebP VP8L image exceeds decoding step bound");
+        }
+        let group = if let Some(ref mg) = meta_groups {
+            let x = px % width;
+            let y = px / width;
+            let idx = usize::from(mg[(y >> prefix_bits) * prefix_width + (x >> prefix_bits)]);
+            &groups[idx]
+        } else {
+            &groups[0]
+        };
+
+        let gs = group.green.decode(reader)?;
+        if gs < 256 {
+            let rv = group.red.decode(reader)?;
+            let bv = group.blue.decode(reader)?;
+            let av = group.alpha.decode(reader)?;
+            if capture_meta {
+                let argb = (u32::from(av) << 24)
+                    | (u32::from(rv) << 16)
+                    | (u32::from(gs) << 8)
+                    | u32::from(bv);
+                out_argb.push(argb);
+                out_meta.push((rv << 8) | gs);
+                if cc_size > 0 {
+                    let h = (argb.wrapping_mul(0x1e35_a7bd) >> (32 - cc_bits)) as usize;
+                    cache[h] = argb;
+                }
+            }
+            px += 1;
+        } else if gs < 280 {
+            let length = decode_vp8l_prefix_val(reader, gs - 256)?;
+            let dist_sym = group.dist.decode(reader)?;
+            let dist_code = decode_vp8l_prefix_val(reader, dist_sym)?;
+            let dist = if dist_code > 120 {
+                dist_code - 120
+            } else {
+                let (xi, yi) = VP8L_DISTANCE_MAP[dist_code - 1];
+                let d = yi * (width as i32) + xi;
+                d.max(1) as usize
+            };
+            if dist == 0 || dist > px || px.checked_add(length).is_none_or(|end| end > total_pixels)
+            {
+                bail!("WebP VP8L LZ77 backward reference out of bounds");
+            }
+            if capture_meta {
+                for _ in 0..length {
+                    let argb = out_argb[out_argb.len() - dist];
+                    out_argb.push(argb);
+                    let r = ((argb >> 16) & 0xFF) as u16;
+                    let g = ((argb >> 8) & 0xFF) as u16;
+                    out_meta.push((r << 8) | g);
+                    if cc_size > 0 {
+                        let h = (argb.wrapping_mul(0x1e35_a7bd) >> (32 - cc_bits)) as usize;
+                        cache[h] = argb;
+                    }
+                }
+            }
+            px += length;
+        } else {
+            let idx = usize::from(gs - 280);
+            if idx >= cc_size {
+                bail!("WebP VP8L color cache index out of bounds");
+            }
+            if capture_meta {
+                let argb = cache[idx];
+                out_argb.push(argb);
+                let r = ((argb >> 16) & 0xFF) as u16;
+                let g = ((argb >> 8) & 0xFF) as u16;
+                out_meta.push((r << 8) | g);
+            }
+            px += 1;
+        }
+    }
+
+    Ok(capture_meta.then_some(out_meta))
+}
+
 fn validate_webp_vp8l(data: &[u8]) -> Result<()> {
     if data.len() < 8 || data[0] != 0x2F {
         bail!("invalid or truncated WebP VP8L bitstream");
     }
     let header = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    let width = ((header & 0x3FFF) + 1) as usize;
+    let height = (((header >> 14) & 0x3FFF) + 1) as usize;
     let version = (header >> 29) & 0x07;
     if version != 0 {
         bail!("unsupported WebP VP8L version");
     }
     let mut reader = BitReader::new(&data[5..]);
     let mut seen_transforms = [false; 4];
-    let mut saw_subimage_transform = false;
+    let mut cur_width = width;
+    let mut steps = 0usize;
+
     while reader.read_bits(1)? == 1 {
         let transform = reader.read_bits(2)? as usize;
         if seen_transforms[transform] {
@@ -778,73 +1249,40 @@ fn validate_webp_vp8l(data: &[u8]) -> Result<()> {
         seen_transforms[transform] = true;
         match transform {
             0 | 1 => {
-                // Predictor or Color transform: 3-bit size_bits followed by a
-                // recursively encoded sub-image and the main image bitstream.
-                let _size_bits = reader.read_bits(3)?;
-                if reader.remaining_bits() < 24 {
-                    bail!("truncated WebP VP8L transform payload");
-                }
-                saw_subimage_transform = true;
-                break;
+                let size_bits = usize::from(reader.read_bits(3)?) + 2;
+                let block_width = cur_width.div_ceil(1usize << size_bits);
+                let block_height = height.div_ceil(1usize << size_bits);
+                decode_vp8l_image_stream(
+                    &mut reader,
+                    block_width,
+                    block_height,
+                    false,
+                    false,
+                    &mut steps,
+                )?;
             }
             2 => {
-                // SubtractGreen transform has no payload bits.
+                // SubtractGreen transform has no subimage payload.
             }
             3 => {
-                // ColorIndexing transform: 8-bit color_table_size_minus_1
-                // followed by a palette sub-image and the main image bitstream.
-                let _table_size = reader.read_bits(8)?;
-                if reader.remaining_bits() < 24 {
-                    bail!("truncated WebP VP8L color-index payload");
-                }
-                saw_subimage_transform = true;
-                break;
+                let table_size = usize::from(reader.read_bits(8)?) + 1;
+                decode_vp8l_image_stream(&mut reader, table_size, 1, false, false, &mut steps)?;
+                let xbits = if table_size <= 2 {
+                    3
+                } else if table_size <= 4 {
+                    2
+                } else if table_size <= 16 {
+                    1
+                } else {
+                    0
+                };
+                cur_width = cur_width.div_ceil(1usize << xbits);
             }
             _ => unreachable!(),
         }
     }
-    if !saw_subimage_transform {
-        let use_color_cache = reader.read_bits(1)?;
-        if use_color_cache == 1 {
-            let color_cache_bits = reader.read_bits(4)?;
-            if !(1..=11).contains(&color_cache_bits) {
-                bail!("invalid WebP VP8L color cache size");
-            }
-        }
-        let use_meta_prefix = reader.read_bits(1)?;
-        if use_meta_prefix == 1 {
-            let _prefix_bits = reader.read_bits(3)?;
-            if reader.remaining_bits() < 24 {
-                bail!("truncated WebP VP8L meta-prefix image");
-            }
-        } else {
-            // Validate the 5 prefix code headers (green/length/cache, red,
-            // blue, alpha, distance) up to the first non-simple Huffman code.
-            for _ in 0..5 {
-                let is_simple = reader.read_bits(1)?;
-                if is_simple == 1 {
-                    let num_symbols_minus_1 = reader.read_bits(1)?;
-                    let is_first_8bits = reader.read_bits(1)?;
-                    let _sym0 = reader.read_bits(if is_first_8bits == 1 { 8 } else { 1 })?;
-                    if num_symbols_minus_1 == 1 {
-                        let _sym1 = reader.read_bits(8)?;
-                    }
-                } else {
-                    let num_code_lengths = usize::from(reader.read_bits(4)?) + 4;
-                    let mut any_nonzero = false;
-                    for _ in 0..num_code_lengths {
-                        if reader.read_bits(3)? != 0 {
-                            any_nonzero = true;
-                        }
-                    }
-                    if !any_nonzero || reader.remaining_bits() < 8 {
-                        bail!("invalid or truncated WebP VP8L prefix code");
-                    }
-                    break;
-                }
-            }
-        }
-    }
+
+    decode_vp8l_image_stream(&mut reader, cur_width, height, true, false, &mut steps)?;
     Ok(())
 }
 
@@ -2559,10 +2997,6 @@ impl<'a> BitReader<'a> {
         self.bits -= drop_bits;
     }
 
-    fn remaining_bits(&self) -> usize {
-        (self.data.len() - self.pos) * 8 + self.bits as usize
-    }
-
     fn remaining_aligned_bytes(&self) -> usize {
         debug_assert_eq!(self.bits % 8, 0);
         (self.data.len() - self.pos) + (self.bits as usize / 8)
@@ -2980,6 +3414,19 @@ mod tests {
         38, 37, 148, 0, 3, 112, 0, 254, 249, 79, 63, 182, 203, 68, 160, 125, 201, 250, 35, 0, 0, 0,
     ];
 
+    /// Decoder-valid 16x16 gradient lossless WebP using SubtractGreen + Predictor transforms (Pillow-verified).
+    const VALID_WEBP_LOSSLESS_PREDICTOR: &[u8] = &[
+        82, 73, 70, 70, 40, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 27, 0, 0, 0, 47, 15, 192, 3,
+        0, 205, 101, 68, 255, 3, 68, 218, 54, 179, 48, 5, 243, 175, 244, 240, 52, 34, 38, 0, 215,
+        238, 2, 0,
+    ];
+
+    /// Decoder-valid 8x8 2-color lossless WebP using 1-bit ColorIndexing packing (Pillow-verified).
+    const VALID_WEBP_LOSSLESS_PALETTE: &[u8] = &[
+        82, 73, 70, 70, 34, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 21, 0, 0, 0, 47, 7, 192, 1, 0,
+        15, 48, 53, 243, 48, 97, 243, 31, 120, 120, 149, 106, 68, 255, 163, 10, 0,
+    ];
+
     /// Decoder-valid 1x1 GIF87a (Pillow-verified).
     const VALID_GIF: &[u8] = &[
         71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44,
@@ -3092,6 +3539,14 @@ mod tests {
             validate_image_bytes(VALID_WEBP_ANIM).unwrap(),
             ImageFormat::Webp
         );
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_LOSSLESS_PREDICTOR).unwrap(),
+            ImageFormat::Webp
+        );
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_LOSSLESS_PALETTE).unwrap(),
+            ImageFormat::Webp
+        );
         assert_eq!(validate_image_bytes(VALID_GIF).unwrap(), ImageFormat::Gif);
 
         // Header-only VP8L (5-byte chunk payload `2f 00 00 00 00` + RIFF pad byte).
@@ -3100,6 +3555,22 @@ mod tests {
         // Zero-padded 8-byte VP8L with empty normal prefix code table.
         let zero_vp8l =
             b"RIFF\x14\x00\x00\x00WEBPVP8L\x08\x00\x00\x00\x2f\x00\x00\x00\x00\x00\x00\x00";
+        // 30-byte VP8L with predictor transform flag followed by zero padding.
+        let predictor_zero_vp8l =
+            b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x01\x00\x00\x00\x00";
+        // VP8L with Color transform flag (bit0=1, type=1 -> 0b011 = 0x03) and zero padding.
+        let color_zero_vp8l =
+            b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x03\x00\x00\x00\x00";
+        // VP8L with ColorIndexing transform flag (bit0=1, type=3 -> 0b111 = 0x07) and zero padding.
+        let palette_zero_vp8l =
+            b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x07\x00\x00\x00\x00";
+        // Truncated genuine lossless predictor WebP (missing final bytes of main image).
+        let mut trunc_predictor_vp8l =
+            VALID_WEBP_LOSSLESS_PREDICTOR[..VALID_WEBP_LOSSLESS_PREDICTOR.len() - 6].to_vec();
+        let trunc_riff = (trunc_predictor_vp8l.len() - 8) as u32;
+        trunc_predictor_vp8l[4..8].copy_from_slice(&trunc_riff.to_le_bytes());
+        let trunc_vp8l_sz = (trunc_predictor_vp8l.len() - 20) as u32;
+        trunc_predictor_vp8l[16..20].copy_from_slice(&trunc_vp8l_sz.to_le_bytes());
         // Animated WebP whose ANMF chunk carries only the 16-byte frame header and no image data.
         let mut empty_anmf = Vec::new();
         empty_anmf.extend_from_slice(b"RIFF");
@@ -3124,6 +3595,10 @@ mod tests {
             b"RIFF\x10\x00\x00\x00WEBPVP8 ".as_slice(),
             header_only_vp8l.as_slice(),
             zero_vp8l.as_slice(),
+            predictor_zero_vp8l.as_slice(),
+            color_zero_vp8l.as_slice(),
+            palette_zero_vp8l.as_slice(),
+            trunc_predictor_vp8l.as_slice(),
             empty_anmf.as_slice(),
             b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".as_slice(),
             // Active / non-image payloads.
