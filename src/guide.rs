@@ -1455,13 +1455,17 @@ RUN A CHANGE
   By default (`[trailers] auto = true`), fast-forward integration auto-stamps
   applicable missing projected role trailers (`Planned-by`, `Implemented-by`,
   `Reviewed-by`, `Orchestrated-by`) over `target..head` via a `role_additions`
-  rewrite before advancing the target (no-op when nothing is missing; respects
-  `commit.gpgsign`; refuses shared commits such as a stacked branch, naming
-  `arc land` or `--no-trailers`), while `--shape no-ff` appends applicable
-  missing trailers directly onto the merge commit message without rewriting
-  branch commits. Pass `--no-trailers` or set `[trailers] auto = false` to
-  skip auto-stamping. `--dry-run` previews which trailers would be stamped
-  (as `auto_trailers` in `arc-integration-plan/1`) without mutating Git state.
+  rewrite applied atomically with the target ref move (no-op when nothing is
+  missing; respects `commit.gpgsign`; refuses commits reachable from another
+  branch, tag, or stacked open change, naming `arc land` or `--no-trailers`,
+  and moves only the source branch, target, and required `refs/arc/*` pins),
+  while `--shape no-ff` appends applicable missing trailers directly onto the
+  merge commit message without rewriting branch commits (omitting `Reviewed-by`
+  when the merged tree differs from the approved tree). Pass `--no-trailers` or
+  set `[trailers] auto = false` to skip auto-stamping. `--dry-run` (single and
+  queued) previews which trailers would be stamped (as `auto_trailers` in
+  `arc-integration-plan/1`) and enforces the same shared-history refusal
+  without mutating Git state.
 
   Several changes, or `--tag`, make `integrate` a queue in dependency order.
   Dry-run prerequisites follow supersession successors through projected

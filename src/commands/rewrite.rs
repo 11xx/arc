@@ -303,8 +303,10 @@ pub(crate) fn check_integrate_shared_safety(
     let mut protected: BTreeMap<String, String> = gitio::local_refs(cwd)?
         .into_iter()
         .filter(|reference| {
-            reference.name.starts_with("refs/heads/")
-                && reference.name != format!("refs/heads/{branch}")
+            (reference.name.starts_with("refs/heads/")
+                && reference.name != format!("refs/heads/{branch}"))
+                || (reference.name.starts_with("refs/tags/")
+                    && gitio::commit_exists(cwd, &reference.commit).unwrap_or(false))
         })
         .map(|reference| (reference.name, reference.commit))
         .collect();
@@ -353,6 +355,7 @@ pub(crate) fn check_integrate_shared_safety(
                     "--format=%(refname)",
                     "refs/heads/",
                     "refs/remotes/",
+                    "refs/tags/",
                 ],
             )?;
             let refs: Vec<&str> = containing
@@ -428,34 +431,43 @@ pub(crate) fn check_integrate_shared_safety(
     Ok(())
 }
 
-/// Auto-stamp applicable missing projected contribution trailers over
-/// `target_head..approved_head` during fast-forward `arc integrate`, using the
-/// `role_additions` rewrite pipeline and respecting Git's `commit.gpgsign`.
+/// Prepared atomic fast-forward trailer stamp: unreferenced commit objects are
+/// already written to Git's ODB, while no ref or ledger event has been mutated.
 ///
-/// Zero-cost no-op when nothing is missing or applicable. Leaves all refs and
-/// ledger events untouched if shared-commit safety or commit signing fails.
+/// The caller executes `ref_updates` in one atomic `git update-ref --stdin`
+/// transaction (moving target, source branch, required `refs/arc/*` pins, and
+/// retention pins together) and publishes `event` only after checkout and
+/// post-update checks pass.
+pub(crate) struct PreparedAutoStamp {
+    pub new_head: String,
+    pub rewritten_commits: usize,
+    pub event: crate::store::LocalEvent,
+    pub ref_updates: Vec<gitio::RefUpdate>,
+    pub rollback_updates: Vec<gitio::RefUpdate>,
+}
+
+/// Prepare auto-stamped commits and the single atomic multi-ref transaction for
+/// fast-forward `arc integrate`, without mutating any ref or ledger event.
+///
+/// Returns `Ok(None)` when nothing is missing or applicable (zero-cost no-op).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn auto_stamp_change_for_integrate(
+pub(crate) fn prepare_auto_stamp_for_integrate(
     ctx: &Ctx,
     store: &Store,
     state: &ChangeState,
+    target_branch: &str,
     target_head: &str,
     approved_head: &str,
+    evaluated_tree: Option<&str>,
     policy: &crate::policy::PolicyFile,
     danger: &crate::status::DangerScope,
     targets: &BTreeSet<String>,
-) -> Result<SyncTrailersResult> {
+) -> Result<Option<PreparedAutoStamp>> {
     let cwd = ctx.cwd.clone();
     let branch = state.branch.clone();
     let preview = preview_range_trailers(&cwd, state, policy, danger, target_head, approved_head)?;
     if preview.commits.is_empty() {
-        return Ok(SyncTrailersResult {
-            exit_code: 0,
-            projected: preview.projected,
-            rewritten_commits: 0,
-            new_head: None,
-            rewrite_event_id: None,
-        });
+        return Ok(None);
     }
     if store.rewrite_intent()?.is_some() {
         bail!(
@@ -532,16 +544,57 @@ pub(crate) fn auto_stamp_change_for_integrate(
         walked.recreated(&cwd, old, &commit, sign)?;
     }
     if walked.mapping.is_empty() {
-        return Ok(SyncTrailersResult {
-            exit_code: 0,
-            projected: preview.projected,
-            rewritten_commits: 0,
-            new_head: None,
-            rewrite_event_id: None,
-        });
+        return Ok(None);
     }
     let rewritten_keys: Vec<String> = walked.mapping.keys().cloned().collect();
     check_integrate_shared_safety(&cwd, store, state, targets, &rewritten_keys)?;
+
+    let new_head = walked
+        .mapping
+        .get(&walked.head)
+        .and_then(|new| new.clone())
+        .unwrap_or_else(|| walked.head.clone());
+    if let Some(expected_tree) = evaluated_tree {
+        let stamped_tree = gitio::commit_tree(&cwd, &new_head)?;
+        if stamped_tree != expected_tree {
+            bail!(
+                "auto-stamped head {} carries tree {stamped_tree}, not the evaluated tree \
+                 {expected_tree}; nothing was moved",
+                short(&new_head)
+            );
+        }
+    }
+
+    // Automatic integration stamping moves ONLY the source branch and required
+    // Arc bookkeeping refs (`refs/arc/*`, excluding `refs/arc/retained/*`);
+    // never any other branch or tag ref.
+    let mut rewrite_refs: BTreeMap<String, RefMove> = BTreeMap::new();
+    for (name, value) in gitio::list_refs(&cwd, "refs/arc/")? {
+        if name.starts_with(gitio::RETAINED_PREFIX) {
+            continue;
+        }
+        if let Some(Some(new)) = walked.mapping.get(&value) {
+            rewrite_refs.insert(
+                name,
+                RefMove {
+                    old: value,
+                    new: new.clone(),
+                },
+            );
+        }
+    }
+    rewrite_refs.insert(
+        format!("refs/heads/{}", walked.branch),
+        RefMove {
+            old: walked.head.clone(),
+            new: new_head.clone(),
+        },
+    );
+    let retention = crate::retention::plan(&cwd, store, &walked.mapping, &rewrite_refs)?;
+    let (retentions, unheld) = crate::retention::creations(&cwd, &retention.retain)?;
+    for name in &unheld {
+        eprintln!("warning: {name} is not created: its commit is no longer in this repository");
+    }
 
     walked.reason = format!(
         "auto-stamped {} during integration on {} from {}",
@@ -549,40 +602,67 @@ pub(crate) fn auto_stamp_change_for_integrate(
         walked.branch,
         short(&walked.from)
     );
-    let mut moves = plan_ref_moves(&cwd, &walked.branch, &walked.from, &walked.mapping, false)?;
-    let retention = crate::retention::plan(&cwd, store, &walked.mapping, &moves.moves)?;
-    let new_head = walked
-        .mapping
-        .get(&walked.head)
-        .and_then(|new| new.clone())
-        .unwrap_or_else(|| walked.head.clone());
-    moves.moves.insert(
-        format!("refs/heads/{}", walked.branch),
-        RefMove {
-            old: walked.head.clone(),
-            new: new_head.clone(),
-        },
-    );
-    let intent = RewriteIntent {
-        schema_version: crate::model::SCHEMA_VERSION,
-        branch: walked.branch,
-        from: walked.from,
-        reason: walked.reason,
-        tool: Some(walked.tool.to_string()),
-        mapping: walked.mapping,
-        refs: moves.moves,
-        retained: retention.retain,
-        created_at: chrono::Utc::now(),
+    let event = history::prepare_mapping(
+        ctx,
+        store,
+        walked.mapping.clone(),
+        walked.reason,
+        Some(walked.tool.to_string()),
+        rewrite_refs.clone(),
+        retention.retain,
+    )?;
+    // Confirm the prepared rewrite preserves approval & gate carry on the head
+    // before touching any ref.
+    let head_carried = match &event.payload {
+        Payload::HistoryRewritten {
+            signature_only,
+            role_additions,
+            ..
+        } => {
+            signature_only.iter().any(|rev| rev == approved_head)
+                || role_additions.iter().any(|rev| rev == approved_head)
+        }
+        _ => false,
     };
-    let refresh_index = !gitio::dirt(&cwd).map(|dirt| dirt.tracked).unwrap_or(true);
-    let event_id = apply_with_options(ctx, store, &intent, true, refresh_index, false)?;
-    Ok(SyncTrailersResult {
-        exit_code: 0,
-        projected: preview.projected,
-        rewritten_commits: intent.mapping.len(),
-        new_head: Some(new_head),
-        rewrite_event_id: Some(event_id),
-    })
+    if !head_carried {
+        bail!(
+            "auto-stamping trailers on {} did not classify as a role_additions rewrite; \
+             nothing was moved",
+            state.change_id
+        );
+    }
+    store.ensure_repository_event_allowed(&event)?;
+
+    let mut ref_updates = Vec::with_capacity(1 + rewrite_refs.len() + retentions.len());
+    ref_updates.push(gitio::RefUpdate {
+        name: format!("refs/heads/{target_branch}"),
+        old: target_head.to_string(),
+        new: new_head.clone(),
+    });
+    for (name, RefMove { old, new }) in &rewrite_refs {
+        ref_updates.push(gitio::RefUpdate {
+            name: name.clone(),
+            old: old.clone(),
+            new: new.clone(),
+        });
+    }
+    ref_updates.extend(retentions);
+    let rollback_updates: Vec<gitio::RefUpdate> = ref_updates
+        .iter()
+        .map(|moved| gitio::RefUpdate {
+            name: moved.name.clone(),
+            old: moved.new.clone(),
+            new: moved.old.clone(),
+        })
+        .collect();
+
+    Ok(Some(PreparedAutoStamp {
+        new_head,
+        rewritten_commits: walked.mapping.len(),
+        event,
+        ref_updates,
+        rollback_updates,
+    }))
 }
 
 /// Recreate commits in `range_base..range_head` onto `new_parent`, appending
@@ -1500,17 +1580,6 @@ fn resume(ctx: &Ctx, store: &Store, branch: &str, intent: &RewriteIntent) -> Res
 /// Answers with the event holding the map, whether this call recorded it or
 /// an interrupted one already had.
 fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -> Result<String> {
-    apply_with_options(ctx, store, intent, write_intent, true, true)
-}
-
-fn apply_with_options(
-    ctx: &Ctx,
-    store: &Store,
-    intent: &RewriteIntent,
-    write_intent: bool,
-    refresh_index: bool,
-    announce: bool,
-) -> Result<String> {
     let cwd = &ctx.cwd;
     let _repository_events = store.lock_repository_events()?;
     // A commit the intent names has to still be here. Objects nothing points
@@ -1637,12 +1706,10 @@ fn apply_with_options(
                          retain {} for recovery", store.rewrite_intent_path().display()))),
                 }
             }
-            if announce {
-                println!(
-                    "history rewrite recorded: {} revisions",
-                    intent.mapping.len()
-                );
-            }
+            println!(
+                "history rewrite recorded: {} revisions",
+                intent.mapping.len()
+            );
             event.event_id.clone()
         }
     };
@@ -1651,7 +1718,7 @@ fn apply_with_options(
     // teaches the index which commit it is looking at when that branch is
     // checked out here.
     let branch_ref = format!("refs/heads/{}", intent.branch);
-    if refresh_index && gitio::current_branch(cwd)?.as_deref() == Some(intent.branch.as_str()) {
+    if gitio::current_branch(cwd)?.as_deref() == Some(intent.branch.as_str()) {
         if let Some(new_head) = intent.refs.get(&branch_ref) {
             gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new]).with_context(
                 || {

@@ -3003,11 +3003,15 @@ enum Cmd {
         /// By default (`[trailers] auto = true`), fast-forward integration
         /// stamps applicable missing projected role trailers (`Planned-by`,
         /// `Implemented-by`, `Reviewed-by`, `Orchestrated-by`) over
-        /// `target..head` via a `role_additions` rewrite (no-op when nothing
-        /// is missing, respecting `commit.gpgsign` and refusing shared
-        /// commits), and `--shape no-ff` appends applicable missing trailers
-        /// directly onto the merge commit message without rewriting branch
-        /// commits. `--dry-run` previews which trailers would be stamped.
+        /// `target..head` via a `role_additions` rewrite applied atomically
+        /// with the target ref move (no-op when nothing is missing, respecting
+        /// `commit.gpgsign`, refusing commits shared with other branches, tags,
+        /// or stacked open changes, and moving only source, target, and
+        /// required `refs/arc/*` pins), and `--shape no-ff` appends applicable
+        /// missing trailers directly onto the merge commit message without
+        /// rewriting branch commits (omitting `Reviewed-by` when the merged
+        /// tree differs from the approved tree). `--dry-run` (single and
+        /// queued) previews trailers and enforces shared-history checks.
         #[arg(long = "no-trailers")]
         no_trailers: bool,
     },

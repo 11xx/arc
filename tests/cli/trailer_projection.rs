@@ -3642,3 +3642,367 @@ fn land_stamps_stacked_layers_bottom_to_top_and_respects_no_trailers() {
     repo.arc(&repo.root).args(["land", &l3]).assert().success();
     assert_eq!(repo.head(&repo.root), l3_head);
 }
+
+/// Regression (`f01m8d8hp4xkhmkkfs4cgk48grk`): a locked target ref fails the
+/// fast-forward multi-ref transaction atomically, leaving the source branch,
+/// target ref, and ledger (zero rewrite or closure events) completely clean.
+#[test]
+fn integrate_ff_locked_target_ref_leaves_source_branch_and_ledger_untouched() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "locked-target");
+    commit_file(&wt, "work.txt", "feat: locked target test");
+    let orig_head = repo.head(&wt);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+    let events_before = event_count(&repo, &change);
+
+    // Hold a lock on `refs/heads/master` so the atomic ref transaction fails.
+    let lock_path = repo.root.join(".git/refs/heads/master.lock");
+    fs::write(&lock_path, "").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .assert()
+        .failure();
+
+    fs::remove_file(&lock_path).unwrap();
+
+    // Target, source branch, and ledger must all remain at their pre-run state.
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+    assert_eq!(event_count(&repo, &change), events_before);
+
+    // Once unlocked, integration succeeds cleanly and stamps trailers.
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&repo.root), orig_head);
+    assert_eq!(repo.head(&wt), repo.head(&repo.root));
+    assert_eq!(history_rewrite_count(&repo), 1);
+    let msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    assert!(
+        msg.contains("Implemented-by: codex:worker#medium")
+            && msg.contains("Reviewed-by: claude:rev#high"),
+        "{msg}"
+    );
+}
+
+/// Regression (`f01m8d8ht7e7n8wwjrk3he8j455`): default auto-stamping refuses
+/// commits reachable from lightweight or annotated tags in both preview and
+/// execution and never silently moves tags.
+#[test]
+fn integrate_ff_refuses_rewriting_commits_tagged_by_lightweight_or_annotated_tag() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "tagged-source");
+    commit_file(&wt, "tagged.txt", "feat: tagged work");
+    let orig_head = repo.head(&wt);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+
+    // Lightweight tag on the approved source commit.
+    git(&wt, &["tag", "release", &orig_head]);
+    for args in [
+        vec!["integrate", &change, "--dry-run"],
+        vec!["integrate", &change, "--dry-run", "--json"],
+        vec!["integrate", &change, "--no-cleanup"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/tags/release"))
+            .stderr(predicates::str::contains("--no-trailers"));
+    }
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "refs/tags/release"]),
+        orig_head
+    );
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Annotated tag on the approved source commit.
+    git(&wt, &["tag", "-d", "release"]);
+    git(&wt, &["tag", "-a", "v1.0", "-m", "v1.0", &orig_head]);
+    let tag_obj = git_out(&repo.root, &["rev-parse", "refs/tags/v1.0"]);
+    for args in [
+        vec!["integrate", &change, "--dry-run"],
+        vec!["integrate", &change, "--no-cleanup"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/tags/v1.0"))
+            .stderr(predicates::str::contains("--no-trailers"));
+    }
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "refs/tags/v1.0"]),
+        tag_obj
+    );
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // `--no-trailers` integrates without moving or rewriting the tagged commit.
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-trailers", "--no-cleanup"])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), orig_head);
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "refs/tags/v1.0"]),
+        tag_obj
+    );
+    assert_eq!(history_rewrite_count(&repo), 0);
+}
+
+/// Regression (`f01m8d8htffdq8vskbqzmjdg97f`): a divergent `--shape no-ff`
+/// merge whose resulting tree differs from the approved commit's tree must
+/// withhold `Reviewed-by` in both dry-run previews and live execution while
+/// still stamping other applicable roles (`Planned-by`, `Implemented-by`,
+/// `Orchestrated-by`).
+#[test]
+fn integrate_merge_commit_withholds_reviewed_by_when_merge_tree_differs_from_approved_tree() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "divergent-merge");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "lead:planner#high",
+        "--orchestrated-by",
+        "lead:coordinator#high",
+    ]));
+    commit_file(&wt, "feature.txt", "feat: feature work");
+    let branch_head = repo.head(&wt);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    // Advance `master` with a disjoint commit so the merge tree differs from
+    // the approved commit's tree.
+    commit_file(&repo.root, "disjoint.txt", "chore: disjoint master advance");
+    repo.arc(&wt)
+        .args(["verify", &change, "--against", "master", "--all"])
+        .assert()
+        .success();
+
+    // Dry-run (JSON and text) withholds `Reviewed-by` while keeping other roles.
+    let plan = json_stdout(repo.arc(&repo.root).args([
+        "integrate",
+        &change,
+        "--shape",
+        "no-ff",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["auto_trailers"]["target"], "merge-commit", "{plan}");
+    assert_eq!(
+        plan["auto_trailers"]["trailers"],
+        serde_json::json!([
+            "Planned-by: lead:planner#high",
+            "Implemented-by: codex:worker#medium",
+            "Orchestrated-by: lead:coordinator#high",
+        ]),
+        "divergent merge preview must omit Reviewed-by: {plan}"
+    );
+    let dry_text =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &change, "--shape", "no-ff", "--dry-run"]),
+        );
+    assert!(
+        !dry_text.contains("Reviewed-by:"),
+        "divergent merge text dry-run must omit Reviewed-by:\n{dry_text}"
+    );
+
+    // Real divergent `--shape no-ff` merge appends other roles and omits `Reviewed-by`.
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--shape", "no-ff", "--no-cleanup"])
+        .assert()
+        .success();
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master^2"]), branch_head);
+    let merge_msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    assert!(
+        merge_msg.contains("Planned-by: lead:planner#high")
+            && merge_msg.contains("Implemented-by: codex:worker#medium")
+            && merge_msg.contains("Orchestrated-by: lead:coordinator#high"),
+        "merge commit missing non-review roles:\n{merge_msg}"
+    );
+    assert!(
+        !merge_msg.contains("Reviewed-by:"),
+        "divergent merge commit must not credit reviewer on an unexamined merge tree:\n{merge_msg}"
+    );
+    check_clean_trailers(&repo, &repo.root, &merge_msg);
+}
+
+/// Regression (`f01m8d8jj47pcjakna8ga8wwqvr`): queued `--dry-run` enforces the
+/// same shared-history check as live queued execution on stacked changes.
+#[test]
+fn integrate_queue_dry_run_refuses_stacked_shared_commits_matching_live_queue() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (lower, lower_wt) = open(&repo, "q-lower");
+    commit_file(&lower_wt, "ql.txt", "feat: queue lower");
+    let lower_head = repo.head(&lower_wt);
+    stdout(
+        repo.arc(&lower_wt)
+            .args(["snapshot", &lower, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&lower_wt)
+        .args(["verify", &lower, "--all"])
+        .assert()
+        .success();
+    repo.arc(&lower_wt)
+        .args([
+            "review",
+            &lower,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let upper_out = stdout(repo.arc(&repo.root).args([
+        "begin",
+        "q-upper",
+        "--base",
+        &lower_head,
+        "--blocked-by",
+        &lower,
+    ]));
+    let upper = opened_change_id(&upper_out);
+    let upper_wt = repo.home.join(".worktrees/repo-q-upper");
+    commit_file(&upper_wt, "qu.txt", "feat: queue upper");
+    let upper_head = repo.head(&upper_wt);
+    stdout(
+        repo.arc(&upper_wt)
+            .args(["snapshot", &upper, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&upper_wt)
+        .args(["verify", &upper, "--all"])
+        .assert()
+        .success();
+    repo.arc(&upper_wt)
+        .args([
+            "review",
+            &upper,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+
+    // Queued `--dry-run` stops at `lower` with the shared-commit refusal,
+    // matching live queued execution.
+    for args in [
+        vec!["integrate", &lower, &upper, "--dry-run"],
+        vec!["integrate", &lower, &upper, "--no-cleanup"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains(format!("stopped: {lower}")))
+            .stdout(predicates::str::contains("refs/heads/arc/q-upper"))
+            .stdout(predicates::str::contains("arc land"))
+            .stdout(predicates::str::contains("--no-trailers"))
+            .stdout(predicates::str::contains(format!("not attempted: {upper}")));
+    }
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&lower_wt), lower_head);
+    assert_eq!(repo.head(&upper_wt), upper_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // With `--no-trailers`, both dry-run and live queue succeed at original SHAs.
+    repo.arc(&repo.root)
+        .args(["integrate", &lower, &upper, "--no-trailers", "--dry-run"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &lower, &upper, "--no-trailers", "--no-cleanup"])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), upper_head);
+    assert_eq!(history_rewrite_count(&repo), 0);
+}

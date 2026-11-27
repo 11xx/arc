@@ -5927,20 +5927,22 @@ fn queue_dry_run(
     // Topology and constraints follow the projected destination; review,
     // findings, holds and iteration remain facts of the observed ledger.
     let report = ctx.report_for_queue(store, &st, Some(target))?;
-    advise_role_trailers(
-        &report,
-        !no_trailers && policy.trailers.auto && policy.contribution.is_none(),
-    );
+    let auto_trailers = !no_trailers && policy.trailers.auto && policy.contribution.is_none();
+    advise_role_trailers(&report, auto_trailers);
     let mut advancing = None;
     let mut conflicts = report.needs_rebase;
     let mut unresolved = true;
+    let mut contained = false;
+    let mut merge_tree = None;
     if report.state == "open"
         && !st.iterating
         && report.fork.is_none()
         && policy.contribution.is_none()
     {
         if let Some(patchset) = st.latest_patchset() {
-            let (ancestor, contained) = integration::ancestry(&ctx.cwd, revision, &patchset.head)?;
+            let (ancestor, already_contained) =
+                integration::ancestry(&ctx.cwd, revision, &patchset.head)?;
+            contained = already_contained;
             if shape == integration::Shape::FfOnly && !integration::ff_eligible(ancestor, contained)
             {
                 return Ok(QueueStep::Stopped {
@@ -5949,7 +5951,9 @@ fn queue_dry_run(
                         .into(),
                 });
             }
-            conflicts = gitio::merge_outcome(&ctx.cwd, revision, &patchset.head)?.conflicts;
+            let outcome = gitio::merge_outcome(&ctx.cwd, revision, &patchset.head)?;
+            conflicts = outcome.conflicts;
+            merge_tree = outcome.tree;
             unresolved = conflicts || (!contained && !ancestor);
             if !contained && (shape == integration::Shape::FfOnly || ancestor && !conflicts) {
                 advancing = Some(patchset.head.clone());
@@ -5978,6 +5982,66 @@ fn queue_dry_run(
     }
     if let Some(stop) = queue_budget_stop(&st, &report) {
         return Ok(stop);
+    }
+    if auto_trailers && !contained {
+        if let Some(patchset) = st.latest_patchset() {
+            let st_with_ctx = state_with_review_context(ctx, &st)?;
+            if shape == integration::Shape::FfOnly {
+                let preview = super::rewrite::preview_range_trailers(
+                    &ctx.cwd,
+                    &st_with_ctx,
+                    &policy,
+                    &report.danger,
+                    target,
+                    &patchset.head,
+                )?;
+                if !preview.commits.is_empty() {
+                    let targets = targets_for_branch(
+                        store,
+                        &st.branch,
+                        &st.target_branch,
+                        &st.target_branch,
+                    )?;
+                    super::rewrite::check_integrate_shared_safety(
+                        &ctx.cwd,
+                        store,
+                        &st_with_ctx,
+                        &targets,
+                        &preview.commits,
+                    )?;
+                    println!(
+                        "dry-run: would auto-stamp trailers on {} for {change_id}: {}",
+                        if preview.commits.len() == 1 {
+                            "1 commit".to_string()
+                        } else {
+                            format!("{} commits", preview.commits.len())
+                        },
+                        preview.trailers.join("; ")
+                    );
+                    // Stamping produces a new commit SHA that dry-run does not
+                    // write, so later members targeting this branch are conditional.
+                    advancing = None;
+                    unresolved = true;
+                }
+            } else {
+                let base_msg = format!("merge({}): {}", st.slug, st.title);
+                let (_, planned) = plan_merge_commit_trailers(
+                    &ctx.cwd,
+                    &st_with_ctx,
+                    &policy,
+                    &report.danger,
+                    &patchset.head,
+                    merge_tree.as_deref(),
+                    &base_msg,
+                )?;
+                if let Some(planned) = planned {
+                    println!(
+                        "dry-run: would append trailers to merge commit for {change_id}: {}",
+                        planned.trailers.join("; ")
+                    );
+                }
+            }
+        }
     }
     if shape == integration::Shape::NoFf && conflicts {
         println!(
@@ -6357,7 +6421,7 @@ fn integrate_one(
     if let Some(worktree) = st.worktree.as_deref() {
         crate::journal::promote_worktree_spool(ctx, Path::new(worktree));
     }
-    let mut report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
+    let report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
         let caller = super::claims::command_identity(ctx).ok();
@@ -6377,7 +6441,7 @@ fn integrate_one(
     let facts = integration_facts(ctx, &store, &st, &report, &target, &selection, true);
     let outcome = integration::decide(facts, expect_basis.as_ref());
     let moved = integration::describe_moved(&outcome.moved);
-    let mut plan = match outcome.decision {
+    let plan = match outcome.decision {
         Decision::Refused(refusal) => {
             let code = match refusal {
                 Refusal::Diverged => Ok(refuse_divergence(&st, &target, &recorded_target)),
@@ -6412,62 +6476,6 @@ fn integrate_one(
             plan
         }
     };
-    if plan.shape == crate::model::IntegrationShape::FastForward && auto_trailers {
-        let st_with_ctx = state_with_review_context(ctx, &st)?;
-        let targets = targets_for_branch(&store, &st.branch, &recorded_target, &target)?;
-        let stamped = super::rewrite::auto_stamp_change_for_integrate(
-            ctx,
-            &store,
-            &st_with_ctx,
-            &plan.old_target,
-            &plan.approved.head,
-            &policy,
-            &report.danger,
-            &targets,
-        )?;
-        if let Some(new_head) = stamped.new_head {
-            let previous_head = plan.approved.head.clone();
-            let previous_tree = plan.evaluated_tree.clone();
-            println!(
-                "auto-stamped trailers on {}: {} -> {} ({}, rewrite {})",
-                st.branch,
-                render::short_sha(&previous_head),
-                render::short_sha(&new_head),
-                if stamped.rewritten_commits == 1 {
-                    "1 commit".to_string()
-                } else {
-                    format!("{} commits", stamped.rewritten_commits)
-                },
-                stamped.rewrite_event_id.as_deref().unwrap_or("recorded"),
-            );
-            gitio::forget_mutable_answers();
-            st = store.state(&change_id)?;
-            st.target_branch = target.clone();
-            report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
-            let post_facts =
-                integration_facts(ctx, &store, &st, &report, &target, &selection, true);
-            let post_outcome = integration::decide(post_facts, None);
-            plan = match post_outcome.decision {
-                Decision::Merge(post_plan)
-                    if post_plan.shape == crate::model::IntegrationShape::FastForward
-                        && post_plan.approved.head == new_head
-                        && post_plan.evaluated_tree == previous_tree =>
-                {
-                    post_plan
-                }
-                Decision::Refused(Refusal::NotReady) => {
-                    eprint!("{}", render::blocker_explanation(&st, &report));
-                    return Ok(status::check_exit_code(&report));
-                }
-                Decision::Refused(refusal) => return Err(refusal.into_error()),
-                _ => bail!(
-                    "auto-stamping trailers on {} changed the integration plan unexpectedly; \
-                     target {target} was not moved",
-                    st.change_id
-                ),
-            };
-        }
-    }
     let integration::MergePlan {
         old_target,
         approved,
@@ -6486,12 +6494,14 @@ fn integrate_one(
     let merge_msg = if actual_shape == crate::model::IntegrationShape::Merge && auto_trailers {
         let st_with_ctx = state_with_review_context(ctx, &st)?;
         let (stamped, _) = plan_merge_commit_trailers(
+            &ctx.cwd,
             &st_with_ctx,
             &policy,
             &report.danger,
             &approved_head,
+            evaluated_tree.as_deref(),
             &base_merge_msg,
-        );
+        )?;
         stamped
     } else {
         base_merge_msg
@@ -6502,6 +6512,29 @@ fn integrate_one(
     if actual_shape == crate::model::IntegrationShape::FastForward {
         refuse_initialized_gitlink_changes(&wt, &old_target, &approved_head)?;
     }
+    let mut prepared_stamp =
+        if actual_shape == crate::model::IntegrationShape::FastForward && auto_trailers {
+            let st_with_ctx = state_with_review_context(ctx, &st)?;
+            let targets = targets_for_branch(&store, &st.branch, &recorded_target, &target)?;
+            super::rewrite::prepare_auto_stamp_for_integrate(
+                ctx,
+                &store,
+                &st_with_ctx,
+                &target,
+                &old_target,
+                &approved_head,
+                evaluated_tree.as_deref(),
+                &policy,
+                &report.danger,
+                &targets,
+            )?
+        } else {
+            None
+        };
+    let shipping_head = prepared_stamp
+        .as_ref()
+        .map(|stamp| stamp.new_head.clone())
+        .unwrap_or_else(|| approved_head.clone());
     let already_contained = actual_shape == crate::model::IntegrationShape::AlreadyContained;
     let mut ev = ctx.event(
         &store,
@@ -6518,7 +6551,7 @@ fn integrate_one(
             },
             integrated_commit: old_target.clone(),
             source_patchset_id: approved_patchset_id.clone(),
-            source_head: approved_head.clone(),
+            source_head: shipping_head.clone(),
             target_branch: target.clone(),
             target_before: old_target.clone(),
             authorization: Some(authorization),
@@ -6528,6 +6561,7 @@ fn integrate_one(
             landing: None,
         },
     )?;
+    let stamped_used = prepared_stamp.is_some();
     let merged = (|| -> Result<String> {
         report_untouched(&checkout, &untouched);
         if checkout.switch_from.is_some() {
@@ -6542,52 +6576,92 @@ fn integrate_one(
         let msg = merge_msg;
 
         // Already-contained integrations retain the observed target; advancing
-        // fast-forwards land at the approved head without a merge commit.
+        // fast-forwards land at the approved (or atomically stamped) head
+        // without a merge commit.
         if gitio::fresh_read(|| gitio::current_branch(&wt))?.as_deref() != Some(target.as_str())
             || gitio::fresh_read(|| gitio::head(&wt))? != old_target
         {
             bail!("target moved during integration before merge; nothing recorded");
         }
+        let mut repo_events_lock = None;
         let merged = if already_contained {
             old_target.clone()
         } else if actual_shape == crate::model::IntegrationShape::FastForward {
-            let target_ref = format!("refs/heads/{target}");
-            let reflog = format!("arc integrate {}: fast-forward", st.slug);
-            gitio::git(
-                &wt,
-                &[
-                    "update-ref",
-                    "-m",
-                    &reflog,
-                    &target_ref,
-                    &approved_head,
-                    &old_target,
-                ],
-            )?;
-            if let Err(error) = gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
-            {
-                let rollback = gitio::git(
+            if let Some(stamp) = &prepared_stamp {
+                let lock = store.lock_repository_events()?;
+                store.ensure_repository_event_allowed(&stamp.event)?;
+                repo_events_lock = Some(lock);
+                gitio::update_refs(&wt, &stamp.ref_updates)?;
+                if let Err(error) =
+                    gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &stamp.new_head])
+                {
+                    let rollback = gitio::update_refs(&wt, &stamp.rollback_updates);
+                    let cause = match rollback {
+                        Ok(()) => anyhow::anyhow!(
+                            "checkout update failed: {error}; refs restored to pre-integration state"
+                        ),
+                        Err(rollback) => anyhow::anyhow!(
+                            "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
+                        ),
+                    };
+                    return Err(cause);
+                }
+                let head = gitio::fresh_read(|| gitio::head(&wt))?;
+                if head != stamp.new_head
+                    || gitio::fresh_read(|| gitio::branch_head(&wt, &target))
+                        .ok()
+                        .as_deref()
+                        != Some(stamp.new_head.as_str())
+                {
+                    return Err(anyhow::anyhow!(
+                        "fast-forward target moved during integration"
+                    ));
+                }
+                head
+            } else {
+                let target_ref = format!("refs/heads/{target}");
+                let reflog = format!("arc integrate {}: fast-forward", st.slug);
+                gitio::git(
                     &wt,
-                    &["update-ref", &target_ref, &old_target, &approved_head],
-                );
-                let cause = match rollback {
-                    Ok(_) => anyhow::anyhow!(
-                        "checkout update failed: {error}; target ref restored to {old_target}"
-                    ),
-                    Err(rollback) => anyhow::anyhow!(
-                        "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
-                    ),
-                };
-                return Err(cause);
+                    &[
+                        "update-ref",
+                        "-m",
+                        &reflog,
+                        &target_ref,
+                        &approved_head,
+                        &old_target,
+                    ],
+                )?;
+                if let Err(error) =
+                    gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
+                {
+                    let rollback = gitio::git(
+                        &wt,
+                        &["update-ref", &target_ref, &old_target, &approved_head],
+                    );
+                    let cause = match rollback {
+                        Ok(_) => anyhow::anyhow!(
+                            "checkout update failed: {error}; target ref restored to {old_target}"
+                        ),
+                        Err(rollback) => anyhow::anyhow!(
+                            "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
+                        ),
+                    };
+                    return Err(cause);
+                }
+                let head = gitio::fresh_read(|| gitio::head(&wt))?;
+                if head != approved_head
+                    || gitio::fresh_read(|| gitio::branch_head(&wt, &target))
+                        .ok()
+                        .as_deref()
+                        != Some(approved_head.as_str())
+                {
+                    return Err(anyhow::anyhow!(
+                        "fast-forward target moved during integration"
+                    ));
+                }
+                head
             }
-            let head =
-                gitio::fresh_read(|| gitio::head(&wt))?;
-            if head != approved_head
-                || gitio::fresh_read(|| gitio::branch_head(&wt, &target)).ok().as_deref() != Some(approved_head.as_str())
-            {
-                return Err(anyhow::anyhow!("fast-forward target moved during integration"));
-            }
-            head
         } else {
             if let Err(e) = gitio::git(
                 &wt,
@@ -6623,7 +6697,9 @@ fn integrate_one(
             let shipped = gitio::commit_tree(&wt, &merged)?;
             if &shipped != expected {
                 if actual_shape == crate::model::IntegrationShape::FastForward {
-                    return Err(anyhow::anyhow!("fast-forward {merged} carries tree {shipped}, not the evaluated tree {expected}"));
+                    return Err(anyhow::anyhow!(
+                        "fast-forward {merged} carries tree {shipped}, not the evaluated tree {expected}"
+                    ));
                 }
 
                 bail!(
@@ -6634,14 +6710,24 @@ fn integrate_one(
 
         if actual_shape == crate::model::IntegrationShape::FastForward {
             let index_tree = gitio::git(&wt, &["write-tree"])?;
-            let approved_tree = gitio::commit_tree(&wt, &approved_head)?;
-            if gitio::fresh_read(|| gitio::head(&wt)).ok().as_deref() != Some(approved_head.as_str())
-                || gitio::fresh_read(|| gitio::branch_head(&wt, &target)).ok().as_deref() != Some(approved_head.as_str())
-                || gitio::fresh_read(|| gitio::current_branch(&wt)).ok().flatten().as_deref() != Some(target.as_str())
+            let approved_tree = gitio::commit_tree(&wt, &shipping_head)?;
+            if gitio::fresh_read(|| gitio::head(&wt)).ok().as_deref()
+                != Some(shipping_head.as_str())
+                || gitio::fresh_read(|| gitio::branch_head(&wt, &target))
+                    .ok()
+                    .as_deref()
+                    != Some(shipping_head.as_str())
+                || gitio::fresh_read(|| gitio::current_branch(&wt))
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    != Some(target.as_str())
                 || index_tree != approved_tree
                 || gitio::dirt(&wt).map(|dirt| dirt.tracked).unwrap_or(true)
             {
-                return Err(anyhow::anyhow!("fast-forward target or checkout moved during integration"));
+                return Err(anyhow::anyhow!(
+                    "fast-forward target or checkout moved during integration"
+                ));
             }
         }
         if gitio::fresh_read(|| gitio::head(&wt))? != merged
@@ -6650,9 +6736,63 @@ fn integrate_one(
         {
             bail!("target or checkout moved during integration verification");
         }
+        if let Some(stamp) = &mut prepared_stamp {
+            if let Err(error) = store.append_local_repository_event(&mut stamp.event) {
+                match store.repository_event_is_published(&stamp.event) {
+                    Ok(false) => {
+                        let _ = gitio::git(
+                            &wt,
+                            &["read-tree", "-u", "-m", &stamp.new_head, &old_target],
+                        );
+                        let rollback = gitio::update_refs(&wt, &stamp.rollback_updates);
+                        return match rollback {
+                            Ok(()) => Err(error.context(
+                                "auto-stamp rewrite publication failed; target, source branch, \
+                                 and checkout were restored and nothing was recorded",
+                            )),
+                            Err(rollback) => Err(error.context(format!(
+                                "auto-stamp rewrite publication failed and ref rollback failed \
+                                 ({rollback:#})"
+                            ))),
+                        };
+                    }
+                    Ok(true) => {
+                        return Err(error.context(format!(
+                            "auto-stamp rewrite event {} is published and refs moved; inspect \
+                             before retrying",
+                            stamp.event.event_id
+                        )));
+                    }
+                    Err(inspection) => {
+                        return Err(error.context(format!(
+                            "auto-stamp rewrite publication is uncertain ({inspection:#}); \
+                             refs moved"
+                        )));
+                    }
+                }
+            }
+            println!(
+                "auto-stamped trailers on {}: {} -> {} ({}, rewrite {})",
+                st.branch,
+                render::short_sha(&approved_head),
+                render::short_sha(&stamp.new_head),
+                if stamp.rewritten_commits == 1 {
+                    "1 commit".to_string()
+                } else {
+                    format!("{} commits", stamp.rewritten_commits)
+                },
+                stamp.event.event_id,
+            );
+        }
+        drop(repo_events_lock);
         Ok(merged)
     })()
-    .map_err(|error| transition_failure(&wt, &target, &approved_head, error))?;
+    .map_err(|error| transition_failure(&wt, &target, &shipping_head, error))?;
+    if stamped_used {
+        gitio::forget_mutable_answers();
+        st = store.state(&change_id)?;
+        st.target_branch = target.clone();
+    }
     if let Payload::ChangeIntegrated {
         integrated_commit, ..
     } = &mut ev.payload
@@ -7652,13 +7792,15 @@ fn targets_for_branch(
 }
 
 fn plan_merge_commit_trailers(
+    cwd: &Path,
     state: &ChangeState,
     policy: &crate::policy::PolicyFile,
     danger: &status::DangerScope,
     approved_head: &str,
+    evaluated_tree: Option<&str>,
     base_msg: &str,
-) -> (String, Option<integration::PlannedTrailers>) {
-    let projected = crate::trailers::for_change(
+) -> Result<(String, Option<integration::PlannedTrailers>)> {
+    let mut projected = crate::trailers::for_change(
         state,
         &crate::trailers::ReviewProjection {
             current_head: Some(approved_head),
@@ -7666,8 +7808,18 @@ fn plan_merge_commit_trailers(
             danger,
         },
     );
+    // Review credit does not transfer to an unexamined merge result: when the
+    // evaluated merge tree differs from the reviewed commit's tree (for
+    // example, because the target advanced with disjoint commits), withhold
+    // `Reviewed-by`.
+    let approved_tree = gitio::commit_tree(cwd, approved_head)?;
+    if evaluated_tree != Some(approved_tree.as_str()) {
+        projected
+            .trailers
+            .retain(|line| !line.starts_with("Reviewed-by:"));
+    }
     if projected.trailers.is_empty() {
-        return (base_msg.to_string(), None);
+        return Ok((base_msg.to_string(), None));
     }
     let applicable =
         crate::trailers::applicable_for_commit(base_msg.as_bytes(), &projected.trailers, &[]);
@@ -7677,18 +7829,18 @@ fn plan_merge_commit_trailers(
         .cloned()
         .collect();
     if added.is_empty() {
-        return (base_msg.to_string(), None);
+        return Ok((base_msg.to_string(), None));
     }
     let stamped = crate::trailers::edit(base_msg.as_bytes(), &[], &applicable);
     let message = String::from_utf8(stamped).unwrap_or_else(|_| base_msg.to_string());
-    (
+    Ok((
         message,
         Some(integration::PlannedTrailers {
             target: "merge-commit".to_string(),
             trailers: added,
             commits: Vec::new(),
         }),
-    )
+    ))
 }
 
 fn advise_role_trailers(report: &StatusReport, auto_trailers_active: bool) {
@@ -7837,12 +7989,14 @@ fn integrate_dry_run_json(
                         .map(str::to_string)
                         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
                     let (_, planned) = plan_merge_commit_trailers(
+                        &ctx.cwd,
                         &st_with_ctx,
                         &merge_policy,
                         &report.danger,
                         &plan.approved.head,
+                        plan.evaluated_tree.as_deref(),
                         &base_msg,
-                    );
+                    )?;
                     document.auto_trailers = planned;
                 }
             }
@@ -7983,8 +8137,16 @@ fn integrate_dry_run(
                 })
             }
         } else {
-            plan_merge_commit_trailers(&st_with_ctx, &policy, &report.danger, &approved_head, &msg)
-                .1
+            plan_merge_commit_trailers(
+                &ctx.cwd,
+                &st_with_ctx,
+                &policy,
+                &report.danger,
+                &approved_head,
+                outcome.tree.as_deref(),
+                &msg,
+            )?
+            .1
         }
     } else {
         None

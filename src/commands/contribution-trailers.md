@@ -89,10 +89,11 @@ Pre-integration qualifying approvals covering the current or shipped patchset
 may project `Reviewed-by: <coordinate>` into the commit's trailer block before
 or during integration, because appending complete role entries preserves
 identical trees and recorded approvals (for fast-forward integration) or
-records role attribution on the merge commit (for `--shape no-ff` merges)
-without rewriting branch commits. Post-integration audits remain ledger-only
-and are never backfilled into already-integrated history, and review credit
-never transfers to content that changed after it was given.
+records role attribution on a `--shape no-ff` merge commit whose tree matches
+the approved tree without rewriting branch commits. Post-integration audits
+remain ledger-only and are never backfilled into already-integrated history,
+and review credit never transfers to a merge or replay whose tree differs from
+the reviewed tree.
 
 Importing these strings never grants approval, discharges an obligation, or
 waives a gate. A self-review does not become independent because its trailer
