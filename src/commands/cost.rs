@@ -3512,22 +3512,31 @@ fn category_amount(
     }
 }
 
+/// Whether `disjoints` account for all of the figure's `category`.
+fn disjoints_cover<'a>(
+    whole: &agent_tapes_core::model::DisjointTokens,
+    disjoints: impl IntoIterator<Item = &'a CostDisjoint>,
+    category: &str,
+) -> bool {
+    let Some(total) = category_amount(whole, category) else {
+        return false;
+    };
+    disjoints
+        .into_iter()
+        .try_fold(0u64, |held, disjoint| {
+            let part = tapes_disjoint(disjoint)?;
+            held.checked_add(category_amount(&part, category)?)
+        })
+        .is_some_and(|covered| covered >= total)
+}
+
 /// Whether the model shares account for all of the figure's `category`.
 fn shares_cover(
     whole: &agent_tapes_core::model::DisjointTokens,
     shares: &[crate::model::CostModelShare],
     category: &str,
 ) -> bool {
-    let Some(total) = category_amount(whole, category) else {
-        return false;
-    };
-    shares
-        .iter()
-        .try_fold(0u64, |held, share| {
-            let part = tapes_disjoint(&share.disjoint)?;
-            held.checked_add(category_amount(&part, category)?)
-        })
-        .is_some_and(|covered| covered >= total)
+    disjoints_cover(whole, shares.iter().map(|share| &share.disjoint), category)
 }
 
 fn unavailable_residual(reason: &str) -> CostResidual {
@@ -4085,6 +4094,7 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         Some(served)
             if facts.by_model.is_empty()
                 && !other_branches
+                && facts.request_terms.raw_shares.len() <= 1
                 && split_model_effort(served).is_some() =>
         {
             let (model, variant) = split_model_effort(served).expect("checked above");
@@ -4118,7 +4128,7 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
                 gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
             }
         }
-        _ if !facts.by_model.is_empty() => {
+        _ if !facts.by_model.is_empty() || facts.request_terms.raw_shares.len() > 1 => {
             if !facts.request_terms.raw_shares.is_empty() {
                 // If a single raw `request_id` appears with both a bare
                 // (`None`) share and variant shares and all of them select the
@@ -4187,6 +4197,24 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
                         price_selected(&disjoint, raw_id, None, &rep.model, None, false);
                     }
                 }
+                for category in PRICED_CATEGORIES {
+                    if !disjoints_cover(
+                        &whole,
+                        facts
+                            .request_terms
+                            .raw_shares
+                            .iter()
+                            .map(|share| &share.disjoint),
+                        category,
+                    ) {
+                        gaps.insert(
+                            arc_reason(MeasurementReason::IncompleteAttribution).to_string(),
+                        );
+                    }
+                }
+                if facts.by_model.is_empty() && facts.attribution_uncertain {
+                    gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
+                }
             } else {
                 // Retained facts hold no live `raw_shares` or `requests`;
                 // price each normalized share directly from `facts.by_model`.
@@ -4227,10 +4255,12 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
                         price_selected(&disjoint, base, None, base, None, false);
                     }
                 }
-            }
-            for category in PRICED_CATEGORIES {
-                if !shares_cover(&whole, &facts.by_model, category) {
-                    gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
+                for category in PRICED_CATEGORIES {
+                    if !shares_cover(&whole, &facts.by_model, category) {
+                        gaps.insert(
+                            arc_reason(MeasurementReason::IncompleteAttribution).to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -7830,6 +7860,60 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, ou
         assert!(
             (upper_base.amount.unwrap() - 0.5).abs() < 1e-9,
             "{upper_base:?}"
+        );
+
+        // Distinct raw spellings (`gemini-4-neon-XHIGH` + `gemini-4-neon-xhigh`)
+        // normalizing to one display coordinate (`gemini-4-neon#xhigh`) must
+        // each price against their own exact legacy row: $2 + $4 = $6, not $8.
+        let mixed_case = make_facts(
+            vec![
+                make_usage("gemini-4-neon-XHIGH", None, 1_000_000, 0),
+                make_usage("gemini-4-neon-xhigh", None, 1_000_000, 0),
+            ],
+            Some(Model {
+                id: "gemini-4-neon-xhigh".to_string(),
+                variant: None,
+            }),
+        );
+        assert_eq!(
+            mixed_case.served_model.as_deref(),
+            Some("gemini-4-neon#xhigh")
+        );
+        assert!(mixed_case.by_model.is_empty());
+        assert_eq!(mixed_case.request_terms.raw_shares.len(), 2);
+        let table_case_distinct = PriceTable::parse(
+            r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models]]
+id = "gemini-4-neon-XHIGH"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+
+[[models]]
+id = "gemini-4-neon-xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, output = 16.0 }
+"#,
+        )
+        .unwrap();
+        let mixed_case_est = list_price(&mixed_case, &table_case_distinct);
+        assert!(
+            (mixed_case_est.amount.unwrap() - 6.0).abs() < 1e-9,
+            "{mixed_case_est:?}"
+        );
+        assert!(mixed_case_est.gaps.is_empty(), "{mixed_case_est:?}");
+        assert_eq!(
+            mixed_case_est.models,
+            vec!["gemini-4-neon-XHIGH", "gemini-4-neon-xhigh"]
         );
     }
 

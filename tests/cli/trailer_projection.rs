@@ -2254,3 +2254,315 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, ou
         "{upper_env}"
     );
 }
+
+#[test]
+fn cost_show_prices_case_distinct_antigravity_rows_in_whole_and_split_sessions() {
+    let repo = Repo::new();
+    let single_mixed = "66666666-2222-4333-8444-000000000001";
+    let split_mixed = "66666666-2222-4333-8444-000000000002";
+    let (t3_home, path) = setup_antigravity_store(
+        &repo,
+        &[
+            (single_mixed, "gemini-4-neon-xhigh"),
+            (split_mixed, "gemini-4-neon-XhIgH"),
+        ],
+    );
+    let profile = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let acp = t3_home
+        .join("userdata/providers/antigravity")
+        .join(profile)
+        .join("antigravity-acp/brain");
+
+    // 1. Single recording with 1M `gemini-4-neon-XHIGH` ($2/M) + 1M `gemini-4-neon-xhigh` ($4/M) = $6.
+    fs::write(
+        acp.join(single_mixed)
+            .join(".system_generated/logs/transcript_full.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:00:00Z",
+                "content": "Mixed case whole."
+            }),
+            serde_json::json!({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:01:00Z",
+                "model": "gemini-4-neon-XHIGH",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "Upper."
+            }),
+            serde_json::json!({
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:02:00Z",
+                "model": "gemini-4-neon-xhigh",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "Lower."
+            }),
+        ),
+    )
+    .unwrap();
+
+    // 2. Two-change split recording: 1M `gemini-4-neon-XHIGH` ($2/M) at 10:05 and
+    // 1M `gemini-4-neon-XhIgH` ($3/M) at 11:05 -> shares $2 + $3, session total $5.
+    fs::write(
+        acp.join(split_mixed)
+            .join(".system_generated/logs/transcript_full.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:00:00Z",
+                "content": "Mixed case split."
+            }),
+            serde_json::json!({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:05:00Z",
+                "model": "gemini-4-neon-XHIGH",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "First."
+            }),
+            serde_json::json!({
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T11:05:00Z",
+                "model": "gemini-4-neon-XhIgH",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "Second."
+            }),
+        ),
+    )
+    .unwrap();
+
+    let retime = |id: &str, instant: &str| {
+        let name = format!("{id}.json");
+        let mut pending = vec![repo.root.join(".git/arc")];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.file_name().is_some_and(|file| file == name.as_str()) {
+                    let mut event: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    event["created_at"] = serde_json::json!(instant);
+                    fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
+                    return;
+                }
+            }
+        }
+        panic!("no ledger event {id}");
+    };
+    let bind_window = |slug: &str, session: &str, start: &str, end: &str| {
+        let change = opened_change_id(&stdout(
+            repo.arc(&repo.root)
+                .args(["begin", slug, "--no-worktree", "--target", "master"])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        ));
+        let dispatch = stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "run",
+                    "dispatch",
+                    "--route",
+                    "fixture-route",
+                    "--worktree",
+                    "/work/run",
+                    "--change",
+                    &change,
+                ])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        )
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+        retime(&dispatch, start);
+        stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "run",
+                    "bind",
+                    &dispatch,
+                    "--executor-harness",
+                    "antigravity",
+                    "--executor-session",
+                    session,
+                ])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        let ended = stdout(
+            repo.arc(&repo.root)
+                .args(["run", "end", &dispatch, "--outcome", "completed"])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        )
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+        retime(&ended, end);
+        change
+    };
+
+    let c_whole = bind_window(
+        "agy-case-whole",
+        single_mixed,
+        "2026-01-01T09:55:00Z",
+        "2026-01-01T10:10:00Z",
+    );
+    let c_split_one = bind_window(
+        "agy-case-one",
+        split_mixed,
+        "2026-01-01T10:00:00Z",
+        "2026-01-01T10:30:00Z",
+    );
+    let c_split_two = bind_window(
+        "agy-case-two",
+        split_mixed,
+        "2026-01-01T11:00:00Z",
+        "2026-01-01T11:30:00Z",
+    );
+
+    let prices = repo.home.join("case-distinct.toml");
+    fs::write(
+        &prices,
+        r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models]]
+id = "gemini-4-neon-XHIGH"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+
+[[models]]
+id = "gemini-4-neon-XhIgH"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 3.0, cache_read = 0.3, cache_write_5m = 3.75, output = 12.0 }
+
+[[models]]
+id = "gemini-4-neon-xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, output = 16.0 }
+"#,
+    )
+    .unwrap();
+
+    let list_qty = |totals: &serde_json::Value| {
+        totals["quantities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q.get("partition").is_none() && q["kind"] == "list-price-estimate")
+            .unwrap_or_else(|| panic!("missing list price: {totals:#}"))
+            .clone()
+    };
+
+    // Whole single recording: $2 + $4 = $6 (not $8).
+    let whole_view = json_stdout(
+        repo.arc(&repo.root)
+            .args([
+                "cost",
+                "show",
+                &c_whole,
+                "--json",
+                "--prices",
+                prices.to_str().unwrap(),
+            ])
+            .env("T3CODE_HOME", &t3_home)
+            .env("PATH", &path),
+    );
+    let whole_row = whole_view["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == format!("antigravity:{single_mixed}"))
+        .unwrap();
+    let q_whole = list_qty(&whole_row["totals"]);
+    assert_eq!(q_whole["status"], "complete", "{q_whole:#}");
+    assert!(
+        (q_whole["amount"].as_f64().unwrap() - 6.0).abs() < 1e-9,
+        "{q_whole:#}"
+    );
+
+    // Two-change split: shares are $2 and $3, and session total is $5 (not $8).
+    let split_view = json_stdout(
+        repo.arc(&repo.root)
+            .args([
+                "cost",
+                "show",
+                &c_split_one,
+                &c_split_two,
+                "--json",
+                "--prices",
+                prices.to_str().unwrap(),
+            ])
+            .env("T3CODE_HOME", &t3_home)
+            .env("PATH", &path),
+    );
+    let split_row = split_view["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == format!("antigravity:{split_mixed}"))
+        .unwrap();
+    let q_split_total = list_qty(&split_row["totals"]);
+    assert_eq!(q_split_total["status"], "complete", "{q_split_total:#}");
+    assert!(
+        (q_split_total["amount"].as_f64().unwrap() - 5.0).abs() < 1e-9,
+        "{q_split_total:#}"
+    );
+    let shares = split_row["split"]["shares"].as_array().unwrap();
+    let mut share_amounts: Vec<f64> = shares
+        .iter()
+        .map(|share| {
+            let q = list_qty(&share["totals"]);
+            assert_eq!(q["status"], "complete", "{q:#}");
+            q["amount"].as_f64().unwrap()
+        })
+        .collect();
+    share_amounts.sort_by(|a, b| a.total_cmp(b));
+    assert_eq!(share_amounts.len(), 2, "{shares:#?}");
+    assert!((share_amounts[0] - 2.0).abs() < 1e-9, "{share_amounts:?}");
+    assert!((share_amounts[1] - 3.0).abs() < 1e-9, "{share_amounts:?}");
+}
