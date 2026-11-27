@@ -802,8 +802,6 @@ impl Item {
 pub(crate) struct Retirement {
     pub(crate) at: String,
     pub(crate) by: Option<String>,
-    #[serde(skip)]
-    pub(crate) consumption_id: Option<String>,
 }
 
 /// A series replayed from its events.
@@ -925,10 +923,22 @@ fn place_wave(waves: &mut Vec<Wave>, wave: Wave, before: Option<&str>, after: Op
 
 /// Replay one series from the journal's events. `None` when no event ever
 /// started it.
+struct ActiveRetirement {
+    order: usize,
+    timestamp: Option<chrono::DateTime<Utc>>,
+    consumption_id: Option<String>,
+    retirement: Retirement,
+}
+
 pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
     let mut series: Option<Series> = None;
     let mut added = 0;
-    for event in events.iter().filter(|e| e.file.as_deref() == Some(file)) {
+    let mut active_retirements: Vec<ActiveRetirement> = Vec::new();
+    for (order, event) in events
+        .iter()
+        .filter(|e| e.file.as_deref() == Some(file))
+        .enumerate()
+    {
         if event.event == "note" {
             let topic = parse_artifact_name(file).map(|(_, topic, _)| topic)?;
             series.get_or_insert(Series {
@@ -1114,21 +1124,49 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Series> {
                 }
             }
             "consumed" => {
-                current.retired = Some(Retirement {
-                    at: event.ts.clone(),
-                    by: event.decision.clone(),
-                    consumption_id: event.consumption_id(),
-                });
+                let id = event.consumption_id();
+                let entry = ActiveRetirement {
+                    order,
+                    timestamp: event.timestamp(),
+                    consumption_id: id.clone(),
+                    retirement: Retirement {
+                        at: event.ts.clone(),
+                        by: event.decision.clone(),
+                    },
+                };
+                if let Some(existing) = active_retirements
+                    .iter_mut()
+                    .find(|item| item.consumption_id.is_some() && item.consumption_id == id)
+                {
+                    *existing = entry;
+                } else {
+                    active_retirements.push(entry);
+                }
+                current.retired = active_retirements
+                    .iter()
+                    .max_by(|a, b| {
+                        a.timestamp
+                            .cmp(&b.timestamp)
+                            .then_with(|| a.consumption_id.cmp(&b.consumption_id))
+                            .then_with(|| a.order.cmp(&b.order))
+                    })
+                    .map(|item| item.retirement.clone());
             }
             "reopened" => {
-                if current.retired.as_ref().is_some_and(|retired| {
-                    event
-                        .reopens
-                        .as_deref()
-                        .is_none_or(|target| retired.consumption_id.as_deref() == Some(target))
-                }) {
-                    current.retired = None;
+                match event.reopens.as_deref() {
+                    Some(target) => active_retirements
+                        .retain(|item| item.consumption_id.as_deref() != Some(target)),
+                    None => active_retirements.clear(),
                 }
+                current.retired = active_retirements
+                    .iter()
+                    .max_by(|a, b| {
+                        a.timestamp
+                            .cmp(&b.timestamp)
+                            .then_with(|| a.consumption_id.cmp(&b.consumption_id))
+                            .then_with(|| a.order.cmp(&b.order))
+                    })
+                    .map(|item| item.retirement.clone());
             }
             kind => {
                 let Some(item) = current.items.iter_mut().find(|item| item.id == id) else {

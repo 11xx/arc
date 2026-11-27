@@ -1458,3 +1458,468 @@ fn reopen_separates_explicit_acting_session_from_filter_and_option_values() {
     assert_eq!(ev_actor_journal["actor"], "journal");
     assert_eq!(ev_actor_journal["session"], "explicit-actor-j");
 }
+
+/// Claim: importing an independently recorded `(consumed, reopened)` pair whose
+/// consumption was previously unseen by the receiver never clears an unrelated
+/// standing local consumption, and exporting back converges both replicas.
+#[test]
+fn reopen_import_of_independent_consume_reopen_pair_preserves_local_consumption() {
+    let alpha = Repo::new();
+    let beta = Repo::new();
+    super::journal_exchange::pair(&alpha, &beta, "alpha", "beta");
+
+    let file = write_artifact(&alpha, "independent-pair", "todo", "# Independent pair\n");
+    let b1 = alpha.home.join("b1.json");
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "export", &file, "--output", b1.to_str().unwrap()])
+        .assert()
+        .success();
+    beta.arc(&beta.root)
+        .args(["journal", "import", b1.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Alpha consumes as discarded first; after a timestamp boundary, beta
+    // independently consumes as done without ever seeing alpha's consumption.
+    consume_artifact(&alpha, &file, "discarded");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    consume_artifact(&beta, &file, "done");
+
+    // Alpha reopens its own discarded event and exports the complete pair to beta.
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "reopen", &file, "--reason", "alpha undo"])
+        .assert()
+        .success();
+    let b2 = alpha.home.join("b2.json");
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "export", &file, "--output", b2.to_str().unwrap()])
+        .assert()
+        .success();
+    beta.arc(&beta.root)
+        .args(["journal", "import", b2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Beta's distinct unreversed `done` consumption MUST remain standing.
+    let beta_list = json_stdout(beta.arc(&beta.root).args(["journal", "list", "--json"]));
+    let beta_row = beta_list["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["file"] == file)
+        .unwrap();
+    assert_eq!(
+        beta_row["consumed"], "done",
+        "importing alpha's consume+reopen pair must preserve beta's done consumption: {beta_row}"
+    );
+    let beta_open = json_stdout(beta.arc(&beta.root).args(["journal", "open", "--json"]));
+    assert!(
+        beta_open["open"].as_array().unwrap().is_empty(),
+        "{beta_open}"
+    );
+    let beta_doctor = doctor_json(&beta);
+    assert!(
+        beta_doctor["problems"].as_array().unwrap().is_empty(),
+        "{beta_doctor}"
+    );
+
+    // Export beta back to alpha: alpha converges to the same `done` standing state.
+    let b3 = beta.home.join("b3.json");
+    beta.arc(&beta.root)
+        .args(["journal", "export", &file, "--output", b3.to_str().unwrap()])
+        .assert()
+        .success();
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "import", b3.to_str().unwrap()])
+        .assert()
+        .success();
+    let alpha_list = json_stdout(alpha.arc(&alpha.root).args(["journal", "list", "--json"]));
+    let alpha_row = alpha_list["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["file"] == file)
+        .unwrap();
+    assert_eq!(alpha_row["consumed"], "done", "{alpha_row}");
+}
+
+/// Claim: importing an ordinary `done` consumption on top of a promoted
+/// artifact never masks the durable change promotion from either explicit or
+/// session-window reopen selectors.
+#[test]
+fn reopen_imported_ordinary_consumption_does_not_mask_change_promotion() {
+    let alpha = Repo::new();
+    let beta = Repo::new();
+    super::journal_exchange::pair(&alpha, &beta, "alpha", "beta");
+
+    let promoted = write_artifact(&alpha, "promoted-todo", "todo", "# Promoted todo\n");
+    let ordinary = write_artifact(&alpha, "ordinary-todo", "todo", "# Ordinary todo\n");
+    let b1 = alpha.home.join("b1.json");
+    alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "export",
+            &promoted,
+            &ordinary,
+            "--output",
+            b1.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    beta.arc(&beta.root)
+        .args(["journal", "import", b1.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Alpha promotes `promoted` into a live change.
+    alpha
+        .arc(&alpha.root)
+        .args([
+            "begin",
+            "live-promo",
+            "--no-worktree",
+            "--from-journal",
+            &promoted,
+        ])
+        .assert()
+        .success();
+
+    // After a timestamp boundary, beta independently consumes both items as `done`.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    for file in [&promoted, &ordinary] {
+        beta.arc(&beta.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", "beta-sess")
+            .args(["journal", "consume", file, "--outcome", "done"])
+            .assert()
+            .success();
+    }
+
+    // Export beta's consumptions and import into alpha.
+    let b2 = beta.home.join("b2.json");
+    beta.arc(&beta.root)
+        .args([
+            "journal",
+            "export",
+            &promoted,
+            &ordinary,
+            "--output",
+            b2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "import", b2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Explicit reopen on alpha MUST still refuse `promoted` as a structural handoff.
+    let explicit_err = alpha
+        .arc(&alpha.root)
+        .args(["journal", "reopen", &promoted, "--reason", "probe"])
+        .output()
+        .unwrap();
+    assert!(!explicit_err.status.success());
+    let msg = output_text(&explicit_err);
+    assert!(
+        msg.contains("structural handoff") && msg.contains("promoted to change"),
+        "{msg}"
+    );
+
+    // Session-window reopen for `beta-sess` MUST skip `promoted` (naming the
+    // handoff on stderr) while still reopening `ordinary`.
+    let dry = alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            "beta-sess",
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo beta batch",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry.status.success(), "{}", output_text(&dry));
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains(&format!("skipped handoff: {promoted}")),
+        "{}",
+        output_text(&dry)
+    );
+    assert!(
+        !String::from_utf8_lossy(&dry.stdout).contains(&promoted),
+        "{}",
+        output_text(&dry)
+    );
+    assert!(
+        String::from_utf8_lossy(&dry.stdout).contains(&format!("would reopen: {ordinary}")),
+        "{}",
+        output_text(&dry)
+    );
+
+    let batch = alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            "beta-sess",
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo beta batch",
+        ])
+        .output()
+        .unwrap();
+    assert!(batch.status.success(), "{}", output_text(&batch));
+
+    let alpha_open = json_stdout(alpha.arc(&alpha.root).args(["journal", "open", "--json"]));
+    let open_files: Vec<&str> = alpha_open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert!(open_files.contains(&ordinary.as_str()), "{open_files:?}");
+    assert!(!open_files.contains(&promoted.as_str()), "{open_files:?}");
+}
+
+/// Claim: concurrent milestone closures imported across replicas obey one
+/// consistent active-consumption reducer across `journal list`, `journal reopen`,
+/// `milestone --json`, and `milestone wave add`.
+#[test]
+fn reopen_milestone_with_concurrent_closures_keeps_journal_and_milestone_consistent() {
+    let alpha = Repo::new();
+    let beta = Repo::new();
+    super::journal_exchange::pair(&alpha, &beta, "alpha", "beta");
+
+    let start_out = stdout(alpha.arc(&alpha.root).args([
+        "milestone",
+        "start",
+        "concurrent-ms",
+        "--title",
+        "Concurrent Milestone",
+    ]));
+    let file = start_out.trim().to_string();
+    alpha
+        .arc(&alpha.root)
+        .args(["milestone", "wave", "add", &file, "w1", "--title", "Wave 1"])
+        .assert()
+        .success();
+
+    let b1 = alpha.home.join("ms-b1.json");
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "export", &file, "--output", b1.to_str().unwrap()])
+        .assert()
+        .success();
+    beta.arc(&beta.root)
+        .args(["journal", "import", b1.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Alpha and beta independently close the same milestone with distinct notes.
+    alpha
+        .arc(&alpha.root)
+        .args(["milestone", "close", &file, "--note", "alpha closure"])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    beta.arc(&beta.root)
+        .args(["milestone", "close", &file, "--note", "beta closure"])
+        .assert()
+        .success();
+
+    // Import beta's concurrent closure into alpha.
+    let b2 = beta.home.join("ms-b2.json");
+    beta.arc(&beta.root)
+        .args(["journal", "export", &file, "--output", b2.to_str().unwrap()])
+        .assert()
+        .success();
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "import", b2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Before reopen: milestone reports the standing (beta) closure and refuses edits.
+    let ms_closed = json_stdout(alpha.arc(&alpha.root).args(["milestone", &file, "--json"]));
+    assert_eq!(
+        ms_closed["milestones"][0]["closure"]["note"], "beta closure",
+        "{ms_closed}"
+    );
+    let edit_closed = alpha
+        .arc(&alpha.root)
+        .args(["milestone", "wave", "add", &file, "w2"])
+        .output()
+        .unwrap();
+    assert!(!edit_closed.status.success());
+
+    // Explicit reopen on alpha clears ALL concurrent closures consistently.
+    let reopen_out = stdout(alpha.arc(&alpha.root).args([
+        "journal",
+        "reopen",
+        &file,
+        "--reason",
+        "milestone reopened for wave 2",
+    ]));
+    assert!(
+        reopen_out.contains("2 concurrent consumptions"),
+        "{reopen_out}"
+    );
+
+    let list_after = json_stdout(alpha.arc(&alpha.root).args(["journal", "list", "--json"]));
+    let ms_row = list_after["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["file"] == file)
+        .unwrap();
+    assert!(ms_row["consumed"].is_null(), "{ms_row}");
+
+    let ms_open = json_stdout(alpha.arc(&alpha.root).args(["milestone", &file, "--json"]));
+    assert!(
+        ms_open["milestones"][0]["closure"].is_null(),
+        "milestone closure must be null after reopen: {ms_open}"
+    );
+
+    // Editing the reopened milestone now succeeds.
+    alpha
+        .arc(&alpha.root)
+        .args(["milestone", "wave", "add", &file, "w2", "--title", "Wave 2"])
+        .assert()
+        .success();
+    let ms_edited = json_stdout(alpha.arc(&alpha.root).args(["milestone", &file, "--json"]));
+    assert_eq!(ms_edited["milestones"][0]["waves"][1]["id"], "w2");
+
+    let doctor = doctor_json(&alpha);
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+}
+
+/// Claim: ordinary manual `consumed --outcome superseded` events with free-text
+/// notes such as `"change of plans"` or uncorroborated `"promoted to global::..."`
+/// are never mistaken for structural handoffs in either explicit or
+/// session-window reopen selectors.
+#[test]
+fn reopen_allows_ordinary_superseded_notes_under_both_selectors() {
+    let repo = Repo::new();
+    let explicit_todo = write_artifact(&repo, "plans-explicit", "todo", "# Explicit superseded\n");
+    let batch_todo = write_artifact(&repo, "plans-batch", "todo", "# Batch superseded\n");
+    let fake_global = write_artifact(&repo, "fake-global", "memory", "# Fake global note\n");
+
+    let sess = "free-text-superseded-sess";
+    for (file, note) in [
+        (&explicit_todo, "change of plans"),
+        (&batch_todo, "change of plans"),
+        (
+            &fake_global,
+            "promoted to global::20260101T000000Z-nonexistent-memory.md",
+        ),
+    ] {
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", sess)
+            .args([
+                "journal",
+                "consume",
+                file,
+                "--outcome",
+                "superseded",
+                "--note",
+                note,
+            ])
+            .assert()
+            .success();
+    }
+
+    // Explicit reopen succeeds without false handoff refusal.
+    let exp_out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "reopen",
+        &explicit_todo,
+        "--reason",
+        "plans changed back",
+    ]));
+    assert!(
+        exp_out.contains(&format!("reopened: {explicit_todo} [was superseded]")),
+        "{exp_out}"
+    );
+
+    // Session-window reopen matches and reopens the remaining two free-text items.
+    let dry = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            sess,
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo superseded batch",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry.status.success(), "{}", output_text(&dry));
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    let dry_stderr = String::from_utf8_lossy(&dry.stderr);
+    assert!(
+        dry_stderr.trim().is_empty(),
+        "unexpected stderr: {dry_stderr}"
+    );
+    assert!(
+        dry_stdout.contains(&format!("would reopen: {batch_todo}")),
+        "{dry_stdout}"
+    );
+    assert!(
+        dry_stdout.contains(&format!("would reopen: {fake_global}")),
+        "{dry_stdout}"
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            sess,
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo superseded batch",
+        ])
+        .assert()
+        .success();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let open_files: Vec<&str> = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        open_files.contains(&explicit_todo.as_str()),
+        "{open_files:?}"
+    );
+    assert!(open_files.contains(&batch_todo.as_str()), "{open_files:?}");
+
+    let memories = json_stdout(repo.arc(&repo.root).args(["journal", "memories", "--json"]));
+    assert!(memories["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["file"] == fake_global));
+}

@@ -108,6 +108,10 @@ pub(crate) struct Closure {
     pub(crate) checkpoint: Option<MilestoneCheckpoint>,
     #[serde(skip)]
     pub(crate) consumption_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) timestamp: Option<chrono::DateTime<Utc>>,
+    #[serde(skip)]
+    pub(crate) order: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,6 +124,8 @@ pub(crate) struct Milestone {
     pub(crate) tracks: Vec<Track>,
     pub(crate) checkpoints: Vec<MilestoneCheckpoint>,
     pub(crate) closure: Option<Closure>,
+    #[serde(skip)]
+    active_closures: Vec<Closure>,
 }
 
 pub(crate) fn is_milestone_file(file: &str) -> bool {
@@ -295,16 +301,70 @@ fn insert_at<T: Eq + std::fmt::Display>(
 }
 
 impl Milestone {
+    fn refresh_standing_closure(&mut self) {
+        self.closure = self
+            .active_closures
+            .iter()
+            .max_by(|left, right| {
+                left.timestamp
+                    .cmp(&right.timestamp)
+                    .then_with(|| left.consumption_id.cmp(&right.consumption_id))
+                    .then_with(|| left.order.cmp(&right.order))
+            })
+            .cloned();
+    }
+
     fn apply(&mut self, event: &JournalEvent) -> Result<()> {
+        self.apply_event(event, 0, false)
+    }
+
+    fn apply_event(
+        &mut self,
+        event: &JournalEvent,
+        order: usize,
+        allow_concurrent_close: bool,
+    ) -> Result<()> {
         if event.event == "reopened" {
-            if self.closure.as_ref().is_some_and(|closure| {
-                event
-                    .reopens
-                    .as_deref()
-                    .is_none_or(|target| closure.consumption_id.as_deref() == Some(target))
-            }) {
-                self.closure = None;
+            match event.reopens.as_deref() {
+                Some(target) => self
+                    .active_closures
+                    .retain(|closure| closure.consumption_id.as_deref() != Some(target)),
+                None => self.active_closures.clear(),
             }
+            self.refresh_standing_closure();
+            return Ok(());
+        }
+        if event.event == "consumed" {
+            if !allow_concurrent_close && self.closure.is_some() {
+                bail!("{} is closed and read-only", self.file);
+            }
+            let f = &event.milestone;
+            if let Some(binding) = &f.milestone_checkpoint {
+                if !self.checkpoints.contains(binding) {
+                    self.checkpoints.push(binding.clone());
+                }
+            }
+            let id = event.consumption_id();
+            let closure = Closure {
+                at: event.ts.clone(),
+                outcome: event.outcome.clone().unwrap_or_default(),
+                by: event.decision.clone(),
+                note: event.note.clone(),
+                checkpoint: f.milestone_checkpoint.clone(),
+                consumption_id: id.clone(),
+                timestamp: event.timestamp(),
+                order,
+            };
+            if let Some(existing) = self
+                .active_closures
+                .iter_mut()
+                .find(|entry| entry.consumption_id.is_some() && entry.consumption_id == id)
+            {
+                *existing = closure;
+            } else {
+                self.active_closures.push(closure);
+            }
+            self.refresh_standing_closure();
             return Ok(());
         }
         if self.closure.is_some() {
@@ -314,21 +374,11 @@ impl Milestone {
         match event.event.as_str() {
             kind if kind.starts_with("milestone-wave-") => self.apply_wave(kind, f),
             kind if kind.starts_with("milestone-track-") => self.apply_track(kind, f),
-            "milestone-checkpoint-bound" | "consumed" => {
+            "milestone-checkpoint-bound" => {
                 if let Some(binding) = &f.milestone_checkpoint {
                     if !self.checkpoints.contains(binding) {
                         self.checkpoints.push(binding.clone());
                     }
-                }
-                if event.event == "consumed" {
-                    self.closure = Some(Closure {
-                        at: event.ts.clone(),
-                        outcome: event.outcome.clone().unwrap_or_default(),
-                        by: event.decision.clone(),
-                        note: event.note.clone(),
-                        checkpoint: f.milestone_checkpoint.clone(),
-                        consumption_id: event.consumption_id(),
-                    });
                 }
                 Ok(())
             }
@@ -441,11 +491,12 @@ pub(crate) fn replay(events: &[JournalEvent], file: &str) -> Option<Milestone> {
         tracks: Vec::new(),
         checkpoints: Vec::new(),
         closure: None,
+        active_closures: Vec::new(),
     };
-    for event in events_on_file.filter(|event| event.known()) {
-        // Two replicas can independently record the same track or edit a
-        // wave the other has removed. Keep the first applicable transition.
-        let _ = milestone.apply(event);
+    for (order, event) in events_on_file.filter(|event| event.known()).enumerate() {
+        // Two replicas can independently record the same track, edit a wave
+        // the other has removed, or close the same milestone concurrently.
+        let _ = milestone.apply_event(event, order, true);
     }
     Some(milestone)
 }
