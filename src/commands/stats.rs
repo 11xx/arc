@@ -683,19 +683,20 @@ fn patchset_identities(
         // resolve without ambiguity. `Some(coord)` means unique; `None` means
         // multiple distinct models share that session id on this patchset.
         let mut peer_session_coords: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+        let mut contributor_sessions: BTreeSet<(String, String)> = BTreeSet::new();
         for contributor in &patchset.contributors {
-            if let (Some(key), Some(coord)) = (
-                session_key(contributor),
-                canonical_coordinate_from_str(contributor, None),
-            ) {
-                peer_session_coords
-                    .entry(key)
-                    .and_modify(|slot| {
-                        if slot.as_deref() != Some(coord.as_str()) {
-                            *slot = None;
-                        }
-                    })
-                    .or_insert(Some(coord));
+            if let Some(key) = session_key(contributor) {
+                contributor_sessions.insert(key.clone());
+                if let Some(coord) = canonical_coordinate_from_str(contributor, None) {
+                    peer_session_coords
+                        .entry(key)
+                        .and_modify(|slot| {
+                            if slot.as_deref() != Some(coord.as_str()) {
+                                *slot = None;
+                            }
+                        })
+                        .or_insert(Some(coord));
+                }
             }
         }
 
@@ -722,6 +723,40 @@ fn patchset_identities(
                 IdentityKey::label(contributor)
             };
             seen.insert(ident);
+        }
+
+        // Carry represented-subject and non-poisoned retained-author session
+        // coordinates for sessions participating in this patchset into history
+        // (without crediting non-contributors) so mixed-source conflicts
+        // persist as `Ambiguous` for subsequent snapshots.
+        if let Some(obo_str) = obo {
+            if let Some(key) = session_key(obo_str) {
+                if contributor_sessions.contains(&key) {
+                    if let IdentityKey {
+                        kind: IdentityKind::Coordinate,
+                        identity,
+                    } = identity_from_subject(obo_str, flag_model)
+                    {
+                        newly_established_sessions.push((key, identity));
+                    }
+                }
+            }
+        }
+        for inherited in &patchset.inherited_authors {
+            if history.is_poisoned_inherited(inherited) {
+                continue;
+            }
+            if let Some(key) = debt_identity_session_key(inherited) {
+                if contributor_sessions.contains(&key) {
+                    if let IdentityKey {
+                        kind: IdentityKind::Coordinate,
+                        identity,
+                    } = identity_from_debt_identity(inherited, false)
+                    {
+                        newly_established_sessions.push((key, identity));
+                    }
+                }
+            }
         }
     } else {
         for author in &patchset.inherited_authors {
@@ -3860,5 +3895,89 @@ mod tests {
         assert_eq!(by_id["codex:gpt-beta#medium"].patchsets, 1);
         assert_eq!(by_id[bare.as_str()].identity_kind, "label");
         assert_eq!(by_id[bare.as_str()].patchsets, 1);
+    }
+
+    #[test]
+    fn by_model_mixed_source_session_ambiguity_persists_to_later_snapshot() {
+        let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d94121";
+        let bare = format!("codex:{uuid}");
+        let prior = format!("codex:{uuid}:gpt-prior#low");
+        let alpha = format!("codex:{uuid}:gpt-alpha#high");
+        let beta = format!("codex:{uuid}:gpt-beta#medium");
+
+        let mut ps1 = with_identity(
+            ps_event("2", 10, "ps-01", "h1"),
+            "lead",
+            Some("observer"),
+            Some("claude"),
+            None,
+            None,
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps1.payload
+        {
+            contributors.push(prior);
+        }
+
+        // ps-02: represented subject names `beta` while explicit peer names
+        // `alpha` alongside bare `S` -> `alpha` gets 1 ps, bare `S` gets 1 ps,
+        // `beta` is NOT credited as contributor, AND `S` becomes Ambiguous in
+        // history.
+        let mut ps2 = with_identity(
+            ps_event("3", 20, "ps-02", "h2"),
+            "lead",
+            Some(&beta),
+            Some("claude"),
+            Some("gpt-beta#medium"),
+            Some(ModelSource::Flag),
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps2.payload
+        {
+            contributors.push(alpha);
+            contributors.push(bare.clone());
+        }
+
+        // ps-03: bare `S` alone with no new model evidence must stay bare label
+        // (2 total patchsets on bare `S`, still 1 on `alpha`).
+        let mut ps3 = with_identity(
+            ps_event("4", 30, "ps-03", "h3"),
+            "lead",
+            Some("observer"),
+            Some("claude"),
+            None,
+            None,
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps3.payload
+        {
+            contributors.push(bare.clone());
+        }
+
+        let rows = summarize_by_model(&[change_tuple(
+            "c1",
+            vec![
+                with_identity(opened_event("1", "c1"), "lead", None, None, None, None),
+                ps1,
+                ps2,
+                ps3,
+            ],
+        )]);
+        let by_id: BTreeMap<&str, &ModelStats> =
+            rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+        assert!(!by_id.contains_key("codex:gpt-beta#medium"));
+        assert_eq!(by_id["codex:gpt-prior#low"].identity_kind, "coordinate");
+        assert_eq!(by_id["codex:gpt-prior#low"].patchsets, 1);
+        assert_eq!(by_id["codex:gpt-alpha#high"].identity_kind, "coordinate");
+        assert_eq!(by_id["codex:gpt-alpha#high"].patchsets, 1);
+        assert_eq!(by_id[bare.as_str()].identity_kind, "label");
+        assert_eq!(by_id[bare.as_str()].patchsets, 2);
     }
 }
