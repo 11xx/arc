@@ -1447,3 +1447,276 @@ fn feedback_refuses_ambiguous_duplicated_rootless_binding_like_journal_dir() {
         "refused write must not touch the duplicated journal"
     );
 }
+
+#[test]
+fn feedback_relative_prefix_discovers_nested_git_repo_under_enclosing_repo() {
+    let repo = Repo::new();
+    let outer = repo.home.join("outer-rel");
+    fs::create_dir_all(&outer).unwrap();
+    git(&outer, &["init", "-b", "master"]);
+    git(&outer, &["config", "user.name", "Fixture"]);
+    git(&outer, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(outer.join("README.md"), "# outer-rel\n").unwrap();
+    git(&outer, &["add", "."]);
+    git(&outer, &["commit", "-m", "initial"]);
+
+    let scope = outer.join("scope");
+    let inner = scope.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "-b", "master"]);
+    git(&inner, &["config", "user.name", "Fixture"]);
+    git(&inner, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(inner.join("README.md"), "# inner\n").unwrap();
+    git(&inner, &["add", "."]);
+    git(&inner, &["commit", "-m", "initial"]);
+
+    let outer_canon = fs::canonicalize(&outer).unwrap();
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let inner_canon = fs::canonicalize(&inner).unwrap();
+    let expected_inner_journal = inner_canon.join("relative-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    assert_eq!(
+        PathBuf::from(stdout(repo.arc(&inner).args(["journal", "dir"])).trim()),
+        expected_inner_journal
+    );
+    repo.arc(&inner)
+        .args([
+            "journal",
+            "log",
+            "nested-rel-bootstrap",
+            "populated from inner",
+        ])
+        .assert()
+        .success();
+    assert!(expected_inner_journal.join("events.jsonl").is_file());
+
+    let scratch = repo.home.join("outside-nested-rel");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Selecting the nested checkout itself finds and writes to `inner/relative-journal`.
+    let empty_list = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "inner", "--list", "--json"]),
+    );
+    assert_eq!(empty_list["schema"], "arc-feedback-list/1");
+    assert_eq!(
+        PathBuf::from(empty_list["journal_dir"].as_str().unwrap()),
+        expected_inner_journal
+    );
+    assert!(empty_list["items"].as_array().unwrap().is_empty());
+
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "inner",
+                "--key",
+                "nested-rel-bug",
+                "--title",
+                "Nested relative friction",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Observed in inner with relative prefix.\n"),
+    );
+    let filed_path = PathBuf::from(created["path"].as_str().unwrap());
+    assert_eq!(
+        filed_path.parent().unwrap(),
+        expected_inner_journal.as_path()
+    );
+
+    let open = json_stdout(repo.arc(&inner).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "nested-rel-bug");
+
+    // Prefix name (`scope`) and relative folder name (`relative-journal`) must refuse
+    // and never fabricate `outer/relative-journal` or `outer/scope/relative-journal`.
+    for target in ["scope", "relative-journal"] {
+        repo.arc(&scratch)
+            .args(["feedback", target, "--list"])
+            .assert()
+            .failure();
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                target,
+                "--key",
+                "should-not-write",
+                "--title",
+                "Should refuse",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Must refuse prefix target.\n")
+            .assert()
+            .failure();
+    }
+    assert!(!outer_canon.join("relative-journal").exists());
+    assert!(!scope_canon.join("relative-journal").exists());
+}
+
+#[test]
+fn feedback_non_git_parent_prefix_distinguishes_relative_and_absolute_nested_repo_journals() {
+    let repo = Repo::new();
+
+    // 1. Non-Git parent prefix with a relative journal destination.
+    let parent_rel = repo.home.join("parent-rel");
+    let inner_rel = parent_rel.join("inner-rel");
+    fs::create_dir_all(&inner_rel).unwrap();
+    git(&inner_rel, &["init", "-b", "master"]);
+    git(&inner_rel, &["config", "user.name", "Fixture"]);
+    git(
+        &inner_rel,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(inner_rel.join("README.md"), "# inner-rel\n").unwrap();
+    git(&inner_rel, &["add", "."]);
+    git(&inner_rel, &["commit", "-m", "initial"]);
+
+    // 2. Non-Git parent prefix with an absolute shared journal destination.
+    let parent_abs = repo.home.join("parent-abs");
+    let inner_abs = parent_abs.join("inner-abs");
+    fs::create_dir_all(&inner_abs).unwrap();
+    git(&inner_abs, &["init", "-b", "master"]);
+    git(&inner_abs, &["config", "user.name", "Fixture"]);
+    git(
+        &inner_abs,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(inner_abs.join("README.md"), "# inner-abs\n").unwrap();
+    git(&inner_abs, &["add", "."]);
+    git(&inner_abs, &["commit", "-m", "initial"]);
+
+    let parent_rel_canon = fs::canonicalize(&parent_rel).unwrap();
+    let inner_rel_canon = fs::canonicalize(&inner_rel).unwrap();
+    let expected_rel_journal = inner_rel_canon.join("relative-journal");
+
+    let parent_abs_canon = fs::canonicalize(&parent_abs).unwrap();
+    let shared_abs_journal = repo.home.join("shared-parent-abs-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n{} = {}\n",
+        serde_json::to_string(&parent_rel_canon.display().to_string()).unwrap(),
+        serde_json::to_string(&parent_abs_canon.display().to_string()).unwrap(),
+        serde_json::to_string(&shared_abs_journal.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    let scratch = repo.home.join("outside-parent-prefixes");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Even before `inner-rel` logs, the non-Git parent prefix must not accept writes
+    // into `parent-rel/relative-journal` under either `parent-rel` or `relative-journal`.
+    for target in ["parent-rel", "relative-journal"] {
+        repo.arc(&scratch)
+            .args(["feedback", target, "--list"])
+            .assert()
+            .failure();
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                target,
+                "--key",
+                "wrong-parent-write",
+                "--title",
+                "Should refuse",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Must not write to parent-rel/relative-journal.\n")
+            .assert()
+            .failure();
+    }
+    assert!(!parent_rel_canon.join("relative-journal").exists());
+
+    // Populate `inner-rel`'s repo-relative journal and `inner-abs`'s shared absolute journal.
+    assert_eq!(
+        PathBuf::from(stdout(repo.arc(&inner_rel).args(["journal", "dir"])).trim()),
+        expected_rel_journal
+    );
+    repo.arc(&inner_rel)
+        .args(["journal", "log", "inner-rel-init", "init relative"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        PathBuf::from(stdout(repo.arc(&inner_abs).args(["journal", "dir"])).trim()),
+        shared_abs_journal
+    );
+    repo.arc(&inner_abs)
+        .args(["journal", "log", "inner-abs-init", "init absolute"])
+        .assert()
+        .success();
+
+    // Relative prefix: `inner-rel` is discovered and receives feedback visible in `inner-rel`;
+    // `parent-rel` and `relative-journal` still refuse without creating `parent-rel/relative-journal`.
+    let rel_created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "inner-rel",
+                "--key",
+                "parent-rel-bug",
+                "--title",
+                "Relative child report",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Lands in inner-rel/relative-journal.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(rel_created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        expected_rel_journal.as_path()
+    );
+    let rel_open = json_stdout(repo.arc(&inner_rel).args(["journal", "open", "--json"]));
+    assert_eq!(rel_open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(rel_open["feedback"][0]["feedback_key"], "parent-rel-bug");
+
+    for target in ["parent-rel", "relative-journal"] {
+        repo.arc(&scratch)
+            .args(["feedback", target, "--list"])
+            .assert()
+            .failure();
+    }
+    assert!(!parent_rel_canon.join("relative-journal").exists());
+
+    // Absolute prefix: `parent-abs` maps the prefix to one shared journal visible in `inner-abs`.
+    let abs_created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "parent-abs",
+                "--key",
+                "parent-abs-bug",
+                "--title",
+                "Absolute shared report",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Lands in shared-parent-abs-journal.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(abs_created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        shared_abs_journal.as_path()
+    );
+    let abs_open = json_stdout(repo.arc(&inner_abs).args(["journal", "open", "--json"]));
+    assert_eq!(abs_open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(abs_open["feedback"][0]["feedback_key"], "parent-abs-bug");
+}

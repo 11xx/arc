@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::store::Store;
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// How an entry's anchor was arrived at. A recorded binding is the project's
@@ -148,41 +149,204 @@ pub(crate) fn journal_directories(cfg: &Config) -> Result<Vec<(String, PathBuf)>
     Ok(dirs)
 }
 
-/// Resolve a configured `[journals.dirs]` destination against its configured
-/// scope anchor, matching normal journal resolution: absolute destinations stay
-/// as given, and relative destinations anchor against the existing absolute
-/// scope's repository root (or the scope itself outside Git). A relative
-/// destination whose scope is non-absolute or absent stays relative so callers
-/// that require an anchored destination can refuse cleanly.
-fn configured_journal_dir(raw_anchor: &str, raw_directory: &str) -> Result<PathBuf> {
-    let directory = crate::config::expand_tilde(raw_directory)?;
-    if directory.is_absolute() {
-        return Ok(directory);
+fn canonical_or_normalized(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
     }
-    let anchor = crate::config::expand_tilde(raw_anchor)?;
-    if !anchor.is_absolute() || !anchor.is_dir() {
-        return Ok(directory);
+    let mut suffix = Vec::new();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        if let Some(name) = cursor.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        if let Ok(mut canonical) = std::fs::canonicalize(parent) {
+            for part in suffix.into_iter().rev() {
+                canonical.push(part);
+            }
+            return canonical;
+        }
+        cursor = parent;
     }
-    crate::journal::anchor_journal_destination(&anchor, directory)
+    path.to_path_buf()
+}
+
+/// Discover concrete `(owner, journal_dir)` pairs for a relative
+/// `[journals.dirs]` destination under an existing absolute prefix `anchor`.
+///
+/// Relative destinations resolve against each matching checkout root rather
+/// than the prefix directory itself, so an enclosing Git prefix or a parent
+/// container holding nested repositories can own one relative journal per
+/// checkout. Populated journals under `anchor` whose own resolution agrees are
+/// discovered in breadth-first order up to `MAX_DIRS_READ`; `anchor` itself is
+/// included while unpopulated only when it resolves directly to
+/// `anchor.join(relative_dir)` and does not act as a non-Git container for
+/// nested checkouts.
+fn discover_relative_configured_journals(
+    cfg: &Config,
+    anchor: &Path,
+    relative_dir: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let canonical_anchor = std::fs::canonicalize(anchor)
+        .with_context(|| format!("cannot canonicalize configured scope {}", anchor.display()))?;
+    let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut discovered_journals: HashSet<PathBuf> = HashSet::new();
+    let mut has_nested_owner = false;
+    let mut queue = VecDeque::new();
+    queue.push_back(canonical_anchor.clone());
+    let mut budget = MAX_DIRS_READ;
+
+    while let Some(dir) = queue.pop_front() {
+        let candidate = canonical_or_normalized(&dir.join(relative_dir));
+        if candidate.is_dir() && crate::journal::is_journal_directory(&candidate).unwrap_or(false) {
+            if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &dir) {
+                if canonical_or_normalized(&resolved) == candidate {
+                    found.push((dir.clone(), candidate.clone()));
+                    discovered_journals.insert(candidate.clone());
+                    if dir != canonical_anchor {
+                        has_nested_owner = true;
+                    }
+                }
+            }
+        }
+        if dir != canonical_anchor && !has_nested_owner && dir.join(".git").exists() {
+            if let Ok(resolved) = crate::journal::resolve_project_dir_without_env(cfg, &dir) {
+                if canonical_or_normalized(&resolved) == candidate {
+                    has_nested_owner = true;
+                }
+            }
+        }
+        if budget == 0 {
+            continue;
+        }
+        budget -= 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut children: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .filter(|entry| entry.file_name() != ".git")
+            .map(|entry| entry.path())
+            .filter(|child| !discovered_journals.contains(&canonical_or_normalized(child)))
+            .collect();
+        children.sort();
+        queue.extend(children);
+    }
+
+    let direct_target = canonical_or_normalized(&canonical_anchor.join(relative_dir));
+    let anchor_already_found = found.iter().any(|(owner, _)| owner == &canonical_anchor);
+    if !anchor_already_found {
+        let resolves_directly =
+            crate::journal::resolve_project_dir_without_env(cfg, &canonical_anchor)
+                .map(|resolved| canonical_or_normalized(&resolved) == direct_target)
+                .unwrap_or(false);
+        let is_git_root = canonical_anchor.join(".git").exists();
+        if resolves_directly && (is_git_root || !has_nested_owner) {
+            found.push((canonical_anchor, direct_target));
+        }
+    }
+
+    Ok(found)
+}
+
+struct KnownJournal {
+    slug: String,
+    journal_dir: PathBuf,
+    configured_anchor: Option<PathBuf>,
+}
+
+fn known_journal_entries(cfg: &Config) -> Result<Vec<KnownJournal>> {
+    let mut entries: Vec<KnownJournal> = journal_directories(cfg)?
+        .into_iter()
+        .map(|(slug, journal_dir)| {
+            let configured_anchor = configured_absolute_anchor(cfg, &journal_dir)?;
+            Ok(KnownJournal {
+                slug,
+                journal_dir,
+                configured_anchor,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for (raw_anchor, raw_directory) in &cfg.journal_dirs {
+        let directory = crate::config::expand_tilde(raw_directory)?;
+        let anchor = crate::config::expand_tilde(raw_anchor)?;
+        if directory.is_absolute() {
+            let normalized = canonical_or_normalized(&directory);
+            if let Some(existing) = entries
+                .iter_mut()
+                .find(|entry| canonical_or_normalized(&entry.journal_dir) == normalized)
+            {
+                let depth = anchor.components().count();
+                if existing
+                    .configured_anchor
+                    .as_ref()
+                    .is_none_or(|best| depth > best.components().count())
+                {
+                    existing.configured_anchor = Some(anchor);
+                }
+                continue;
+            }
+            let slug = directory
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| directory.display().to_string());
+            entries.push(KnownJournal {
+                slug,
+                journal_dir: directory,
+                configured_anchor: Some(anchor),
+            });
+            continue;
+        }
+
+        if !anchor.is_absolute() || !anchor.is_dir() {
+            if entries.iter().any(|entry| entry.journal_dir == directory) {
+                continue;
+            }
+            let slug = directory
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| directory.display().to_string());
+            entries.push(KnownJournal {
+                slug,
+                journal_dir: directory,
+                configured_anchor: Some(anchor),
+            });
+            continue;
+        }
+
+        for (owner, journal_dir) in discover_relative_configured_journals(cfg, &anchor, &directory)?
+        {
+            let normalized = canonical_or_normalized(&journal_dir);
+            if let Some(existing) = entries
+                .iter_mut()
+                .find(|entry| canonical_or_normalized(&entry.journal_dir) == normalized)
+            {
+                if existing.configured_anchor.is_none() {
+                    existing.configured_anchor = Some(owner);
+                }
+                continue;
+            }
+            let slug = crate::config::path_slug(&owner);
+            entries.push(KnownJournal {
+                slug,
+                journal_dir,
+                configured_anchor: Some(owner),
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| (&a.slug, &a.journal_dir).cmp(&(&b.slug, &b.journal_dir)));
+    Ok(entries)
 }
 
 /// Every hot journal directory arc knows about, with its slug, sorted: those
 /// under the default root and those `[journals] dirs` routes elsewhere.
 pub(crate) fn known_journals(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
-    let mut dirs = journal_directories(cfg)?;
-    for (raw_anchor, raw_directory) in &cfg.journal_dirs {
-        let path = configured_journal_dir(raw_anchor, raw_directory)?;
-        if dirs.iter().any(|(_, known)| known == &path) {
-            continue;
-        }
-        let slug = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        dirs.push((slug, path));
-    }
-    dirs.sort();
-    Ok(dirs)
+    Ok(known_journal_entries(cfg)?
+        .into_iter()
+        .map(|entry| (entry.slug, entry.journal_dir))
+        .collect())
 }
 
 /// Every project arc knows about, sorted by journal directory.
@@ -212,8 +376,10 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
 /// by slug or label.
 pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
     let mut projects = Vec::new();
-    for (slug, journal_dir) in known_journals(cfg)? {
-        let configured = configured_anchor(cfg, &journal_dir)?;
+    for entry in known_journal_entries(cfg)? {
+        let slug = entry.slug;
+        let journal_dir = entry.journal_dir;
+        let configured = entry.configured_anchor;
         let recorded = if journal_dir.is_absolute() {
             crate::journal::recorded_anchor(&journal_dir)?
         } else {
@@ -258,12 +424,14 @@ fn is_cold_archive(name: &str, siblings: &[String]) -> bool {
         .is_some_and(|hot| siblings.iter().any(|sibling| sibling == hot))
 }
 
-/// The path scope that routes this journal directory, when one does. The
-/// longest matching scope wins, mirroring how the journal itself resolves.
-fn configured_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>> {
+/// The path scope that routes an absolute journal directory, when one does.
+/// The longest matching scope wins, mirroring how the journal itself resolves.
+fn configured_absolute_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>> {
+    let target = canonical_or_normalized(journal_dir);
     let mut best: Option<(usize, PathBuf)> = None;
     for (anchor, directory) in &cfg.journal_dirs {
-        if configured_journal_dir(anchor, directory)? != journal_dir {
+        let expanded = crate::config::expand_tilde(directory)?;
+        if !expanded.is_absolute() || canonical_or_normalized(&expanded) != target {
             continue;
         }
         let path = crate::config::expand_tilde(anchor)?;

@@ -5541,10 +5541,15 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
         }
     }
     if let Some((_, anchor, directory)) = configured {
+        let resolved_anchor = if directory.is_absolute() {
+            anchor
+        } else {
+            prefix_path.to_path_buf()
+        };
         return Ok(JournalResolution {
             directory: anchor_journal_destination(cwd, directory)?,
             source: ResolutionSource::ConfigPrefix,
-            anchor: Some(anchor),
+            anchor: Some(resolved_anchor),
         });
     }
     if let Some(root) = repository {
@@ -5600,7 +5605,7 @@ fn resolve_with_unbound(cwd: &Path, allow_unbound: bool) -> Result<JournalResolu
     )
 }
 
-fn is_journal_directory(dir: &Path) -> Result<bool> {
+pub(crate) fn is_journal_directory(dir: &Path) -> Result<bool> {
     if dir.join("events.jsonl").is_file() || bindings_path(dir).is_file() {
         return Ok(true);
     }
