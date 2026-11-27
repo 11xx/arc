@@ -114,6 +114,23 @@ fn resolve_project(cfg: &config::Config, name: &str) -> Result<Project> {
         .collect();
     match matches.len() {
         1 => {
+            let matched = matches[0];
+            if !discovery.truncated_relative_prefixes.is_empty() && matched.slug != name {
+                let prefixes = discovery
+                    .truncated_relative_prefixes
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "project name {name:?} cannot be proven unique while relative [journals.dirs] \
+                     discovery under {prefixes} is incomplete (reached the {} directory scan limit); \
+                     pass the unambiguous project slug {} instead, or configure a narrower \
+                     [journals.dirs] prefix",
+                    registry::RELATIVE_DISCOVERY_LIMIT,
+                    matched.slug
+                );
+            }
             for prefix in &discovery.truncated_relative_prefixes {
                 eprintln!(
                     "warning: relative [journals.dirs] discovery under {} reached the {} directory scan limit; unindexed checkouts beneath it may be omitted",
@@ -121,9 +138,25 @@ fn resolve_project(cfg: &config::Config, name: &str) -> Result<Project> {
                     registry::RELATIVE_DISCOVERY_LIMIT
                 );
             }
-            Ok(matches[0].clone())
+            Ok(matched.clone())
         }
         0 => {
+            if !discovery.truncated_relative_prefixes.is_empty() {
+                if let Some(project) = registry::resolve_truncated_relative_project_by_slug(
+                    cfg,
+                    name,
+                    &discovery.truncated_relative_prefixes,
+                )? {
+                    for prefix in &discovery.truncated_relative_prefixes {
+                        eprintln!(
+                            "warning: relative [journals.dirs] discovery under {} reached the {} directory scan limit; unindexed checkouts beneath it may be omitted",
+                            prefix.display(),
+                            registry::RELATIVE_DISCOVERY_LIMIT
+                        );
+                    }
+                    return Ok(project);
+                }
+            }
             let truncation_note = if discovery.truncated_relative_prefixes.is_empty() {
                 String::new()
             } else {
@@ -135,9 +168,9 @@ fn resolve_project(cfg: &config::Config, name: &str) -> Result<Project> {
                     .join(", ");
                 format!(
                     "; incomplete relative [journals.dirs] discovery under {prefixes} \
-                     (reached the {} directory scan limit — run a journal write inside \
-                     the target checkout to register it, or configure a narrower \
-                     [journals.dirs] prefix)",
+                     (reached the {} directory scan limit — pass the checkout's full \
+                     project slug, run a journal write inside the target checkout to \
+                     register it, or configure a narrower [journals.dirs] prefix)",
                     registry::RELATIVE_DISCOVERY_LIMIT
                 )
             };
@@ -315,7 +348,12 @@ pub fn run(ctx: &Ctx, args: FeedbackArgs) -> Result<i32> {
             .starts_with(registry::journals_root(&cfg))
             && !is_configured_absolute_journal(&cfg, anchor, &project.journal_dir)?
         {
-            let _ = registry::remember_relative_checkout(&cfg, anchor);
+            if let Err(error) = registry::remember_relative_checkout(&cfg, anchor) {
+                eprintln!(
+                    "warning: could not record relative checkout index for {}: {error:#}",
+                    anchor.display()
+                );
+            }
         }
     }
     match outcome {

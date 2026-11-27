@@ -1,5 +1,12 @@
 use super::common::*;
 
+fn journal_slug(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
 fn journal_events(dir: &Path) -> Vec<serde_json::Value> {
     let text = fs::read_to_string(dir.join("events.jsonl")).unwrap_or_default();
     text.lines()
@@ -1938,6 +1945,8 @@ fn feedback_preserves_registered_relative_checkout_past_scan_limit_and_surfaces_
         expected_journal
     );
 
+    let inner_slug = before["slug"].as_str().unwrap().to_string();
+
     // Add 4,096 empty sibling directories sorting ahead of `zz-parent`.
     for i in 0..4096 {
         fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
@@ -1948,11 +1957,26 @@ fn feedback_preserves_registered_relative_checkout_past_scan_limit_and_surfaces_
         expected_journal
     );
 
-    // Registered checkout remains addressable for both listing and writing,
-    // while incomplete scan discovery under `scope` is surfaced on stderr.
+    // Under an incomplete scan, the short label `inner` cannot be proven unique
+    // and must refuse while pointing to the unambiguous slug.
+    let short_refusal = repo
+        .arc(&scratch)
+        .args(["feedback", "inner", "--list"])
+        .assert()
+        .failure();
+    let short_stderr = String::from_utf8_lossy(&short_refusal.get_output().stderr);
+    assert!(
+        short_stderr.contains("cannot be proven unique")
+            && short_stderr.contains(&inner_slug)
+            && short_stderr.contains("4096 directory scan limit"),
+        "expected refusal requiring unambiguous slug under truncated scan, got: {short_stderr}"
+    );
+
+    // Addressing the registered checkout by its unambiguous slug succeeds for
+    // both listing and writing, while incomplete discovery is surfaced on stderr.
     let list_out = repo
         .arc(&scratch)
-        .args(["feedback", "inner", "--list", "--json"])
+        .args(["feedback", &inner_slug, "--list", "--json"])
         .output()
         .unwrap();
     assert!(
@@ -1976,7 +2000,7 @@ fn feedback_preserves_registered_relative_checkout_past_scan_limit_and_surfaces_
         .arc(&scratch)
         .args([
             "feedback",
-            "inner",
+            &inner_slug,
             "--key",
             "broad-prefix-bug",
             "--title",
@@ -2005,9 +2029,9 @@ fn feedback_preserves_registered_relative_checkout_past_scan_limit_and_surfaces_
     assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
     assert_eq!(open["feedback"][0]["feedback_key"], "broad-prefix-bug");
 
-    // When an unindexed checkout sits past the scan limit (remove the checkout
-    // index to simulate an unindexed pre-upgrade checkout), refusal must
-    // surface incomplete discovery explicitly rather than failing silently.
+    // When the checkout index is absent (simulating an unindexed pre-upgrade
+    // checkout behind 4,096 siblings), short-name lookup refuses with explicit
+    // truncation details, while addressing the checkout by its full slug still works.
     let index_path = repo.home.join(".local/ai/arc/relative-checkouts.jsonl");
     assert!(index_path.is_file());
     fs::remove_file(&index_path).unwrap();
@@ -2023,5 +2047,389 @@ fn feedback_preserves_registered_relative_checkout_past_scan_limit_and_surfaces_
             && missing_stderr.contains("4096 directory scan limit")
             && missing_stderr.contains(&scope_canon.display().to_string()),
         "expected explicit truncation notice on refusal, got: {missing_stderr}"
+    );
+
+    let unindexed_slug_list =
+        json_stdout(
+            repo.arc(&scratch)
+                .args(["feedback", &inner_slug, "--list", "--json"]),
+        );
+    assert_eq!(
+        PathBuf::from(unindexed_slug_list["journal_dir"].as_str().unwrap()),
+        expected_journal
+    );
+}
+
+#[test]
+fn feedback_refuses_short_name_under_truncated_scan_and_allows_unambiguous_slugs() {
+    let repo = Repo::new();
+    let scope = repo.home.join("broad-ambiguous-scope");
+    let aaa_inner = scope.join("aaa").join("inner");
+    let zzz_inner = scope.join("zzz").join("inner");
+    for checkout in [&aaa_inner, &zzz_inner] {
+        fs::create_dir_all(checkout).unwrap();
+        git(checkout, &["init", "-b", "master"]);
+        git(checkout, &["config", "user.name", "Fixture"]);
+        git(
+            checkout,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
+        fs::write(checkout.join("README.md"), "# inner\n").unwrap();
+        git(checkout, &["add", "."]);
+        git(checkout, &["commit", "-m", "initial"]);
+    }
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let aaa_canon = fs::canonicalize(&aaa_inner).unwrap();
+    let zzz_canon = fs::canonicalize(&zzz_inner).unwrap();
+    let aaa_journal = aaa_canon.join("relative-journal");
+    let zzz_journal = zzz_canon.join("relative-journal");
+    let aaa_slug = journal_slug(&aaa_canon);
+    let zzz_slug = journal_slug(&zzz_canon);
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Seed both checkouts with legacy prefix-bound journals (no checkout index).
+    for journal in [&aaa_journal, &zzz_journal] {
+        fs::create_dir_all(journal).unwrap();
+        fs::write(
+            journal.join("bindings.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-binding/1",
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "bound",
+                    "anchor": scope_canon.display().to_string(),
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            journal.join("events.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-event/1",
+                    "ts": "2026-01-01T00:00:01Z",
+                    "event": "logged",
+                    "topic": "legacy-seed",
+                    "summary": "pre-upgrade",
+                })
+            ),
+        )
+        .unwrap();
+    }
+
+    let scratch = repo.home.join("outside-ambiguous-truncated");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Before adding 4,096 siblings, `feedback inner` refuses as ambiguous.
+    repo.arc(&scratch)
+        .args(["feedback", "inner", "--list"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "matched multiple registered projects",
+        ));
+
+    // Add 4,096 shallow sibling directories and index only `aaa/inner`.
+    for i in 0..4096 {
+        fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
+    }
+    repo.arc(&aaa_inner)
+        .args(["journal", "log", "index-aaa", "index only aaa/inner"])
+        .assert()
+        .success();
+
+    // Short name `inner` MUST still refuse rather than silently writing to `aaa/inner`.
+    repo.arc(&scratch)
+        .args([
+            "feedback",
+            "inner",
+            "--key",
+            "must-not-write",
+            "--title",
+            "Ambiguous short name",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must not land under incomplete discovery.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be proven unique"))
+        .stderr(predicates::str::contains(&aaa_slug));
+    let aaa_open_before = json_stdout(repo.arc(&aaa_inner).args(["journal", "open", "--json"]));
+    assert!(aaa_open_before["feedback"].as_array().unwrap().is_empty());
+
+    // Exact slugs unambiguously target both the indexed `aaa/inner` and the
+    // unindexed legacy `zzz/inner`.
+    let aaa_created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                &aaa_slug,
+                "--key",
+                "aaa-report",
+                "--title",
+                "AAA slug write",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Targeted aaa/inner via slug.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(aaa_created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        aaa_journal.as_path()
+    );
+
+    let zzz_created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                &zzz_slug,
+                "--key",
+                "zzz-report",
+                "--title",
+                "ZZZ legacy slug write",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Targeted unindexed legacy zzz/inner via slug.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(zzz_created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        zzz_journal.as_path()
+    );
+    let zzz_open = json_stdout(repo.arc(&zzz_inner).args(["journal", "open", "--json"]));
+    assert_eq!(zzz_open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(zzz_open["feedback"][0]["feedback_key"], "zzz-report");
+
+    // Indexing `zzz/inner` restores the explicit multi-match ambiguity refusal on `inner`.
+    repo.arc(&zzz_inner)
+        .args(["journal", "log", "index-zzz", "index zzz/inner"])
+        .assert()
+        .success();
+    repo.arc(&scratch)
+        .args(["feedback", "inner", "--list"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "matched multiple registered projects",
+        ));
+}
+
+#[test]
+fn feedback_overlapping_relative_prefixes_match_legacy_binding_of_winning_scope() {
+    let repo = Repo::new();
+    let outer = repo.home.join("outer-overlap");
+    fs::create_dir_all(&outer).unwrap();
+    git(&outer, &["init", "-b", "master"]);
+    git(&outer, &["config", "user.name", "Fixture"]);
+    git(&outer, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(outer.join("README.md"), "# outer-overlap\n").unwrap();
+    git(&outer, &["add", "."]);
+    git(&outer, &["commit", "-m", "initial"]);
+
+    let scope = outer.join("scope");
+    let deeper = scope.join("zzz");
+    let inner = deeper.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "-b", "master"]);
+    git(&inner, &["config", "user.name", "Fixture"]);
+    git(&inner, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(inner.join("README.md"), "# inner\n").unwrap();
+    git(&inner, &["add", "."]);
+    git(&inner, &["commit", "-m", "initial"]);
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let deeper_canon = fs::canonicalize(&deeper).unwrap();
+    let inner_canon = fs::canonicalize(&inner).unwrap();
+    let inner_journal = inner_canon.join("relative-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+        serde_json::to_string(&deeper_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Seed a legacy journal bound to the most specific prefix (`outer/scope/zzz`).
+    fs::create_dir_all(&inner_journal).unwrap();
+    fs::write(
+        inner_journal.join("bindings.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": "journal-binding/1",
+                "ts": "2026-01-01T00:00:00Z",
+                "event": "bound",
+                "anchor": deeper_canon.display().to_string(),
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        inner_journal.join("events.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": "journal-event/1",
+                "ts": "2026-01-01T00:00:01Z",
+                "event": "logged",
+                "topic": "overlap-legacy",
+                "summary": "bound to deeper winning prefix",
+            })
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        PathBuf::from(stdout(repo.arc(&inner).args(["journal", "dir"])).trim()),
+        inner_journal
+    );
+
+    let scratch = repo.home.join("outside-overlap");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let listed = json_stdout(
+        repo.arc(&scratch)
+            .args(["feedback", "inner", "--list", "--json"]),
+    );
+    assert_eq!(
+        PathBuf::from(listed["journal_dir"].as_str().unwrap()),
+        inner_journal
+    );
+
+    let created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                "inner",
+                "--key",
+                "overlap-prefix-bug",
+                "--title",
+                "Overlapping relative prefixes",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Matched winning deeper prefix legacy binding.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        inner_journal.as_path()
+    );
+
+    let open = json_stdout(repo.arc(&inner).args(["journal", "open", "--json"]));
+    assert_eq!(open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(open["feedback"][0]["feedback_key"], "overlap-prefix-bug");
+}
+
+#[test]
+fn feedback_repairs_unterminated_checkout_index_and_surfaces_index_write_failures() {
+    let repo = Repo::new();
+    let outer = repo.home.join("outer-torn-index");
+    fs::create_dir_all(&outer).unwrap();
+    git(&outer, &["init", "-b", "master"]);
+    git(&outer, &["config", "user.name", "Fixture"]);
+    git(&outer, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(outer.join("README.md"), "# outer-torn-index\n").unwrap();
+    git(&outer, &["add", "."]);
+    git(&outer, &["commit", "-m", "initial"]);
+
+    let scope = outer.join("scope");
+    let inner = scope.join("zz-parent").join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "-b", "master"]);
+    git(&inner, &["config", "user.name", "Fixture"]);
+    git(&inner, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(inner.join("README.md"), "# inner\n").unwrap();
+    git(&inner, &["add", "."]);
+    git(&inner, &["commit", "-m", "initial"]);
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let inner_canon = fs::canonicalize(&inner).unwrap();
+    let expected_journal = inner_canon.join("relative-journal");
+    let inner_slug = journal_slug(&inner_canon);
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Add 4,096 shallow sibling directories so discovery depends on the index.
+    for i in 0..4096 {
+        fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
+    }
+
+    // Seed `relative-checkouts.jsonl` with an unterminated malformed tail line.
+    let index_path = repo.home.join(".local/ai/arc/relative-checkouts.jsonl");
+    fs::write(&index_path, "{\"broken\": true").unwrap();
+
+    // `journal log` in `inner` must repair/publish cleanly so `inner` is indexed.
+    repo.arc(&inner)
+        .args([
+            "journal",
+            "log",
+            "torn-index-seed",
+            "register after torn tail",
+        ])
+        .assert()
+        .success();
+
+    let repaired = fs::read_to_string(&index_path).unwrap();
+    assert!(
+        repaired.ends_with('\n') && repaired.contains(&inner_canon.display().to_string()),
+        "expected cleanly repaired index containing inner, got: {repaired:?}"
+    );
+
+    let scratch = repo.home.join("outside-torn-index");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let listed =
+        json_stdout(
+            repo.arc(&scratch)
+                .args(["feedback", &inner_slug, "--list", "--json"]),
+        );
+    assert_eq!(
+        PathBuf::from(listed["journal_dir"].as_str().unwrap()),
+        expected_journal
+    );
+
+    // Replace the index file with a directory to force an index publication failure
+    // and verify `journal log` surfaces the failure explicitly on stderr.
+    fs::remove_file(&index_path).unwrap();
+    fs::create_dir(&index_path).unwrap();
+
+    let log_out = repo
+        .arc(&inner)
+        .args(["journal", "log", "index-fail", "surface index error"])
+        .output()
+        .unwrap();
+    assert!(log_out.status.success());
+    let log_stderr = String::from_utf8_lossy(&log_out.stderr);
+    assert!(
+        log_stderr.contains("could not record relative checkout index"),
+        "expected index write failure warning on stderr, got: {log_stderr}"
     );
 }

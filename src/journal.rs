@@ -5792,9 +5792,27 @@ pub(crate) fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Resu
     Ok(base.join(directory))
 }
 
+/// Effective journal directory resolved for an existing project path without
+/// honoring `ARC_JOURNAL_DIR`, together with the winning `[journals.dirs]`
+/// prefix when a relative configured rule matched.
+pub(crate) struct ResolvedProjectJournal {
+    pub directory: PathBuf,
+    pub relative_config_prefix: Option<PathBuf>,
+}
+
 /// Resolve the effective journal directory for an existing project path under
 /// `cfg`, matching `resolve` without honoring `ARC_JOURNAL_DIR`.
 pub(crate) fn resolve_project_dir_without_env(cfg: &config::Config, cwd: &Path) -> Result<PathBuf> {
+    Ok(resolve_project_journal_without_env(cfg, cwd)?.directory)
+}
+
+/// Resolve the effective journal directory and winning relative prefix for an
+/// existing project path under `cfg`, matching `resolve` without honoring
+/// `ARC_JOURNAL_DIR`.
+pub(crate) fn resolve_project_journal_without_env(
+    cfg: &config::Config,
+    cwd: &Path,
+) -> Result<ResolvedProjectJournal> {
     let canonical_cwd = std::fs::canonicalize(cwd)
         .with_context(|| format!("cannot canonicalize journal cwd {}", cwd.display()))?;
     let repository = repo_root(&canonical_cwd).ok();
@@ -5814,19 +5832,29 @@ pub(crate) fn resolve_project_dir_without_env(cfg: &config::Config, cwd: &Path) 
         let depth = anchor.components().count();
         if configured
             .as_ref()
-            .is_none_or(|(best_depth, _)| depth > *best_depth)
+            .is_none_or(|(best_depth, _, _)| depth > *best_depth)
         {
-            configured = Some((depth, config::expand_tilde(raw_directory)?));
+            configured = Some((depth, anchor, config::expand_tilde(raw_directory)?));
         }
     }
-    if let Some((_, directory)) = configured {
-        return anchor_journal_destination(&canonical_cwd, directory);
+    if let Some((_, anchor, directory)) = configured {
+        let relative_config_prefix = (!directory.is_absolute()).then_some(anchor);
+        return Ok(ResolvedProjectJournal {
+            directory: anchor_journal_destination(&canonical_cwd, directory)?,
+            relative_config_prefix,
+        });
     }
     if let Some(root) = repository {
-        return Ok(cfg.ai_home.join("journals").join(config::path_slug(&root)));
+        return Ok(ResolvedProjectJournal {
+            directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
+            relative_config_prefix: None,
+        });
     }
     if let Some((directory, _)) = rootless_journal(cfg, &canonical_cwd)? {
-        return Ok(directory);
+        return Ok(ResolvedProjectJournal {
+            directory,
+            relative_config_prefix: None,
+        });
     }
     bail!(
         "cannot resolve a stable journal anchor from {}",
@@ -11437,8 +11465,16 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
         return Ok(());
     };
     if resolution.relative_config_prefix {
-        if let Ok(cfg) = config::load() {
-            let _ = crate::registry::remember_relative_checkout(&cfg, &anchor);
+        match config::load()
+            .and_then(|cfg| crate::registry::remember_relative_checkout(&cfg, &anchor))
+        {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!(
+                    "warning: could not record relative checkout index for {}: {error:#}",
+                    anchor.display()
+                );
+            }
         }
     }
     // A write from the project re-registers a retired journal.
