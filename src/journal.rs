@@ -18391,6 +18391,37 @@ fn global_promotion_corroborated(filename: &str, global_file: &str) -> bool {
     })
 }
 
+/// Whether a legacy `consumed [superseded]` event without `promoted_to_global`
+/// matches the structural signature emitted by `journal promote --global`: a
+/// project memory whose `promoted to global::<dst>` destination is a bare
+/// memory filename carrying the source's topic and the consumption event's own
+/// UTC timestamp.
+fn is_legacy_global_promotion_shape(
+    dir: &Path,
+    filename: &str,
+    event: &JournalEvent,
+    global_file: &str,
+) -> bool {
+    if is_global_dir(dir).unwrap_or(false) || global_file.contains(['/', '\\']) {
+        return false;
+    }
+    let Some((_, src_topic, src_kind)) = parse_artifact_name(filename) else {
+        return false;
+    };
+    if src_kind != JournalKind::Memory.as_str() || event.topic != src_topic {
+        return false;
+    }
+    let Some((dst_stamp, dst_topic, dst_kind)) = parse_artifact_name(global_file) else {
+        return false;
+    };
+    if dst_kind != JournalKind::Memory.as_str() || dst_topic != src_topic {
+        return false;
+    }
+    event
+        .timestamp()
+        .is_some_and(|ts| ts.format("%Y%m%dT%H%M%SZ").to_string() == dst_stamp)
+}
+
 /// Whether `value` has the exact shape `ids::new_change_id` issues
 /// (`<valid-slug>-<6 lowercase base32 chars>`), used only as a fallback when
 /// no local ledger is readable to corroborate a legacy `change <id>` note.
@@ -18487,10 +18518,12 @@ fn handoff_evidence(
                 return Some(format!("transitioned to {successor}"));
             }
         }
-        if let Some(global_file) = note.strip_prefix("promoted to global::").map(str::trim) {
-            if parse_artifact_name(global_file)
-                .is_some_and(|(_, _, kind)| kind == JournalKind::Memory.as_str())
-                && global_promotion_corroborated(filename, global_file)
+        if let Some(global_file) = note.strip_prefix("promoted to global::") {
+            if !global_file.contains(['/', '\\'])
+                && parse_artifact_name(global_file)
+                    .is_some_and(|(_, _, kind)| kind == JournalKind::Memory.as_str())
+                && (global_promotion_corroborated(filename, global_file)
+                    || is_legacy_global_promotion_shape(dir, filename, event, global_file))
             {
                 return Some(format!("promoted to global::{global_file}"));
             }

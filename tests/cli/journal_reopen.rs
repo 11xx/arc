@@ -2421,3 +2421,274 @@ fn reopen_session_window_respects_standing_and_concurrent_consumptions() {
         "{doctor}"
     );
 }
+
+/// Claim: legacy global memory promotions recorded without `promoted_to_global`
+/// remain protected from both explicit and session-window reopen after export
+/// and import onto a paired peer with an independent operator home, while
+/// ordinary superseded notes (including free-text and non-matching notes) still
+/// reopen on the peer.
+#[test]
+fn reopen_protects_imported_legacy_global_memory_promotions_across_operator_homes() {
+    let alpha = Repo::new();
+    let beta = Repo::new();
+    super::journal_exchange::pair(&alpha, &beta, "alpha", "beta");
+
+    let legacy_mem1 = write_artifact(&alpha, "legacy-global-one", "memory", "# Legacy one\n");
+    let legacy_mem2 = write_artifact(&alpha, "legacy-global-two", "memory", "# Legacy two\n");
+    let plain_mem = write_artifact(&alpha, "legacy-plain-note", "memory", "# Plain note\n");
+    let fake_global = write_artifact(&alpha, "legacy-fake-global", "memory", "# Fake global\n");
+    let fake_todo = write_artifact(&alpha, "legacy-fake-todo", "todo", "# Fake todo\n");
+
+    let sess = "legacy-promo-sess";
+    for file in [&legacy_mem1, &legacy_mem2] {
+        alpha
+            .arc(&alpha.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", sess)
+            .args(["journal", "promote", file, "--global"])
+            .assert()
+            .success();
+    }
+    alpha
+        .arc(&alpha.root)
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", sess)
+        .args([
+            "journal",
+            "consume",
+            &plain_mem,
+            "--outcome",
+            "superseded",
+            "--note",
+            "change of plans",
+        ])
+        .assert()
+        .success();
+    alpha
+        .arc(&alpha.root)
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", sess)
+        .args([
+            "journal",
+            "consume",
+            &fake_global,
+            "--outcome",
+            "superseded",
+            "--note",
+            "promoted to global::20260101T000000Z-nonexistent-memory.md",
+        ])
+        .assert()
+        .success();
+    alpha
+        .arc(&alpha.root)
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", sess)
+        .args([
+            "journal",
+            "consume",
+            &fake_todo,
+            "--outcome",
+            "superseded",
+            "--note",
+            "placeholder",
+        ])
+        .assert()
+        .success();
+
+    // Strip `promoted_to_global` from alpha's promotion events to reproduce
+    // genuine pre-reopen legacy records before exporting to beta, and give
+    // `fake_todo` an exact timestamp/topic-matching global-promotion note to
+    // prove non-memory artifacts are never misclassified.
+    let alpha_log_path = journal_dir(&alpha).join("events.jsonl");
+    let legacy_lines: Vec<String> = fs::read_to_string(&alpha_log_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["file"] == legacy_mem1 || value["file"] == legacy_mem2 {
+                value.as_object_mut().unwrap().remove("promoted_to_global");
+            } else if value["file"] == fake_todo && value["event"] == "consumed" {
+                let ts = value["ts"].as_str().unwrap();
+                let stamp: String = ts.chars().filter(|c| !matches!(c, '-' | ':')).collect();
+                value["note"] = serde_json::Value::String(format!(
+                    "promoted to global::{stamp}-legacy-fake-todo-memory.md"
+                ));
+            }
+            serde_json::to_string(&value).unwrap()
+        })
+        .collect();
+    fs::write(&alpha_log_path, format!("{}\n", legacy_lines.join("\n"))).unwrap();
+
+    // Export from alpha and verify the bundle carries no `promoted_to_global`
+    // field for the legacy promotions.
+    let bundle = alpha.home.join("legacy-global-promo-bundle.json");
+    alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "export",
+            &legacy_mem1,
+            &legacy_mem2,
+            &plain_mem,
+            &fake_global,
+            &fake_todo,
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bundle_raw = fs::read_to_string(&bundle).unwrap();
+    assert!(
+        !bundle_raw.contains("\"promoted_to_global\""),
+        "test fixture must exercise legacy records without promoted_to_global"
+    );
+
+    // Import into beta, whose independent operator home has no global memories.
+    beta.arc(&beta.root)
+        .args(["journal", "import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let beta_global = json_stdout(
+        beta.arc(&beta.root)
+            .args(["journal", "--global", "memories", "--json"]),
+    );
+    assert!(
+        beta_global["memories"].as_array().unwrap().is_empty(),
+        "{beta_global}"
+    );
+
+    // Explicit reopen on beta MUST refuse `legacy_mem1` as a structural handoff
+    // without modifying beta's event log.
+    let beta_log_path = journal_dir(&beta).join("events.jsonl");
+    let beta_log_before = fs::read_to_string(&beta_log_path).unwrap();
+    let explicit_err = beta
+        .arc(&beta.root)
+        .args(["journal", "reopen", &legacy_mem1, "--reason", "probe"])
+        .output()
+        .unwrap();
+    assert!(!explicit_err.status.success());
+    let explicit_msg = output_text(&explicit_err);
+    assert!(
+        explicit_msg.contains("structural handoff")
+            && explicit_msg.contains("promoted to global::"),
+        "{explicit_msg}"
+    );
+    assert_eq!(fs::read_to_string(&beta_log_path).unwrap(), beta_log_before);
+
+    // Session-window reopen on beta (dry-run and real) MUST skip both legacy
+    // promotions while reopening all three ordinary-note controls.
+    let dry = beta
+        .arc(&beta.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            sess,
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo legacy session",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry.status.success(), "{}", output_text(&dry));
+    let dry_out = String::from_utf8_lossy(&dry.stdout);
+    let dry_err = String::from_utf8_lossy(&dry.stderr);
+    for legacy in [&legacy_mem1, &legacy_mem2] {
+        assert!(!dry_out.contains(legacy), "{dry_out}");
+        assert!(
+            dry_err.contains(&format!("skipped handoff: {legacy}")),
+            "{dry_err}"
+        );
+    }
+    for control in [&plain_mem, &fake_global, &fake_todo] {
+        assert!(
+            dry_out.contains(&format!("would reopen: {control}")),
+            "{dry_out}"
+        );
+    }
+    assert!(dry_out.contains("would reopen 3 artifact(s)"), "{dry_out}");
+    assert_eq!(fs::read_to_string(&beta_log_path).unwrap(), beta_log_before);
+
+    let batch = beta
+        .arc(&beta.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            sess,
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo legacy session",
+        ])
+        .output()
+        .unwrap();
+    assert!(batch.status.success(), "{}", output_text(&batch));
+    let batch_out = String::from_utf8_lossy(&batch.stdout);
+    let batch_err = String::from_utf8_lossy(&batch.stderr);
+    for legacy in [&legacy_mem1, &legacy_mem2] {
+        assert!(!batch_out.contains(legacy), "{batch_out}");
+        assert!(
+            batch_err.contains(&format!("skipped handoff: {legacy}")),
+            "{batch_err}"
+        );
+    }
+    for control in [&plain_mem, &fake_global, &fake_todo] {
+        assert!(
+            batch_out.contains(&format!("reopened: {control}")),
+            "{batch_out}"
+        );
+    }
+
+    // Both legacy promotions stay retired on beta while alpha retains its
+    // global successors; ordinary-note controls are live again on beta.
+    let beta_memories = json_stdout(beta.arc(&beta.root).args(["journal", "memories", "--json"]));
+    let beta_live_memories: Vec<&str> = beta_memories["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        beta_live_memories.contains(&plain_mem.as_str()),
+        "{beta_live_memories:?}"
+    );
+    assert!(
+        beta_live_memories.contains(&fake_global.as_str()),
+        "{beta_live_memories:?}"
+    );
+    assert!(
+        !beta_live_memories.contains(&legacy_mem1.as_str()),
+        "{beta_live_memories:?}"
+    );
+    assert!(
+        !beta_live_memories.contains(&legacy_mem2.as_str()),
+        "{beta_live_memories:?}"
+    );
+
+    let beta_open = json_stdout(beta.arc(&beta.root).args(["journal", "open", "--json"]));
+    assert!(beta_open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["file"] == fake_todo));
+
+    let alpha_global = json_stdout(
+        alpha
+            .arc(&alpha.root)
+            .args(["journal", "--global", "memories", "--json"]),
+    );
+    assert_eq!(
+        alpha_global["memories"].as_array().unwrap().len(),
+        2,
+        "{alpha_global}"
+    );
+
+    let beta_doctor = doctor_json(&beta);
+    assert!(
+        beta_doctor["problems"].as_array().unwrap().is_empty(),
+        "{beta_doctor}"
+    );
+}
