@@ -174,15 +174,30 @@ fn checkout_notes(
                 ));
             }
             if let Some(path) = gate.invariants.as_deref() {
-                let local = match fs::read_to_string(toplevel.join(path)) {
-                    Ok(text) => Some(text),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => return Err(error.into()),
-                };
-                if local != gitio::file_at(cwd, target_head, path)? {
-                    notes.push(format!(
-                        "this checkout's {path} differs from {target}'s; readiness answers for {target}'s"
-                    ));
+                let target_bytes = gitio::file_at(cwd, target_head, path)
+                    .ok()
+                    .flatten()
+                    .map(String::into_bytes);
+                match fs::read(toplevel.join(path)) {
+                    Ok(local) => {
+                        if Some(local) != target_bytes {
+                            notes.push(format!(
+                                "this checkout's {path} differs from {target}'s; readiness answers for {target}'s"
+                            ));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        if target_bytes.is_some() {
+                            notes.push(format!(
+                                "this checkout's {path} differs from {target}'s; readiness answers for {target}'s"
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        notes.push(format!(
+                            "this checkout's {path} could not be read; readiness answers for {target}'s"
+                        ));
+                    }
                 }
             }
         }

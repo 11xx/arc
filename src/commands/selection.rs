@@ -306,13 +306,13 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
                 hostname.clone(),
                 &run.timing,
             ),
-            gate.budget,
+            gate.effective_budget(),
             &mut run.timing,
         )?;
         run.timing.execution_limit_ms = limit;
         run.timing.execution_limit_origin = origin;
         run.timing.budget_at_run = gate
-            .budget
+            .effective_budget()
             .map(|_| Box::new(gate.budget_judgement(&run.timing)));
         let current = candidate_declarations(ctx, &st, &tree)?;
         if current.gates.has_budgets() {
@@ -476,8 +476,8 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
             name: (*name).clone(),
             command: gate.command.clone(),
             timeout: gate.timeout,
-            budget: gate.budget,
-            budget_sources: gate.budget_sources.clone(),
+            budget: gate.effective_budget(),
+            budget_sources: gate.effective_budget_sources().to_vec(),
             budget_suspension: gate.budget_suspension.clone(),
             environment_probe: gate.environment.clone(),
             environment: declared_environment(&environments, gate).map(str::to_string),

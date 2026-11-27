@@ -8,10 +8,8 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
         "--concurrent requires five rounds of the complete batch; --gate is standalone"
     );
     let root = gitio::toplevel(&ctx.cwd)?;
-    let mut declared = gates::inspect(&root)?;
-    declared.destination_confinement(&root)?;
+    let declared = super::measurement_declarations(ctx, &root)?;
     let _confinement = crate::confinement::Scope::new(&declared.confine);
-    declared.ensure_unconflicted()?;
     let required = declared
         .gates
         .iter()
@@ -139,7 +137,7 @@ pub(super) fn measure(ctx: &Ctx, runs: u32, selected: Option<&str>) -> Result<i3
                 && gitio::worktree_tree(&root)? == tree,
             "worktree moved during concurrent measurement; no acceptance recorded"
         );
-        let current = gates::inspect(&root)?;
+        let current = super::measurement_declarations(ctx, &root)?;
         anyhow::ensure!(
             crate::gate_concurrency::members(current.gates.iter()) == members,
             "concurrent declarations changed during measurement; no acceptance recorded"

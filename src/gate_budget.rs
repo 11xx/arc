@@ -138,22 +138,34 @@ impl Gate {
     }
 
     pub fn absorb_budget(&mut self, other: &Gate) {
-        let self_had_budget = self.budget.is_some();
+        // Merge effective caps for both ordinary and interface runs so neither
+        // a branch change nor an operator policy can be bypassed by an omitted
+        // `interface_budget` on the stricter layer.
+        let any_interface = self.interface_budget.is_some() || other.interface_budget.is_some();
+        if any_interface {
+            let self_iface = self.interface_budget.or(self.budget);
+            let other_iface = other.interface_budget.or(other.budget);
+            if self.interface_budget.is_none() {
+                self.interface_budget_sources
+                    .extend(self.budget_sources.clone());
+            }
+            if other.interface_budget.is_some() {
+                self.interface_budget_sources
+                    .extend(other.interface_budget_sources.clone());
+            } else {
+                self.interface_budget_sources
+                    .extend(other.budget_sources.clone());
+            }
+            self.interface_budget_sources
+                .sort_by(|a, b| (&a.source, a.milliseconds).cmp(&(&b.source, b.milliseconds)));
+            self.interface_budget_sources.dedup();
+            self.interface_budget = minimum(self_iface, other_iface);
+        }
         self.budget = minimum(self.budget, other.budget);
         self.budget_sources.extend(other.budget_sources.clone());
         self.budget_sources
             .sort_by(|a, b| (&a.source, a.milliseconds).cmp(&(&b.source, b.milliseconds)));
         self.budget_sources.dedup();
-        // A layer that already caps a gate with `budget` and declares no
-        // `interface_budget` cannot be loosened by another layer adding one.
-        if !self_had_budget || self.interface_budget.is_some() {
-            self.interface_budget = minimum(self.interface_budget, other.interface_budget);
-            self.interface_budget_sources
-                .extend(other.interface_budget_sources.clone());
-            self.interface_budget_sources
-                .sort_by(|a, b| (&a.source, a.milliseconds).cmp(&(&b.source, b.milliseconds)));
-            self.interface_budget_sources.dedup();
-        }
     }
 
     pub fn budget_judgement(
@@ -680,6 +692,44 @@ mod tests {
             toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\ninterface_budget='30s'\n")
                 .unwrap();
         target.owe_also(own, "target", "change");
-        assert_eq!(target.gates["unit"].interface_budget, None);
+        target.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: None,
+            change_size: Some(crate::gate_trailers::ChangeSize::Interface),
+        });
+        assert_eq!(target.gates["unit"].effective_budget(), Some(10_000));
+
+        // Operator ordinary budget without interface_budget caps a target's wider interface_budget.
+        let mut target_wide: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\ninterface_budget='30s'\n")
+                .unwrap();
+        target_wide.name_budget_sources("target");
+        let mut operator_cap: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\n").unwrap();
+        operator_cap.name_budget_sources("operator");
+        target_wide.owe_also(operator_cap, "target", "operator");
+        target_wide.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: None,
+            change_size: Some(crate::gate_trailers::ChangeSize::Interface),
+        });
+        assert_eq!(target_wide.gates["unit"].effective_budget(), Some(10_000));
+        assert!(target_wide.gates["unit"]
+            .effective_budget_sources()
+            .iter()
+            .any(|s| s.source == "operator" && s.milliseconds == 10_000));
+
+        // Operator ordinary budget between target budget and target interface_budget
+        // keeps ordinary changes at target's budget and caps interface changes at operator's.
+        let mut target_mid: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\ninterface_budget='30s'\n")
+                .unwrap();
+        let operator_mid: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='20s'\n").unwrap();
+        target_mid.owe_also(operator_mid, "target", "operator");
+        assert_eq!(target_mid.gates["unit"].effective_budget(), Some(10_000));
+        target_mid.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: None,
+            change_size: Some(crate::gate_trailers::ChangeSize::Interface),
+        });
+        assert_eq!(target_mid.gates["unit"].effective_budget(), Some(20_000));
     }
 }

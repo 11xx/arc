@@ -209,13 +209,13 @@ pub fn publication(
                     super::local_hostname(),
                     &timing,
                 ),
-                gate.budget,
+                gate.effective_budget(),
                 &mut timing,
             )?;
             timing.execution_limit_ms = limit;
             timing.execution_limit_origin = origin;
             timing.budget_at_run = gate
-                .budget
+                .effective_budget()
                 .map(|_| Box::new(gate.budget_judgement(&timing)));
             match VerifyResult::observed(run.status.success(), run.status.code(), run.timed_out) {
                 VerifyResult::Pass
@@ -489,7 +489,19 @@ fn configuration_identity(
         .collect::<Vec<_>>();
     let budgets = required
         .iter()
-        .map(|(name, gate)| (name.as_str(), (gate.budget, &gate.budget_sources)))
+        .map(|(name, gate)| {
+            (
+                name.as_str(),
+                (
+                    gate.budget,
+                    &gate.budget_sources,
+                    gate.interface_budget,
+                    &gate.interface_budget_sources,
+                    gate.effective_budget(),
+                    gate.effective_budget_sources(),
+                ),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let bytes = serde_json::to_vec(&(
         authority,

@@ -369,13 +369,16 @@ struct Planned {
     states: Vec<ChangeState>,
     reports: Vec<crate::status::StatusReport>,
     declarations: Vec<crate::integration::Declarations>,
-    /// Every gate a member requires, under its one shared declaration.
+    /// Every gate a member requires, under its one shared declaration (for stack landings).
     gates: Vec<(String, crate::gates::Gate)>,
     /// Per-member projected contribution trailers (empty when auto-stamping is
     /// disabled).
     projected_trailers: Vec<Vec<String>>,
     /// Whether at least one member has missing applicable trailers to stamp.
     any_stamping: bool,
+    /// Every distinct `(gate_name, declaration_identity)` obligation across members,
+    /// preserving distinct per-member `Witness:` / `Change-size:` inputs for composed landings.
+    composed_obligations: Vec<(String, crate::gates::Gate)>,
 }
 
 fn brief_digest(state: &ChangeState) -> Option<String> {
@@ -661,6 +664,8 @@ fn plan(
     let auto_trailers = !no_trailers && policy.trailers.auto;
     let mut union: BTreeMap<String, GateUnion> = BTreeMap::new();
     let mut gate_declarations: BTreeMap<String, crate::gates::Gate> = BTreeMap::new();
+    let mut composed_by_key: BTreeMap<(String, String), crate::gates::Gate> = BTreeMap::new();
+    let mut composed_order: Vec<(String, String)> = Vec::new();
     let mut budget_rules = None;
     let top_index = members.len() - 1;
     let mut top_gates: BTreeMap<String, String> = BTreeMap::new();
@@ -830,25 +835,28 @@ fn plan(
             );
         }
         crate::gate_budget::merge_rules(&mut budget_rules, declarations.gates.budget.clone());
-        let required: Vec<(String, String, bool, String, crate::gates::Gate)> = declarations
-            .gates
-            .required_for_event(&selected.profile, crate::model::GateEvent::Integration)
-            .into_iter()
-            .map(|(name, gate)| {
-                (
-                    name.clone(),
-                    crate::gates::declaration_identity(gate),
-                    gate.binds.is_tree(),
-                    gate.command.clone(),
-                    (*gate).clone(),
-                )
-            })
-            .collect();
+        let required: Vec<(String, String, String, bool, String, crate::gates::Gate)> =
+            declarations
+                .gates
+                .required_for_event(&selected.profile, crate::model::GateEvent::Integration)
+                .into_iter()
+                .map(|(name, gate)| {
+                    (
+                        name.clone(),
+                        crate::gates::definition_identity(gate),
+                        crate::gates::declaration_identity(gate),
+                        gate.binds.is_tree(),
+                        gate.command.clone(),
+                        (*gate).clone(),
+                    )
+                })
+                .collect();
         let mut gates = BTreeMap::new();
-        for (name, identity, binds_tree, command, declared) in required {
+        let mut def_gates = BTreeMap::new();
+        for (name, def_identity, evidence_identity, binds_tree, command, declared) in required {
             let name = &name;
             match union.get_mut(name) {
-                Some(existing) if existing.identity != identity => {
+                Some(existing) if existing.identity != def_identity => {
                     return refuse(
                         Blocker::GatesNotGreen.exit_code(),
                         format!(
@@ -874,6 +882,9 @@ fn plan(
                     }
                     combined.absorb_budget(&declared);
                     combined.absorb_admission(&declared);
+                    if index == top_index {
+                        combined.gate_trailers = declared.gate_trailers.clone();
+                    }
                     existing.exclusive = combined.exclusive.clone();
                     existing.admission_ms = crate::exclusive::Request::for_gate(combined)
                         .map(|request| request.admission.as_millis());
@@ -882,13 +893,13 @@ fn plan(
                     let exclusive = declared.exclusive.clone();
                     let admission_ms = crate::exclusive::Request::for_gate(&declared)
                         .map(|request| request.admission.as_millis());
-                    gate_declarations.insert(name.clone(), declared);
+                    gate_declarations.insert(name.clone(), declared.clone());
                     union.insert(
                         name.clone(),
                         GateUnion {
                             exclusive,
                             admission_ms,
-                            identity: identity.clone(),
+                            identity: def_identity.clone(),
                             binds: if binds_tree { "tree" } else { "commit" },
                             command: command.clone(),
                             required_by: vec![member.change_id.clone()],
@@ -896,10 +907,22 @@ fn plan(
                     );
                 }
             }
-            gates.insert(name.clone(), identity);
+            let key = (name.clone(), evidence_identity.clone());
+            match composed_by_key.get_mut(&key) {
+                Some(existing) => {
+                    existing.absorb_budget(&declared);
+                    existing.absorb_admission(&declared);
+                }
+                None => {
+                    composed_order.push(key.clone());
+                    composed_by_key.insert(key, declared);
+                }
+            }
+            gates.insert(name.clone(), evidence_identity);
+            def_gates.insert(name.clone(), def_identity);
         }
         if index == top_index {
-            top_gates = gates.clone();
+            top_gates = def_gates;
         }
         let (member_projected_trailers, member_auto_trailers) = if auto_trailers {
             let mut with_ctx = selected.clone();
@@ -1056,6 +1079,15 @@ fn plan(
     if gitio::fresh_branch_head(&ctx.cwd, &target)? != target_before {
         return refuse(1, "landing target moved while planning");
     }
+    let composed_obligations = composed_order
+        .into_iter()
+        .map(|key| {
+            let gate = composed_by_key
+                .remove(&key)
+                .expect("ordered key exists in composed obligations");
+            (key.0, gate)
+        })
+        .collect();
     Ok(Ok(Planned {
         plan: Plan {
             schema: PLAN_SCHEMA,
@@ -1075,6 +1107,7 @@ fn plan(
         gates: gate_declarations.into_iter().collect(),
         projected_trailers: projected_trailers_list,
         any_stamping,
+        composed_obligations,
     }))
 }
 
@@ -1290,11 +1323,29 @@ enum BudgetRefusal {
     Observed(String),
 }
 
-/// Judge the shared receipts against each member's effective obligations.
+/// Evidence receipts keyed by `(gate_name, declaration_identity)` for composed
+/// landings (so distinct per-member witness/change-size inputs retain distinct
+/// receipts) or by `gate_name` for stacked landings.
+#[derive(Clone)]
+enum SelectedEvidence {
+    Composed(super::gatekeeping::LandingEvidence),
+    Stack(BTreeMap<String, String>),
+}
+
+impl SelectedEvidence {
+    fn get(&self, gate: &str, identity: &str) -> Option<&String> {
+        match self {
+            SelectedEvidence::Composed(map) => map.get(&(gate.to_string(), identity.to_string())),
+            SelectedEvidence::Stack(map) => map.get(gate),
+        }
+    }
+}
+
+/// Judge the selected receipts against each member's effective obligations.
 fn budget_refusal(
     plan: &Plan,
     top: &ChangeState,
-    evidence: &BTreeMap<String, String>,
+    evidence: &SelectedEvidence,
 ) -> Option<BudgetRefusal> {
     let mut missing = None;
     for member in &plan.members {
@@ -1302,7 +1353,8 @@ fn budget_refusal(
             let Some(budget) = gate.budget_ms else {
                 continue;
             };
-            let receipt = evidence.get(name).and_then(|id| {
+            let identity = member.gates.get(name).map(String::as_str).unwrap_or("");
+            let receipt = evidence.get(name, identity).and_then(|id| {
                 top.verifications
                     .iter()
                     .find(|receipt| &receipt.event_id == id)
@@ -1324,7 +1376,10 @@ fn budget_refusal(
                 }
                 None => {
                     missing.get_or_insert_with(|| {
-                        let selected = evidence.get(name).map(|id| format!(" {id}")).unwrap_or_default();
+                        let selected = evidence
+                            .get(name, identity)
+                            .map(|id| format!(" {id}"))
+                            .unwrap_or_default();
                         BudgetRefusal::MissingReceipt(format!(
                             "{}: gate {name}: no selected receipt{selected} in top change {}; run_ms is missing for budget {}; budget source {}",
                             member.change_id, top.change_id, crate::gate_budget::duration(budget),
@@ -1676,6 +1731,7 @@ fn run_attempt(
     let gate_declarations = planned.gates;
     let projected_trailers = planned.projected_trailers;
     let any_stamping = planned.any_stamping;
+    let composed_obligations = planned.composed_obligations;
     let member_ids: Vec<String> = pinned
         .members
         .iter()
@@ -1756,15 +1812,18 @@ fn run_attempt(
             }
         }
         crash_point("composed");
-        // The gates every member requires run once at the composed head, in
-        // a checkout the attempt owns, with no ledger or change lock held.
-        let gated = gate_composed(ctx, store, &pinned, &gate_declarations, &top, &attempt);
+        // The gates every member requires run at the composed head, once per
+        // distinct `(gate, gate_trailers)` obligation, in a checkout the
+        // attempt owns, with no ledger or change lock held.
+        let gated = gate_composed(ctx, store, &pinned, &composed_obligations, &top, &attempt);
         match gated {
             Ok((0, evidence)) => Some(evidence),
             Ok((_, evidence)) => {
-                if let Some(BudgetRefusal::Observed(reason)) =
-                    budget_refusal(&pinned, &store.state(&top)?, &evidence)
-                {
+                if let Some(BudgetRefusal::Observed(reason)) = budget_refusal(
+                    &pinned,
+                    &store.state(&top)?,
+                    &SelectedEvidence::Composed(evidence),
+                ) {
                     abandon(ctx, store, &attempt, &reason)?;
                     eprintln!("Cannot land: {reason}; nothing closed");
                     return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
@@ -1846,9 +1905,11 @@ fn run_attempt(
                 &pinned.target_branch,
                 crate::integration::Shape::FfOnly,
             )?;
-            if let Some(BudgetRefusal::Observed(reason)) =
-                budget_refusal(&pinned, &state, &reported_evidence(&top_report))
-            {
+            if let Some(BudgetRefusal::Observed(reason)) = budget_refusal(
+                &pinned,
+                &state,
+                &SelectedEvidence::Stack(reported_evidence(&top_report)),
+            ) {
                 abandon(ctx, store, &attempt, &reason)?;
                 eprintln!("Cannot land: {reason}; nothing closed");
                 return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
@@ -2082,8 +2143,8 @@ fn gate_checkout(ctx: &Ctx, store: &Store, attempt: &str, commit: &str) -> Resul
     ))
 }
 
-/// Run the gates every member requires, once, at the composed head,
-/// recorded on the top member.
+/// Run the gates every member requires, once per distinct obligation, at the
+/// composed head, recorded on the top member.
 fn gate_composed(
     ctx: &Ctx,
     store: &Store,
@@ -2091,20 +2152,17 @@ fn gate_composed(
     gates: &[(String, crate::gates::Gate)],
     top: &str,
     attempt: &str,
-) -> Result<(i32, BTreeMap<String, String>)> {
+) -> Result<(i32, super::gatekeeping::LandingEvidence)> {
     let commit = plan.after().to_string();
     let tree = plan.installed_tree().to_string();
     let confinement = crate::confinement::at(&ctx.cwd, &plan.target_before)?;
     let _confinement = crate::confinement::Scope::new(&confinement);
     let checkout = gate_checkout(ctx, store, attempt, &commit)?;
-    let mut state = store.state(top)?;
-    state.target_branch = plan.target_branch.clone();
     super::gatekeeping::verify_landing_head(
         ctx,
         store,
         super::gatekeeping::LandingGateRun {
             change_id: top,
-            state: &state,
             gates,
             commit: &commit,
             tree: &tree,
@@ -2125,7 +2183,7 @@ fn commit(
     observed: &serde_json::Value,
     mut intent: landing::Intent,
     started_at: chrono::DateTime<chrono::Utc>,
-    composed_evidence: Option<BTreeMap<String, String>>,
+    composed_evidence: Option<super::gatekeeping::LandingEvidence>,
 ) -> Result<i32> {
     let attempt = intent.attempt.clone();
     let _authority = crate::replica::lock(store)?;
@@ -2199,9 +2257,10 @@ fn commit(
     let top_index = plan.members.len() - 1;
     let top_report = &fresh.reports[top_index];
     let top_state = &fresh.states[top_index];
-    let selected_evidence = composed_evidence
-        .clone()
-        .unwrap_or_else(|| reported_evidence(top_report));
+    let selected_evidence = match &composed_evidence {
+        Some(evidence) => SelectedEvidence::Composed(evidence.clone()),
+        None => SelectedEvidence::Stack(reported_evidence(top_report)),
+    };
     if let Some(BudgetRefusal::MissingReceipt(reason) | BudgetRefusal::Observed(reason)) =
         budget_refusal(&plan, top_state, &selected_evidence)
     {
@@ -2209,7 +2268,44 @@ fn commit(
         eprintln!("Cannot land: {reason}; nothing closed");
         return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
     }
-    let mut gate_evidence = composed_evidence.clone().unwrap_or_default();
+    let mut gate_evidence: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(composed) = &composed_evidence {
+        for member in &plan.members {
+            for (name, identity) in &member.gates {
+                if !composed.contains_key(&(name.clone(), identity.clone())) {
+                    abandon_locked(
+                        ctx,
+                        store,
+                        &attempt,
+                        "a required gate has no evidence at the composed head",
+                    )?;
+                    eprintln!(
+                        "Cannot land: gate {name} for {} has no evidence at the composed head; nothing closed",
+                        member.change_id
+                    );
+                    return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+                }
+            }
+        }
+        // Top-level summary retains one receipt per gate name, preferring the
+        // top member's receipt while each member's authorization carries its own.
+        for name in plan.gates.keys() {
+            let receipt = plan
+                .members
+                .iter()
+                .rev()
+                .find_map(|member| {
+                    member
+                        .gates
+                        .get(name)
+                        .and_then(|identity| composed.get(&(name.clone(), identity.clone())))
+                })
+                .cloned();
+            if let Some(receipt) = receipt {
+                gate_evidence.insert(name.clone(), receipt);
+            }
+        }
+    }
     for gate in top_report
         .gates
         .iter()
@@ -2453,10 +2549,14 @@ fn commit(
                     verdict_provisional: approval.verdict_provisional,
                     gate_evidence: member
                         .gates
-                        .keys()
-                        .filter_map(|name| {
-                            gate_evidence
-                                .get(name)
+                        .iter()
+                        .filter_map(|(name, identity)| {
+                            composed_evidence
+                                .as_ref()
+                                .and_then(|composed| {
+                                    composed.get(&(name.clone(), identity.clone()))
+                                })
+                                .or_else(|| gate_evidence.get(name))
                                 .map(|evidence| (name.clone(), evidence.clone()))
                         })
                         .collect(),

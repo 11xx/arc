@@ -663,6 +663,60 @@ pub(super) fn render(report: &GateReport) {
     }
 }
 
+/// Load the authoritative gate declarations for measurement in `root`.
+///
+/// Inside an open change's branch or worktree, reads the same destination,
+/// target-branch invariant list, and `merge-base..head` gate trailers that
+/// `arc verify` executes against so measurement and verification agree on
+/// every input. Outside a change, inspects the checkout with destination
+/// confinement.
+pub(super) fn measurement_declarations(ctx: &Ctx, root: &Path) -> Result<gates::GatesFile> {
+    if let Ok(store) = ctx.store() {
+        if let Ok(states) = store.readable_states() {
+            let branch = gitio::git(root, &["symbolic-ref", "--short", "HEAD"])
+                .ok()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty());
+            let resolved_root = crate::config::resolved(root);
+            let mut by_branch: Vec<&ChangeState> = branch
+                .as_deref()
+                .map(|branch| {
+                    states
+                        .values()
+                        .filter(|state| !state.is_closed() && state.branch == branch)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if by_branch.len() != 1 {
+                by_branch = states
+                    .values()
+                    .filter(|state| {
+                        !state.is_closed()
+                            && state.worktree.as_deref().is_some_and(|wt| {
+                                crate::config::resolved(Path::new(wt)) == resolved_root
+                            })
+                    })
+                    .collect();
+            }
+            if by_branch.len() == 1 {
+                let state = by_branch[0];
+                let declarations = ctx.declarations(state)?;
+                if !declarations.target_unreadable {
+                    let declared = declarations.gates;
+                    declared.ensure_unconflicted()?;
+                    declared.ensure_runnable(None)?;
+                    return Ok(declared);
+                }
+            }
+        }
+    }
+    let mut declared = gates::inspect(root)?;
+    declared.destination_confinement(root)?;
+    declared.ensure_unconflicted()?;
+    declared.ensure_runnable(None)?;
+    Ok(declared)
+}
+
 pub fn measure_gates(
     ctx: &Ctx,
     runs: u32,
@@ -681,10 +735,8 @@ pub fn measure_gates(
             .map_or_else(|| "unmeasured".into(), |n| n.to_string())
     );
     let root = gitio::toplevel(&ctx.cwd)?;
-    let mut declared = gates::inspect(&root)?;
-    declared.destination_confinement(&root)?;
+    let declared = measurement_declarations(ctx, &root)?;
     let _confinement = crate::confinement::Scope::new(&declared.confine);
-    declared.ensure_unconflicted()?;
     if let Some(name) = selected {
         anyhow::ensure!(
             declared.gates.contains_key(name),

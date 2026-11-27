@@ -167,9 +167,10 @@ fn batch(
                 item.gate.as_deref().unwrap_or("command")
             );
         }
-        let declaration_ok = gate.is_some_and(|gate| {
-            Some(gates::declaration_identity(gate)).as_ref() == item.declaration.as_ref()
-        });
+        let declaration_ok = item.landing.is_some()
+            || gate.is_some_and(|gate| {
+                Some(gates::declaration_identity(gate)).as_ref() == item.declaration.as_ref()
+            });
         passed += usize::from(
             item.result == VerifyResult::Pass
                 && !dirty

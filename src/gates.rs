@@ -1096,6 +1096,7 @@ impl GatesFile {
         for gate in self.gates.values_mut() {
             gate.gate_trailers = trailers.clone();
         }
+        self.refresh_concurrency();
     }
 
     /// Actionable gate-trailer and target-branch invariant list errors.
@@ -1237,16 +1238,16 @@ impl GatesFile {
     }
 }
 
-/// Identity of the gate declaration whose evidence can be reused.
+/// Identity of the gate definition independent of per-change commit trailers.
 ///
-/// Absent confinement, default bindings and absent coverage add no identity fields.
-/// Scoped declarations bind the complete coverage map and dangerous patterns,
-/// since they determine the fallback for a path no gate names.
-pub fn declaration_identity(gate: &Gate) -> String {
-    crate::base_pass::digest(&declaration_value(gate))
+/// Used to verify that members of a composed or stacked landing agree on the
+/// gate declaration itself while still permitting distinct per-member
+/// `Witness:` / `Change-size:` inputs.
+pub fn definition_identity(gate: &Gate) -> String {
+    crate::base_pass::digest(&definition_value(gate))
 }
 
-pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
+pub(crate) fn definition_value(gate: &Gate) -> serde_json::Value {
     let mut value = serde_json::json!({
         "command": gate.command, "environment": gate.environment,
         "profiles": gate.profiles, "events": gate.events,
@@ -1265,9 +1266,6 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
     if gate.binds == Binding::Commit {
         value["binds"] = serde_json::json!("commit");
     }
-    if !gate.gate_trailers.is_empty() {
-        value["gate_trailers"] = serde_json::json!(gate.gate_trailers);
-    }
     if let Some(invariants) = &gate.resolved_invariants {
         value["invariants"] = serde_json::json!({
             "path": invariants.path,
@@ -1275,6 +1273,24 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
         });
     } else if let Some(path) = &gate.invariants {
         value["invariants"] = serde_json::json!({ "path": path });
+    }
+    value
+}
+
+/// Identity of the gate declaration whose evidence can be reused.
+///
+/// Absent confinement, default bindings, absent coverage, absent gate trailers,
+/// and absent invariants add no identity fields. Scoped declarations bind the
+/// complete coverage map and dangerous patterns, since they determine the
+/// fallback for a path no gate names.
+pub fn declaration_identity(gate: &Gate) -> String {
+    crate::base_pass::digest(&declaration_value(gate))
+}
+
+pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
+    let mut value = definition_value(gate);
+    if !gate.gate_trailers.is_empty() {
+        value["gate_trailers"] = serde_json::json!(gate.gate_trailers);
     }
     value
 }
@@ -1646,6 +1662,7 @@ mod tests {
             change_size: None,
         });
         let with_a = declaration_identity(&base.gates["unit"]);
+        let def_a = definition_identity(&base.gates["unit"]);
         assert_ne!(default_id, with_a);
         assert_eq!(coverage_identity(&base.gates["unit"]), Some(with_a.clone()));
 
@@ -1657,6 +1674,7 @@ mod tests {
         });
         let with_b = declaration_identity(&base.gates["unit"]);
         assert_ne!(with_a, with_b);
+        assert_eq!(def_a, definition_identity(&base.gates["unit"]));
 
         base.set_gate_trailers(crate::gate_trailers::GateTrailers {
             witnesses: Some(crate::gate_trailers::WitnessDeclaration::Named {
@@ -1666,6 +1684,7 @@ mod tests {
         });
         let with_b_interface = declaration_identity(&base.gates["unit"]);
         assert_ne!(with_b, with_b_interface);
+        assert_eq!(def_a, definition_identity(&base.gates["unit"]));
 
         let mut inv = declared("[gates.unit]\ncommand = 'true'\ninvariants = 'inv.json'\n");
         inv.gates.get_mut("unit").unwrap().resolved_invariants =

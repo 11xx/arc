@@ -978,8 +978,45 @@ pub fn publication_participants(
             if let Some(seconds) = declaration["timeout"].as_u64() {
                 declaration["timeout"] = serde_json::json!(format!("{seconds}s"));
             }
+            let (coverage, confine, gate_trailers, invariants_obj) =
+                if let Some(map) = declaration.as_object_mut() {
+                    let coverage = map.remove("coverage");
+                    let confine = map.remove("confine");
+                    let gate_trailers = map.remove("gate_trailers");
+                    let invariants_obj = map.get("invariants").and_then(|v| v.as_object()).cloned();
+                    if let Some(obj) = &invariants_obj {
+                        if let Some(path) = obj.get("path").cloned() {
+                            map.insert("invariants".into(), path);
+                        } else {
+                            map.remove("invariants");
+                        }
+                    }
+                    (coverage, confine, gate_trailers, invariants_obj)
+                } else {
+                    (None, None, None, None)
+                };
             let mut gate: Gate = serde_json::from_value(declaration)?;
-            gate.coverage = serde_json::from_value(entry.declaration["coverage"].clone())?;
+            if let Some(coverage) = coverage {
+                gate.coverage = serde_json::from_value(coverage)?;
+            }
+            if let Some(confine) = confine {
+                gate.confine = serde_json::from_value(confine)?;
+            }
+            if let Some(gate_trailers) = gate_trailers {
+                gate.gate_trailers = serde_json::from_value(gate_trailers)?;
+            }
+            if let Some(obj) = invariants_obj {
+                if let (Some(path), Some(sha256)) = (
+                    obj.get("path").and_then(|v| v.as_str()),
+                    obj.get("sha256").and_then(|v| v.as_str()),
+                ) {
+                    gate.resolved_invariants = Some(crate::gate_trailers::ResolvedInvariants {
+                        path: path.to_string(),
+                        sha256: sha256.to_string(),
+                        entries: Vec::new(),
+                    });
+                }
+            }
             gate.budget = entry.budget_ms;
             participants.insert(name.to_owned(), gate);
         }

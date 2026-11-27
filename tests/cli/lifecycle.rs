@@ -2549,6 +2549,9 @@ fn append_policy_has_a_single_authority() {
         "chain.rs::chain::state:ifstate.is_closed(){",
         "doctor.rs::run::forstateinstates.values().filter(|s|!s.is_closed()){",
         "gate_reports.rs::over_budgets::lethead=ifstate.is_closed(){",
+        // Measurement selects the open change supplying authoritative gate declarations.
+        "gate_reports.rs::measurement_declarations::.filter(|state|!state.is_closed()&&state.branch==branch)",
+        "gate_reports.rs::measurement_declarations::!state.is_closed()",
         "claims.rs::ready_candidate::!candidate.is_closed()",
         "fork.rs::open_change_on_branch::.find(|state|!state.is_closed()&&state.branch==branch)",
         "gatekeeping.rs::check_tagged::ifstate.is_closed(){",

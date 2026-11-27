@@ -1376,14 +1376,14 @@ fn verify_against(
     Ok(if passed == total { 0 } else { 1 })
 }
 
+/// Passing gate receipts keyed by `(gate_name, declaration_identity)`.
+pub(crate) type LandingEvidence = BTreeMap<(String, String), String>;
+
 /// The gates a composed landing runs once, at the commit it composed.
 pub(crate) struct LandingGateRun<'a> {
     /// The member the run is recorded on.
     pub change_id: &'a str,
-    /// That member's state, read against the landing's target.
-    pub state: &'a ChangeState,
-    /// Every gate a member requires, each under the one declaration all of
-    /// them share.
+    /// Every gate obligation a member requires.
     pub gates: &'a [(String, gates::Gate)],
     pub commit: &'a str,
     pub tree: &'a str,
@@ -1392,20 +1392,19 @@ pub(crate) struct LandingGateRun<'a> {
     pub attempt: &'a str,
 }
 
-/// Run a composed landing's gates in its checkout, recording the evidence on
-/// one member with the landing named. A pass already recorded at the
-/// composed tree answers its gate under the rule every run follows: a
-/// tree-bound pass by tree, a commit-bound pass only at the composed commit.
-/// Returns the exit code and, per gate, the passing evidence that answers it
-/// at the composed commit.
+/// Run a composed landing's gate obligations in its checkout, recording
+/// evidence on one member with the landing named. A pass already recorded at
+/// the composed tree answers its obligation under the rule every run follows:
+/// a tree-bound pass by tree, a commit-bound pass only at the composed commit,
+/// and matching declaration identity (including declared gate trailers).
+/// Returns the exit code and, per `(gate_name, declaration_identity)`, the
+/// passing evidence that answers it at the composed commit.
 pub(crate) fn verify_landing_head(
     ctx: &Ctx,
     store: &Store,
     run: LandingGateRun<'_>,
-) -> Result<(i32, BTreeMap<String, String>)> {
+) -> Result<(i32, LandingEvidence)> {
     let event = GateEvent::Integration;
-    let required: Vec<(&String, &gates::Gate)> =
-        run.gates.iter().map(|(name, gate)| (name, gate)).collect();
     let checkout_ctx = ctx.with_cwd(run.checkout.to_path_buf());
     // The evidence about to be recorded cites the composed head, which a
     // failed attempt leaves on no branch: without a pin the record would
@@ -1415,16 +1414,20 @@ pub(crate) fn verify_landing_head(
         &gitio::landing_retention_ref(run.change_id, run.commit),
         run.commit,
     )?;
-    let run_id = start_verification_run_for_event(
-        ctx,
-        store,
-        run.change_id,
-        run.commit,
-        together::mode(&required),
-        true,
-        &required,
-        event,
-    )?;
+    // Group obligations into passes with unique gate names so distinct member
+    // witness/change-size inputs for the same gate name each run cleanly with
+    // their own verification run and environment without shadowing one another.
+    let mut passes: Vec<Vec<(&String, &gates::Gate)>> = Vec::new();
+    for (name, gate) in run.gates {
+        if let Some(pass) = passes
+            .iter_mut()
+            .find(|pass| !pass.iter().any(|(existing, _)| *existing == name))
+        {
+            pass.push((name, gate));
+        } else {
+            passes.push(vec![(name, gate)]);
+        }
+    }
     let answering = || Answering {
         tree: run.tree,
         head: run.commit,
@@ -1434,85 +1437,100 @@ pub(crate) fn verify_landing_head(
     };
     let environments = gate_environments(
         run.checkout,
-        required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+        run.gates.iter().map(|(name, gate)| (name.as_str(), gate)),
     )?;
-    let Partition {
-        budget_refused,
-        reused,
-        delta_reuses,
-        base_reuses,
-        to_run,
-    } = partition(
-        &checkout_ctx,
-        run.state,
-        required.clone(),
-        answering(),
-        &environments,
-        event,
-        true,
-    );
-    append_base_reuses(
-        ctx,
-        store,
-        run.change_id,
-        &run_id,
-        run.commit,
-        run.tree,
-        &base_reuses,
-    )?;
-    append_reuses(
-        ctx,
-        store,
-        run.change_id,
-        &run_id,
-        run.commit,
-        run.tree,
-        &reused,
-    )?;
-    append_delta_reuses(
-        ctx,
-        store,
-        run.change_id,
-        &run_id,
-        run.commit,
-        run.tree,
-        &delta_reuses,
-    )?;
-    let to_run_count = to_run.len();
-    let passed =
-        together::run_required(&checkout_ctx, store, run.change_id, to_run, |name, gate| {
-            VerificationInput {
-                confine: gate.confine.clone(),
-                timings: gate.timings.clone(),
-                budget: Some(gate.declared_budget()),
-                exclusive: crate::exclusive::Request::for_gate(gate),
-                env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
-                preparation_ms: 0,
-                run_id: Some(run_id.clone()),
-                probe: None,
-                gate: Some(name.clone()),
-                command: gate.command.clone(),
-                timeout_seconds: gate.timeout,
-                work_declaration: Some(gates::declaration_identity(gate)),
-                declaration: gates::coverage_identity(gate),
-                attested_result: None,
-                tested_revision: Some(run.commit.to_string()),
-                execution_host: None,
-                runner: None,
-                environment_identity: declared_environment(&environments, gate).map(str::to_owned),
-                note: None,
-                falsification: None,
-                against_target: None,
-                target_revision: None,
-                landing: Some(run.attempt.to_string()),
-            }
-        })?;
-    let failed = budget_refused + to_run_count - passed;
+    let mut failed = 0usize;
+    for required in &passes {
+        let current_state = store.state(run.change_id)?;
+        let run_id = start_verification_run_for_event(
+            ctx,
+            store,
+            run.change_id,
+            run.commit,
+            together::mode(required),
+            true,
+            required,
+            event,
+        )?;
+        let Partition {
+            budget_refused,
+            reused,
+            delta_reuses,
+            base_reuses,
+            to_run,
+        } = partition(
+            &checkout_ctx,
+            &current_state,
+            required.clone(),
+            answering(),
+            &environments,
+            event,
+            true,
+        );
+        append_base_reuses(
+            ctx,
+            store,
+            run.change_id,
+            &run_id,
+            run.commit,
+            run.tree,
+            &base_reuses,
+        )?;
+        append_reuses(
+            ctx,
+            store,
+            run.change_id,
+            &run_id,
+            run.commit,
+            run.tree,
+            &reused,
+        )?;
+        append_delta_reuses(
+            ctx,
+            store,
+            run.change_id,
+            &run_id,
+            run.commit,
+            run.tree,
+            &delta_reuses,
+        )?;
+        let to_run_count = to_run.len();
+        let passed =
+            together::run_required(&checkout_ctx, store, run.change_id, to_run, |name, gate| {
+                VerificationInput {
+                    confine: gate.confine.clone(),
+                    timings: gate.timings.clone(),
+                    budget: Some(gate.declared_budget()),
+                    exclusive: crate::exclusive::Request::for_gate(gate),
+                    env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
+                    preparation_ms: 0,
+                    run_id: Some(run_id.clone()),
+                    probe: None,
+                    gate: Some(name.clone()),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                    work_declaration: Some(gates::declaration_identity(gate)),
+                    declaration: gates::coverage_identity(gate),
+                    attested_result: None,
+                    tested_revision: Some(run.commit.to_string()),
+                    execution_host: None,
+                    runner: None,
+                    environment_identity: declared_environment(&environments, gate)
+                        .map(str::to_owned),
+                    note: None,
+                    falsification: None,
+                    against_target: None,
+                    target_revision: None,
+                    landing: Some(run.attempt.to_string()),
+                }
+            })?;
+        failed += budget_refused + to_run_count - passed;
+    }
     let state = store.state(run.change_id)?;
     let legacy_trees = status::legacy_evidence_trees(&state, &ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
     let mut evidence = BTreeMap::new();
-    for (name, gate) in &required {
+    for (name, gate) in run.gates {
         if let Some(found) = reusable_evidence_for_event(
             &ctx.cwd,
             &state,
@@ -1523,10 +1541,13 @@ pub(crate) fn verify_landing_head(
             declared_environment(&environments, gate),
             event,
         ) {
-            evidence.insert((*name).clone(), found.event_id.clone());
+            evidence.insert(
+                (name.clone(), gates::declaration_identity(gate)),
+                found.event_id.clone(),
+            );
         }
     }
-    let total = required.len();
+    let total = run.gates.len();
     println!(
         "gates: {}/{total} pass at the composed head",
         total - failed.min(total)
@@ -5084,9 +5105,16 @@ fn run_gate_budgeted_with_prep(
     env: &crate::gate_trailers::GateCommandEnv,
 ) -> Result<GateRun> {
     with_check_timings(timings, cwd, || {
-        run_gate_with_capture(cmd, cwd, timeout, admission, prepared, pinned_cwd, env, || {
-            crate::verification_output::Capture::new(output_root, producing_store)
-        })
+        run_gate_with_capture(
+            cmd,
+            cwd,
+            timeout,
+            admission,
+            prepared,
+            pinned_cwd,
+            env,
+            || crate::verification_output::Capture::new(output_root, producing_store),
+        )
     })
 }
 
