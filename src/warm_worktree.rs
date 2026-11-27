@@ -724,16 +724,39 @@ fn owned_cache(common: &Path, key: &str) -> Result<PathBuf> {
 }
 
 fn owned_marker(path: &Path, marker: &str) -> Result<()> {
-    match OpenOptions::new()
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .context("preparation cache ownership path has no parent")?;
+    let name = path
+        .file_name()
+        .context("preparation cache ownership path has no filename")?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{name}.tmp.{}", ulid::Ulid::new()));
+    let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(path)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(marker.as_bytes())?;
-        }
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .context("cannot stage preparation cache ownership")?;
+    let staged = (|| -> std::io::Result<()> {
+        file.write_all(marker.as_bytes())?;
+        file.flush()?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).context("cannot write preparation cache ownership");
+    }
+    // Publish atomically without overwriting an existing file so no concurrent
+    // reader can ever observe an empty or partially written ownership marker.
+    let linked = fs::hard_link(&temporary, path);
+    let _ = fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if !fs::symlink_metadata(path)?.file_type().is_file()
                 || fs::read_to_string(path)? != marker
@@ -743,10 +766,10 @@ fn owned_marker(path: &Path, marker: &str) -> Result<()> {
                     path.display()
                 );
             }
+            Ok(())
         }
-        Err(error) => return Err(error).context("cannot mark preparation cache ownership"),
+        Err(error) => Err(error).context("cannot publish preparation cache ownership"),
     }
-    Ok(())
 }
 
 fn already_prepared(path: &Path, identity: &str) -> Result<bool> {
@@ -999,6 +1022,41 @@ fn run_hook(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_marker_publishes_atomically_under_concurrency_and_refuses_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = "arc-worktree-cache/1\ndeadbeef\n";
+        for round in 0..8 {
+            let path = directory.path().join(format!("owner-{round}"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..12)
+                    .map(|_| {
+                        let path = path.as_path();
+                        let barrier = barrier.clone();
+                        scope.spawn(move || {
+                            barrier.wait();
+                            owned_marker(path, marker)
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    handle.join().unwrap().unwrap();
+                }
+            });
+            assert_eq!(fs::read_to_string(&path).unwrap(), marker);
+        }
+        let mismatched = directory.path().join("owner-mismatch");
+        fs::write(&mismatched, "arc-worktree-cache/1\nother\n").unwrap();
+        let error = owned_marker(&mismatched, marker).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("preparation cache ownership does not match"),
+            "{error:#}"
+        );
+    }
 
     /// A lease belongs to the owned child only. Clearing CLOEXEC in the
     /// parent lets a concurrent unrelated exec keep mutable storage busy.
