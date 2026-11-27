@@ -628,9 +628,14 @@ fn verify_with_landing(
         }
         let need_reuse_environments =
             !parallel || (reuse && required.iter().any(|(_, gate)| gate.environment.is_some()));
+        let mut parallel_reuse_prep = None;
         let mut preparation_ms = if need_reuse_environments {
             let preparing = Instant::now();
-            crate::warm_worktree::prepare(&run_ctx.cwd)?;
+            if parallel {
+                parallel_reuse_prep = Some(crate::warm_worktree::prepare_isolated(&run_ctx.cwd)?);
+            } else {
+                crate::warm_worktree::prepare(&run_ctx.cwd)?;
+            }
             preparing.elapsed().as_millis() as u64
         } else {
             0
@@ -650,13 +655,15 @@ fn verify_with_landing(
         // these identities decide reuse only; executed gates re-probe inside
         // their own prepared detached worktree.
         let environments = if need_reuse_environments {
-            gate_environments(
+            gate_environments_with_prepared(
                 &run_ctx.cwd,
                 required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+                parallel_reuse_prep.as_ref(),
             )?
         } else {
             DeclaredEnvironments::new()
         };
+        drop(parallel_reuse_prep);
         let target_head = gitio::branch_head(&run_ctx.cwd, &st.target_branch).ok();
         let Partition {
             budget_refused,
@@ -2765,12 +2772,45 @@ fn normalize_scratch_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn parallel_scratch_owner_marker(common_dir: &Path, path: &Path) -> String {
+fn parallel_scratch_owner_marker(common_dir: &Path, path: &Path, token: &str) -> String {
     format!(
-        "arc-parallel-scratch/1\n{}\n{}\n",
+        "arc-parallel-scratch/2\n{}\n{}\n{}\n",
         common_dir.display(),
-        path.display()
+        path.display(),
+        token
     )
+}
+
+fn marker_matches_slot(text: &str, common_dir: &Path, path: &Path) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_common = common_dir.display().to_string();
+    let expected_path = path.display().to_string();
+    match lines.as_slice() {
+        ["arc-parallel-scratch/1", common, recorded] => {
+            *common == expected_common && *recorded == expected_path
+        }
+        ["arc-parallel-scratch/2", common, recorded, token] => {
+            *common == expected_common && *recorded == expected_path && !token.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn list_worktree_admins(common_dir: &Path) -> Result<BTreeSet<PathBuf>> {
+    let registrations = common_dir.join("worktrees");
+    if !registrations.is_dir() {
+        return Ok(BTreeSet::new());
+    }
+    let mut admins = BTreeSet::new();
+    for entry in std::fs::read_dir(&registrations)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            if let Ok(canonical) = std::fs::canonicalize(entry.path()) {
+                admins.insert(canonical);
+            }
+        }
+    }
+    Ok(admins)
 }
 
 fn find_worktree_admin_for_path(common_dir: &Path, path: &Path) -> Result<Option<PathBuf>> {
@@ -2793,7 +2833,7 @@ fn find_worktree_admin_for_path(common_dir: &Path, path: &Path) -> Result<Option
         };
         let recorded = Path::new(gitdir.trim());
         if recorded == expected || config::resolved(recorded) == expected_resolved {
-            return Ok(Some(admin));
+            return Ok(Some(std::fs::canonicalize(admin)?));
         }
     }
     Ok(None)
@@ -2805,13 +2845,148 @@ fn has_proven_parallel_scratch_ownership(common_dir: &Path, path: &Path) -> Resu
     };
     let marker = admin.join(PARALLEL_SCRATCH_OWNER_FILE);
     match std::fs::symlink_metadata(&marker) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(
-            std::fs::read_to_string(&marker)? == parallel_scratch_owner_marker(common_dir, path)
-        ),
+        Ok(metadata) if metadata.file_type().is_file() => Ok(marker_matches_slot(
+            &std::fs::read_to_string(&marker)?,
+            common_dir,
+            path,
+        )),
         Ok(_) => Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
+}
+
+fn has_exact_parallel_scratch_token(
+    admin: &Path,
+    common_dir: &Path,
+    path: &Path,
+    token: &str,
+) -> Result<bool> {
+    let marker = admin.join(PARALLEL_SCRATCH_OWNER_FILE);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(std::fs::read_to_string(&marker)?
+            == parallel_scratch_owner_marker(common_dir, path, token)),
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn path_matches_dir_identity(path: &Path, dev: u64, ino: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_dir() && meta.dev() == dev && meta.ino() == ino,
+        Err(_) => false,
+    }
+}
+
+/// Run a Git command in its own process group so SIGINT/SIGTERM/SIGHUP stops
+/// and reaps Git and any blocked hook descendants immediately.
+fn run_interruptible_git(cwd: &Path, args: &[&str]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
+    crate::interruption::check()?;
+    let mut command = gitio::git_command();
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut group = crate::process_group::OwnedGroup::spawn(&mut command)
+        .with_context(|| format!("cannot start git {}", args.join(" ")))?;
+    let stdout = group
+        .child()
+        .stdout
+        .take()
+        .context("git stdout pipe unavailable")?;
+    let stderr = group
+        .child()
+        .stderr
+        .take()
+        .context("git stderr pipe unavailable")?;
+    let out = thread::spawn(move || {
+        crate::process_group::read_tail(stdout, crate::process_group::STDERR_TAIL_BYTES)
+    });
+    let err = thread::spawn(move || {
+        crate::process_group::read_tail(stderr, crate::process_group::STDERR_TAIL_BYTES)
+    });
+    let mut exited = false;
+    loop {
+        if !exited {
+            exited = group
+                .leader_exited()
+                .with_context(|| format!("cannot observe git {}", args.join(" ")))?;
+        }
+        if (exited && out.is_finished() && err.is_finished())
+            || crate::interruption::check().is_err()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let status = group
+        .stop()
+        .with_context(|| format!("cannot stop git {} process group", args.join(" ")))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let _ = crate::process_group::join_before_deadline(out, Some(deadline), "git stdout reader");
+    let stderr_tail =
+        crate::process_group::join_before_deadline(err, Some(deadline), "git stderr reader")?
+            .transpose()?
+            .unwrap_or_default();
+    crate::interruption::check()?;
+    if !status.success() {
+        bail!("git {} failed: {}", args.join(" "), stderr_tail.trim());
+    }
+    Ok(())
+}
+
+/// Remove a partial detached `--no-checkout` worktree that an interrupted
+/// `git worktree add` started inside our atomically reserved directory.
+/// Never touches a directory containing anything beyond `.git` or a branch
+/// checkout.
+fn cleanup_interrupted_no_checkout(
+    common_dir: &Path,
+    path: &Path,
+    dev: u64,
+    ino: u64,
+    admins_before: &BTreeSet<PathBuf>,
+) {
+    if !path_matches_dir_identity(path, dev, ino) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    if entries.is_empty() {
+        let _ = std::fs::remove_dir(path);
+        return;
+    }
+    if entries.len() != 1 || entries[0].file_name() != ".git" {
+        return;
+    }
+    let dot_git = path.join(".git");
+    if !std::fs::symlink_metadata(&dot_git).is_ok_and(|m| m.file_type().is_file()) {
+        return;
+    }
+    let Ok(Some(admin)) = find_worktree_admin_for_path(common_dir, path) else {
+        return;
+    };
+    if admins_before.contains(&admin) {
+        return;
+    }
+    // Only remove if HEAD is absent or detached (never a branch checkout).
+    if let Ok(head) = std::fs::read_to_string(admin.join("HEAD")) {
+        if head.trim_start().starts_with("ref:") {
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(&dot_git);
+    let _ = std::fs::remove_dir(path);
+    let _ = std::fs::remove_dir_all(&admin);
 }
 
 fn cleanup_owned_parallel_scratch(repo: &Path, common_dir: &Path, path: &Path) -> Result<()> {
@@ -2867,25 +3042,42 @@ fn try_acquire_parallel_slot_lock(path: &Path) -> Result<Option<std::fs::File>> 
     Ok(Some(file))
 }
 
+enum ParallelScratchOwnership {
+    /// Atomically reserved empty directory; cleanup only calls `rmdir(2)` on
+    /// matching `(dev, ino)` and never removes a non-empty directory or
+    /// unrelated worktree.
+    ReservedEmptyDir { dev: u64, ino: u64 },
+    /// Proven parallel scratch worktree whose Git admin directory carries our
+    /// unique per-allocation ownership token and whose checkout matches
+    /// `(dev, ino)`.
+    OwnedWorktree {
+        admin: PathBuf,
+        dev: u64,
+        ino: u64,
+        token: String,
+    },
+}
+
 /// An isolated detached checkout owned exclusively by one parallel gate run.
 ///
 /// Allocates inside `<worktrees_dir>/.arc-parallel`, serialized across
 /// processes by an exclusive flock held from before allocation through
-/// execution and cleanup. Refuses occupied paths that lack a matching
-/// ownership marker and removes its own checkout on exit, error, interruption,
-/// or panic.
+/// execution and cleanup. Atomically reserves an empty directory before
+/// running interruptible Git creation, stamps a per-allocation ownership token
+/// in the Git admin directory, refuses occupied paths lacking proven scratch
+/// ownership, and verifies ownership before any removal.
 struct ParallelScratchWorktree {
     repo: PathBuf,
     common_dir: PathBuf,
     path: PathBuf,
-    armed: bool,
+    ownership: ParallelScratchOwnership,
     _lock: std::fs::File,
 }
 
 impl ParallelScratchWorktree {
     fn allocate(ctx: &Ctx, slug: &str, gate: &str, revision: &str) -> Result<Self> {
         use std::io::Write;
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
         crate::interruption::check()?;
         let toplevel = gitio::toplevel(&ctx.cwd)?;
@@ -2960,30 +3152,75 @@ impl ParallelScratchWorktree {
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
             crate::interruption::check()?;
-            // Arm the RAII guard before `git worktree add` so an error or
-            // interruption mid-creation still cleans up this slot while the
-            // exclusive slot lock remains held.
-            let guard = Self {
+            // Atomically reserve the destination directory via `mkdir(2)` so
+            // an external entry placed at `path` fails with `AlreadyExists`
+            // and is never touched.
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    bail!(
+                        "refusing to use occupied path {} without parallel-scratch ownership; \
+                         move or remove it and retry",
+                        path.display()
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot create {}", path.display()));
+                }
+            }
+            let reserved_meta = std::fs::symlink_metadata(&path)?;
+            let (dev, ino) = (reserved_meta.dev(), reserved_meta.ino());
+            let admins_before = list_worktree_admins(&common_dir)?;
+            let mut guard = Self {
                 repo: ctx.cwd.clone(),
                 common_dir: common_dir.clone(),
                 path: path.clone(),
-                armed: true,
+                ownership: ParallelScratchOwnership::ReservedEmptyDir { dev, ino },
                 _lock: lock,
             };
             let display = path.display().to_string();
-            gitio::git(
+            // Step 1: register the detached worktree without running checkout
+            // hooks so we can prove creation ownership and stamp our token
+            // before populating the working tree.
+            if let Err(error) = run_interruptible_git(
                 &ctx.cwd,
-                &["worktree", "add", "--detach", &display, revision],
-            )?;
-            let admin = std::fs::canonicalize(gitio::worktree_admin_dir(&path)?)?;
-            let worktrees_admin = std::fs::canonicalize(common_dir.join("worktrees"))?;
-            if !admin.starts_with(&worktrees_admin) {
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    "--no-checkout",
+                    &display,
+                    revision,
+                ],
+            ) {
+                if error.is::<crate::interruption::Interrupted>() {
+                    cleanup_interrupted_no_checkout(&common_dir, &path, dev, ino, &admins_before);
+                }
+                return Err(error);
+            }
+            if !path_matches_dir_identity(&path, dev, ino) {
                 bail!(
-                    "parallel scratch admin dir {} lies outside {}",
-                    admin.display(),
-                    worktrees_admin.display()
+                    "parallel scratch checkout {} changed identity during creation",
+                    path.display()
                 );
             }
+            let admin = std::fs::canonicalize(gitio::worktree_admin_dir(&path)?)?;
+            let worktrees_admin = std::fs::canonicalize(common_dir.join("worktrees"))?;
+            if !admin.starts_with(&worktrees_admin) || admins_before.contains(&admin) {
+                bail!(
+                    "parallel scratch admin dir {} was not created by this invocation",
+                    admin.display()
+                );
+            }
+            let head_ref = std::fs::read_to_string(admin.join("HEAD"))
+                .with_context(|| format!("cannot read {}/HEAD", admin.display()))?;
+            if head_ref.trim_start().starts_with("ref:") {
+                bail!(
+                    "refusing to claim branch worktree at {} as parallel scratch",
+                    path.display()
+                );
+            }
+            let token = ulid::Ulid::new().to_string();
             let marker = admin.join(PARALLEL_SCRATCH_OWNER_FILE);
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -2993,7 +3230,18 @@ impl ParallelScratchWorktree {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&marker)
                 .with_context(|| format!("cannot write {}", marker.display()))?;
-            file.write_all(parallel_scratch_owner_marker(&common_dir, &path).as_bytes())?;
+            file.write_all(parallel_scratch_owner_marker(&common_dir, &path, &token).as_bytes())?;
+            guard.ownership = ParallelScratchOwnership::OwnedWorktree {
+                admin,
+                dev,
+                ino,
+                token,
+            };
+            crate::interruption::check()?;
+            // Step 2: populate the working tree (including any post-checkout
+            // hook) inside an interruptible process group while ownership is
+            // already established for cleanup.
+            run_interruptible_git(&path, &["checkout", "--detach", "--force", revision])?;
             crate::interruption::check()?;
             return Ok(guard);
         }
@@ -3005,15 +3253,42 @@ impl ParallelScratchWorktree {
 
 impl Drop for ParallelScratchWorktree {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if let Err(error) = cleanup_owned_parallel_scratch(&self.repo, &self.common_dir, &self.path)
-        {
-            eprintln!(
-                "warning: could not remove parallel scratch worktree {} ({error:#})",
-                self.path.display()
-            );
+        match &self.ownership {
+            ParallelScratchOwnership::ReservedEmptyDir { dev, ino } => {
+                if path_matches_dir_identity(&self.path, *dev, *ino) {
+                    // Only removes an empty directory we atomically created;
+                    // fails harmlessly with ENOTEMPTY if another process
+                    // populated the directory.
+                    let _ = std::fs::remove_dir(&self.path);
+                }
+            }
+            ParallelScratchOwnership::OwnedWorktree {
+                admin,
+                dev,
+                ino,
+                token,
+            } => {
+                let token_ok =
+                    has_exact_parallel_scratch_token(admin, &self.common_dir, &self.path, token)
+                        .unwrap_or(false);
+                let dir_ok = std::fs::symlink_metadata(&self.path).is_err()
+                    || path_matches_dir_identity(&self.path, *dev, *ino);
+                if !token_ok || !dir_ok {
+                    eprintln!(
+                        "warning: refusing to remove {} because parallel-scratch ownership changed",
+                        self.path.display()
+                    );
+                    return;
+                }
+                if let Err(error) =
+                    cleanup_owned_parallel_scratch(&self.repo, &self.common_dir, &self.path)
+                {
+                    eprintln!(
+                        "warning: could not remove parallel scratch worktree {} ({error:#})",
+                        self.path.display()
+                    );
+                }
+            }
         }
     }
 }
@@ -3335,6 +3610,14 @@ pub(super) fn gate_environments<'a>(
     cwd: &Path,
     gates: impl Iterator<Item = (&'a str, &'a gates::Gate)>,
 ) -> Result<DeclaredEnvironments> {
+    gate_environments_with_prepared(cwd, gates, None)
+}
+
+fn gate_environments_with_prepared<'a>(
+    cwd: &Path,
+    gates: impl Iterator<Item = (&'a str, &'a gates::Gate)>,
+    prepared: Option<&crate::warm_worktree::PreparedStorage>,
+) -> Result<DeclaredEnvironments> {
     let mut identities = DeclaredEnvironments::new();
     for (name, gate) in gates {
         let _confinement = crate::confinement::Scope::new(&gate.confine);
@@ -3345,7 +3628,7 @@ pub(super) fn gate_environments<'a>(
         if identities.contains_key(&key) {
             continue;
         }
-        let run = gates::environment_probe(cwd, probe, gate.timeout)?;
+        let run = gates::environment_probe_with_prepared(cwd, probe, gate.timeout, prepared)?;
         if let Some(failure) = &run.failure {
             eprintln!(
                 "warning: environment probe {probe:?} for gate {name:?} yielded no identity: {}",

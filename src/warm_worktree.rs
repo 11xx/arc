@@ -482,11 +482,10 @@ pub(crate) fn resolved_build_directory(path: &Path) -> Result<Option<PathBuf>> {
 /// Prepare an isolated checkout and hold its build storage lease until the
 /// returned guard is dropped.
 ///
-/// Serializes cache-leased preparation across sibling threads in the same
-/// process so concurrent isolated gates never contend on the shared cache lease.
+/// Waits with interruption checks on cross-process build and preparation-cache
+/// leases so concurrent parallel verification invocations serialize shared
+/// storage cleanly and distinct build directories overlap once cache work ends.
 pub(crate) fn prepare_isolated(path: &Path) -> Result<PreparedStorage> {
-    static CACHE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     crate::interruption::check()?;
     let text = match fs::read_to_string(path.join(CONFIG)) {
         Ok(text) => text,
@@ -507,15 +506,12 @@ pub(crate) fn prepare_isolated(path: &Path) -> Result<PreparedStorage> {
         }
     };
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
-    let _serial = CACHE_SERIAL
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     crate::interruption::check()?;
     if hook.mode == Mode::PathStable {
         return stable::prepare_and_hold(&path, &(hook, timeout));
     }
     let before = Source::observe(&path)?;
-    let outcome = run(&path, &before, &(hook, timeout));
+    let outcome = run_with_wait(&path, &before, &(hook, timeout), true);
     if let Err(error) = &outcome {
         if error.is::<crate::interruption::Interrupted>() {
             return Err(outcome.unwrap_err());
@@ -794,11 +790,15 @@ fn record_prepared(build: &Path, identity: &str) -> Result<()> {
     result
 }
 
-fn lease(cache: &Path) -> Result<File> {
-    acquire_lease(&cache.join("lease"), "preparation cache")
+fn lease_with_mode(cache: &Path, wait: bool) -> Result<File> {
+    acquire_lease_with_mode(&cache.join("lease"), "preparation cache", wait)
 }
 
 fn acquire_lease(path: &Path, kind: &str) -> Result<File> {
+    acquire_lease_with_mode(path, kind, false)
+}
+
+fn acquire_lease_with_mode(path: &Path, kind: &str, wait: bool) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -810,25 +810,49 @@ fn acquire_lease(path: &Path, kind: &str) -> Result<File> {
     if !file.metadata()?.file_type().is_file() {
         bail!("{kind} lease is not a regular file");
     }
-    // SAFETY: the descriptor belongs to `file`, which holds the lease until
-    // preparation has finished and all owned children have been collected.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    loop {
+        if wait {
+            crate::interruption::check()?;
+        }
+        // SAFETY: the descriptor belongs to `file`, which holds the lease until
+        // preparation has finished and all owned children have been collected.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            gitio::forget_answers();
+            return Ok(file);
+        }
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::WouldBlock {
-            bail!("{kind} lease is busy");
+            if !wait {
+                bail!("{kind} lease is busy");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            if wait {
+                crate::interruption::check()?;
+            }
+            continue;
         }
         return Err(error).with_context(|| format!("cannot lease {kind}"));
     }
-    gitio::forget_answers();
-    Ok(file)
 }
 
-fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()> {
+fn run(path: &Path, source: &Source, config: &(Hook, u64)) -> Result<()> {
+    run_with_wait(path, source, config, false)
+}
+
+fn run_with_wait(
+    path: &Path,
+    source: &Source,
+    (hook, timeout): &(Hook, u64),
+    wait: bool,
+) -> Result<()> {
     let key = cache_key(hook, *timeout);
     let common = gitio::common_dir(path)?;
     let cache = owned_cache(&common, &key)?;
     let lease = CommandLease {
-        files: vec![lease(&cache)?],
+        files: vec![lease_with_mode(&cache, wait)?],
         build_lease: None,
         storage: None,
     };
@@ -982,7 +1006,7 @@ mod tests {
     fn lease_inheritance_is_scoped_to_the_owned_command() {
         let directory = tempfile::tempdir().unwrap();
         let guard = CommandLease {
-            files: vec![lease(directory.path()).unwrap()],
+            files: vec![lease_with_mode(directory.path(), false).unwrap()],
             build_lease: None,
             storage: None,
         };

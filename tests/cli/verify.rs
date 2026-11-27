@@ -777,6 +777,358 @@ fn verify_all_parallel_shared_path_stable_directory_keeps_prepare_and_gate_under
 }
 
 #[test]
+fn verify_all_parallel_failed_worktree_add_preserves_raced_branch_checkout_and_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.alpha]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-race", "--no-worktree"]),
+    );
+
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let bin = repo.home.join("fake-git-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let captured = repo.home.join("raced-target");
+    let mode_file = repo.home.join("race-mode");
+    // Intercept `git worktree add --detach --no-checkout <path> <rev>` right
+    // before real git runs, inserting either an unrelated linked branch
+    // checkout (with an untracked sentinel) or a populated plain directory at
+    // `<path>`, then letting real git fail.
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "--detach" ] && [ "$4" = "--no-checkout" ]; then
+    target="$5"
+    printf '%s' "$target" > '{captured}'
+    mode="$(cat '{mode_file}')"
+    if [ "$mode" = "branch" ]; then
+        '{real_git}' worktree add "$target" -b raced-branch >/dev/null 2>&1
+        printf 'sentinel\n' > "$target/sentinel.txt"
+    elif [ "$mode" = "plaindir" ]; then
+        rmdir "$target" 2>/dev/null || true
+        mkdir -p "$target"
+        printf 'keep\n' > "$target/keep.txt"
+    fi
+fi
+exec '{real_git}' "$@"
+"#,
+        captured = captured.display(),
+        mode_file = mode_file.display(),
+        real_git = real_git,
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Case A: unrelated linked branch checkout + untracked sentinel inserted in
+    // the race window must survive completely untouched when worktree add fails.
+    fs::write(&mode_file, "branch").unwrap();
+    repo.arc(&repo.root)
+        .env("PATH", &path_env)
+        .args(["verify", "parallel-race", "--all", "--parallel", "--rerun"])
+        .assert()
+        .failure();
+    let target = PathBuf::from(fs::read_to_string(&captured).unwrap());
+    assert_eq!(
+        fs::read_to_string(target.join("sentinel.txt")).unwrap(),
+        "sentinel\n",
+        "raced unrelated branch checkout sentinel was deleted"
+    );
+    let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    assert!(
+        list.contains(target.to_str().unwrap()) && list.contains("branch refs/heads/raced-branch"),
+        "raced unrelated branch checkout was unregistered: {list}"
+    );
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", target.to_str().unwrap()],
+    );
+
+    // Case B: plain populated directory inserted in the race window must
+    // survive completely untouched when worktree add fails.
+    fs::write(&mode_file, "plaindir").unwrap();
+    repo.arc(&repo.root)
+        .env("PATH", &path_env)
+        .args(["verify", "parallel-race", "--all", "--parallel", "--rerun"])
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(target.join("keep.txt")).unwrap(),
+        "keep\n",
+        "raced plain directory content was deleted"
+    );
+    fs::remove_dir_all(&target).unwrap();
+}
+
+#[test]
+fn verify_all_parallel_overlapping_invocations_wait_on_shared_build_and_cache_leases() {
+    // Part A: explicit shared `prepare.directory` across two overlapping
+    // `arc verify --all --parallel --rerun` processes.
+    {
+        let repo = Repo::new();
+        let markers = repo.home.join("overlap-shared-build");
+        fs::create_dir_all(&markers).unwrap();
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(
+            repo.root.join(".arc/worktrees.toml"),
+            "[prepare]\nmode = \"path-stable\"\ndirectory = \"../shared-build\"\ncommand = \"printf '%s' \\\"$ARC_WORKTREE_PATH\\\" > \\\"$ARC_WORKTREE_BUILD/owner\\\"\"\ntimeout = \"10s\"\n",
+        )
+        .unwrap();
+        let gate_cmd = format!(
+            "if [ ! -e '{m}/first-entered' ]; then \
+               touch '{m}/first-entered'; \
+               n=0; until [ -e '{m}/release-first' ]; do n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done; \
+             fi; \
+             test \"$(cat \"$ARC_WORKTREE_BUILD/owner\")\" = \"$ARC_WORKTREE_PATH\"",
+            m = markers.display()
+        );
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!("[gates.alpha]\ncommand = {gate_cmd:?}\n"),
+        )
+        .unwrap();
+        git(
+            &repo.root,
+            &["add", ".arc/gates.toml", ".arc/worktrees.toml"],
+        );
+        git(
+            &repo.root,
+            &["commit", "-m", "test: shared build dir overlap"],
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "overlap-shared", "--no-worktree"]),
+        );
+        let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+        let first = repo.spawn_arc_piped(
+            &repo.root,
+            &["verify", "overlap-shared", "--all", "--parallel", "--rerun"],
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !markers.join("first-entered").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(markers.join("first-entered").exists());
+        let second = repo.spawn_arc_piped(
+            &repo.root,
+            &["verify", "overlap-shared", "--all", "--parallel", "--rerun"],
+        );
+        thread::sleep(Duration::from_millis(150));
+        fs::write(markers.join("release-first"), "").unwrap();
+        let first_out = first.wait_with_output().unwrap();
+        let second_out = second.wait_with_output().unwrap();
+        assert!(
+            first_out.status.success(),
+            "first failed: {}",
+            String::from_utf8_lossy(&first_out.stderr)
+        );
+        assert!(
+            second_out.status.success(),
+            "second failed: {}",
+            String::from_utf8_lossy(&second_out.stderr)
+        );
+        assert_eq!(
+            git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+            worktrees_before
+        );
+    }
+
+    // Part B: distinct default path-stable build directories while the first
+    // process's preparation hook holds the shared preparation cache lease.
+    {
+        let repo = Repo::new();
+        let markers = repo.home.join("overlap-cache-lease");
+        fs::create_dir_all(&markers).unwrap();
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        let prep_cmd = format!(
+            "if [ ! -e '{m}/prep-entered' ]; then \
+               touch '{m}/prep-entered'; \
+               n=0; until [ -e '{m}/prep-release' ]; do n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done; \
+             fi; \
+             printf '%s' \"$ARC_WORKTREE_PATH\" > \"$ARC_WORKTREE_BUILD/owner\"",
+            m = markers.display()
+        );
+        fs::write(
+            repo.root.join(".arc/worktrees.toml"),
+            format!(
+                "[prepare]\nmode = \"path-stable\"\ncommand = {prep_cmd:?}\ntimeout = \"15s\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            "[gates.alpha]\ncommand = \"test \\\"$(cat \\\"$ARC_WORKTREE_BUILD/owner\\\")\\\" = \\\"$ARC_WORKTREE_PATH\\\"\"\n",
+        )
+        .unwrap();
+        git(
+            &repo.root,
+            &["add", ".arc/gates.toml", ".arc/worktrees.toml"],
+        );
+        git(
+            &repo.root,
+            &["commit", "-m", "test: default path-stable cache overlap"],
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "overlap-cache", "--no-worktree"]),
+        );
+        let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+        let first = repo.spawn_arc_piped(
+            &repo.root,
+            &["verify", "overlap-cache", "--all", "--parallel", "--rerun"],
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !markers.join("prep-entered").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(markers.join("prep-entered").exists());
+        let second = repo.spawn_arc_piped(
+            &repo.root,
+            &["verify", "overlap-cache", "--all", "--parallel", "--rerun"],
+        );
+        thread::sleep(Duration::from_millis(150));
+        fs::write(markers.join("prep-release"), "").unwrap();
+        let first_out = first.wait_with_output().unwrap();
+        let second_out = second.wait_with_output().unwrap();
+        assert!(
+            first_out.status.success(),
+            "first failed: {}",
+            String::from_utf8_lossy(&first_out.stderr)
+        );
+        assert!(
+            second_out.status.success(),
+            "second failed: {}",
+            String::from_utf8_lossy(&second_out.stderr)
+        );
+        assert_eq!(
+            git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+            worktrees_before
+        );
+    }
+}
+
+#[test]
+fn verify_all_parallel_sigterm_interrupts_blocked_post_checkout_hook_and_cleans_up() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    let repo = Repo::new();
+    let markers = repo.home.join("post-checkout-markers");
+    fs::create_dir_all(&markers).unwrap();
+    write_two_gates(&repo, "true", "true");
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gates"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-hook-sigterm", "--no-worktree"]),
+    );
+
+    // Install a post-checkout hook that records its PID and blocks without any
+    // external release.
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho $$ > '{m}/hook.pid'\ntouch '{m}/hook-entered'\nexec sleep 300\n",
+            m = markers.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+    let mut child = repo.spawn_arc_piped(
+        &repo.root,
+        &["verify", "parallel-hook-sigterm", "--all", "--parallel"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !markers.join("hook-entered").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        markers.join("hook-entered").exists(),
+        "post-checkout hook never ran"
+    );
+    let hook_pid: i32 = fs::read_to_string(markers.join("hook.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // Send SIGTERM to arc while post-checkout is blocked; do NOT release hook.
+    // SAFETY: `child.id()` is the live child process spawned above.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "arc did not exit promptly on SIGTERM while post-checkout hook was blocked"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "expected SIGTERM exit, got {status:?}"
+    );
+    // Confirm the blocked hook process was killed and reaped (no stray process).
+    let hook_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: kill(pid, 0) only probes process existence.
+        let alive = unsafe { libc::kill(hook_pid, 0) } == 0;
+        let zombie = fs::read_to_string(format!("/proc/{hook_pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.starts_with('Z')))
+            .unwrap_or(false);
+        if !alive || zombie {
+            break;
+        }
+        assert!(
+            Instant::now() < hook_deadline,
+            "blocked post-checkout hook {hook_pid} survived SIGTERM"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before,
+        "SIGTERM during blocked post-checkout hook left detached parallel scratch worktree registered"
+    );
+    let recorded = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-hook-sigterm",
+        "--type",
+        "verification-recorded",
+    ]));
+    assert!(recorded.trim().is_empty(), "{recorded}");
+}
+
+#[test]
 fn failing_gate_keeps_complete_private_diagnostics_beside_its_short_tail() {
     let repo = Repo::new();
     repo.redeclare_gates("[gates.failure]\ncommand = \"printf discard; head -c 4096 /dev/zero | tr '\\\\000' x; printf err >&2; exit 1\"\n");

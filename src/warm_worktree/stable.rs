@@ -56,6 +56,10 @@ pub(super) fn resolved_build_directory(path: &Path, hook: &Hook) -> Result<PathB
 
 impl Storage {
     fn open(path: &Path, hook: &Hook, timeout: u64) -> Result<Self> {
+        Self::open_with_wait(path, hook, timeout, false)
+    }
+
+    fn open_with_wait(path: &Path, hook: &Hook, timeout: u64, wait: bool) -> Result<Self> {
         let common = fs::canonicalize(gitio::common_dir(path)?)?;
         let build = resolved_build_directory(path, hook)?;
         fs::DirBuilder::new().recursive(true).mode(0o700).create(
@@ -64,7 +68,7 @@ impl Storage {
                 .context("path-stable storage has no parent")?,
         )?;
         let build_lease = control_path(&build, LEASE)?;
-        let file = acquire_lease(&build_lease, "path-stable build")?;
+        let file = acquire_lease_with_mode(&build_lease, "path-stable build", wait)?;
         owned_marker(
             &control_path(&build, OWNER)?,
             &format!(
@@ -123,11 +127,22 @@ impl Storage {
     /// Run the preparation command, if one is declared, reporting whether
     /// it ran and succeeded.
     fn prepare(&mut self, path: &Path, source: &Source, hook: &Hook, timeout: u64) -> Result<bool> {
+        self.prepare_with_wait(path, source, hook, timeout, false)
+    }
+
+    fn prepare_with_wait(
+        &mut self,
+        path: &Path,
+        source: &Source,
+        hook: &Hook,
+        timeout: u64,
+        wait: bool,
+    ) -> Result<bool> {
         let Some(command) = hook.command.as_deref() else {
             self.require_complete()?;
             return Ok(false);
         };
-        let cache_lease = lease(&self.cache)?;
+        let cache_lease = lease_with_mode(&self.cache, wait)?;
         self.guard.files.push(cache_lease);
         let incomplete = &self.incomplete;
         let mut marker = OpenOptions::new()
@@ -244,8 +259,8 @@ pub(super) fn prepare_and_hold(
     (hook, timeout): &(Hook, u64),
 ) -> Result<PreparedStorage> {
     let source = Source::observe(path)?;
-    let mut storage = Storage::open(path, hook, *timeout)?;
-    if storage.prepare(path, &source, hook, *timeout)? {
+    let mut storage = Storage::open_with_wait(path, hook, *timeout, true)?;
+    if storage.prepare_with_wait(path, &source, hook, *timeout, true)? {
         crate::slots::record_built(path)?;
     }
     eprintln!(
