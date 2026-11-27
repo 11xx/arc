@@ -3198,15 +3198,26 @@ pub fn raw_tree_diff_between(cwd: &Path, left: &str, right: &str) -> Result<Vec<
     parse_raw_tree_diff(&raw)
 }
 
-/// Zero-context unified diff bytes between two Git blob object ids.
+/// Zero-context unified diff bytes between two Git blob object ids, pinned
+/// against user diff configuration so hunk boundaries are deterministic.
 pub fn diff_blobs_u0(cwd: &Path, left_oid: &str, right_oid: &str) -> Result<Vec<u8>> {
     git_bytes(
         cwd,
         &[
+            "-c",
+            "diff.interHunkContext=0",
+            "-c",
+            "diff.algorithm=myers",
+            "-c",
+            "diff.renames=false",
+            "-c",
+            "core.autocrlf=false",
             "diff",
             "-U0",
+            "--inter-hunk-context=0",
             "--no-color",
             "--no-ext-diff",
+            "--no-textconv",
             "--no-renames",
             left_oid,
             right_oid,

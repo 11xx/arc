@@ -741,8 +741,9 @@ fn tighten_matches_left(old_lines: &[&[u8]], new_lines: &[&[u8]], matches: &mut 
     }
 }
 
-/// Whether all `fix_commit` hunks on a modified regular text file survive in
-/// `head_oid` when anchored to their changed regions.
+/// Whether all `fix_commit` hunks (and any EOF newline termination change) on a
+/// modified regular text file survive in `head_oid` within their strict
+/// exterior 3-way anchor windows.
 fn text_blob_survives(cwd: &Path, pre_oid: &str, fix_oid: &str, head_oid: &str) -> bool {
     let (Ok(pre_bytes), Ok(fix_bytes), Ok(head_bytes)) = (
         gitio::read_blob(cwd, pre_oid),
@@ -754,14 +755,20 @@ fn text_blob_survives(cwd: &Path, pre_oid: &str, fix_oid: &str, head_oid: &str) 
     if pre_bytes.contains(&0) || fix_bytes.contains(&0) || head_bytes.contains(&0) {
         return true;
     }
+    // Check EOF newline termination independently on every text fix, including
+    // mixed fixes that change both text and trailing newline.
+    let pre_nl = pre_bytes.ends_with(b"\n");
+    let fix_nl = fix_bytes.ends_with(b"\n");
+    let head_nl = head_bytes.ends_with(b"\n");
+    if pre_nl != fix_nl && head_nl == pre_nl {
+        return false;
+    }
+
     let pre_lines = split_lines(&pre_bytes);
     let fix_lines = split_lines(&fix_bytes);
     let head_lines = split_lines(&head_bytes);
     if pre_lines == fix_lines {
-        let pre_nl = pre_bytes.ends_with(b"\n");
-        let fix_nl = fix_bytes.ends_with(b"\n");
-        let head_nl = head_bytes.ends_with(b"\n");
-        return !(pre_nl != fix_nl && head_nl == pre_nl);
+        return true;
     }
 
     let (Ok(pf_diff), Ok(fh_diff)) = (
@@ -785,112 +792,86 @@ fn text_blob_survives(cwd: &Path, pre_oid: &str, fix_oid: &str, head_oid: &str) 
 
     let mut fix_to_head = matched_pairs_from_u0(fix_lines.len(), head_lines.len(), &fh_hunks);
     tighten_matches_left(&fix_lines, &head_lines, &mut fix_to_head);
-    let mut fix_match = vec![None; fix_lines.len()];
-    for &(fi, hi) in &fix_to_head {
-        fix_match[fi] = Some(hi);
-    }
 
     for hunk in &fix_hunks {
-        if hunk.new_start < hunk.new_end
-            && (hunk.new_start..hunk.new_end).all(|fi| fix_match[fi].is_some())
-        {
-            continue;
-        }
-
+        // Bound the affected region strictly by exterior 3-way anchors
+        // (lines unchanged between `pre`, `fix`, and `head` outside the hunk).
         let left_anchor = fix_to_head
             .iter()
             .rev()
-            .find(|&&(fi, _)| fi < hunk.new_start)
+            .find(|&&(fi, _)| fi < hunk.new_start && fix_to_pre[fi].is_some())
             .copied();
         let right_anchor = fix_to_head
             .iter()
-            .find(|&&(fi, _)| fi >= hunk.new_end)
+            .find(|&&(fi, _)| fi >= hunk.new_end && fix_to_pre[fi].is_some())
             .copied();
 
-        let (head_start, pre_gap_start) = match left_anchor {
-            Some((lfi, lhi)) => {
-                let pre_start = fix_to_pre[lfi]
-                    .map(|lp| lp + 1)
-                    .unwrap_or(hunk.old_start)
-                    .min(hunk.old_start);
-                (lhi + 1, pre_start)
-            }
+        let (fix_win_start, head_win_start) = match left_anchor {
+            Some((lfi, lhi)) => (lfi + 1, lhi + 1),
             None => (0, 0),
         };
-        let (head_end, pre_gap_end) = match right_anchor {
-            Some((rfi, rhi)) => {
-                let pre_end = fix_to_pre[rfi].unwrap_or(hunk.old_end).max(hunk.old_end);
-                (rhi, pre_end)
-            }
-            None => (head_lines.len(), pre_lines.len()),
+        let (fix_win_end, head_win_end) = match right_anchor {
+            Some((rfi, rhi)) => (rfi, rhi),
+            None => (fix_lines.len(), head_lines.len()),
         };
 
-        let head_region = &head_lines[head_start..head_end];
-        if hunk.old_start == hunk.old_end {
-            // Pure insertion hunk: reverted if the aligned region at `head`
-            // became empty (the inserted lines were removed with no replacement).
-            if head_region.is_empty() {
-                return false;
-            }
+        let fix_win = &fix_lines[fix_win_start..fix_win_end];
+        let head_win = &head_lines[head_win_start..head_win_end];
+        if fix_win == head_win {
             continue;
         }
 
-        if head_region.is_empty() {
-            continue;
-        }
-        let pre_region = &pre_lines[pre_gap_start..pre_gap_end];
-        let local_start = hunk.old_start - pre_gap_start;
-        let local_end = hunk.old_end - pre_gap_start;
-        if lcs_covers_range(pre_region, head_region, local_start, local_end) {
-            return false;
+        let old_lines = &pre_lines[hunk.old_start..hunk.old_end];
+        let new_lines = &fix_lines[hunk.new_start..hunk.new_end];
+
+        if !old_lines.is_empty() {
+            // Modification or deletion hunk: if any line eliminated by `fix`
+            // (`old_lines \ new_lines`) reappeared in `head_win` above its
+            // multiplicity in `fix_win`, at least part of the fix was rolled
+            // back inside its anchored window.
+            let mut new_counts: std::collections::HashMap<&[u8], usize> =
+                std::collections::HashMap::new();
+            for &line in new_lines {
+                *new_counts.entry(line).or_insert(0) += 1;
+            }
+            let mut removed_lines: std::collections::HashSet<&[u8]> =
+                std::collections::HashSet::new();
+            for &line in old_lines {
+                if let Some(count) = new_counts.get_mut(line) {
+                    if *count > 0 {
+                        *count -= 1;
+                        continue;
+                    }
+                }
+                removed_lines.insert(line);
+            }
+            for line in removed_lines {
+                let head_count = head_win.iter().filter(|&&l| l == line).count();
+                let fix_count = fix_win.iter().filter(|&&l| l == line).count();
+                if head_count > fix_count {
+                    return false;
+                }
+            }
+        } else if !new_lines.is_empty() {
+            // Pure-insertion hunk: survives if every inserted line stays
+            // present in `head_win` at its `fix_win` multiplicity; otherwise
+            // it survives only if `head_win` retains more lines than the
+            // non-inserted context lines in `fix_win` (indicating a replacement
+            // rather than deleting the insertion alongside an adjacent edit).
+            let inserted_intact = new_lines.iter().all(|&line| {
+                let head_count = head_win.iter().filter(|&&l| l == line).count();
+                let fix_count = fix_win.iter().filter(|&&l| l == line).count();
+                head_count >= fix_count
+            });
+            if !inserted_intact {
+                let other_fix_lines = fix_win.len().saturating_sub(new_lines.len());
+                if head_win.len() <= other_fix_lines {
+                    return false;
+                }
+            }
         }
     }
     true
-}
-
-/// Whether an LCS alignment between `pre_region` and `head_region` matches
-/// every line in `pre_region[range_start..range_end]`.
-fn lcs_covers_range(
-    pre_region: &[&[u8]],
-    head_region: &[&[u8]],
-    range_start: usize,
-    range_end: usize,
-) -> bool {
-    let n = pre_region.len();
-    let m = head_region.len();
-    if range_start >= range_end || range_end > n || m == 0 {
-        return false;
-    }
-    const MAX_DP_CELLS: usize = 200_000;
-    if n.saturating_mul(m) > MAX_DP_CELLS {
-        return contains_subslice(head_region, &pre_region[range_start..range_end]);
-    }
-    let cols = m + 1;
-    let mut dp = vec![0u32; (n + 1) * cols];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i * cols + j] = if pre_region[i] == head_region[j] {
-                dp[(i + 1) * cols + (j + 1)] + 1
-            } else {
-                dp[(i + 1) * cols + j].max(dp[i * cols + (j + 1)])
-            };
-        }
-    }
-    let mut pre_matched = vec![false; n];
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < n && j < m {
-        if pre_region[i] == head_region[j] && dp[i * cols + j] == dp[(i + 1) * cols + (j + 1)] + 1 {
-            pre_matched[i] = true;
-            i += 1;
-            j += 1;
-        } else if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    pre_matched[range_start..range_end].iter().all(|&m| m)
 }
 
 fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
@@ -899,15 +880,6 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
     }
     let trimmed = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     trimmed.split(|&b| b == b'\n').collect()
-}
-
-fn contains_subslice(haystack: &[&[u8]], needle: &[&[u8]]) -> bool {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
 }
 
 /// Open blocking finding IDs for `state` at `current_head`, combining

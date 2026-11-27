@@ -1367,3 +1367,286 @@ fn region_bound_fix_survival_handles_nearby_edits_copies_reapply_and_raw_paths()
         repo.arc(&wt4).args(["check", &change4]).assert().code(2);
     }
 }
+
+#[test]
+fn exterior_window_fix_survival_covers_insertion_interhunk_relocation_partial_and_eof() {
+    let repo = Repo::new();
+
+    // Case 1: Insertion-only fix rolled back alongside an adjacent edit must reopen;
+    // an actual replacement of the inserted guard alongside the adjacent edit must stay resolved.
+    let begin1 = stdout(repo.arc(&repo.root).args(["begin", "insert-adjacent-edit"]));
+    let change1 = opened_change_id(&begin1);
+    let wt1 = repo.home.join(".worktrees/repo-insert-adjacent-edit");
+    repo.commit(&wt1, "f.txt", "A\nB\nC\n", "feat: initial");
+    stdout(repo.arc(&wt1).args(["snapshot", "insert-adjacent-edit"]));
+    let fid1 = stdout(repo.arc(&wt1).args([
+        "finding",
+        "insert-adjacent-edit",
+        "--summary",
+        "add guard",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt1, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+    let fix1 = repo.head(&wt1);
+    stdout(repo.arc(&wt1).args([
+        "resolve",
+        "insert-adjacent-edit",
+        &fid1,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix1,
+    ]));
+    // Delete GUARD and edit adjacent line B -> must reopen.
+    repo.commit(
+        &wt1,
+        "f.txt",
+        "A\nB edited\nC\n",
+        "chore: drop guard and edit B",
+    );
+    stdout(repo.arc(&wt1).args(["snapshot", "insert-adjacent-edit"]));
+    let status1_reopened = json_stdout(repo.arc(&wt1).args(["status", &change1, "--json"]));
+    assert_eq!(
+        status1_reopened["open_blocking_findings"],
+        serde_json::json!([fid1]),
+        "deleting insertion alongside adjacent edit must reopen finding: {status1_reopened}"
+    );
+    repo.arc(&wt1).args(["check", &change1]).assert().code(2);
+    // Control: actual replacement for GUARD alongside edited B -> must stay resolved.
+    repo.commit(
+        &wt1,
+        "f.txt",
+        "A\nGUARD_V2\nB edited\nC\n",
+        "fix: refine guard while keeping edited B",
+    );
+    stdout(repo.arc(&wt1).args(["snapshot", "insert-adjacent-edit"]));
+    let status1_control = json_stdout(repo.arc(&wt1).args(["status", &change1, "--json"]));
+    assert_eq!(
+        status1_control["open_blocking_findings"],
+        serde_json::json!([]),
+        "actual replacement of inserted guard alongside edited B must stay resolved: {status1_control}"
+    );
+
+    // Case 2: Git `diff.interHunkContext = 5` must not suppress reopening when one of two
+    // separated hunks is rolled back.
+    let begin2 = stdout(repo.arc(&repo.root).args(["begin", "interhunk-config"]));
+    let change2 = opened_change_id(&begin2);
+    let wt2 = repo.home.join(".worktrees/repo-interhunk-config");
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nBAD1\nB\nC\nD\nE\nBAD2\nF\n",
+        "feat: two bad lines",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "interhunk-config"]));
+    let fid2 = stdout(repo.arc(&wt2).args([
+        "finding",
+        "interhunk-config",
+        "--summary",
+        "fix both bad lines",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nGOOD1\nB\nC\nD\nE\nGOOD2\nF\n",
+        "fix: repair both bad lines",
+    );
+    let fix2 = repo.head(&wt2);
+    stdout(repo.arc(&wt2).args([
+        "resolve",
+        "interhunk-config",
+        &fid2,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix2,
+    ]));
+    repo.commit(
+        &wt2,
+        "f.txt",
+        "A\nBAD1\nB\nC\nD\nE\nGOOD2\nF\n",
+        "chore: restore BAD1 only",
+    );
+    stdout(repo.arc(&wt2).args(["snapshot", "interhunk-config"]));
+    // Default config must reopen.
+    let status2_default = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2_default["open_blocking_findings"],
+        serde_json::json!([fid2]),
+        "default config must reopen finding: {status2_default}"
+    );
+    repo.arc(&wt2).args(["check", &change2]).assert().code(2);
+    // `diff.interHunkContext = 5` must produce the exact same reopening.
+    git(&wt2, &["config", "diff.interHunkContext", "5"]);
+    let status2_interhunk = json_stdout(repo.arc(&wt2).args(["status", &change2, "--json"]));
+    assert_eq!(
+        status2_interhunk["open_blocking_findings"],
+        serde_json::json!([fid2]),
+        "diff.interHunkContext=5 must not suppress finding blocker: {status2_interhunk}"
+    );
+    repo.arc(&wt2).args(["check", &change2]).assert().code(2);
+    git(&wt2, &["config", "--unset", "diff.interHunkContext"]);
+
+    // Case 3: Relocated copy of fixed text must not hide rollback of BAD at the original site.
+    let begin3 = stdout(repo.arc(&repo.root).args(["begin", "relocated-copy"]));
+    let change3 = opened_change_id(&begin3);
+    let wt3 = repo.home.join(".worktrees/repo-relocated-copy");
+    repo.commit(&wt3, "f.txt", "A\nBAD\nB\nC\nD\n", "feat: initial");
+    stdout(repo.arc(&wt3).args(["snapshot", "relocated-copy"]));
+    let fid3 = stdout(repo.arc(&wt3).args([
+        "finding",
+        "relocated-copy",
+        "--summary",
+        "fix BAD",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(&wt3, "f.txt", "A\nGOOD\nB\nC\nD\n", "fix: BAD -> GOOD");
+    let fix3 = repo.head(&wt3);
+    stdout(repo.arc(&wt3).args([
+        "resolve",
+        "relocated-copy",
+        &fid3,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix3,
+    ]));
+    repo.commit(
+        &wt3,
+        "f.txt",
+        "A\nBAD\nB edited\nC edited\nGOOD\nD\n",
+        "chore: restore BAD and relocate GOOD",
+    );
+    stdout(repo.arc(&wt3).args(["snapshot", "relocated-copy"]));
+    let status3 = json_stdout(repo.arc(&wt3).args(["status", &change3, "--json"]));
+    assert_eq!(
+        status3["open_blocking_findings"],
+        serde_json::json!([fid3]),
+        "relocated copy of GOOD must not hide restored BAD at original site: {status3}"
+    );
+    repo.arc(&wt3).args(["check", &change3]).assert().code(2);
+
+    // Case 4: Partial rollback within a contiguous multi-line hunk must reopen.
+    let begin4 = stdout(repo.arc(&repo.root).args(["begin", "partial-hunk"]));
+    let change4 = opened_change_id(&begin4);
+    let wt4 = repo.home.join(".worktrees/repo-partial-hunk");
+    repo.commit(
+        &wt4,
+        "f.txt",
+        "A\nBAD1\nBAD2\nB\n",
+        "feat: two adjacent bugs",
+    );
+    stdout(repo.arc(&wt4).args(["snapshot", "partial-hunk"]));
+    let fid4 = stdout(repo.arc(&wt4).args([
+        "finding",
+        "partial-hunk",
+        "--summary",
+        "fix both adjacent lines",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(
+        &wt4,
+        "f.txt",
+        "A\nGOOD1\nGOOD2\nB\n",
+        "fix: repair both adjacent lines",
+    );
+    let fix4 = repo.head(&wt4);
+    stdout(repo.arc(&wt4).args([
+        "resolve",
+        "partial-hunk",
+        &fid4,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix4,
+    ]));
+    repo.commit(
+        &wt4,
+        "f.txt",
+        "A\nBAD1\nGOOD2\nB\n",
+        "chore: restore BAD1 while keeping GOOD2",
+    );
+    stdout(repo.arc(&wt4).args(["snapshot", "partial-hunk"]));
+    let status4 = json_stdout(repo.arc(&wt4).args(["status", &change4, "--json"]));
+    assert_eq!(
+        status4["open_blocking_findings"],
+        serde_json::json!([fid4]),
+        "restoring one line of a contiguous fix hunk must reopen finding: {status4}"
+    );
+    repo.arc(&wt4).args(["check", &change4]).assert().code(2);
+
+    // Case 5: Rolled-back EOF newline in a mixed text+newline fix must reopen.
+    let begin5 = stdout(repo.arc(&repo.root).args(["begin", "mixed-eof-newline"]));
+    let change5 = opened_change_id(&begin5);
+    let wt5 = repo.home.join(".worktrees/repo-mixed-eof-newline");
+    repo.commit(&wt5, "f.txt", "A\nBAD", "feat: missing newline and BAD");
+    stdout(repo.arc(&wt5).args(["snapshot", "mixed-eof-newline"]));
+    let fid5 = stdout(repo.arc(&wt5).args([
+        "finding",
+        "mixed-eof-newline",
+        "--summary",
+        "fix text and final newline",
+        "--blocking",
+        "--severity",
+        "major",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    repo.commit(
+        &wt5,
+        "f.txt",
+        "A\nGOOD\n",
+        "fix: repair text and add trailing newline",
+    );
+    let fix5 = repo.head(&wt5);
+    stdout(repo.arc(&wt5).args([
+        "resolve",
+        "mixed-eof-newline",
+        &fid5,
+        "--status",
+        "resolved",
+        "--commit",
+        &fix5,
+    ]));
+    repo.commit(
+        &wt5,
+        "f.txt",
+        "A\nGOOD",
+        "chore: drop trailing newline alone",
+    );
+    stdout(repo.arc(&wt5).args(["snapshot", "mixed-eof-newline"]));
+    let status5 = json_stdout(repo.arc(&wt5).args(["status", &change5, "--json"]));
+    assert_eq!(
+        status5["open_blocking_findings"],
+        serde_json::json!([fid5]),
+        "dropping trailing newline from a mixed text+newline fix must reopen finding: {status5}"
+    );
+    repo.arc(&wt5).args(["check", &change5]).assert().code(2);
+}
