@@ -713,3 +713,73 @@ fn stats_by_model_later_snapshot_reuses_exact_session_coordinate() {
     assert_eq!(helper["changes"], 1);
     assert_eq!(helper["patchsets"], 2);
 }
+
+/// Regression test for same-session alias lookup: explicit contributor models
+/// sharing one session UUID must both be credited, and a bare session paired
+/// with an explicit session-qualified model must resolve to that coordinate
+/// rather than emitting raw labels.
+#[test]
+fn stats_by_model_same_session_contributors_preserve_explicit_models() {
+    let repo = Repo::new();
+    let uuid1 = "01a1d771-d401-7bd0-8b41-dd9ce2d94110";
+    let uuid2 = "01a1d771-d401-7bd0-8b41-dd9ce2d94111";
+    let probe1 = format!("codex:{uuid1}:gpt-probe#high");
+    let newer1 = format!("codex:{uuid1}:gpt-new#medium");
+    let bare2 = format!("codex:{uuid2}");
+    let probe2 = format!("codex:{uuid2}:gpt-pair#high");
+
+    // Case 1: two explicit session-qualified models on one snapshot.
+    let (_c1, wt1) = begin_with_worktree(&repo, "same-session-two-models", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt1, "a.txt", "1\n", "feat: a");
+    repo.arc(&wt1)
+        .args([
+            "--actor",
+            "lead",
+            "--harness",
+            "claude",
+            "snapshot",
+            "--contributors",
+            &format!("{probe1},{newer1}"),
+        ])
+        .assert()
+        .success();
+
+    // Case 2: bare session followed by explicit session-qualified model.
+    let (_c2, wt2) = begin_with_worktree(&repo, "same-session-bare-and-explicit", |cmd| {
+        cmd.args(["--actor", "lead"]);
+    });
+    commit_file(&repo, &wt2, "b.txt", "1\n", "feat: b");
+    repo.arc(&wt2)
+        .args([
+            "--actor",
+            "lead",
+            "--harness",
+            "claude",
+            "snapshot",
+            "--contributors",
+            &format!("{bare2},{probe2}"),
+        ])
+        .assert()
+        .success();
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    let models = stats["models"].as_array().expect("models array");
+    let has = |id: &str| models.iter().any(|row| row["identity"] == id);
+
+    let r_probe = find_row(&stats, "codex:gpt-probe#high");
+    assert_eq!(r_probe["identity_kind"], "coordinate");
+    assert_eq!(r_probe["patchsets"], 1);
+    let r_new = find_row(&stats, "codex:gpt-new#medium");
+    assert_eq!(r_new["identity_kind"], "coordinate");
+    assert_eq!(r_new["patchsets"], 1);
+    assert!(!has(&probe1), "{stats}");
+    assert!(!has(&newer1), "{stats}");
+
+    let r_pair = find_row(&stats, "codex:gpt-pair#high");
+    assert_eq!(r_pair["identity_kind"], "coordinate");
+    assert_eq!(r_pair["patchsets"], 1);
+    assert!(!has(&bare2), "{stats}");
+    assert!(!has(&probe2), "{stats}");
+}

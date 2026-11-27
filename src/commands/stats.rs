@@ -382,125 +382,132 @@ fn event_identity(event: &Event) -> IdentityKey {
     IdentityKey::unattributed()
 }
 
-/// Whether two contributor or subject strings name the exact same harness
-/// session id (for example `codex:<uuid>` and `codex:<uuid>:gpt-repeat#high`).
-fn same_session_id(a: &str, b: &str) -> bool {
-    let (Some((h1, s1, _)), Some((h2, s2, _))) = (
-        crate::coordinate::session_subject(a),
-        crate::coordinate::session_subject(b),
-    ) else {
-        return false;
-    };
-    h1 == h2 && s1 == s2 && is_harness_session_id(h1, s1)
+/// `(harness, session_id)` when `value` names a harness session id (whether
+/// bare `harness:<session>` or session-qualified `harness:<session>:model`).
+fn session_key(value: &str) -> Option<(String, String)> {
+    let (harness, session, _) = crate::coordinate::session_subject(value)?;
+    is_harness_session_id(harness, session).then(|| (harness.to_string(), session.to_string()))
 }
 
-/// Extract a canonical coordinate for `contributor` from `obo` (and optional
-/// explicit `--model` flag) when `obo` names `contributor` directly — either by
-/// exact string match or by matching the exact `(harness, session)` of a bare
-/// session contributor. Never matches on harness alone.
-fn coordinate_from_delegated_subject(
+/// `(harness, session_id)` when `value` is a bare session identifier with no
+/// explicit model segment (for example `codex:<uuid>`).
+fn bare_session_key(value: &str) -> Option<(String, String)> {
+    let (harness, session, None) = crate::coordinate::session_subject(value)? else {
+        return None;
+    };
+    is_harness_session_id(harness, session).then(|| (harness.to_string(), session.to_string()))
+}
+
+/// `(harness, session_id)` for a `DebtIdentity`, checking its structured
+/// `harness`/`session` fields as well as its `actor` and `on_behalf_of`.
+fn debt_identity_session_key(id: &DebtIdentity) -> Option<(String, String)> {
+    if let (Some(h), Some(s)) = (id.harness.as_deref(), id.session.as_deref()) {
+        let h = h.trim();
+        let s = s.trim();
+        if !h.is_empty() && is_harness_session_id(h, s) {
+            return Some((h.to_string(), s.to_string()));
+        }
+    }
+    session_key(&id.actor).or_else(|| session_key(id.effective_actor()))
+}
+
+/// Per-change author evidence accumulated chronologically across patchsets so
+/// every lookup runs in O(log K) without recursively re-evaluating prior
+/// patchsets on long rebase chains.
+#[derive(Default)]
+struct ChangeAuthorHistory {
+    /// Newest established canonical coordinate per exact contributor/actor key.
+    by_exact: BTreeMap<String, String>,
+    /// Newest established canonical coordinate per `(harness, session_id)`.
+    by_session: BTreeMap<(String, String), String>,
+    /// `(actor, coordinate)` pairs legitimately established on earlier patchsets.
+    legit_actor_coords: BTreeSet<(String, String)>,
+    /// `(actor, harness, model, session)` tuples recorded on earlier patchsets
+    /// whose recorder was not model-bound (the model belonged to a delegated
+    /// subject).
+    unbound_recorders: BTreeSet<(String, String, String, Option<String>)>,
+}
+
+impl ChangeAuthorHistory {
+    fn is_poisoned_inherited(&self, inherited: &DebtIdentity) -> bool {
+        let (Some(h), Some(m)) = (inherited.harness.as_deref(), inherited.model.as_deref()) else {
+            return false;
+        };
+        let Some(coord) = canonical_coordinate(h, m, inherited.session.as_deref()) else {
+            return false;
+        };
+        let key = (
+            inherited.actor.clone(),
+            h.to_string(),
+            m.to_string(),
+            inherited.session.clone(),
+        );
+        self.unbound_recorders.contains(&key)
+            && !self
+                .legit_actor_coords
+                .contains(&(inherited.actor.clone(), coord))
+    }
+
+    fn lookup(&self, contributor: &str) -> Option<String> {
+        if let Some(coord) = self.by_exact.get(contributor) {
+            return Some(coord.clone());
+        }
+        // Same-session inference applies only to bare session identifiers.
+        let key = bare_session_key(contributor)?;
+        self.by_session.get(&key).cloned()
+    }
+
+    fn record_established(&mut self, actor: &str, coordinate: &str) {
+        self.by_exact
+            .insert(actor.to_string(), coordinate.to_string());
+        self.legit_actor_coords
+            .insert((actor.to_string(), coordinate.to_string()));
+        if let Some(key) = session_key(actor) {
+            self.by_session.insert(key, coordinate.to_string());
+        }
+    }
+
+    fn record_unbound_recorder(&mut self, event: &Event) {
+        if recorder_model_bound(event) {
+            return;
+        }
+        if let (Some(h), Some(m)) = (event.harness.as_deref(), event.model.as_deref()) {
+            self.unbound_recorders.insert((
+                event.actor.clone(),
+                h.to_string(),
+                m.to_string(),
+                event.session.clone(),
+            ));
+        }
+    }
+}
+
+/// Resolve one contributor on `event` using exact and explicit evidence first,
+/// then same-session inference for bare session identifiers only, and finally
+/// prior-patchset `history`.
+fn resolve_contributor_coordinate(
+    event: &Event,
+    patchset: &crate::state::Patchset,
     contributor: &str,
     obo: Option<&str>,
     flag_model: Option<&str>,
+    peer_session_coords: &BTreeMap<(String, String), Option<String>>,
+    history: &ChangeAuthorHistory,
 ) -> Option<String> {
-    let obo = obo.filter(|value| !value.trim().is_empty())?;
-    if obo == contributor {
-        return match identity_from_subject(contributor, flag_model) {
-            IdentityKey {
-                kind: IdentityKind::Coordinate,
-                identity,
-            } => Some(identity),
-            _ => None,
-        };
+    // 1. Explicit coordinate carried directly by the contributor string
+    //    (e.g. `codex:gpt-6.1-sol#xhigh` or `codex:<uuid>:gpt-probe#high`).
+    if let Some(coord) = canonical_coordinate_from_str(contributor, None) {
+        return Some(coord);
     }
-    let (h1, s1, None) = crate::coordinate::session_subject(contributor)? else {
-        return None;
-    };
-    let (h2, s2, Some(model)) = crate::coordinate::session_subject(obo)? else {
-        return None;
-    };
-    (h1 == h2 && s1 == s2)
-        .then(|| canonical_coordinate(h2, model, Some(s2)))
-        .flatten()
-}
 
-/// Whether `inherited` copies a `(harness, model)` pair from an earlier
-/// `PatchsetAdded` event whose recorder was not model-bound (the model belonged
-/// to a delegated subject), with no earlier legitimate authoring evidence
-/// establishing that coordinate for `inherited.actor`.
-fn is_poisoned_inherited_recorder(inherited: &DebtIdentity, events_before: &[Event]) -> bool {
-    let (Some(inh_harness), Some(inh_model)) =
-        (inherited.harness.as_deref(), inherited.model.as_deref())
-    else {
-        return false;
-    };
-    let Some(inh_coord) =
-        canonical_coordinate(inh_harness, inh_model, inherited.session.as_deref())
-    else {
-        return false;
-    };
-
-    let mut seen_poison = false;
-    let mut seen_legit = false;
-    for (idx, prior) in events_before.iter().enumerate() {
-        let Payload::PatchsetAdded {
-            contributors,
-            inherited_authors,
-            ..
-        } = &prior.payload
-        else {
-            continue;
-        };
-        if prior.actor == inherited.actor
-            && !recorder_model_bound(prior)
-            && prior.harness.as_deref() == Some(inh_harness)
-            && prior.model.as_deref() == Some(inh_model)
-            && prior.session.as_deref() == inherited.session.as_deref()
-        {
-            seen_poison = true;
-            continue;
-        }
-        if direct_contributor_coordinate(
-            prior,
-            &events_before[..idx],
-            &inherited.actor,
-            contributors,
-            inherited_authors,
-        )
-        .as_deref()
-            == Some(inh_coord.as_str())
-        {
-            seen_legit = true;
-        }
-    }
-    seen_poison && !seen_legit
-}
-
-/// The canonical coordinate established for `contributor` directly by `event`
-/// (without falling back to earlier patchsets), guarding against inherited
-/// author records copied from an un-bound earlier recorder.
-fn direct_contributor_coordinate(
-    event: &Event,
-    events_before: &[Event],
-    contributor: &str,
-    contributors: &[String],
-    inherited_authors: &[DebtIdentity],
-) -> Option<String> {
-    let obo = event
-        .on_behalf_of
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let flag_model = (event.model_provenance.model_source == Some(ModelSource::Flag))
-        .then_some(event.model.as_deref())
-        .flatten();
-
-    if let Some(inherited) = inherited_authors.iter().find(|id| {
-        contributor == id.actor
-            || contributor == id.effective_actor()
-            || same_session_id(contributor, &id.actor)
-            || same_session_id(contributor, id.effective_actor())
-    }) {
-        if !is_poisoned_inherited_recorder(inherited, events_before) {
+    // 2. Exact match in retained `inherited_authors` (guarding against
+    //    delegated models copied onto an un-bound earlier recorder).
+    if let Some(inherited) = patchset
+        .inherited_authors
+        .iter()
+        .find(|id| contributor == id.actor || contributor == id.effective_actor())
+    {
+        if !history.is_poisoned_inherited(inherited) {
             if let IdentityKey {
                 kind: IdentityKind::Coordinate,
                 identity,
@@ -511,100 +518,143 @@ fn direct_contributor_coordinate(
         }
     }
 
-    if !contributors.is_empty() {
-        let matched_contributor = contributors
-            .iter()
-            .find(|value| value.as_str() == contributor || same_session_id(value, contributor))?;
-        if let Some(coord) = coordinate_from_delegated_subject(matched_contributor, obo, flag_model)
+    // 3. Exact `--on-behalf-of` subject match (including explicit `--model`
+    //    flag on a bare session subject).
+    if obo == Some(contributor) {
+        if let IdentityKey {
+            kind: IdentityKind::Coordinate,
+            identity,
+        } = identity_from_subject(contributor, flag_model)
         {
-            return Some(coord);
+            return Some(identity);
         }
-        if let Some(coord) = canonical_coordinate_from_str(matched_contributor, None) {
-            return Some(coord);
-        }
-        if matched_contributor == &event.actor && recorder_model_bound(event) {
-            return event
-                .harness
-                .as_deref()
-                .zip(event.model.as_deref())
-                .and_then(|(h, m)| canonical_coordinate(h, m, event.session.as_deref()));
-        }
-        return None;
     }
 
-    if let Some(coord) = coordinate_from_delegated_subject(contributor, obo, flag_model) {
-        return Some(coord);
-    }
-    if obo.is_none() && contributor == event.actor {
-        return event
+    // 4. Exact recorder match when the event's model is recorder-bound.
+    if contributor == patchset.actor && recorder_model_bound(event) {
+        if let Some(coord) = event
             .harness
             .as_deref()
             .zip(event.model.as_deref())
-            .and_then(|(h, m)| canonical_coordinate(h, m, event.session.as_deref()));
-    }
-    None
-}
-
-/// The newest coordinate established for `contributor` by an earlier
-/// `PatchsetAdded` event on the same change, applying the same retained,
-/// exact-subject, exact-session, and recorder-bound evidence rules.
-fn earlier_contributor_coordinate(events_before: &[Event], contributor: &str) -> Option<String> {
-    let mut established = None;
-    for (idx, event) in events_before.iter().enumerate() {
-        let Payload::PatchsetAdded {
-            contributors,
-            inherited_authors,
-            ..
-        } = &event.payload
-        else {
-            continue;
-        };
-        if let Some(coord) = direct_contributor_coordinate(
-            event,
-            &events_before[..idx],
-            contributor,
-            contributors,
-            inherited_authors,
-        ) {
-            established = Some(coord);
+            .and_then(|(h, m)| canonical_coordinate(h, m, event.session.as_deref()))
+        {
+            return Some(coord);
         }
     }
-    established
+
+    // 5. Same-session inference for bare session names (`harness:<session>`)
+    //    only: retained author, delegated `--on-behalf-of`, or a unique
+    //    explicit peer coordinate for the same session on this patchset.
+    if let Some(bare_key) = bare_session_key(contributor) {
+        if let Some(coord) = patchset.inherited_authors.iter().find_map(|inherited| {
+            if debt_identity_session_key(inherited).as_ref() != Some(&bare_key)
+                || history.is_poisoned_inherited(inherited)
+            {
+                return None;
+            }
+            match identity_from_debt_identity(inherited, false) {
+                IdentityKey {
+                    kind: IdentityKind::Coordinate,
+                    identity,
+                } => Some(identity),
+                _ => None,
+            }
+        }) {
+            return Some(coord);
+        }
+        if let Some(obo_str) = obo {
+            if let Some((h2, s2, Some(model))) = crate::coordinate::session_subject(obo_str) {
+                if bare_key.0 == h2 && bare_key.1 == s2 {
+                    if let Some(coord) = canonical_coordinate(h2, model, Some(s2)) {
+                        return Some(coord);
+                    }
+                }
+            }
+        }
+        if let Some(Some(coord)) = peer_session_coords.get(&bare_key) {
+            return Some(coord.clone());
+        }
+    }
+
+    // 6. Prior-patchset history (exact match first, then bare-session match).
+    history.lookup(contributor)
 }
 
-/// Distinct author identities for a `PatchsetAdded` event, preferring retained
-/// or declared contributor coordinates over the recording lead's session.
+/// Distinct author identities for a `PatchsetAdded` event, resolved in a
+/// single chronological pass using `history` and updating `history` with any
+/// newly established coordinates or un-bound recorder observations.
 fn patchset_identities(
     event: &Event,
     state: &ChangeState,
-    events_before: &[Event],
+    history: &mut ChangeAuthorHistory,
     patchset_id: &str,
 ) -> Vec<IdentityKey> {
     let Some(patchset) = state.patchsets.iter().find(|ps| ps.id == patchset_id) else {
-        return vec![event_identity(event)];
-    };
-    if patchset.contributors.is_empty() && patchset.inherited_authors.is_empty() {
         let ident = event_identity(event);
+        history.record_unbound_recorder(event);
+        return vec![ident];
+    };
+    let obo = event
+        .on_behalf_of
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let flag_model = (event.model_provenance.model_source == Some(ModelSource::Flag))
+        .then_some(event.model.as_deref())
+        .flatten();
+
+    if patchset.contributors.is_empty() && patchset.inherited_authors.is_empty() {
+        let mut ident = event_identity(event);
         if ident.kind == IdentityKind::Label {
-            if let Some(coord) = earlier_contributor_coordinate(events_before, &ident.identity) {
-                return vec![IdentityKey::coordinate(coord)];
+            if let Some(coord) = history.lookup(&ident.identity) {
+                ident = IdentityKey::coordinate(coord);
             }
         }
+        if ident.kind == IdentityKind::Coordinate {
+            let subject_key = obo.unwrap_or(&event.actor);
+            history.record_established(subject_key, &ident.identity);
+        }
+        history.record_unbound_recorder(event);
         return vec![ident];
     }
 
     let mut seen = BTreeSet::new();
+    let mut newly_established: Vec<(String, String)> = Vec::new();
+    let mut newly_established_sessions: Vec<((String, String), String)> = Vec::new();
+
     if !patchset.contributors.is_empty() {
+        // Index unique explicit session-qualified coordinates declared among
+        // this patchset's contributors so a bare `harness:<session>` peer can
+        // resolve without ambiguity. `Some(coord)` means unique; `None` means
+        // multiple distinct models share that session id on this patchset.
+        let mut peer_session_coords: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
         for contributor in &patchset.contributors {
-            let coord = direct_contributor_coordinate(
+            if let (Some(key), Some(coord)) = (
+                session_key(contributor),
+                canonical_coordinate_from_str(contributor, None),
+            ) {
+                peer_session_coords
+                    .entry(key)
+                    .and_modify(|slot| {
+                        if slot.as_deref() != Some(coord.as_str()) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(coord));
+            }
+        }
+
+        for contributor in &patchset.contributors {
+            let coord = resolve_contributor_coordinate(
                 event,
-                events_before,
+                patchset,
                 contributor,
-                &patchset.contributors,
-                &patchset.inherited_authors,
-            )
-            .or_else(|| earlier_contributor_coordinate(events_before, contributor));
+                obo,
+                flag_model,
+                &peer_session_coords,
+                history,
+            );
             let ident = if let Some(coord) = coord {
+                newly_established.push((contributor.clone(), coord.clone()));
                 IdentityKey::coordinate(coord)
             } else if (contributor == &patchset.actor
                 && patchset.on_behalf_of.is_none()
@@ -619,8 +669,8 @@ fn patchset_identities(
         }
     } else {
         for author in &patchset.inherited_authors {
-            let ident = if is_poisoned_inherited_recorder(author, events_before) {
-                if let Some(coord) = earlier_contributor_coordinate(events_before, &author.actor) {
+            let ident = if history.is_poisoned_inherited(author) {
+                if let Some(coord) = history.lookup(&author.actor) {
                     IdentityKey::coordinate(coord)
                 } else if author.actor.trim().is_empty() {
                     IdentityKey::unattributed()
@@ -630,9 +680,7 @@ fn patchset_identities(
             } else {
                 let resolved = identity_from_debt_identity(author, true);
                 if resolved.kind == IdentityKind::Label {
-                    if let Some(coord) =
-                        earlier_contributor_coordinate(events_before, &resolved.identity)
-                    {
+                    if let Some(coord) = history.lookup(&resolved.identity) {
                         IdentityKey::coordinate(coord)
                     } else {
                         resolved
@@ -641,9 +689,27 @@ fn patchset_identities(
                     resolved
                 }
             };
+            if ident.kind == IdentityKind::Coordinate {
+                newly_established.push((author.actor.clone(), ident.identity.clone()));
+                if author.effective_actor() != author.actor {
+                    newly_established
+                        .push((author.effective_actor().to_string(), ident.identity.clone()));
+                }
+                if let Some(key) = debt_identity_session_key(author) {
+                    newly_established_sessions.push((key, ident.identity.clone()));
+                }
+            }
             seen.insert(ident);
         }
     }
+
+    for (actor, coord) in newly_established {
+        history.record_established(&actor, &coord);
+    }
+    for (key, coord) in newly_established_sessions {
+        history.by_session.insert(key, coord);
+    }
+    history.record_unbound_recorder(event);
 
     if seen.is_empty() {
         vec![event_identity(event)]
@@ -668,11 +734,12 @@ fn summarize_by_model(changes: &[(String, ChangeState, Vec<Event>)]) -> Vec<Mode
         // Who contributed each patchset, so a rework round lands on the
         // identity whose work opened it rather than on the reviewer.
         let mut patchset_subjects: BTreeMap<&str, Vec<IdentityKey>> = BTreeMap::new();
-        for (index, event) in events.iter().enumerate() {
+        let mut author_history = ChangeAuthorHistory::default();
+        for event in events {
             match &event.payload {
                 Payload::PatchsetAdded { patchset_id, .. } => {
                     let identities =
-                        patchset_identities(event, state, &events[..index], patchset_id);
+                        patchset_identities(event, state, &mut author_history, patchset_id);
                     for ident in &identities {
                         let row = rows.entry(ident.clone()).or_default();
                         row.changes
@@ -3389,5 +3456,235 @@ mod tests {
         assert_eq!(helper.identity_kind, "label");
         assert_eq!(helper.changes, 1);
         assert_eq!(helper.patchsets, 2);
+    }
+
+    #[test]
+    fn by_model_long_clean_rebase_chain_runs_in_linear_time_for_legit_and_poisoned_replays() {
+        // 30 legitimate recorder replays — exponential recursion would take
+        // minutes/hours; single-pass history completes in milliseconds.
+        let mut legit_events = vec![with_identity(
+            opened_event("0", "legit"),
+            "lead",
+            None,
+            None,
+            None,
+            None,
+        )];
+        let mut ps1 = with_identity(
+            ps_event("1", 10, "ps-01", "h1"),
+            "lead",
+            None,
+            Some("claude"),
+            Some("claude-probe#high"),
+            Some(ModelSource::Flag),
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps1.payload
+        {
+            contributors.push("lead".into());
+            contributors.push("helper".into());
+        }
+        legit_events.push(ps1);
+        for i in 2..=31 {
+            let mut replay = with_identity(
+                ps_event(
+                    &i.to_string(),
+                    i as i64 * 10,
+                    &format!("ps-{i:02}"),
+                    &format!("h{i}"),
+                ),
+                "lead",
+                None,
+                Some("claude"),
+                None,
+                None,
+            );
+            if let Payload::PatchsetAdded {
+                ref mut contributors,
+                ref mut inherited_authors,
+                ..
+            } = replay.payload
+            {
+                contributors.push("lead".into());
+                contributors.push("helper".into());
+                inherited_authors.push(DebtIdentity::new(
+                    "lead".into(),
+                    None,
+                    Some("claude".into()),
+                    Some("claude-probe#high".into()),
+                    Some("s".into()),
+                ));
+                inherited_authors.push(DebtIdentity::new("helper".into(), None, None, None, None));
+            }
+            legit_events.push(replay);
+        }
+
+        // 30 delegated-poison replays — must stay linear AND emit no phantom
+        // `claude:gpt-carry#high` coordinate.
+        let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d9410a";
+        let obo = format!("codex:{uuid}:gpt-carry#high");
+        let mut poisoned_events = vec![with_identity(
+            opened_event("0", "poisoned"),
+            "lead",
+            None,
+            None,
+            None,
+            None,
+        )];
+        let mut p1 = with_identity(
+            ps_event("1", 10, "ps-01", "p1"),
+            "lead",
+            Some(&obo),
+            Some("claude"),
+            Some("gpt-carry#high"),
+            Some(ModelSource::Flag),
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = p1.payload
+        {
+            contributors.push("lead".into());
+            contributors.push("helper".into());
+        }
+        poisoned_events.push(p1);
+        for i in 2..=31 {
+            let mut replay = with_identity(
+                ps_event(
+                    &i.to_string(),
+                    i as i64 * 10,
+                    &format!("ps-{i:02}"),
+                    &format!("p{i}"),
+                ),
+                "lead",
+                Some(&obo),
+                Some("claude"),
+                Some("gpt-carry#high"),
+                Some(ModelSource::Flag),
+            );
+            if let Payload::PatchsetAdded {
+                ref mut contributors,
+                ref mut inherited_authors,
+                ..
+            } = replay.payload
+            {
+                contributors.push("lead".into());
+                contributors.push("helper".into());
+                inherited_authors.push(DebtIdentity::new(
+                    "lead".into(),
+                    None,
+                    Some("claude".into()),
+                    Some("gpt-carry#high".into()),
+                    Some("s".into()),
+                ));
+                inherited_authors.push(DebtIdentity::new("helper".into(), None, None, None, None));
+            }
+            poisoned_events.push(replay);
+        }
+
+        let start = std::time::Instant::now();
+        let rows = summarize_by_model(&[
+            change_tuple("legit", legit_events),
+            change_tuple("poisoned", poisoned_events),
+        ]);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "rebase chain attribution took {:?}",
+            start.elapsed()
+        );
+        let by_id: BTreeMap<&str, &ModelStats> =
+            rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+        assert!(!by_id.contains_key("claude:gpt-carry#high"));
+        assert_eq!(by_id["claude:claude-probe#high"].patchsets, 31);
+        assert_eq!(by_id["lead"].identity_kind, "label");
+        assert_eq!(by_id["lead"].patchsets, 31);
+        assert_eq!(by_id["helper"].patchsets, 62);
+    }
+
+    #[test]
+    fn by_model_exact_and_explicit_session_contributors_are_never_masked_by_aliases() {
+        let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d9410a";
+        let bare = format!("codex:{uuid}");
+        let probe = format!("codex:{uuid}:gpt-probe#high");
+        let newer = format!("codex:{uuid}:gpt-new#medium");
+
+        // Case 1: two explicit models sharing one session UUID credit BOTH coordinates.
+        let mut ps_two = with_identity(
+            ps_event("2", 10, "ps-01", "h1"),
+            "lead",
+            Some(&probe),
+            Some("claude"),
+            Some("gpt-probe#high"),
+            Some(ModelSource::Flag),
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps_two.payload
+        {
+            contributors.push(probe.clone());
+            contributors.push(newer.clone());
+        }
+
+        // Case 2: bare session followed by explicit session-qualified model
+        // resolves to the explicit coordinate without emitting raw labels.
+        let mut ps_mixed = with_identity(
+            ps_event("2", 10, "ps-01", "h2"),
+            "lead",
+            Some(&bare),
+            Some("claude"),
+            None,
+            None,
+        );
+        if let Payload::PatchsetAdded {
+            ref mut contributors,
+            ..
+        } = ps_mixed.payload
+        {
+            contributors.push(bare.clone());
+            contributors.push(probe.clone());
+        }
+
+        let rows_two = summarize_by_model(&[change_tuple(
+            "c1",
+            vec![
+                with_identity(opened_event("1", "c1"), "lead", None, None, None, None),
+                ps_two,
+            ],
+        )]);
+        let by_id_two: BTreeMap<&str, &ModelStats> =
+            rows_two.iter().map(|r| (r.identity.as_str(), r)).collect();
+        assert_eq!(
+            by_id_two["codex:gpt-probe#high"].identity_kind,
+            "coordinate"
+        );
+        assert_eq!(by_id_two["codex:gpt-probe#high"].patchsets, 1);
+        assert_eq!(
+            by_id_two["codex:gpt-new#medium"].identity_kind,
+            "coordinate"
+        );
+        assert_eq!(by_id_two["codex:gpt-new#medium"].patchsets, 1);
+
+        let rows_mixed = summarize_by_model(&[change_tuple(
+            "c2",
+            vec![
+                with_identity(opened_event("1", "c2"), "lead", None, None, None, None),
+                ps_mixed,
+            ],
+        )]);
+        let by_id_mixed: BTreeMap<&str, &ModelStats> = rows_mixed
+            .iter()
+            .map(|r| (r.identity.as_str(), r))
+            .collect();
+        assert!(!by_id_mixed.contains_key(bare.as_str()));
+        assert!(!by_id_mixed.contains_key(probe.as_str()));
+        assert_eq!(
+            by_id_mixed["codex:gpt-probe#high"].identity_kind,
+            "coordinate"
+        );
+        assert_eq!(by_id_mixed["codex:gpt-probe#high"].patchsets, 1);
     }
 }
