@@ -783,3 +783,64 @@ fn stats_by_model_same_session_contributors_preserve_explicit_models() {
     assert!(!has(&bare2), "{stats}");
     assert!(!has(&probe2), "{stats}");
 }
+
+/// Regression test for multi-model session ambiguity: when `ps-01` establishes
+/// two distinct models for one session UUID and `ps-02` names only the bare
+/// session UUID, `ps-02` must remain a bare-session label rather than
+/// arbitrarily inheriting the lexically last model (regardless of contributor
+/// argument order).
+#[test]
+fn stats_by_model_bare_session_stays_label_after_multi_model_snapshot() {
+    let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d94199";
+    let bare = format!("codex:{uuid}");
+    let alpha = format!("codex:{uuid}:gpt-alpha#high");
+    let beta = format!("codex:{uuid}:gpt-beta#medium");
+
+    for contributors_arg in [format!("{alpha},{beta}"), format!("{beta},{alpha}")] {
+        let repo = Repo::new();
+        let (_change_id, wt) = begin_with_worktree(&repo, "ambiguous-session", |cmd| {
+            cmd.args(["--actor", "lead"]);
+        });
+        commit_file(&repo, &wt, "work.txt", "v1\n", "feat: v1");
+        repo.arc(&wt)
+            .args([
+                "--actor",
+                "lead",
+                "--on-behalf-of",
+                "observer",
+                "snapshot",
+                "--contributors",
+                &contributors_arg,
+            ])
+            .assert()
+            .success();
+
+        commit_file(&repo, &wt, "work.txt", "v2\n", "feat: v2");
+        repo.arc(&wt)
+            .args([
+                "--actor",
+                "lead",
+                "--on-behalf-of",
+                "observer",
+                "snapshot",
+                "--contributors",
+                &bare,
+            ])
+            .assert()
+            .success();
+
+        let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+
+        let r_alpha = find_row(&stats, "codex:gpt-alpha#high");
+        assert_eq!(r_alpha["identity_kind"], "coordinate", "{contributors_arg}");
+        assert_eq!(r_alpha["patchsets"], 1, "{contributors_arg}");
+
+        let r_beta = find_row(&stats, "codex:gpt-beta#medium");
+        assert_eq!(r_beta["identity_kind"], "coordinate", "{contributors_arg}");
+        assert_eq!(r_beta["patchsets"], 1, "{contributors_arg}");
+
+        let r_bare = find_row(&stats, &bare);
+        assert_eq!(r_bare["identity_kind"], "label", "{contributors_arg}");
+        assert_eq!(r_bare["patchsets"], 1, "{contributors_arg}");
+    }
+}

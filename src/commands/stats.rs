@@ -411,6 +411,12 @@ fn debt_identity_session_key(id: &DebtIdentity) -> Option<(String, String)> {
     session_key(&id.actor).or_else(|| session_key(id.effective_actor()))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SessionEstablished {
+    Unique(String),
+    Ambiguous,
+}
+
 /// Per-change author evidence accumulated chronologically across patchsets so
 /// every lookup runs in O(log K) without recursively re-evaluating prior
 /// patchsets on long rebase chains.
@@ -418,8 +424,10 @@ fn debt_identity_session_key(id: &DebtIdentity) -> Option<(String, String)> {
 struct ChangeAuthorHistory {
     /// Newest established canonical coordinate per exact contributor/actor key.
     by_exact: BTreeMap<String, String>,
-    /// Newest established canonical coordinate per `(harness, session_id)`.
-    by_session: BTreeMap<(String, String), String>,
+    /// Newest established canonical coordinate per `(harness, session_id)`, or
+    /// `Ambiguous` when a patchset established multiple distinct coordinates
+    /// for the same session.
+    by_session: BTreeMap<(String, String), SessionEstablished>,
     /// `(actor, coordinate)` pairs legitimately established on earlier patchsets.
     legit_actor_coords: BTreeSet<(String, String)>,
     /// `(actor, harness, model, session)` tuples recorded on earlier patchsets
@@ -452,18 +460,49 @@ impl ChangeAuthorHistory {
         if let Some(coord) = self.by_exact.get(contributor) {
             return Some(coord.clone());
         }
-        // Same-session inference applies only to bare session identifiers.
+        // Same-session inference applies only to bare session identifiers, and
+        // never guesses when a prior patchset established multiple coordinates
+        // for the same session.
         let key = bare_session_key(contributor)?;
-        self.by_session.get(&key).cloned()
+        match self.by_session.get(&key) {
+            Some(SessionEstablished::Unique(coord)) => Some(coord.clone()),
+            Some(SessionEstablished::Ambiguous) | None => None,
+        }
     }
 
-    fn record_established(&mut self, actor: &str, coordinate: &str) {
-        self.by_exact
-            .insert(actor.to_string(), coordinate.to_string());
-        self.legit_actor_coords
-            .insert((actor.to_string(), coordinate.to_string()));
-        if let Some(key) = session_key(actor) {
-            self.by_session.insert(key, coordinate.to_string());
+    fn record_patchset(
+        &mut self,
+        established: &[(String, String)],
+        extra_sessions: &[((String, String), String)],
+    ) {
+        let mut patchset_sessions: BTreeMap<(String, String), SessionEstablished> = BTreeMap::new();
+        let mut tally_session = |key: (String, String), coord: &str| {
+            patchset_sessions
+                .entry(key)
+                .and_modify(|slot| {
+                    if !matches!(slot, SessionEstablished::Unique(existing) if existing == coord) {
+                        *slot = SessionEstablished::Ambiguous;
+                    }
+                })
+                .or_insert_with(|| SessionEstablished::Unique(coord.to_string()));
+        };
+        for (actor, coord) in established {
+            self.by_exact.insert(actor.clone(), coord.clone());
+            self.legit_actor_coords
+                .insert((actor.clone(), coord.clone()));
+            if let Some(key) = session_key(actor) {
+                tally_session(key, coord);
+            }
+        }
+        for (key, coord) in extra_sessions {
+            tally_session(key.clone(), coord);
+        }
+        for (key, state) in patchset_sessions {
+            if state == SessionEstablished::Ambiguous {
+                self.by_exact
+                    .retain(|exact, _| bare_session_key(exact).as_ref() != Some(&key));
+            }
+            self.by_session.insert(key, state);
         }
     }
 
@@ -543,24 +582,29 @@ fn resolve_contributor_coordinate(
     }
 
     // 5. Same-session inference for bare session names (`harness:<session>`)
-    //    only: retained author, delegated `--on-behalf-of`, or a unique
+    //    only: unique retained author, delegated `--on-behalf-of`, or a unique
     //    explicit peer coordinate for the same session on this patchset.
     if let Some(bare_key) = bare_session_key(contributor) {
-        if let Some(coord) = patchset.inherited_authors.iter().find_map(|inherited| {
-            if debt_identity_session_key(inherited).as_ref() != Some(&bare_key)
-                || history.is_poisoned_inherited(inherited)
-            {
-                return None;
-            }
-            match identity_from_debt_identity(inherited, false) {
-                IdentityKey {
-                    kind: IdentityKind::Coordinate,
-                    identity,
-                } => Some(identity),
-                _ => None,
-            }
-        }) {
-            return Some(coord);
+        let inherited_coords: BTreeSet<String> = patchset
+            .inherited_authors
+            .iter()
+            .filter_map(|inherited| {
+                if debt_identity_session_key(inherited).as_ref() != Some(&bare_key)
+                    || history.is_poisoned_inherited(inherited)
+                {
+                    return None;
+                }
+                match identity_from_debt_identity(inherited, false) {
+                    IdentityKey {
+                        kind: IdentityKind::Coordinate,
+                        identity,
+                    } => Some(identity),
+                    _ => None,
+                }
+            })
+            .collect();
+        if inherited_coords.len() == 1 {
+            return inherited_coords.into_iter().next();
         }
         if let Some(obo_str) = obo {
             if let Some((h2, s2, Some(model))) = crate::coordinate::session_subject(obo_str) {
@@ -611,7 +655,7 @@ fn patchset_identities(
         }
         if ident.kind == IdentityKind::Coordinate {
             let subject_key = obo.unwrap_or(&event.actor);
-            history.record_established(subject_key, &ident.identity);
+            history.record_patchset(&[(subject_key.to_string(), ident.identity.clone())], &[]);
         }
         history.record_unbound_recorder(event);
         return vec![ident];
@@ -703,12 +747,7 @@ fn patchset_identities(
         }
     }
 
-    for (actor, coord) in newly_established {
-        history.record_established(&actor, &coord);
-    }
-    for (key, coord) in newly_established_sessions {
-        history.by_session.insert(key, coord);
-    }
+    history.record_patchset(&newly_established, &newly_established_sessions);
     history.record_unbound_recorder(event);
 
     if seen.is_empty() {
@@ -3686,5 +3725,65 @@ mod tests {
             "coordinate"
         );
         assert_eq!(by_id_mixed["codex:gpt-probe#high"].patchsets, 1);
+    }
+
+    #[test]
+    fn by_model_preserves_session_ambiguity_after_multi_model_snapshot() {
+        let uuid = "01a1d771-d401-7bd0-8b41-dd9ce2d94199";
+        let bare = format!("codex:{uuid}");
+        let alpha = format!("codex:{uuid}:gpt-alpha#high");
+        let beta = format!("codex:{uuid}:gpt-beta#medium");
+
+        for order in [[alpha.clone(), beta.clone()], [beta.clone(), alpha.clone()]] {
+            let mut ps1 = with_identity(
+                ps_event("2", 10, "ps-01", "h1"),
+                "lead",
+                Some("observer"),
+                Some("claude"),
+                None,
+                None,
+            );
+            if let Payload::PatchsetAdded {
+                ref mut contributors,
+                ..
+            } = ps1.payload
+            {
+                contributors.extend(order);
+            }
+
+            let mut ps2 = with_identity(
+                ps_event("3", 20, "ps-02", "h2"),
+                "lead",
+                Some("observer"),
+                Some("claude"),
+                None,
+                None,
+            );
+            if let Payload::PatchsetAdded {
+                ref mut contributors,
+                ..
+            } = ps2.payload
+            {
+                contributors.push(bare.clone());
+            }
+
+            let rows = summarize_by_model(&[change_tuple(
+                "c1",
+                vec![
+                    with_identity(opened_event("1", "c1"), "lead", None, None, None, None),
+                    ps1,
+                    ps2,
+                ],
+            )]);
+            let by_id: BTreeMap<&str, &ModelStats> =
+                rows.iter().map(|r| (r.identity.as_str(), r)).collect();
+
+            assert_eq!(by_id["codex:gpt-alpha#high"].identity_kind, "coordinate");
+            assert_eq!(by_id["codex:gpt-alpha#high"].patchsets, 1);
+            assert_eq!(by_id["codex:gpt-beta#medium"].identity_kind, "coordinate");
+            assert_eq!(by_id["codex:gpt-beta#medium"].patchsets, 1);
+            assert_eq!(by_id[bare.as_str()].identity_kind, "label");
+            assert_eq!(by_id[bare.as_str()].patchsets, 1);
+        }
     }
 }
