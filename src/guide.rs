@@ -142,7 +142,9 @@ SAY WHO YOU ARE (before the first write)
   `arc env` detects a harness by the session variable it exports; not every
   harness exports one. Antigravity tool shells export the native conversation
   in `ANTIGRAVITY_CONVERSATION_ID`. Its T3 recording store follows
-  `T3CODE_HOME` (default `~/.t3`). A harness exports its session id into the processes it
+  `T3CODE_HOME` (default `~/.t3`). When an Antigravity recording carries effort
+  as a trailing `-low`, `-medium`, `-high`, `-xhigh`, or `-max` suffix on the
+  model id with no separate variant, arc splits it into `<model>#<effort>`. A harness exports its session id into the processes it
   starts, so when several harnesses' variables are present it is the nearest
   ancestor that exported one that owns this process: a pi run inside a Claude
   Code tool shell reports pi, not the shell's claude. Where the ancestry names
@@ -7022,7 +7024,7 @@ PROGRESS
   unsatisfied until removed, and an unreadable foreign journal degrades that
   prerequisite to `unknown` without failing the report. Each row derives
   `readiness` (`ready`, `claimed`, `blocked`, `waiting`, `in-flight`,
-  `complete`, or `inactive`) and `blocked_by`. `arc progress [series] --ready`
+  `complete`, or `inactive`) and `blocked_by`. `arc progress [<series>] --ready`
   prints only currently ready items (excluding claimed, blocked and waiting
   items), and `arc watch <series> --until item-ready|wave-done [--wave W]`
   waits on the workspace feed until a ready item or completed wave appears.
@@ -7104,7 +7106,7 @@ MILESTONES
   `arc milestone` composes local and cross-project `arc progress` series into a
   two-dimensional wave-by-track matrix, closed by a checkpoint and/or conclusion.
   Like `arc progress`, milestones are strictly pull-only: read on request
-  (`arc milestone [SLUG] [--ready] [--ignore-waves] [--plain|--json]`) and never
+  (`arc milestone [<slug>] [--ready] [--ignore-waves] [--plain|--json]`) and never
   pushed into `status`, `check`, `catchup`, `journal open`, or hooks.
 
   A milestone is a journal artifact of kind `milestone`, started with:

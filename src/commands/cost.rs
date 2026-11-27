@@ -3045,47 +3045,75 @@ fn is_absence(reason: MeasurementReason) -> bool {
 /// It names one in its per-model split, its effort unnamed when the split
 /// names several, or, with no split, in the model selections it observed,
 /// or in the session's model when it observed no mix of models.
-fn served_model(view: &agent_tapes_core::usage::UsageView) -> Option<String> {
-    let coordinate = |model: &str, variant: Option<&String>| match variant {
+fn served_model(view: &agent_tapes_core::usage::UsageView, harness: &str) -> Option<String> {
+    let format_coordinate = |model: String, variant: Option<String>| match variant {
         Some(variant) => format!("{model}#{variant}"),
-        None => model.to_string(),
+        None => model,
+    };
+    let collapse_single = |entries: Vec<(String, Option<String>)>| -> Option<String> {
+        let models: Vec<&str> = entries
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let [model] = models[..] else {
+            return None;
+        };
+        let variants: BTreeSet<Option<&str>> = entries
+            .iter()
+            .map(|(_, variant)| variant.as_deref())
+            .collect();
+        match &variants.into_iter().collect::<Vec<_>>()[..] {
+            [variant] => Some(format_coordinate(
+                model.to_string(),
+                variant.map(str::to_string),
+            )),
+            _ => Some(model.to_string()),
+        }
     };
     let session = &view.session;
-    let coordinate = match view.by_model.as_deref().unwrap_or_default() {
-        [model] => coordinate(&model.model, model.variant.as_ref()),
-        [first, rest @ ..] if rest.iter().all(|model| model.model == first.model) => {
-            first.model.clone()
-        }
+    let by_model = view.by_model.as_deref().unwrap_or_default();
+    let coordinate = if !by_model.is_empty() {
+        let entries = by_model
+            .iter()
+            .map(|model| {
+                crate::session_store::normalize_model_for_harness(
+                    harness,
+                    &model.model,
+                    model.variant.as_deref(),
+                )
+            })
+            .collect();
+        collapse_single(entries)?
+    } else if !session.model_selections.is_empty() {
         // One model selected at several efforts is that model, effort unnamed.
-        [] if !session.model_selections.is_empty() => {
-            let selections = &session.model_selections;
-            let models: Vec<&String> = selections
-                .iter()
-                .map(|span| &span.model.id)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            let [model] = models[..] else {
-                return None;
-            };
-            let variants: BTreeSet<Option<&String>> = selections
-                .iter()
-                .map(|span| span.model.variant.as_ref())
-                .collect();
-            match &variants.into_iter().collect::<Vec<_>>()[..] {
-                [variant] => coordinate(model, *variant),
-                _ => model.clone(),
-            }
-        }
-        [] if session
-            .model_observation
-            .as_ref()
-            .is_none_or(|status| !status.mixed) =>
-        {
-            let model = session.model.as_ref()?;
-            coordinate(&model.id, model.variant.as_ref())
-        }
-        _ => return None,
+        let entries = session
+            .model_selections
+            .iter()
+            .map(|span| {
+                crate::session_store::normalize_model_for_harness(
+                    harness,
+                    &span.model.id,
+                    span.model.variant.as_deref(),
+                )
+            })
+            .collect();
+        collapse_single(entries)?
+    } else if session
+        .model_observation
+        .as_ref()
+        .is_none_or(|status| !status.mixed)
+    {
+        let model = session.model.as_ref()?;
+        let (id, variant) = crate::session_store::normalize_model_for_harness(
+            harness,
+            &model.id,
+            model.variant.as_deref(),
+        );
+        format_coordinate(id, variant)
+    } else {
+        return None;
     };
     portable_coordinate(&coordinate).then_some(coordinate)
 }
@@ -3230,7 +3258,7 @@ fn normalize(
         incomplete,
         selection,
         liveness: None,
-        served_model: served_model(view),
+        served_model: served_model(view, harness),
         attribution_uncertain: view
             .session
             .model_observation
@@ -3362,11 +3390,27 @@ fn priced_shares(
             &consumption.served,
             &consumption.measurement_completeness,
             convention,
+            harness,
         );
     }
     let models = view.by_model.as_deref().unwrap_or_default();
-    let shares = model_shares(models, &MeasurementCompleteness::default(), convention);
-    let ids: BTreeSet<&str> = models.iter().map(|model| model.model.as_str()).collect();
+    let shares = model_shares(
+        models,
+        &MeasurementCompleteness::default(),
+        convention,
+        harness,
+    );
+    let ids: BTreeSet<String> = models
+        .iter()
+        .map(|model| {
+            crate::session_store::normalize_model_for_harness(
+                harness,
+                &model.model,
+                model.variant.as_deref(),
+            )
+            .0
+        })
+        .collect();
     let uncertain = view
         .session
         .model_observation
@@ -3396,12 +3440,18 @@ fn model_shares(
     models: &[agent_tapes_core::usage::ModelUsage],
     completeness: &MeasurementCompleteness,
     convention: agent_tapes_core::model::TokenConvention,
+    harness: &str,
 ) -> Vec<crate::model::CostModelShare> {
-    let mut efforts: BTreeMap<&str, Vec<CostDisjoint>> = BTreeMap::new();
-    for model in models
-        .iter()
-        .filter(|model| portable_coordinate(&model.model))
-    {
+    let mut efforts: BTreeMap<String, Vec<CostDisjoint>> = BTreeMap::new();
+    for model in models {
+        let (base, _) = crate::session_store::normalize_model_for_harness(
+            harness,
+            &model.model,
+            model.variant.as_deref(),
+        );
+        if !portable_coordinate(&base) {
+            continue;
+        }
         let Some(tokens) = model.tokens.as_ref() else {
             continue;
         };
@@ -3414,7 +3464,7 @@ fn model_shares(
         )
         .with_completeness(&qualified);
         if let Some(disjoint) = cost_disjoint(&disjoint) {
-            efforts.entry(&model.model).or_default().push(disjoint);
+            efforts.entry(base).or_default().push(disjoint);
         }
     }
     efforts
@@ -3423,7 +3473,7 @@ fn model_shares(
             let held: Vec<(Option<&CostDisjoint>, u64)> =
                 efforts.iter().map(|effort| (Some(effort), 1)).collect();
             crate::model::CostModelShare {
-                model: model.to_string(),
+                model,
                 disjoint: span::sum_disjoint(efforts[0].convention.clone(), &held),
             }
         })
@@ -6864,8 +6914,12 @@ per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, o
         .by_model
         .remove(0)
         .expect("tapes prices the share");
-        let [share] = &model_shares(shares, &MeasurementCompleteness::default(), convention)[..]
-        else {
+        let [share] = &model_shares(
+            shares,
+            &MeasurementCompleteness::default(),
+            convention,
+            "codex",
+        )[..] else {
             panic!("one share");
         };
         let disjoint = tapes_disjoint(&share.disjoint).unwrap();
@@ -6930,6 +6984,136 @@ per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, o
         assert_eq!(
             TAPES_READER,
             format!("agent-tapes-core {} {revision}", field("version"))
+        );
+    }
+
+    #[test]
+    fn antigravity_served_model_and_shares_normalize_effort_suffixes() {
+        use agent_tapes_core::model::{
+            Model, Session, SourceDescriptor, TokenConvention, Tokens, Transcript, Truncation,
+        };
+        use agent_tapes_core::usage::{self, ModelUsage, UsageDetail};
+
+        let make_usage = |model: &str, variant: Option<&str>| ModelUsage {
+            model: model.to_string(),
+            variant: variant.map(str::to_string),
+            tokens: Some(Tokens {
+                input: Some(100),
+                output: Some(50),
+                reasoning: None,
+                cache_read: Some(0),
+                cache_write: Some(0),
+            }),
+            cost: None,
+            cost_coverage: None,
+            request_count: Some(1),
+            measurement_coverage: BTreeMap::new(),
+            measurement_incomplete: Vec::new(),
+            measurement_completeness: MeasurementCompleteness::default(),
+            list_price_estimate: None,
+            cache_write_by_ttl: None,
+        };
+        let empty_view = |by_model: Vec<ModelUsage>, model: Option<Model>| {
+            let session = Session {
+                id: "11111111-2222-4333-8444-000000000001".to_string(),
+                source: SourceDescriptor::installed("antigravity", "/dev/null"),
+                metadata: None,
+                model,
+                model_observation: None,
+                model_selections: Vec::new(),
+                launch: None,
+                title: None,
+                derived_title: None,
+                derived_title_truncated: None,
+                directory: None,
+                started_at: None,
+                last_activity_at: None,
+                live: None,
+                cost: None,
+                tokens: None,
+                accounting: None,
+                start_uncertain: false,
+                occurrence: None,
+                usage_detail: (!by_model.is_empty()).then(|| UsageDetail {
+                    by_model: Some(by_model),
+                    ..UsageDetail::default()
+                }),
+                list_price_estimate: None,
+                t3: None,
+            };
+            usage::usage(&Transcript {
+                session,
+                turns: Vec::new(),
+                truncated: false,
+                truncation: Truncation::default(),
+                read: None,
+                terminal: None,
+                text_tail: None,
+                artifacts: Vec::new(),
+                graph: None,
+                trailing_record: None,
+                notes: Vec::new(),
+                projection: None,
+                kinds: None,
+                locations: None,
+            })
+        };
+
+        let single = empty_view(vec![make_usage("gemini-4-neon-xhigh", None)], None);
+        assert_eq!(
+            served_model(&single, "antigravity").as_deref(),
+            Some("gemini-4-neon#xhigh")
+        );
+        // Non-Antigravity harnesses must keep hyphenated suffixes intact.
+        assert_eq!(
+            served_model(&single, "claude").as_deref(),
+            Some("gemini-4-neon-xhigh")
+        );
+
+        let already_split = empty_view(vec![make_usage("gemini-4-neon", Some("xhigh"))], None);
+        assert_eq!(
+            served_model(&already_split, "antigravity").as_deref(),
+            Some("gemini-4-neon#xhigh")
+        );
+
+        // Two efforts of the same Antigravity base model collapse to the base model.
+        let multi_effort = empty_view(
+            vec![
+                make_usage("gemini-4-neon-high", None),
+                make_usage("gemini-4-neon-xhigh", None),
+            ],
+            None,
+        );
+        assert_eq!(
+            served_model(&multi_effort, "antigravity").as_deref(),
+            Some("gemini-4-neon")
+        );
+        let convention = TokenConvention::of("antigravity").unwrap();
+        let shares = model_shares(
+            multi_effort.by_model.as_deref().unwrap(),
+            &MeasurementCompleteness::default(),
+            convention,
+            "antigravity",
+        );
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].model, "gemini-4-neon");
+        assert_eq!(shares[0].disjoint.uncached_input, Some(200));
+
+        // Session-level fallback also normalizes for Antigravity only.
+        let session_only = empty_view(
+            Vec::new(),
+            Some(Model {
+                id: "claude-opus-5-5-high".to_string(),
+                variant: None,
+            }),
+        );
+        assert_eq!(
+            served_model(&session_only, "antigravity").as_deref(),
+            Some("claude-opus-5-5#high")
+        );
+        assert_eq!(
+            served_model(&session_only, "codex").as_deref(),
+            Some("claude-opus-5-5-high")
         );
     }
 }

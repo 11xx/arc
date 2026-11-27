@@ -955,6 +955,155 @@ fn env_detects_opencode2_by_process_ancestry() {
     );
 }
 
+fn install_antigravity_sqlite_shim(repo: &Repo) -> String {
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let sqlite = bin.join("sqlite3");
+    fs::write(
+        &sqlite,
+        concat!(
+            "#!/bin/sh\n",
+            "case \"$*\" in\n",
+            "  *'trajectory_metadata_blob'*) printf '[]\\n' ;;\n",
+            "  *'trajectory_meta'*)\n",
+            "    for arg in \"$@\"; do\n",
+            "      case \"$arg\" in\n",
+            "        *.db)\n",
+            "          id=\"$(basename \"$arg\" .db)\"\n",
+            "          printf '[{\"cascade_id\":\"%s\"}]\\n' \"$id\"\n",
+            "          exit 0\n",
+            "          ;;\n",
+            "      esac\n",
+            "    done\n",
+            "    printf '[]\\n'\n",
+            "    ;;\n",
+            "  *) printf '[]\\n' ;;\n",
+            "esac\n",
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&sqlite, fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+fn write_antigravity_recording(t3_home: &Path, session: &str, model: &str) {
+    let profile = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let acp = t3_home
+        .join("userdata/providers/antigravity")
+        .join(profile)
+        .join("antigravity-acp");
+    let conversations = acp.join("conversations");
+    fs::create_dir_all(&conversations).unwrap();
+    fs::write(
+        conversations.join(format!("{session}.db")),
+        b"SQLite format 3\0",
+    )
+    .unwrap();
+    let logs = acp
+        .join("brain")
+        .join(session)
+        .join(".system_generated/logs");
+    fs::create_dir_all(&logs).unwrap();
+    let user = serde_json::json!({
+        "step_index": 0,
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "status": "DONE",
+        "created_at": "2026-11-26T10:00:00Z",
+        "content": "Run the task."
+    });
+    let planner = serde_json::json!({
+        "step_index": 1,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-11-26T10:00:01Z",
+        "model": model,
+        "content": "Done."
+    });
+    fs::write(
+        logs.join("transcript_full.jsonl"),
+        format!("{user}\n{planner}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn env_normalizes_antigravity_effort_suffixes_and_preserves_other_harnesses() {
+    let repo = Repo::new();
+    let t3_home = repo.home.join(".t3");
+    let path = install_antigravity_sqlite_shim(&repo);
+
+    for (index, (raw_model, expected)) in [
+        ("gemini-4-neon-low", "gemini-4-neon#low"),
+        ("gemini-4-neon-medium", "gemini-4-neon#medium"),
+        ("claude-opus-5-5-high", "claude-opus-5-5#high"),
+        ("gemini-4-neon-xhigh", "gemini-4-neon#xhigh"),
+        ("claude-opus-5-5-max", "claude-opus-5-5#max"),
+        ("gemini-flash-worker-agy", "gemini-flash-worker-agy"),
+        ("gemini-4-neon", "gemini-4-neon"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let session = format!("11111111-2222-4333-8444-00000000000{index}");
+        write_antigravity_recording(&t3_home, &session, raw_model);
+        let out = stdout(
+            repo.arc(&repo.root)
+                .arg("env")
+                .env("ANTIGRAVITY_CONVERSATION_ID", &session)
+                .env("T3CODE_HOME", &t3_home)
+                .env("PATH", &path),
+        );
+        assert!(
+            out.contains(&format!("# model: {expected}\n")),
+            "raw={raw_model} expected={expected}\n{out}"
+        );
+        assert!(
+            out.contains(&format!("# observed: {expected} at ")),
+            "raw={raw_model} expected={expected}\n{out}"
+        );
+    }
+
+    // Non-Antigravity harnesses must NOT split trailing `-high` suffixes.
+    let claude_session = "22222222-2222-4333-8444-000000000001";
+    let claude_project = repo.home.join(".claude/projects/-fixture");
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::write(
+        claude_project.join(format!("{claude_session}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "user",
+                "uuid": "u1",
+                "timestamp": "2026-11-26T10:00:00Z",
+                "message": {"role": "user", "content": "prompt"}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "a1",
+                "timestamp": "2026-11-26T10:00:01Z",
+                "message": {"role": "assistant", "model": "claude-opus-5-5-high", "content": "answer"}
+            })
+        ),
+    )
+    .unwrap();
+    let claude_out = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CLAUDE_SESSION_ID", claude_session)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude")),
+    );
+    assert!(
+        claude_out.contains("# model: claude-opus-5-5-high\n"),
+        "non-Antigravity harness must not split suffix:\n{claude_out}"
+    );
+}
+
 /// One harness in a synthetic ancestry: its wrapper name, the session variable
 /// it exports, and the session that variable names.
 type HarnessLink<'a> = (&'a str, &'a str, &'a str);
@@ -1556,6 +1705,8 @@ fn env_unsets_the_identity_fields_it_cannot_establish() {
             .env_remove("ARC_DATA_ROOT")
             .env_remove("ARC_WORKTREES_DIR")
             .env_remove("AI_HOME")
+            .env_remove("T3CODE_HOME")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")

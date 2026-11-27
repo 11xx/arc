@@ -517,7 +517,11 @@ pub(crate) fn project_sessions(
                     let mut row = RecentSession::new(harness, &session.id);
                     row.observe(
                         session.last_activity_at,
-                        session.model.as_ref().map(model_name).as_deref(),
+                        session
+                            .model
+                            .as_ref()
+                            .map(|model| model_name(harness, model))
+                            .as_deref(),
                     );
                     sessions.push(row);
                 }
@@ -750,7 +754,7 @@ fn recording_identity(
         .as_ref()
         .is_some_and(|status| status.head_read);
     if let Some(selection) = transcript.session.newest_model_selection() {
-        let model = model_name(&selection.model);
+        let model = model_name(harness, &selection.model);
         let operator = transcript
             .turns
             .iter()
@@ -788,7 +792,7 @@ fn recording_identity(
     }
     match transcript.session.model.as_ref() {
         Some(model) => SessionIdentity::Named {
-            model: model_name(model),
+            model: model_name(harness, model),
             observation: None,
         },
         None => SessionIdentity::Unnamed(ModelUnavailable::NotRecorded),
@@ -920,7 +924,7 @@ fn codex_model_identity_at(
                 anyhow::bail!("model metadata read skipped records; selection remains unresolved");
             }
             let selected = page.models.last().map(|observed| CheckpointSelection {
-                model: model_name(&observed.model),
+                model: model_name("codex", &observed.model),
                 timestamp: observed.timestamp,
             });
             if index == 0 {
@@ -1005,10 +1009,57 @@ fn codex_model_identity_at(
     }
 }
 
-fn model_name(model: &agent_tapes_core::model::Model) -> String {
-    match &model.variant {
-        Some(variant) => format!("{}#{variant}", model.id),
-        None => model.id.clone(),
+/// Effort suffixes Antigravity appends to model identifiers instead of
+/// recording in a separate attribute.
+const ANTIGRAVITY_EFFORT_SUFFIXES: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Split a recognized case-insensitive trailing `-<effort>` suffix from an
+/// Antigravity model identifier when no separate effort variant is present and
+/// the remaining base identifier is non-empty and does not end with `-`.
+///
+/// Coordinates that already carry a non-empty `variant` are returned untouched.
+pub(crate) fn normalize_antigravity_model(
+    id: &str,
+    variant: Option<&str>,
+) -> (String, Option<String>) {
+    if let Some(variant) = variant.filter(|variant| !variant.trim().is_empty()) {
+        return (id.to_string(), Some(variant.to_string()));
+    }
+    if !id.contains('#') {
+        if let Some((base, suffix)) = id.rsplit_once('-') {
+            if !base.is_empty() && !base.ends_with('-') {
+                if let Some(effort) = ANTIGRAVITY_EFFORT_SUFFIXES
+                    .iter()
+                    .find(|candidate| candidate.eq_ignore_ascii_case(suffix))
+                {
+                    return (base.to_string(), Some((*effort).to_string()));
+                }
+            }
+        }
+    }
+    (id.to_string(), None)
+}
+
+/// Normalize a recording's `(id, variant)` for `harness`. Only Antigravity
+/// encodes effort as a hyphenated suffix on the model identifier; other
+/// harnesses keep their identifiers untouched.
+pub(crate) fn normalize_model_for_harness(
+    harness: &str,
+    id: &str,
+    variant: Option<&str>,
+) -> (String, Option<String>) {
+    if harness == "antigravity" {
+        normalize_antigravity_model(id, variant)
+    } else {
+        (id.to_string(), variant.map(str::to_string))
+    }
+}
+
+fn model_name(harness: &str, model: &agent_tapes_core::model::Model) -> String {
+    let (id, variant) = normalize_model_for_harness(harness, &model.id, model.variant.as_deref());
+    match variant {
+        Some(variant) => format!("{id}#{variant}"),
+        None => id,
     }
 }
 
@@ -1540,5 +1591,120 @@ mod tests {
         assert!(reason
             .line()
             .contains("after waiting up to 1 second for a model-bearing record"));
+    }
+
+    #[test]
+    fn antigravity_model_normalization_splits_recognized_effort_suffixes_and_is_idempotent() {
+        for (id, variant, expected_id, expected_variant) in [
+            ("gemini-4-neon-low", None, "gemini-4-neon", Some("low")),
+            (
+                "gemini-4-neon-medium",
+                None,
+                "gemini-4-neon",
+                Some("medium"),
+            ),
+            (
+                "claude-opus-5-5-high",
+                None,
+                "claude-opus-5-5",
+                Some("high"),
+            ),
+            ("gemini-4-neon-xhigh", None, "gemini-4-neon", Some("xhigh")),
+            ("claude-opus-5-5-max", None, "claude-opus-5-5", Some("max")),
+            ("gemini-4-neon-HIGH", None, "gemini-4-neon", Some("high")),
+            ("gemini-4-neon-XHigh", None, "gemini-4-neon", Some("xhigh")),
+            (
+                "gemini-4-neon-high",
+                Some(""),
+                "gemini-4-neon",
+                Some("high"),
+            ),
+            (
+                "gemini-4-neon-xhigh",
+                Some("   "),
+                "gemini-4-neon",
+                Some("xhigh"),
+            ),
+            // Already-split coordinates stay untouched (idempotent with tapes-core).
+            (
+                "gemini-4-neon",
+                Some("xhigh"),
+                "gemini-4-neon",
+                Some("xhigh"),
+            ),
+            (
+                "gemini-4-neon-high",
+                Some("xhigh"),
+                "gemini-4-neon-high",
+                Some("xhigh"),
+            ),
+            // Non-effort hyphenated IDs and degenerate forms are preserved.
+            (
+                "gemini-flash-worker-agy",
+                None,
+                "gemini-flash-worker-agy",
+                None,
+            ),
+            ("gemini-4-neon", None, "gemini-4-neon", None),
+            (
+                "gemini-pro-orchestrator-neon",
+                None,
+                "gemini-pro-orchestrator-neon",
+                None,
+            ),
+            ("high", None, "high", None),
+            ("-high", None, "-high", None),
+            ("--high", None, "--high", None),
+            ("gemini-4-neon--high", None, "gemini-4-neon--high", None),
+            ("gemini-4-neon-", None, "gemini-4-neon-", None),
+            ("gemini-4-neon#high", None, "gemini-4-neon#high", None),
+            (
+                "gemini-4-neon#custom-high",
+                None,
+                "gemini-4-neon#custom-high",
+                None,
+            ),
+            ("", None, "", None),
+        ] {
+            let (norm_id, norm_variant) = normalize_antigravity_model(id, variant);
+            assert_eq!(
+                (norm_id.as_str(), norm_variant.as_deref()),
+                (expected_id, expected_variant),
+                "id={id:?}, variant={variant:?}"
+            );
+            // Calling a second time on the normalized output must be a no-op.
+            assert_eq!(
+                normalize_antigravity_model(&norm_id, norm_variant.as_deref()),
+                (norm_id, norm_variant),
+                "idempotency failed for id={id:?}, variant={variant:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_antigravity_harnesses_do_not_split_hyphenated_effort_suffixes() {
+        for harness in ["claude", "codex", "pi", "opencode"] {
+            let model = agent_tapes_core::model::Model {
+                id: "claude-opus-5-5-high".to_string(),
+                variant: None,
+            };
+            assert_eq!(model_name(harness, &model), "claude-opus-5-5-high");
+
+            let with_variant = agent_tapes_core::model::Model {
+                id: "gpt-6.1-sol".to_string(),
+                variant: Some("xhigh".to_string()),
+            };
+            assert_eq!(model_name(harness, &with_variant), "gpt-6.1-sol#xhigh");
+        }
+        let agy_raw = agent_tapes_core::model::Model {
+            id: "gemini-4-neon-xhigh".to_string(),
+            variant: None,
+        };
+        assert_eq!(model_name("antigravity", &agy_raw), "gemini-4-neon#xhigh");
+        let agy_split = agent_tapes_core::model::Model {
+            id: "gemini-4-neon".to_string(),
+            variant: Some("xhigh".to_string()),
+        };
+        assert_eq!(model_name("antigravity", &agy_split), "gemini-4-neon#xhigh");
     }
 }

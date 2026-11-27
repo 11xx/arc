@@ -1491,3 +1491,245 @@ fn sync_and_advisory_never_introduce_single_participant_violation_on_existing_pl
     assert_eq!(pair_checked.status.code(), Some(0));
     assert!(pair_checked.stdout.is_empty());
 }
+
+fn setup_antigravity_store(repo: &Repo, sessions: &[(&str, &str)]) -> (PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let t3_home = repo.home.join(".t3");
+    let profile = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let acp = t3_home
+        .join("userdata/providers/antigravity")
+        .join(profile)
+        .join("antigravity-acp");
+    let conversations = acp.join("conversations");
+    fs::create_dir_all(&conversations).unwrap();
+    for (session, model) in sessions {
+        fs::write(
+            conversations.join(format!("{session}.db")),
+            b"SQLite format 3\0",
+        )
+        .unwrap();
+        let logs = acp
+            .join("brain")
+            .join(session)
+            .join(".system_generated/logs");
+        fs::create_dir_all(&logs).unwrap();
+        let user = serde_json::json!({
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "created_at": "2026-11-26T10:00:00Z",
+            "content": "Implement the change."
+        });
+        let planner = serde_json::json!({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": "2026-11-26T10:00:01Z",
+            "model": model,
+            "input_tokens": 120,
+            "cache_read_tokens": 40,
+            "output_tokens": 30,
+            "content": "Done."
+        });
+        fs::write(
+            logs.join("transcript_full.jsonl"),
+            format!("{user}\n{planner}\n"),
+        )
+        .unwrap();
+    }
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let sqlite = bin.join("sqlite3");
+    fs::write(
+        &sqlite,
+        concat!(
+            "#!/bin/sh\n",
+            "case \"$*\" in\n",
+            "  *'trajectory_metadata_blob'*) printf '[]\\n' ;;\n",
+            "  *'trajectory_meta'*)\n",
+            "    for arg in \"$@\"; do\n",
+            "      case \"$arg\" in\n",
+            "        *.db)\n",
+            "          id=\"$(basename \"$arg\" .db)\"\n",
+            "          printf '[{\"cascade_id\":\"%s\"}]\\n' \"$id\"\n",
+            "          exit 0\n",
+            "          ;;\n",
+            "      esac\n",
+            "    done\n",
+            "    printf '[]\\n'\n",
+            "    ;;\n",
+            "  *) printf '[]\\n' ;;\n",
+            "esac\n",
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&sqlite, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (t3_home, path)
+}
+
+#[test]
+fn antigravity_sessions_record_project_and_account_normalized_effort_coordinates() {
+    let repo = Repo::new();
+    let impl_session = "33333333-2222-4333-8444-000000000001";
+    let rev_session = "33333333-2222-4333-8444-000000000002";
+    let (t3_home, path) = setup_antigravity_store(
+        &repo,
+        &[
+            (impl_session, "gemini-4-neon-xhigh"),
+            (rev_session, "claude-opus-5-5-high"),
+        ],
+    );
+
+    let as_agy = |cmd: &mut AssertCommand, session: &str| {
+        cmd.env_remove("ARC_ACTOR")
+            .env("ARC_HARNESS", "antigravity")
+            .env("ARC_SESSION", session)
+            .env("T3CODE_HOME", &t3_home)
+            .env("PATH", &path);
+    };
+
+    let mut begin_cmd = repo.arc(&repo.root);
+    begin_cmd.args(["begin", "agy-normalized"]);
+    as_agy(&mut begin_cmd, impl_session);
+    let change = opened_change_id(&stdout(&mut begin_cmd));
+    let wt = repo.home.join(".worktrees/repo-agy-normalized");
+    commit_file(&wt, "work.txt", "feat: antigravity work");
+
+    let mut snap_cmd = repo.arc(&wt);
+    snap_cmd.args([
+        "snapshot",
+        &change,
+        "--solo",
+        "--on-behalf-of",
+        "antigravity:gemini-4-neon#xhigh",
+    ]);
+    as_agy(&mut snap_cmd, impl_session);
+    stdout(&mut snap_cmd);
+
+    let mut review_cmd = repo.arc(&wt);
+    review_cmd.args(["review", &change, "--verdict", "approved"]);
+    as_agy(&mut review_cmd, rev_session);
+    stdout(&mut review_cmd);
+
+    let mut roles_cmd = repo.arc(&wt);
+    roles_cmd.args(["roles", &change, "--orchestrated-by"]);
+    as_agy(&mut roles_cmd, rev_session);
+    stdout(&mut roles_cmd);
+
+    let events: Vec<serde_json::Value> =
+        stdout(repo.arc(&repo.root).args(["events", "--change", &change]))
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(events[0]["model"], "gemini-4-neon#xhigh");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event_type"] == "verdict-recorded"
+                && event["model"] == "claude-opus-5-5#high"),
+        "{events:#?}"
+    );
+
+    let (projected, notes) = trailers(&repo, &change);
+    assert_eq!(
+        projected,
+        vec![
+            "Implemented-by: antigravity:gemini-4-neon#xhigh".to_string(),
+            "Reviewed-by: antigravity:claude-opus-5-5#high".to_string(),
+            "Orchestrated-by: antigravity:claude-opus-5-5#high".to_string(),
+        ],
+        "{notes:#?}"
+    );
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    let models = stats["models"].as_array().unwrap();
+    assert!(
+        models.iter().any(
+            |row| row["identity"] == "antigravity:gemini-4-neon#xhigh" && row["patchsets"] == 1
+        ),
+        "{stats:#?}"
+    );
+
+    let mut cost_cmd = repo.arc(&repo.root);
+    cost_cmd
+        .args(["cost", "show", &change, "--json"])
+        .env("T3CODE_HOME", &t3_home)
+        .env("PATH", &path);
+    let cost = json_stdout(&mut cost_cmd);
+    let sessions = cost["sessions"].as_array().unwrap();
+    assert!(
+        sessions.iter().any(|row| {
+            row["key"] == format!("antigravity:{impl_session}")
+                && row["agent"] == "antigravity:gemini-4-neon#xhigh"
+                && row["agent_conflict"].is_null()
+        }),
+        "{cost:#?}"
+    );
+    assert!(
+        sessions.iter().any(|row| {
+            row["key"] == format!("antigravity:{rev_session}")
+                && row["agent"] == "antigravity:claude-opus-5-5#high"
+                && row["agent_conflict"].is_null()
+        }),
+        "{cost:#?}"
+    );
+}
+
+#[test]
+fn historical_hyphenated_antigravity_coordinates_remain_readable_and_valid() {
+    let repo = Repo::new();
+    let (change, wt) = open(&repo, "agy-historical");
+    commit_file(
+        &wt,
+        "legacy.txt",
+        "feat: historical antigravity commit\n\nImplemented-by: antigravity:gemini-4-neon-high\n",
+    );
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                &change,
+                "--solo",
+                "--model",
+                "seed-model",
+                "--on-behalf-of",
+                "antigravity:gemini-4-neon-high",
+            ])
+            .env("ARC_ACTOR", format!("antigravity:{RECORDER}"))
+            .env("ARC_HARNESS", "antigravity")
+            .env("ARC_SESSION", RECORDER),
+    );
+    seed_history(&repo, &change, "seed-model", "gemini-4-neon-high");
+
+    let (projected, notes) = trailers(&repo, &change);
+    assert_eq!(
+        projected,
+        vec!["Implemented-by: antigravity:gemini-4-neon-high".to_string()],
+        "{notes:#?}"
+    );
+    let checked = repo
+        .arc(&wt)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin(git_out(&wt, &["show", "-s", "--format=%B", "HEAD"]))
+        .output()
+        .unwrap();
+    assert_eq!(checked.status.code(), Some(0));
+    assert!(checked.stdout.is_empty());
+
+    let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
+    assert!(
+        stats["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["identity"] == "antigravity:gemini-4-neon-high"),
+        "{stats:#?}"
+    );
+}
