@@ -636,6 +636,7 @@ fn verify_with_landing(
                     &run_ctx.cwd,
                     None,
                     None,
+                    None,
                 )?);
             } else {
                 crate::warm_worktree::prepare(&run_ctx.cwd)?;
@@ -3914,13 +3915,18 @@ fn verify_all_parallel(
     for (index, ((_, gate), scratch)) in required.iter().zip(&scratches).enumerate() {
         crate::interruption::check()?;
         scratch.verify_live_ownership(Some(revision))?;
-        let (dir_fd, _) = scratch.pinned_handle()?;
+        let (dir_fd, admin_path) = scratch.pinned_handle()?;
+        let pinned = crate::warm_worktree::PinnedCheckout {
+            dir_fd,
+            admin: admin_path,
+            common: &scratch.common_dir,
+        };
         let resolved = {
             let _confinement = crate::confinement::Scope::new(&gate.confine);
             crate::warm_worktree::resolved_build_directory(
                 &scratch.path,
                 Some(&scratch.storage_key),
-                Some(dir_fd),
+                Some(pinned),
             )?
         };
         match resolved {
@@ -3957,13 +3963,20 @@ fn verify_all_parallel(
                             let scratch = &scratches[index];
                             let scratch_path = scratch.path.as_path();
                             let (dir_fd, admin_path) = scratch.pinned_handle()?;
-                            scratch.verify_live_ownership(Some(revision))?;
+                            let pinned = crate::warm_worktree::PinnedCheckout {
+                                dir_fd,
+                                admin: admin_path,
+                                common: &scratch.common_dir,
+                            };
+                            let verify_ownership = || scratch.verify_live_ownership(Some(revision));
+                            verify_ownership()?;
                             let _confinement = crate::confinement::Scope::new(&gate.confine);
                             let preparing = Instant::now();
                             let prepared = crate::warm_worktree::prepare_isolated(
                                 scratch_path,
                                 Some(&scratch.storage_key),
-                                Some(dir_fd),
+                                Some(pinned),
+                                Some(&verify_ownership),
                             )?;
                             let gate_preparation_ms = preparing.elapsed().as_millis() as u64
                                 + if index == 0 { preparation_ms } else { 0 };

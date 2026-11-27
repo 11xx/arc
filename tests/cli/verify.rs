@@ -1830,6 +1830,187 @@ exec '{real_git}' "$@"
 }
 
 #[test]
+fn verify_all_parallel_preparation_stays_pinned_to_original_source_across_move_and_replacement() {
+    for mode in ["path-stable", "source-bound"] {
+        let repo = Repo::new();
+        let markers = repo.home.join(format!("prep-pin-{mode}"));
+        fs::create_dir_all(&markers).unwrap();
+        let moved = repo.home.join(format!("moved-during-prep-{mode}"));
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(repo.root.join("source.txt"), "original-source\n").unwrap();
+        let prep_cmd = format!(
+            "pwd > '{m}/build.pwd'; \
+             touch '{m}/entered'; \
+             n=0; until [ -e '{m}/swapped' ]; do n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done; \
+             cat \"$ARC_WORKTREE_PATH/source.txt\" > '{m}/observed-source.txt'; \
+             cat \"$ARC_WORKTREE_PATH/source.txt\" > \"$ARC_WORKTREE_BUILD/built-source.txt\"",
+            m = markers.display()
+        );
+        fs::write(
+            repo.root.join(".arc/worktrees.toml"),
+            format!("[prepare]\nmode = {mode:?}\ncommand = {prep_cmd:?}\ntimeout = \"15s\"\n"),
+        )
+        .unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!(
+                "[gates.alpha]\ncommand = \"touch '{}/gate-ran'\"\n",
+                markers.display()
+            ),
+        )
+        .unwrap();
+        git(
+            &repo.root,
+            &[
+                "add",
+                "source.txt",
+                ".arc/worktrees.toml",
+                ".arc/gates.toml",
+            ],
+        );
+        git(
+            &repo.root,
+            &["commit", "-m", "test: mid-hook preparation move fixture"],
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "parallel-prep-pin", "--no-worktree"]),
+        );
+
+        let mut child = repo.spawn_arc_piped(
+            &repo.root,
+            &[
+                "verify",
+                "parallel-prep-pin",
+                "--all",
+                "--parallel",
+                "--rerun",
+            ],
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !markers.join("entered").exists() && Instant::now() < deadline {
+            if let Some(status) = child.try_wait().unwrap() {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "mode={mode}: arc verify exited early ({status:?}):\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(markers.join("entered").exists(), "mode={mode}");
+
+        let scratch_root = repo.home.join(".worktrees/.arc-parallel");
+        let scratch_path = fs::read_dir(&scratch_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+            .expect("live parallel scratch directory not found");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "move",
+                scratch_path.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                scratch_path.to_str().unwrap(),
+                "-b",
+                "prep-replacement",
+            ],
+        );
+        fs::write(scratch_path.join("source.txt"), "replacement-source\n").unwrap();
+        fs::write(scratch_path.join("sentinel.txt"), "keep-me\n").unwrap();
+        fs::write(markers.join("swapped"), "").unwrap();
+
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !output.status.success(),
+            "mode={mode}: verify must fail when checkout moved during preparation"
+        );
+        assert!(
+            !markers.join("gate-ran").exists(),
+            "mode={mode}: gate ran after mid-hook move and replacement"
+        );
+        assert_eq!(
+            fs::read_to_string(markers.join("observed-source.txt")).unwrap(),
+            "original-source\n",
+            "mode={mode}: preparation hook read source from replacement instead of pinned checkout"
+        );
+        let build_dir = PathBuf::from(
+            fs::read_to_string(markers.join("build.pwd"))
+                .unwrap()
+                .trim(),
+        );
+        assert_eq!(
+            fs::read_to_string(build_dir.join("built-source.txt")).unwrap(),
+            "original-source\n",
+            "mode={mode}: build output came from replacement instead of pinned checkout"
+        );
+        if mode == "path-stable" {
+            let parent = build_dir.parent().unwrap();
+            let has_incomplete = fs::read_dir(parent)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.starts_with(".arc-worktree-") && name.ends_with(".incomplete")
+                });
+            assert!(
+                has_incomplete,
+                "path-stable storage cleared incomplete marker after mid-hook checkout replacement"
+            );
+        } else {
+            let replacement_admin =
+                PathBuf::from(git_out(&scratch_path, &["rev-parse", "--absolute-git-dir"]));
+            assert!(
+                !replacement_admin.join("arc-warm-build").exists()
+                    && !replacement_admin.join("arc-cold-build").exists(),
+                "source-bound preparation wrote build storage into replacement checkout's admin dir"
+            );
+            assert!(
+                !build_dir.join("prepared").exists(),
+                "source-bound preparation stamped prepared receipt after mid-hook replacement"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(scratch_path.join("sentinel.txt")).unwrap(),
+            "keep-me\n",
+            "mode={mode}: replacement checkout sentinel was deleted"
+        );
+        let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list.contains(scratch_path.to_str().unwrap())
+                && list.contains("branch refs/heads/prep-replacement"),
+            "mode={mode}: replacement branch checkout was unregistered: {list}"
+        );
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                scratch_path.to_str().unwrap(),
+            ],
+        );
+        if moved.exists() {
+            git(
+                &repo.root,
+                &["worktree", "remove", "--force", moved.to_str().unwrap()],
+            );
+        }
+    }
+}
+
+#[test]
 fn verify_all_parallel_overlapping_invocations_wait_on_shared_build_and_cache_leases() {
     // Part A: explicit shared `prepare.directory` across two overlapping
     // `arc verify --all --parallel --rerun` processes.

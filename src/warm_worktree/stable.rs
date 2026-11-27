@@ -31,9 +31,13 @@ struct Storage {
 pub(super) fn resolved_build_directory_for(
     path: &Path,
     storage_key: Option<&Path>,
+    pinned: Option<PinnedCheckout<'_>>,
     hook: &Hook,
 ) -> Result<PathBuf> {
-    let common = fs::canonicalize(gitio::common_dir(path)?)?;
+    let common = match pinned {
+        Some(pin) => pin.common.to_path_buf(),
+        None => fs::canonicalize(gitio::common_dir(path)?)?,
+    };
     let build = if let Some(directory) = &hook.directory {
         let candidate = if directory.is_absolute() {
             directory.clone()
@@ -60,18 +64,22 @@ pub(super) fn resolved_build_directory_for(
 
 impl Storage {
     fn open(path: &Path, hook: &Hook, timeout: u64) -> Result<Self> {
-        Self::open_with_wait(path, None, hook, timeout, false)
+        Self::open_with_wait(path, None, None, hook, timeout, false)
     }
 
     fn open_with_wait(
         path: &Path,
         storage_key: Option<&Path>,
+        pinned: Option<PinnedCheckout<'_>>,
         hook: &Hook,
         timeout: u64,
         wait: bool,
     ) -> Result<Self> {
-        let common = fs::canonicalize(gitio::common_dir(path)?)?;
-        let build = resolved_build_directory_for(path, storage_key, hook)?;
+        let common = match pinned {
+            Some(pin) => pin.common.to_path_buf(),
+            None => fs::canonicalize(gitio::common_dir(path)?)?,
+        };
+        let build = resolved_build_directory_for(path, storage_key, pinned, hook)?;
         fs::DirBuilder::new().recursive(true).mode(0o700).create(
             build
                 .parent()
@@ -137,13 +145,15 @@ impl Storage {
     /// Run the preparation command, if one is declared, reporting whether
     /// it ran and succeeded.
     fn prepare(&mut self, path: &Path, source: &Source, hook: &Hook, timeout: u64) -> Result<bool> {
-        self.prepare_with_wait(path, None, source, hook, timeout, false)
+        self.prepare_with_wait(path, None, None, source, hook, timeout, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_with_wait(
         &mut self,
         path: &Path,
-        pinned_cwd: Option<std::os::fd::RawFd>,
+        pinned_source_fd: Option<std::os::fd::RawFd>,
+        verify_ownership: Option<&dyn Fn() -> Result<()>>,
         source: &Source,
         hook: &Hook,
         timeout: u64,
@@ -170,6 +180,7 @@ impl Storage {
         marker.sync_all()?;
         let outcome = run_hook(
             path,
+            pinned_source_fd,
             source,
             command,
             timeout,
@@ -182,11 +193,17 @@ impl Storage {
                 return Err(outcome.unwrap_err());
             }
         }
-        let after = Source::observe_with_fd(path, pinned_cwd)?;
+        let after = Source::observe_with_fd(path, pinned_source_fd)?;
         if after != *source {
             return Err(SourceMutation(source.changed_fields(&after)).into());
         }
         outcome.context("path-stable preparation failed; retained outputs are unavailable")?;
+        // Verify checkout ownership before clearing the incomplete marker so
+        // path-stable storage never commits outputs from a moved or replaced
+        // checkout.
+        if let Some(check) = verify_ownership {
+            check()?;
+        }
         fs::remove_file(incomplete)?;
         // The stable lease spans preparation and its caller; the cache is
         // protected only while the hook can write it.
@@ -268,12 +285,24 @@ pub(super) fn configure(
 pub(super) fn prepare_and_hold(
     path: &Path,
     storage_key: Option<&Path>,
-    pinned_cwd: Option<std::os::fd::RawFd>,
+    pinned: Option<PinnedCheckout<'_>>,
+    owned_source_fd: Option<std::os::fd::OwnedFd>,
+    verify_ownership: Option<&dyn Fn() -> Result<()>>,
     (hook, timeout): &(Hook, u64),
 ) -> Result<PreparedStorage> {
-    let source = Source::observe_with_fd(path, pinned_cwd)?;
-    let mut storage = Storage::open_with_wait(path, storage_key, hook, *timeout, true)?;
-    if storage.prepare_with_wait(path, pinned_cwd, &source, hook, *timeout, true)? {
+    let source_fd = owned_source_fd.as_ref().map(AsRawFd::as_raw_fd);
+    let source = Source::observe_with_fd(path, source_fd)?;
+    let mut storage = Storage::open_with_wait(path, storage_key, pinned, hook, *timeout, true)?;
+    if storage.prepare_with_wait(
+        path,
+        source_fd,
+        verify_ownership,
+        &source,
+        hook,
+        *timeout,
+        true,
+    )? && pinned.is_none()
+    {
         crate::slots::record_built(path)?;
     }
     eprintln!(
@@ -287,5 +316,6 @@ pub(super) fn prepare_and_hold(
         storage.cache,
         storage.build,
         storage.guard,
+        owned_source_fd,
     ))
 }

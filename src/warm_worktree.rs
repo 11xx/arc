@@ -505,6 +505,51 @@ pub fn prepare_command(command: &mut Command, path: &Path) -> Result<CommandLeas
     configure(command, path, Use::Gate)
 }
 
+/// Stable kernel-pinned reference to an owned isolated checkout so preparation
+/// never re-resolves either the source tree or Git administrative directories
+/// through a mutable checkout pathname.
+#[derive(Clone, Copy)]
+pub(crate) struct PinnedCheckout<'a> {
+    pub(crate) dir_fd: std::os::fd::RawFd,
+    pub(crate) admin: &'a Path,
+    pub(crate) common: &'a Path,
+}
+
+fn dup_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: `fd` is a valid open descriptor owned by the caller.
+    let duped = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if duped < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `duped` is freshly created and owned exclusively here.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duped) })
+}
+
+fn inherit_fd(command: &mut Command, fd: std::os::fd::RawFd) {
+    // SAFETY: fcntl is async-signal-safe. Only the owned child clears
+    // CLOEXEC; the parent keeps CLOEXEC so unrelated execs never inherit `fd`.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+fn source_env_path(path: &Path, pinned_source_fd: Option<std::os::fd::RawFd>) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = pinned_source_fd {
+        return PathBuf::from(format!("/proc/self/fd/{fd}"));
+    }
+    let _ = pinned_source_fd;
+    path.to_path_buf()
+}
+
 /// Prepared storage held across probing and gate execution for an isolated
 /// checkout so preparation and consumption stay under one continuous lease.
 #[derive(Default)]
@@ -519,6 +564,7 @@ struct PreparedInner {
     cache: PathBuf,
     build: PathBuf,
     lease: CommandLease,
+    pinned_source: Option<std::os::fd::OwnedFd>,
 }
 
 impl PreparedStorage {
@@ -529,6 +575,7 @@ impl PreparedStorage {
         cache: PathBuf,
         build: PathBuf,
         lease: CommandLease,
+        pinned_source: Option<std::os::fd::OwnedFd>,
     ) -> Self {
         Self {
             inner: Some(PreparedInner {
@@ -538,6 +585,7 @@ impl PreparedStorage {
                 cache,
                 build,
                 lease,
+                pinned_source,
             }),
         }
     }
@@ -546,9 +594,11 @@ impl PreparedStorage {
         let Some(inner) = &self.inner else {
             return;
         };
+        let pinned_fd = inner.pinned_source.as_ref().map(AsRawFd::as_raw_fd);
+        let env_path = source_env_path(&inner.path, pinned_fd);
         command
             .envs(environment(
-                &inner.path,
+                &env_path,
                 &inner.revision,
                 &inner.tree,
                 &inner.cache,
@@ -556,6 +606,9 @@ impl PreparedStorage {
             ))
             .env_remove("CARGO_TARGET_DIR")
             .env("GIT_OPTIONAL_LOCKS", "0");
+        if let Some(fd) = pinned_fd {
+            inherit_fd(command, fd);
+        }
         inner.lease.inherit(command);
     }
 }
@@ -570,9 +623,9 @@ impl PreparedStorage {
 pub(crate) fn resolved_build_directory(
     path: &Path,
     storage_key: Option<&Path>,
-    pinned_cwd: Option<std::os::fd::RawFd>,
+    pinned: Option<PinnedCheckout<'_>>,
 ) -> Result<Option<PathBuf>> {
-    let text = match read_config_text(path, pinned_cwd) {
+    let text = match read_config_text(path, pinned.map(|p| p.dir_fd)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
@@ -594,6 +647,7 @@ pub(crate) fn resolved_build_directory(
     Ok(Some(stable::resolved_build_directory_for(
         &path,
         storage_key,
+        pinned,
         &hook,
     )?))
 }
@@ -607,10 +661,14 @@ pub(crate) fn resolved_build_directory(
 pub(crate) fn prepare_isolated(
     path: &Path,
     storage_key: Option<&Path>,
-    pinned_cwd: Option<std::os::fd::RawFd>,
+    pinned: Option<PinnedCheckout<'_>>,
+    verify_ownership: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<PreparedStorage> {
     crate::interruption::check()?;
-    let text = match read_config_text(path, pinned_cwd) {
+    if let Some(check) = verify_ownership {
+        check()?;
+    }
+    let text = match read_config_text(path, pinned.map(|p| p.dir_fd)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(PreparedStorage::default());
@@ -630,34 +688,64 @@ pub(crate) fn prepare_isolated(
     };
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
     crate::interruption::check()?;
+    let owned_source_fd = pinned
+        .map(|pin| dup_cloexec(pin.dir_fd))
+        .transpose()
+        .context("cannot duplicate pinned source directory descriptor")?;
+    let source_fd = owned_source_fd.as_ref().map(AsRawFd::as_raw_fd);
     if hook.mode == Mode::PathStable {
-        return stable::prepare_and_hold(&path, storage_key, pinned_cwd, &(hook, timeout));
+        return stable::prepare_and_hold(
+            &path,
+            storage_key,
+            pinned,
+            owned_source_fd,
+            verify_ownership,
+            &(hook, timeout),
+        );
     }
-    let before = Source::observe_with_fd(&path, pinned_cwd)?;
-    let outcome = run_with_wait(&path, &before, &(hook, timeout), true);
+    let before = Source::observe_with_fd(&path, source_fd)?;
+    let outcome = run_with_wait(
+        &path,
+        &before,
+        &(hook, timeout),
+        true,
+        pinned,
+        source_fd,
+        verify_ownership,
+    );
     if let Err(error) = &outcome {
         if error.is::<crate::interruption::Interrupted>() {
             return Err(outcome.unwrap_err());
         }
     }
-    if Source::observe_with_fd(&path, pinned_cwd)? != before {
+    if Source::observe_with_fd(&path, source_fd)? != before {
         return Err(SourceMutation(String::new()).into());
+    }
+    if let Some(check) = verify_ownership {
+        check()?;
     }
     let (hook, timeout) = configuration(&text)?.context("preparation configuration disappeared")?;
     if let Err(error) = outcome {
-        cold_storage(&path, &before, &(hook, timeout))?;
+        cold_storage_with_admin(&path, pinned.map(|p| p.admin), &before, &(hook, timeout))?;
         cold(&format!("{error:#}"));
     } else {
         eprintln!("worktree preparation: prepared source tree {}", before.tree);
-        crate::slots::record_built(&path)?;
+        if pinned.is_none() {
+            crate::slots::record_built(&path)?;
+        }
     }
     let (hook, timeout) = configuration(&text)?.context("preparation configuration disappeared")?;
     let key = cache_key(&hook, timeout);
-    let source = Source::observe_with_fd(&path, pinned_cwd)?;
-    let cache = gitio::common_dir(&path)?
-        .join("arc/cache/worktrees")
-        .join(&key);
-    let admin = gitio::worktree_admin_dir(&path)?;
+    let source = Source::observe_with_fd(&path, source_fd)?;
+    let common = match pinned {
+        Some(pin) => pin.common.to_path_buf(),
+        None => gitio::common_dir(&path)?,
+    };
+    let cache = common.join("arc/cache/worktrees").join(&key);
+    let admin = match pinned {
+        Some(pin) => pin.admin.to_path_buf(),
+        None => gitio::worktree_admin_dir(&path)?,
+    };
     let source_path = source_path_key(&path);
     let mut build = admin
         .join("arc-warm-build")
@@ -688,6 +776,7 @@ pub(crate) fn prepare_isolated(
                 owned_build: true,
             }),
         },
+        owned_source_fd,
     ))
 }
 
@@ -793,8 +882,20 @@ fn invocation_key() -> &'static str {
     KEY.get_or_init(|| ulid::Ulid::new().to_string())
 }
 
-fn cold_storage(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<PathBuf> {
-    let admin = gitio::worktree_admin_dir(path)?;
+fn cold_storage(path: &Path, source: &Source, config: &(Hook, u64)) -> Result<PathBuf> {
+    cold_storage_with_admin(path, None, source, config)
+}
+
+fn cold_storage_with_admin(
+    path: &Path,
+    pinned_admin: Option<&Path>,
+    source: &Source,
+    (hook, timeout): &(Hook, u64),
+) -> Result<PathBuf> {
+    let admin = match pinned_admin {
+        Some(admin) => admin.to_path_buf(),
+        None => gitio::worktree_admin_dir(path)?,
+    };
     let root = private_directory(&admin, "arc-cold-build")?;
     let invocation = private_directory(&root, invocation_key())?;
     let config = private_directory(&invocation, &cache_key(hook, *timeout))?;
@@ -985,24 +1086,34 @@ fn acquire_lease_with_mode(path: &Path, kind: &str, wait: bool) -> Result<File> 
 }
 
 fn run(path: &Path, source: &Source, config: &(Hook, u64)) -> Result<()> {
-    run_with_wait(path, source, config, false)
+    run_with_wait(path, source, config, false, None, None, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_wait(
     path: &Path,
     source: &Source,
     (hook, timeout): &(Hook, u64),
     wait: bool,
+    pinned: Option<PinnedCheckout<'_>>,
+    pinned_source_fd: Option<std::os::fd::RawFd>,
+    verify_ownership: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<()> {
     let key = cache_key(hook, *timeout);
-    let common = gitio::common_dir(path)?;
+    let common = match pinned {
+        Some(pin) => pin.common.to_path_buf(),
+        None => gitio::common_dir(path)?,
+    };
     let cache = owned_cache(&common, &key)?;
     let lease = CommandLease {
         files: vec![lease_with_mode(&cache, wait)?],
         build_lease: None,
         storage: None,
     };
-    let admin = gitio::worktree_admin_dir(path)?;
+    let admin = match pinned {
+        Some(pin) => pin.admin.to_path_buf(),
+        None => gitio::worktree_admin_dir(path)?,
+    };
     let build_root = private_directory(&admin, "arc-warm-build")?;
     let builds = private_directory(&build_root, &key)?;
     let sources = private_directory(&builds, &source_path_key(path))?;
@@ -1027,6 +1138,7 @@ fn run_with_wait(
     }
     run_hook(
         path,
+        pinned_source_fd,
         source,
         hook.command
             .as_deref()
@@ -1036,12 +1148,17 @@ fn run_with_wait(
         &build,
         &lease,
     )?;
+    if let Some(check) = verify_ownership {
+        check()?;
+    }
     record_prepared(&build, &identity)?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_hook(
     path: &Path,
+    pinned_source_fd: Option<std::os::fd::RawFd>,
     source: &Source,
     hook_command: &str,
     timeout: u64,
@@ -1053,12 +1170,13 @@ fn run_hook(
         .checked_add(Duration::from_secs(timeout))
         .context("worktree preparation timeout is too large")?;
     let (mut shell, _) = crate::slots::measured_shell(path)?;
+    let env_path = source_env_path(path, pinned_source_fd);
     let command = &mut shell.command;
     command
         .args(["-c", hook_command])
         .current_dir(build)
         .envs(environment(
-            path,
+            &env_path,
             &source.revision,
             &source.tree,
             cache,
@@ -1070,6 +1188,9 @@ fn run_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if let Some(fd) = pinned_source_fd {
+        inherit_fd(command, fd);
+    }
     lease.inherit(command);
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
