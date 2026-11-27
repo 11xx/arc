@@ -524,8 +524,9 @@ fn verify_all_parallel_refuses_unowned_occupied_path_and_isolates_concurrent_inv
         worktrees_before
     );
 
-    // An unrelated branch worktree occupying slot 0 without parallel-scratch
-    // ownership must be refused cleanly and left completely untouched.
+    // An unrelated branch worktree placed inside `.arc-parallel` must be left
+    // completely untouched while the next `verify --all --parallel` succeeds on
+    // its own fresh unique checkout path.
     fs::remove_file(markers.join("hold")).unwrap();
     fs::create_dir_all(slot0_path.parent().unwrap()).unwrap();
     git(
@@ -542,10 +543,7 @@ fn verify_all_parallel_refuses_unowned_occupied_path_and_isolates_concurrent_inv
     repo.arc(&repo.root)
         .args(["verify", "parallel-own", "--all", "--parallel", "--rerun"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "without parallel-scratch ownership",
-        ));
+        .success();
     assert_eq!(
         fs::read_to_string(slot0_path.join("keep.txt")).unwrap(),
         "precious\n",
@@ -816,14 +814,16 @@ fn verify_all_parallel_failed_worktree_add_preserves_raced_branch_checkout_and_d
     let bin = repo.home.join("fake-git-bin");
     fs::create_dir_all(&bin).unwrap();
     let wrapper = bin.join("git");
+    let captured = repo.home.join("raced-target");
     let mode_file = repo.home.join("race-mode");
-    // Intercept `git worktree add --detach --no-checkout` right before real git
-    // runs, inserting an external entry at `slot0_path` so promotion refuses
-    // without touching the external checkout or directory.
+    // Intercept `git worktree add --detach --no-checkout <target> <rev>` right
+    // before real git runs, inserting an external entry directly at `<target>`
+    // so real git fails while arc preserves the external checkout or directory.
     let script = format!(
         r#"#!/bin/sh
 if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "--detach" ] && [ "$4" = "--no-checkout" ]; then
-    target='{slot0}'
+    target="$5"
+    printf '%s' "$target" > '{captured}'
     mode="$(cat '{mode_file}')"
     if [ "$mode" = "branch" ]; then
         '{real_git}' worktree add "$target" -b raced-branch >/dev/null 2>&1
@@ -835,7 +835,7 @@ if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "--detach" ] && [ "$4" 
 fi
 exec '{real_git}' "$@"
 "#,
-        slot0 = slot0_path.display(),
+        captured = captured.display(),
         mode_file = mode_file.display(),
         real_git = real_git,
     );
@@ -855,25 +855,20 @@ exec '{real_git}' "$@"
         .args(["verify", "parallel-race", "--all", "--parallel", "--rerun"])
         .assert()
         .failure();
+    let target = PathBuf::from(fs::read_to_string(&captured).unwrap());
     assert_eq!(
-        fs::read_to_string(slot0_path.join("sentinel.txt")).unwrap(),
+        fs::read_to_string(target.join("sentinel.txt")).unwrap(),
         "sentinel\n",
         "raced unrelated branch checkout sentinel was deleted"
     );
     let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
     assert!(
-        list.contains(slot0_path.to_str().unwrap())
-            && list.contains("branch refs/heads/raced-branch"),
+        list.contains(target.to_str().unwrap()) && list.contains("branch refs/heads/raced-branch"),
         "raced unrelated branch checkout was unregistered: {list}"
     );
     git(
         &repo.root,
-        &[
-            "worktree",
-            "remove",
-            "--force",
-            slot0_path.to_str().unwrap(),
-        ],
+        &["worktree", "remove", "--force", target.to_str().unwrap()],
     );
 
     // Case B: plain populated directory inserted in the race window must
@@ -884,12 +879,13 @@ exec '{real_git}' "$@"
         .args(["verify", "parallel-race", "--all", "--parallel", "--rerun"])
         .assert()
         .failure();
+    let target = PathBuf::from(fs::read_to_string(&captured).unwrap());
     assert_eq!(
-        fs::read_to_string(slot0_path.join("keep.txt")).unwrap(),
+        fs::read_to_string(target.join("keep.txt")).unwrap(),
         "keep\n",
         "raced plain directory content was deleted"
     );
-    fs::remove_dir_all(&slot0_path).unwrap();
+    fs::remove_dir_all(&target).unwrap();
 }
 
 #[test]
@@ -900,7 +896,8 @@ fn verify_all_parallel_live_replacement_and_stale_branch_reuse_preserve_unrelate
     let moved = repo.home.join("moved-owned-scratch");
     // Part A: while the owned scratch is live, move it away with
     // `git worktree move` and place a new branch checkout with an untracked
-    // sentinel at the old path. Drop must never delete the replacement branch
+    // sentinel at the old path. Verify must fail (never recording evidence from
+    // the replacement) and Drop must never delete the replacement branch
     // checkout or its sentinel.
     let replace_cmd = format!(
         "old=\"$PWD\"; printf '%s' \"$old\" > '{m}/old.pwd'; \
@@ -935,6 +932,10 @@ fn verify_all_parallel_live_replacement_and_stale_branch_reuse_preserve_unrelate
         ])
         .output()
         .unwrap();
+    assert!(
+        !part_a_output.status.success(),
+        "verify must refuse a replaced checkout"
+    );
     let part_a_stderr = String::from_utf8_lossy(&part_a_output.stderr);
     assert!(
         part_a_stderr.contains("refusing to remove"),
@@ -963,15 +964,16 @@ fn verify_all_parallel_live_replacement_and_stale_branch_reuse_preserve_unrelate
         );
     }
 
-    // Part B: SIGKILL leaves a marked parallel scratch behind; switching it
-    // onto a branch (`git switch -c unrelated-stale`) and adding an untracked
-    // sentinel must cause the next `verify --all --parallel` to refuse without
-    // deleting the branch checkout or its sentinel.
+    // Part B: SIGKILL leaves an orphaned marked parallel scratch behind;
+    // switching it onto a branch (`git switch -c unrelated-stale`) and adding
+    // an untracked sentinel must leave it untouched while the next
+    // `verify --all --parallel` succeeds cleanly on a fresh unique path.
     let repo_b = Repo::new();
     let markers_b = repo_b.home.join("stale-markers");
     fs::create_dir_all(&markers_b).unwrap();
     let block_cmd = format!(
-        "echo $$ > '{m}/stale.pid'; printf '%s' \"$PWD\" > '{m}/stale.pwd'; touch '{m}/stale-entered'; exec sleep 60",
+        "echo $$ > '{m}/stale.pid'; printf '%s' \"$PWD\" > '{m}/stale.pwd'; touch '{m}/stale-entered'; \
+         if [ ! -e '{m}/unblock' ]; then exec sleep 60; fi",
         m = markers_b.display()
     );
     fs::create_dir_all(repo_b.root.join(".arc")).unwrap();
@@ -1028,14 +1030,12 @@ fn verify_all_parallel_live_replacement_and_stale_branch_reuse_preserve_unrelate
     git(&stale_path, &["switch", "-c", "unrelated-stale"]);
     fs::write(stale_path.join("sentinel.txt"), "keep-branch\n").unwrap();
 
+    fs::write(markers_b.join("unblock"), "").unwrap();
     repo_b
         .arc(&repo_b.root)
         .args(["verify", "parallel-stale", "--all", "--parallel", "--rerun"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "without parallel-scratch ownership",
-        ));
+        .success();
     assert_eq!(
         fs::read_to_string(stale_path.join("sentinel.txt")).unwrap(),
         "keep-branch\n",
@@ -1064,13 +1064,10 @@ fn verify_all_parallel_sigterm_before_add_preserves_external_detached_checkout()
     use std::os::unix::process::ExitStatusExt;
 
     let repo = Repo::new();
-    let markers = repo.home.join("ext-detached-markers");
-    fs::create_dir_all(&markers).unwrap();
-    let gate_cmd = format!("pwd > '{}/slot0.pwd'", markers.display());
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
         repo.root.join(".arc/gates.toml"),
-        format!("[gates.alpha]\ncommand = {gate_cmd:?}\n"),
+        "[gates.alpha]\ncommand = \"true\"\n",
     )
     .unwrap();
     git(&repo.root, &["add", ".arc/gates.toml"]);
@@ -1080,17 +1077,6 @@ fn verify_all_parallel_sigterm_before_add_preserves_external_detached_checkout()
             .args(["begin", "parallel-ext-detached", "--no-worktree"]),
     );
 
-    repo.arc(&repo.root)
-        .args(["verify", "parallel-ext-detached", "--all", "--parallel"])
-        .assert()
-        .success();
-    let slot0_path = PathBuf::from(
-        fs::read_to_string(markers.join("slot0.pwd"))
-            .unwrap()
-            .trim(),
-    );
-    assert!(!slot0_path.exists());
-
     let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
         .unwrap()
         .trim()
@@ -1098,20 +1084,23 @@ fn verify_all_parallel_sigterm_before_add_preserves_external_detached_checkout()
     let bin = repo.home.join("ext-detached-git-bin");
     fs::create_dir_all(&bin).unwrap();
     let wrapper = bin.join("git");
-    // Right before arc's `git worktree add --detach --no-checkout` runs,
-    // another Git process adds a detached `--no-checkout` worktree at
-    // `slot0_path` and sends SIGTERM to arc (our parent process).
+    let captured = repo.home.join("ext-detached-target");
+    // Right before arc's `git worktree add --detach --no-checkout <target>`
+    // runs, another Git process adds a detached `--no-checkout` worktree
+    // directly at `<target>` and sends SIGTERM to arc (our parent process).
     let script = format!(
         r#"#!/bin/sh
 if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "--detach" ] && [ "$4" = "--no-checkout" ]; then
-    '{real_git}' worktree add --detach --no-checkout '{slot0}' HEAD >/dev/null 2>&1
+    target="$5"
+    printf '%s' "$target" > '{captured}'
+    '{real_git}' worktree add --detach --no-checkout "$target" HEAD >/dev/null 2>&1
     kill -TERM "$PPID"
     exec sleep 30
 fi
 exec '{real_git}' "$@"
 "#,
+        captured = captured.display(),
         real_git = real_git,
-        slot0 = slot0_path.display(),
     );
     fs::write(&wrapper, script).unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1139,25 +1128,388 @@ exec '{real_git}' "$@"
         "expected SIGTERM exit, got {:?}",
         output.status
     );
+    let target = PathBuf::from(fs::read_to_string(&captured).unwrap());
     assert!(
-        slot0_path.join(".git").is_file(),
+        target.join(".git").is_file(),
         "external detached worktree .git file was deleted"
     );
     let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
     assert!(
-        list.contains(slot0_path.to_str().unwrap()),
+        list.contains(target.to_str().unwrap()),
         "external detached worktree registration was deleted: {list}"
     );
-    // Clean up external worktree.
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", target.to_str().unwrap()],
+    );
+}
+
+#[test]
+fn verify_all_parallel_works_with_relative_worktree_paths() {
+    let repo = Repo::new();
+    git(&repo.root, &["config", "worktree.useRelativePaths", "true"]);
+    let markers = repo.home.join("relative-markers");
+    fs::create_dir_all(&markers).unwrap();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        "[prepare]\nmode = \"path-stable\"\ncommand = \"printf ok > \\\"$ARC_WORKTREE_BUILD/ready\\\"\"\ntimeout = \"10s\"\n",
+    )
+    .unwrap();
+    write_two_gates(
+        &repo,
+        &format!(
+            "cat .git > '{m}/alpha.dotgit' && test -f \"$ARC_WORKTREE_BUILD/ready\"",
+            m = markers.display()
+        ),
+        &format!(
+            "cat .git > '{m}/beta.dotgit' && test -f \"$ARC_WORKTREE_BUILD/ready\"",
+            m = markers.display()
+        ),
+    );
+    git(
+        &repo.root,
+        &["add", ".arc/gates.toml", ".arc/worktrees.toml"],
+    );
     git(
         &repo.root,
         &[
-            "worktree",
-            "remove",
-            "--force",
-            slot0_path.to_str().unwrap(),
+            "commit",
+            "-m",
+            "test: relative worktree path parallel gates",
         ],
     );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-relative", "--no-worktree"]),
+    );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "parallel-relative",
+            "--all",
+            "--parallel",
+            "--rerun",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 2/2 pass"));
+
+    for file in ["alpha.dotgit", "beta.dotgit"] {
+        let dotgit = fs::read_to_string(markers.join(file)).unwrap();
+        assert!(
+            dotgit.trim().starts_with("gitdir: .."),
+            "expected relative gitdir link in {file}, got: {dotgit}"
+        );
+    }
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-relative", "--json"]),
+    );
+    assert!(
+        status["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["green_at_head"] == true && gate["worktree_dirty"] == false),
+        "{status}"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before,
+        "relative-path parallel scratch worktree was not cleaned up"
+    );
+}
+
+#[test]
+fn verify_all_parallel_checkout_swap_preserves_replacement_edits_and_refuses_gate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Case A: right before `git checkout HEAD`, move the scratch away and place
+    // a replacement branch checkout with dirty tracked edits at the old path.
+    // Because checkout runs via `fchdir(dir_fd)` and arc re-verifies live
+    // ownership before running the gate, the replacement keeps its branch and
+    // edits, the gate never runs, and Drop refuses to remove the replacement.
+    {
+        let repo = Repo::new();
+        let markers = repo.home.join("swap-markers");
+        fs::create_dir_all(&markers).unwrap();
+        let moved = repo.home.join("moved-before-checkout");
+        let gate_cmd = format!("touch '{}/gate-ran'", markers.display());
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!("[gates.alpha]\ncommand = {gate_cmd:?}\n"),
+        )
+        .unwrap();
+        fs::write(repo.root.join("tracked.txt"), "original\n").unwrap();
+        git(&repo.root, &["add", ".arc/gates.toml", "tracked.txt"]);
+        git(&repo.root, &["commit", "-m", "test: checkout swap fixture"]);
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "parallel-swap", "--no-worktree"]),
+        );
+
+        let bin = repo.home.join("swap-git-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("git");
+        let captured = markers.join("swapped.pwd");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = "checkout" ] && [ "$2" = "HEAD" ]; then
+    old="$PWD"
+    printf '%s' "$old" > '{captured}'
+    '{real_git}' -C '{root}' worktree move "$old" '{moved}' >/dev/null 2>&1
+    '{real_git}' -C '{root}' worktree add "$old" -b swapped-branch >/dev/null 2>&1
+    printf 'dirty-user-edit\n' > "$old/tracked.txt"
+fi
+exec '{real_git}' "$@"
+"#,
+            captured = captured.display(),
+            real_git = real_git,
+            root = repo.root.display(),
+            moved = moved.display(),
+        );
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path_env = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        repo.arc(&repo.root)
+            .env("PATH", &path_env)
+            .args(["verify", "parallel-swap", "--all", "--parallel", "--rerun"])
+            .assert()
+            .failure();
+        assert!(
+            !markers.join("gate-ran").exists(),
+            "gate ran against a swapped replacement checkout"
+        );
+        let old_path = PathBuf::from(fs::read_to_string(&captured).unwrap());
+        assert_eq!(
+            fs::read_to_string(old_path.join("tracked.txt")).unwrap(),
+            "dirty-user-edit\n",
+            "replacement branch checkout tracked edit was discarded"
+        );
+        let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list.contains(old_path.to_str().unwrap())
+                && list.contains("branch refs/heads/swapped-branch"),
+            "replacement branch checkout was detached or unregistered: {list}"
+        );
+        let events = stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "parallel-swap",
+            "--type",
+            "verification-recorded",
+        ]));
+        assert!(
+            events.trim().is_empty(),
+            "unexpected evidence recorded for swapped checkout: {events}"
+        );
+        git(
+            &repo.root,
+            &["worktree", "remove", "--force", old_path.to_str().unwrap()],
+        );
+        if moved.exists() {
+            git(
+                &repo.root,
+                &["worktree", "remove", "--force", moved.to_str().unwrap()],
+            );
+        }
+    }
+
+    // Case B: right before `git checkout HEAD`, switch the scratch in-place
+    // onto a branch with dirty tracked edits. Because checkout runs without
+    // `--detach` or `--force` and arc re-verifies detached HEAD, the branch
+    // and edits survive, the gate never runs, and Drop refuses cleanup without
+    // leaking HEAD.lock.
+    {
+        let repo = Repo::new();
+        let markers = repo.home.join("inplace-markers");
+        fs::create_dir_all(&markers).unwrap();
+        let gate_cmd = format!("touch '{}/gate-ran'", markers.display());
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!("[gates.alpha]\ncommand = {gate_cmd:?}\n"),
+        )
+        .unwrap();
+        fs::write(repo.root.join("tracked.txt"), "original\n").unwrap();
+        git(&repo.root, &["add", ".arc/gates.toml", "tracked.txt"]);
+        git(
+            &repo.root,
+            &["commit", "-m", "test: inplace switch fixture"],
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "parallel-inplace", "--no-worktree"]),
+        );
+
+        let bin = repo.home.join("inplace-git-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("git");
+        let captured = markers.join("inplace.pwd");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = "checkout" ] && [ "$2" = "HEAD" ]; then
+    printf '%s' "$PWD" > '{captured}'
+    '{real_git}' switch -c inplace-branch >/dev/null 2>&1
+    printf 'inplace-user-edit\n' > "$PWD/tracked.txt"
+fi
+exec '{real_git}' "$@"
+"#,
+            captured = captured.display(),
+            real_git = real_git,
+        );
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path_env = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        repo.arc(&repo.root)
+            .env("PATH", &path_env)
+            .args([
+                "verify",
+                "parallel-inplace",
+                "--all",
+                "--parallel",
+                "--rerun",
+            ])
+            .assert()
+            .failure();
+        assert!(
+            !markers.join("gate-ran").exists(),
+            "gate ran after in-place branch switch"
+        );
+        let inplace_path = PathBuf::from(fs::read_to_string(&captured).unwrap());
+        assert_eq!(
+            fs::read_to_string(inplace_path.join("tracked.txt")).unwrap(),
+            "inplace-user-edit\n",
+            "in-place branch checkout tracked edit was discarded"
+        );
+        let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list.contains(inplace_path.to_str().unwrap())
+                && list.contains("branch refs/heads/inplace-branch"),
+            "in-place branch checkout was detached or unregistered: {list}"
+        );
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                inplace_path.to_str().unwrap(),
+            ],
+        );
+    }
+}
+
+#[test]
+fn verify_all_parallel_sigkill_orphan_and_corrupt_admin_never_strand_next_run() {
+    let repo = Repo::new();
+    let markers = repo.home.join("orphan-markers");
+    fs::create_dir_all(&markers).unwrap();
+    let gate_cmd = format!(
+        "echo $$ > '{m}/gate.pid'; printf '%s' \"$PWD\" > '{m}/orphan.pwd'; touch '{m}/entered'; \
+         if [ ! -e '{m}/unblock' ]; then exec sleep 60; fi",
+        m = markers.display()
+    );
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!("[gates.alpha]\ncommand = {gate_cmd:?}\n"),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: sigkill orphan gate"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-orphan", "--no-worktree"]),
+    );
+
+    let mut child = repo.spawn_arc_piped(
+        &repo.root,
+        &[
+            "verify",
+            "parallel-orphan",
+            "--all",
+            "--parallel",
+            "--rerun",
+        ],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !markers.join("entered").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(markers.join("entered").exists());
+    let gate_pid = FixturePid::read(&markers.join("gate.pid"));
+    // SAFETY: `child.id()` is the live child spawned above.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    let _ = child.wait().unwrap();
+    drop(gate_pid);
+
+    let orphan_path = PathBuf::from(
+        fs::read_to_string(markers.join("orphan.pwd"))
+            .unwrap()
+            .trim(),
+    );
+    assert!(orphan_path.exists());
+    // Corrupt the orphaned admin's gitdir and owner marker to mimic a crash
+    // mid-update; the next parallel run must still succeed cleanly on a fresh
+    // unique checkout path.
+    let admin = PathBuf::from(git_out(&orphan_path, &["rev-parse", "--absolute-git-dir"]));
+    fs::write(admin.join("gitdir"), "/nonexistent/stage/.git\n").unwrap();
+    fs::write(
+        admin.join("arc-parallel-scratch-owner"),
+        "arc-parallel-scratch/2\n/nonexistent\n/nonexistent/stage\ntoken\n",
+    )
+    .unwrap();
+
+    fs::write(markers.join("unblock"), "").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "parallel-orphan",
+            "--all",
+            "--parallel",
+            "--rerun",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 1/1 pass"));
+    let second_path = PathBuf::from(
+        fs::read_to_string(markers.join("orphan.pwd"))
+            .unwrap()
+            .trim(),
+    );
+    assert_ne!(
+        second_path, orphan_path,
+        "next run reused crashed orphan path instead of allocating a fresh unique path"
+    );
+    assert!(
+        !second_path.exists(),
+        "second run's fresh checkout was not cleaned up"
+    );
+    fs::remove_dir_all(&admin).unwrap();
+    fs::remove_dir_all(&orphan_path).unwrap();
 }
 
 #[test]

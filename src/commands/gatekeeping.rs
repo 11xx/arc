@@ -632,7 +632,8 @@ fn verify_with_landing(
         let mut preparation_ms = if need_reuse_environments {
             let preparing = Instant::now();
             if parallel {
-                parallel_reuse_prep = Some(crate::warm_worktree::prepare_isolated(&run_ctx.cwd)?);
+                parallel_reuse_prep =
+                    Some(crate::warm_worktree::prepare_isolated(&run_ctx.cwd, None)?);
             } else {
                 crate::warm_worktree::prepare(&run_ctx.cwd)?;
             }
@@ -2781,45 +2782,26 @@ fn parallel_scratch_owner_marker(common_dir: &Path, path: &Path, token: &str) ->
     )
 }
 
-fn marker_matches_slot(text: &str, common_dir: &Path, path: &Path) -> bool {
-    let lines: Vec<&str> = text.lines().collect();
-    let expected_common = common_dir.display().to_string();
-    let expected_path = path.display().to_string();
-    match lines.as_slice() {
-        ["arc-parallel-scratch/1", common, recorded] => {
-            *common == expected_common && *recorded == expected_path
-        }
-        ["arc-parallel-scratch/2", common, recorded, token] => {
-            *common == expected_common && *recorded == expected_path && !token.is_empty()
-        }
-        _ => false,
+fn is_detached_oid(head_contents: &str) -> bool {
+    let trimmed = head_contents.trim();
+    !trimmed.starts_with("ref:")
+        && trimmed.len() >= 40
+        && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn resolve_git_link(base: &Path, recorded: &Path) -> PathBuf {
+    if recorded.is_relative() {
+        base.join(recorded)
+    } else {
+        recorded.to_path_buf()
     }
 }
 
-fn find_worktree_admin_for_path(common_dir: &Path, path: &Path) -> Result<Option<PathBuf>> {
-    let registrations = common_dir.join("worktrees");
-    if !registrations.is_dir() {
-        return Ok(None);
+fn git_paths_match(left: &Path, right: &Path) -> bool {
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        return a == b;
     }
-    let expected = path.join(".git");
-    let expected_resolved = config::resolved(&expected);
-    for entry in std::fs::read_dir(&registrations)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let admin = entry.path();
-        let gitdir = match std::fs::read_to_string(admin.join("gitdir")) {
-            Ok(gitdir) => gitdir,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let recorded = Path::new(gitdir.trim());
-        if recorded == expected || config::resolved(recorded) == expected_resolved {
-            return Ok(Some(std::fs::canonicalize(admin)?));
-        }
-    }
-    Ok(None)
+    normalize_scratch_path(left) == normalize_scratch_path(right)
 }
 
 fn path_matches_dir_identity(path: &Path, dev: u64, ino: u64) -> bool {
@@ -2833,6 +2815,21 @@ fn path_matches_dir_identity(path: &Path, dev: u64, ino: u64) -> bool {
 /// Run a Git command in its own process group so SIGINT/SIGTERM/SIGHUP stops
 /// and reaps Git and any blocked hook descendants immediately.
 fn run_interruptible_git(cwd: &Path, args: &[&str]) -> Result<()> {
+    run_interruptible_git_inner(Some(cwd), None, args)
+}
+
+/// Run a Git command bound directly to an open directory descriptor via
+/// `fchdir(2)` in `pre_exec`, so path replacement at the worktree pathname
+/// cannot redirect Git onto a different checkout.
+fn run_interruptible_git_at_fd(dir_fd: std::os::fd::RawFd, args: &[&str]) -> Result<()> {
+    run_interruptible_git_inner(None, Some(dir_fd), args)
+}
+
+fn run_interruptible_git_inner(
+    cwd: Option<&Path>,
+    dir_fd: Option<std::os::fd::RawFd>,
+    args: &[&str],
+) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
@@ -2840,11 +2837,25 @@ fn run_interruptible_git(cwd: &Path, args: &[&str]) -> Result<()> {
     let mut command = gitio::git_command();
     command
         .args(args)
-        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    if let Some(fd) = dir_fd {
+        // SAFETY: `fchdir` is async-signal-safe and `fd` remains open in the
+        // parent across `spawn` (closing automatically on `execve` via CLOEXEC).
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let mut group = crate::process_group::OwnedGroup::spawn(&mut command)
         .with_context(|| format!("cannot start git {}", args.join(" ")))?;
     let stdout = group
@@ -2957,7 +2968,24 @@ fn read_regular_file_at(dir_fd: std::os::fd::RawFd, name: &str) -> std::io::Resu
     Ok(text)
 }
 
-fn write_file_atomic_in_dir(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+fn unlink_at_ignore_not_found(dir_fd: std::os::fd::RawFd, name: &str) -> std::io::Result<()> {
+    use std::ffi::CString;
+
+    let c_name =
+        CString::new(name).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `dir_fd` is open and `c_name` is a NUL-terminated basename.
+    if unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), 0) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Atomically publish `bytes` to `dir/name` without overwriting an existing
+/// file and without ever exposing a zero-byte or partial file.
+fn write_file_atomic_exclusive_in_dir(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -2979,54 +3007,70 @@ fn write_file_atomic_in_dir(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> 
         let _ = std::fs::remove_file(&temp);
         return Err(error).with_context(|| format!("cannot write {}", temp.display()));
     }
-    if let Err(error) = std::fs::rename(&temp, dir.join(name)) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error).with_context(|| format!("cannot replace {}/{name}", dir.display()));
-    }
+    let link_result = std::fs::hard_link(&temp, dir.join(name));
+    let _ = std::fs::remove_file(&temp);
+    link_result.with_context(|| format!("cannot publish {}/{name}", dir.display()))?;
     Ok(())
 }
 
-/// Atomically rename `from` to `to`, failing with `AlreadyExists` if anything
-/// already occupies `to`.
-fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+/// Exclusive Git `<admin>/HEAD.lock` guard held across detached-HEAD
+/// verification and destructive cleanup so concurrent `git switch -c` or branch
+/// ref transactions cannot repurpose the checkout between check and removal.
+struct HeadLockGuard {
+    admin_fd: std::os::fd::RawFd,
+    armed: bool,
+}
 
-    let c_from = CString::new(from.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let c_to = CString::new(to.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: `c_from` and `c_to` are valid NUL-terminated paths.
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                c_from.as_ptr(),
-                libc::AT_FDCWD,
-                c_to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if rc == 0 {
-            return Ok(());
-        }
-        Err(std::io::Error::last_os_error())
+impl HeadLockGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+}
+
+impl Drop for HeadLockGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = unlink_at_ignore_not_found(self.admin_fd, "HEAD.lock");
         }
-        let _ = (c_from, c_to);
-        std::fs::rename(from, to)
     }
+}
+
+fn acquire_admin_head_lock(admin_fd: std::os::fd::RawFd) -> std::io::Result<HeadLockGuard> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+
+    let c_name = CString::new("HEAD.lock").expect("static lock name contains no NUL");
+    // SAFETY: `admin_fd` is a valid open directory fd and `c_name` is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            admin_fd,
+            c_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is freshly created and owned exclusively here.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let _ = file.write_all(b"arc-parallel-scratch-cleanup\n");
+    let _ = file.flush();
+    drop(file);
+    Ok(HeadLockGuard {
+        admin_fd,
+        armed: true,
+    })
 }
 
 /// Recursively remove every entry inside the open directory `dir_fd` strictly
 /// relative to `dir_fd` (never following symlinks and never re-resolving paths).
-fn remove_dir_contents_at(dir_fd: std::os::fd::RawFd) -> std::io::Result<()> {
+/// When `skip_name` is provided, that top-level entry is left in place.
+fn remove_dir_contents_at(
+    dir_fd: std::os::fd::RawFd,
+    skip_name: Option<&[u8]>,
+) -> std::io::Result<()> {
     use std::ffi::{CStr, CString};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -3067,6 +3111,9 @@ fn remove_dir_contents_at(dir_fd: std::os::fd::RawFd) -> std::io::Result<()> {
         // SAFETY: `d_name` is a NUL-terminated entry name inside `entry`.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
         if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        if skip_name.is_some_and(|skip| name.to_bytes() == skip) {
             continue;
         }
         entries.push(CString::from(name));
@@ -3132,7 +3179,7 @@ fn remove_dir_contents_at(dir_fd: std::os::fd::RawFd) -> std::io::Result<()> {
             }
             // SAFETY: `child_fd` is a valid freshly opened descriptor.
             let child = unsafe { OwnedFd::from_raw_fd(child_fd) };
-            remove_dir_contents_at(child.as_raw_fd())?;
+            remove_dir_contents_at(child.as_raw_fd(), None)?;
             drop(child);
             // SAFETY: remove now-empty child directory relative to `dir_fd`.
             if unsafe { libc::unlinkat(dir_fd, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
@@ -3186,7 +3233,8 @@ fn rmdir_if_same_inode(path: &Path, dev: u64, ino: u64) {
 }
 
 /// Remove a verified Git worktree admin directory relative to `<common>/worktrees`
-/// using an already-opened and verified `admin_fd`.
+/// using an already-opened and verified `admin_fd`, unlinking `HEAD.lock` last
+/// so Git cannot mutate `HEAD` while the directory is being torn down.
 fn remove_verified_admin_dir(
     common_dir: &Path,
     admin: &Path,
@@ -3202,8 +3250,12 @@ fn remove_verified_admin_dir(
     let worktrees_dir = common_dir.join("worktrees");
     let worktrees_fd = open_dir_nofollow(&worktrees_dir)
         .with_context(|| format!("cannot open {}", worktrees_dir.display()))?;
-    remove_dir_contents_at(admin_fd.as_raw_fd())
+    unlink_at_ignore_not_found(admin_fd.as_raw_fd(), "HEAD")
+        .with_context(|| format!("cannot unlink {}/HEAD", admin.display()))?;
+    remove_dir_contents_at(admin_fd.as_raw_fd(), Some(b"HEAD.lock"))
         .with_context(|| format!("cannot clear {}", admin.display()))?;
+    unlink_at_ignore_not_found(admin_fd.as_raw_fd(), "HEAD.lock")
+        .with_context(|| format!("cannot unlink {}/HEAD.lock", admin.display()))?;
     drop(admin_fd);
     let c_name = CString::new(admin_name.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid admin dir name: {e}"))?;
@@ -3224,8 +3276,21 @@ fn remove_verified_admin_dir(
     Ok(())
 }
 
+fn resolve_admin_from_dir_fd(dir_fd: std::os::fd::RawFd, worktree_path: &Path) -> Result<PathBuf> {
+    let text = read_regular_file_at(dir_fd, ".git")
+        .with_context(|| format!("cannot read {}/.git", worktree_path.display()))?;
+    let rest = text
+        .trim()
+        .strip_prefix("gitdir:")
+        .with_context(|| format!("{}/.git is not a gitdir link", worktree_path.display()))?;
+    let target = resolve_git_link(worktree_path, Path::new(rest.trim()));
+    std::fs::canonicalize(&target)
+        .with_context(|| format!("cannot resolve worktree admin dir {}", target.display()))
+}
+
 fn verify_admin_detached_and_gitdir(
     admin_fd: std::os::fd::RawFd,
+    admin: &Path,
     expected_path: &Path,
 ) -> Result<bool> {
     let head = match read_regular_file_at(admin_fd, "HEAD") {
@@ -3233,7 +3298,7 @@ fn verify_admin_detached_and_gitdir(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    if head.trim_start().starts_with("ref:") {
+    if !is_detached_oid(&head) {
         return Ok(false);
     }
     let gitdir = match read_regular_file_at(admin_fd, "gitdir") {
@@ -3241,12 +3306,16 @@ fn verify_admin_detached_and_gitdir(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
+    let recorded = resolve_git_link(admin, Path::new(gitdir.trim()));
     let expected = expected_path.join(".git");
-    let recorded = Path::new(gitdir.trim());
-    Ok(recorded == expected || config::resolved(recorded) == config::resolved(&expected))
+    Ok(git_paths_match(&recorded, &expected))
 }
 
-fn dot_git_points_to_admin(dir_fd: std::os::fd::RawFd, admin: &Path) -> Result<bool> {
+fn dot_git_points_to_admin(
+    dir_fd: std::os::fd::RawFd,
+    worktree_path: &Path,
+    admin: &Path,
+) -> Result<bool> {
     let text = match read_regular_file_at(dir_fd, ".git") {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -3255,8 +3324,8 @@ fn dot_git_points_to_admin(dir_fd: std::os::fd::RawFd, admin: &Path) -> Result<b
     let Some(rest) = text.trim().strip_prefix("gitdir:") else {
         return Ok(false);
     };
-    let target = Path::new(rest.trim());
-    let canonical_target = match std::fs::canonicalize(target) {
+    let target = resolve_git_link(worktree_path, Path::new(rest.trim()));
+    let canonical_target = match std::fs::canonicalize(&target) {
         Ok(path) => path,
         Err(_) => return Ok(false),
     };
@@ -3265,74 +3334,6 @@ fn dot_git_points_to_admin(dir_fd: std::os::fd::RawFd, admin: &Path) -> Result<b
         Err(_) => return Ok(false),
     };
     Ok(canonical_target == canonical_admin)
-}
-
-/// Inspect and remove a stale owned parallel scratch at `path` left behind by a
-/// crashed run while the caller holds the exclusive slot lock.
-///
-/// Refuses without deleting if the checkout lacks a matching ownership marker,
-/// was switched onto a branch (`HEAD` starts with `ref:`), or its `.git` file
-/// no longer points to the verified admin directory.
-fn try_cleanup_stale_parallel_scratch(common_dir: &Path, path: &Path) -> Result<bool> {
-    use std::os::fd::AsRawFd;
-
-    let Some(admin) = find_worktree_admin_for_path(common_dir, path)? else {
-        return Ok(false);
-    };
-    let admin_fd = match open_dir_nofollow(&admin) {
-        Ok(fd) => fd,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    let marker = match read_regular_file_at(admin_fd.as_raw_fd(), PARALLEL_SCRATCH_OWNER_FILE) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    if !marker_matches_slot(&marker, common_dir, path) {
-        return Ok(false);
-    }
-    if !verify_admin_detached_and_gitdir(admin_fd.as_raw_fd(), path)? {
-        return Ok(false);
-    }
-    if std::fs::symlink_metadata(path).is_ok() {
-        let dir_fd = match open_dir_nofollow(path) {
-            Ok(fd) => fd,
-            Err(_) => return Ok(false),
-        };
-        if !dot_git_points_to_admin(dir_fd.as_raw_fd(), &admin)? {
-            return Ok(false);
-        }
-        let (dev, ino) = fstat_fd(dir_fd.as_raw_fd())?;
-        remove_dir_contents_at(dir_fd.as_raw_fd())
-            .with_context(|| format!("cannot clear stale parallel scratch {}", path.display()))?;
-        drop(dir_fd);
-        remove_verified_admin_dir(common_dir, &admin, admin_fd)?;
-        rmdir_if_same_inode(path, dev, ino);
-    } else {
-        remove_verified_admin_dir(common_dir, &admin, admin_fd)?;
-    }
-    Ok(true)
-}
-
-/// Remove a private staging worktree created under our unique `0700`
-/// `.stage-<token>` directory before it was ever promoted to the slot path.
-fn cleanup_private_stage(common_dir: &Path, stage_root: &Path, stage_path: &Path) {
-    use std::os::fd::AsRawFd;
-
-    if let Ok(Some(admin)) = find_worktree_admin_for_path(common_dir, stage_path) {
-        if let Ok(admin_fd) = open_dir_nofollow(&admin) {
-            let _ = remove_verified_admin_dir(common_dir, &admin, admin_fd);
-        }
-    }
-    if let Ok(dir_fd) = open_dir_nofollow(stage_path) {
-        if let Ok((dev, ino)) = fstat_fd(dir_fd.as_raw_fd()) {
-            let _ = remove_dir_contents_at(dir_fd.as_raw_fd());
-            drop(dir_fd);
-            rmdir_if_same_inode(stage_path, dev, ino);
-        }
-    }
-    let _ = std::fs::remove_dir(stage_root);
 }
 
 fn try_acquire_parallel_slot_lock(path: &Path) -> Result<Option<std::fs::File>> {
@@ -3367,12 +3368,9 @@ fn try_acquire_parallel_slot_lock(path: &Path) -> Result<Option<std::fs::File>> 
 }
 
 enum ParallelScratchOwnership {
-    /// Private per-invocation staging directory created under a random ULID
-    /// before moving into the slot path. Cleanup never touches the slot path.
-    PrivateStage {
-        stage_root: PathBuf,
-        stage_path: PathBuf,
-    },
+    /// Before `git worktree add --detach --no-checkout` finishes and ownership
+    /// is verified and stamped. Drop never deletes anything in this state.
+    PreCreate,
     /// Proven detached parallel scratch worktree pinned by an open directory
     /// descriptor (`dir_fd`), inode identity `(dev, ino)`, and per-allocation
     /// ownership token in `<admin>/arc-parallel-scratch-owner`.
@@ -3382,24 +3380,22 @@ enum ParallelScratchOwnership {
         dev: u64,
         ino: u64,
         token: String,
-        current_path: PathBuf,
-        stage_root: Option<PathBuf>,
     },
 }
 
 /// An isolated detached checkout owned exclusively by one parallel gate run.
 ///
-/// Allocates inside `<worktrees_dir>/.arc-parallel`, serialized across
-/// processes by an exclusive flock held from before allocation through
-/// execution and cleanup. Stages `git worktree add --detach --no-checkout` in
-/// a private `0700` per-run directory, stamps a per-allocation ownership token
-/// in the Git admin directory, atomically promotes it into the slot path via
-/// `renameat2(RENAME_NOREPLACE)`, and binds cleanup strictly to the pinned
-/// directory descriptor and verified detached admin entry (never calling
-/// `git worktree remove --force <path>` by path).
+/// Each allocation creates a fresh unique per-run checkout directory directly
+/// inside `<worktrees_dir>/.arc-parallel` (avoiding path reuse and relocation
+/// so relative Git worktree links work natively and crashed runs never strand
+/// future invocations), while holding a per-slot flock strictly to key warm
+/// default `path-stable` build storage. Cleanup acquires `<admin>/HEAD.lock`
+/// before verifying detached state, severs `.git`/`gitdir`, and clears contents
+/// strictly through the pinned `dir_fd`.
 struct ParallelScratchWorktree {
     common_dir: PathBuf,
     path: PathBuf,
+    storage_key: PathBuf,
     ownership: ParallelScratchOwnership,
     _lock: std::fs::File,
 }
@@ -3444,7 +3440,9 @@ impl ParallelScratchWorktree {
             let Some(lock) = try_acquire_parallel_slot_lock(&lock_path)? else {
                 continue;
             };
-            let path = normalize_scratch_path(&scratch_root.join(format!("{base}-{slot}")));
+            let storage_key = normalize_scratch_path(&scratch_root.join(format!("{base}-{slot}")));
+            let token = ulid::Ulid::new().to_string();
+            let path = normalize_scratch_path(&scratch_root.join(format!("{base}-{slot}-{token}")));
             if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
                 bail!(
                     "{} lies outside the sandbox at {}",
@@ -3452,58 +3450,39 @@ impl ParallelScratchWorktree {
                     prefix.display()
                 );
             }
-            let path_exists = std::fs::symlink_metadata(&path).is_ok();
             let resolved = config::resolved(&path);
-            let registered = gitio::worktree_inventory(&ctx.cwd)?
-                .iter()
-                .any(|entry| entry.path == path || config::resolved(&entry.path) == resolved);
-            if path_exists || registered {
-                if !try_cleanup_stale_parallel_scratch(&common_dir, &path)? {
-                    bail!(
-                        "refusing to use occupied path {} without parallel-scratch ownership; \
-                         move or remove it and retry",
-                        path.display()
-                    );
-                }
-                if std::fs::symlink_metadata(&path).is_ok()
-                    || gitio::worktree_inventory(&ctx.cwd)?.iter().any(|entry| {
-                        entry.path == path || config::resolved(&entry.path) == resolved
-                    })
-                {
-                    bail!(
-                        "stale parallel scratch checkout {} could not be cleared cleanly",
-                        path.display()
-                    );
-                }
+            if std::fs::symlink_metadata(&path).is_ok()
+                || gitio::worktree_inventory(&ctx.cwd)?
+                    .iter()
+                    .any(|entry| entry.path == path || config::resolved(&entry.path) == resolved)
+            {
+                bail!(
+                    "refusing to use occupied path {} without parallel-scratch ownership; \
+                     move or remove it and retry",
+                    path.display()
+                );
             }
             let parent = path
                 .parent()
                 .context("parallel scratch path has no parent")?;
-            std::fs::create_dir_all(parent)
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
                 .with_context(|| format!("cannot create {}", parent.display()))?;
+            if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
+                bail!("{} is not a real directory", parent.display());
+            }
             crate::interruption::check()?;
 
-            // Stage `git worktree add --detach --no-checkout` inside a private
-            // 0700 per-invocation directory keyed by a fresh ULID so creation
-            // provenance is unambiguous and `<path>` is never touched until
-            // atomic `renameat2(RENAME_NOREPLACE)` succeeds.
-            let token = ulid::Ulid::new().to_string();
-            let stage_root = parent.join(format!(".stage-{token}"));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&stage_root)
-                .with_context(|| format!("cannot create {}", stage_root.display()))?;
-            let stage_path = stage_root.join(format!("{base}-{slot}-{token}"));
             let mut guard = Self {
                 common_dir: common_dir.clone(),
                 path: path.clone(),
-                ownership: ParallelScratchOwnership::PrivateStage {
-                    stage_root: stage_root.clone(),
-                    stage_path: stage_path.clone(),
-                },
+                storage_key,
+                ownership: ParallelScratchOwnership::PreCreate,
                 _lock: lock,
             };
-            let stage_display = stage_path.display().to_string();
+            let path_display = path.display().to_string();
             run_interruptible_git(
                 &ctx.cwd,
                 &[
@@ -3511,11 +3490,14 @@ impl ParallelScratchWorktree {
                     "add",
                     "--detach",
                     "--no-checkout",
-                    &stage_display,
+                    &path_display,
                     revision,
                 ],
             )?;
-            let admin = std::fs::canonicalize(gitio::worktree_admin_dir(&stage_path)?)?;
+            let dir_fd = open_dir_nofollow(&path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            let (dev, ino) = fstat_fd(dir_fd.as_raw_fd())?;
+            let admin = resolve_admin_from_dir_fd(dir_fd.as_raw_fd(), &path)?;
             let worktrees_admin = std::fs::canonicalize(common_dir.join("worktrees"))?;
             if !admin.starts_with(&worktrees_admin) {
                 bail!(
@@ -3524,96 +3506,118 @@ impl ParallelScratchWorktree {
                     worktrees_admin.display()
                 );
             }
-            let head_ref = std::fs::read_to_string(admin.join("HEAD"))
-                .with_context(|| format!("cannot read {}/HEAD", admin.display()))?;
-            if head_ref.trim_start().starts_with("ref:") {
+            let admin_fd = open_dir_nofollow(&admin)
+                .with_context(|| format!("cannot open {}", admin.display()))?;
+            if !verify_admin_detached_and_gitdir(admin_fd.as_raw_fd(), &admin, &path)? {
                 bail!(
-                    "refusing to claim branch worktree at {} as parallel scratch",
-                    stage_path.display()
-                );
-            }
-            write_file_atomic_in_dir(
-                &admin,
-                PARALLEL_SCRATCH_OWNER_FILE,
-                parallel_scratch_owner_marker(&common_dir, &stage_path, &token).as_bytes(),
-            )?;
-            let dir_fd = open_dir_nofollow(&stage_path)
-                .with_context(|| format!("cannot open {}", stage_path.display()))?;
-            let (dev, ino) = fstat_fd(dir_fd.as_raw_fd())?;
-            guard.ownership = ParallelScratchOwnership::OwnedWorktree {
-                admin: admin.clone(),
-                dir_fd,
-                dev,
-                ino,
-                token: token.clone(),
-                current_path: stage_path.clone(),
-                stage_root: Some(stage_root.clone()),
-            };
-            crate::interruption::check()?;
-
-            // Refuse if an external worktree registration appeared at `<path>`
-            // before promotion.
-            if gitio::worktree_inventory(&ctx.cwd)?
-                .iter()
-                .any(|entry| entry.path == path || config::resolved(&entry.path) == resolved)
-            {
-                bail!(
-                    "refusing to use occupied path {} without parallel-scratch ownership; \
-                     move or remove it and retry",
+                    "refusing to claim worktree at {} because HEAD is not detached or gitdir does not match",
                     path.display()
                 );
             }
-            // Promote atomically with RENAME_NOREPLACE so any concurrent file,
-            // directory, or worktree placed at `<path>` causes EEXIST and stays
-            // completely untouched while `guard` cleans only our private stage.
-            match rename_noreplace(&stage_path, &path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    bail!(
-                        "refusing to use occupied path {} without parallel-scratch ownership; \
-                         move or remove it and retry",
-                        path.display()
-                    );
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "cannot promote parallel scratch {} to {}",
-                            stage_path.display(),
-                            path.display()
-                        )
-                    });
-                }
+            let head_ref = read_regular_file_at(admin_fd.as_raw_fd(), "HEAD")
+                .with_context(|| format!("cannot read {}/HEAD", admin.display()))?;
+            if head_ref.trim() != revision {
+                bail!(
+                    "refusing to claim worktree at {} because HEAD does not match {}",
+                    path.display(),
+                    revision
+                );
             }
-            let gitdir_line = format!("{}\n", path.join(".git").display());
-            write_file_atomic_in_dir(&admin, "gitdir", gitdir_line.as_bytes())?;
-            write_file_atomic_in_dir(
+            drop(admin_fd);
+            write_file_atomic_exclusive_in_dir(
                 &admin,
                 PARALLEL_SCRATCH_OWNER_FILE,
                 parallel_scratch_owner_marker(&common_dir, &path, &token).as_bytes(),
             )?;
-            let _ = std::fs::remove_dir(&stage_root);
-            if let ParallelScratchOwnership::OwnedWorktree {
-                current_path,
-                stage_root: root_slot,
-                ..
-            } = &mut guard.ownership
-            {
-                *current_path = path.clone();
-                *root_slot = None;
-            }
+            let raw_dir_fd = dir_fd.as_raw_fd();
+            guard.ownership = ParallelScratchOwnership::OwnedWorktree {
+                admin,
+                dir_fd,
+                dev,
+                ino,
+                token,
+            };
             crate::interruption::check()?;
+            guard.verify_live_ownership(Some(revision))?;
 
             // Populate the working tree (including any post-checkout hook)
-            // inside an interruptible process group while ownership and pinned
-            // directory descriptor are already established for cleanup.
-            run_interruptible_git(&path, &["checkout", "--detach", "--force", revision])?;
+            // strictly inside the pinned `dir_fd` via `fchdir(2)` without
+            // `--detach` or `--force`, so neither a swapped checkout at `path`
+            // nor an in-place branch switch can lose edits or be detached.
+            run_interruptible_git_at_fd(raw_dir_fd, &["checkout", "HEAD"])?;
             crate::interruption::check()?;
+            guard.verify_live_ownership(Some(revision))?;
             return Ok(guard);
         }
         bail!(
             "all {MAX_PARALLEL_SCRATCH_SLOTS} parallel scratch slots for gate {gate:?} are in use"
         );
+    }
+
+    /// Confirm that `self.path` still resolves to the exact pinned directory
+    /// inode, retains our ownership token, remains detached (at
+    /// `expected_revision` when specified), and keeps mutually consistent
+    /// `.git` and `admin/gitdir` links.
+    fn verify_live_ownership(&self, expected_revision: Option<&str>) -> Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let ParallelScratchOwnership::OwnedWorktree {
+            admin,
+            dir_fd,
+            dev,
+            ino,
+            token,
+        } = &self.ownership
+        else {
+            bail!("parallel scratch {} is not owned", self.path.display());
+        };
+        if !path_matches_dir_identity(&self.path, *dev, *ino) {
+            bail!(
+                "refusing to use parallel scratch {} because its directory identity changed",
+                self.path.display()
+            );
+        }
+        let admin_fd = open_dir_nofollow(admin).with_context(|| {
+            format!("cannot inspect parallel scratch admin {}", admin.display())
+        })?;
+        let marker = read_regular_file_at(admin_fd.as_raw_fd(), PARALLEL_SCRATCH_OWNER_FILE)
+            .with_context(|| {
+                format!(
+                    "parallel scratch {} lost its ownership marker",
+                    self.path.display()
+                )
+            })?;
+        if marker != parallel_scratch_owner_marker(&self.common_dir, &self.path, token) {
+            bail!(
+                "refusing to use parallel scratch {} because its ownership marker changed",
+                self.path.display()
+            );
+        }
+        if !verify_admin_detached_and_gitdir(admin_fd.as_raw_fd(), admin, &self.path)? {
+            bail!(
+                "refusing to use parallel scratch {} because its detached state or gitdir binding changed",
+                self.path.display()
+            );
+        }
+        if let Some(expected_rev) = expected_revision {
+            let head = read_regular_file_at(admin_fd.as_raw_fd(), "HEAD")
+                .with_context(|| format!("cannot read {}/HEAD", admin.display()))?;
+            if head.trim() != expected_rev {
+                bail!(
+                    "refusing to use parallel scratch {} because HEAD is no longer detached at {}",
+                    self.path.display(),
+                    expected_rev
+                );
+            }
+        }
+        if !dot_git_points_to_admin(dir_fd.as_raw_fd(), &self.path, admin)? {
+            bail!(
+                "refusing to use parallel scratch {} because its .git link no longer points to {}",
+                self.path.display(),
+                admin.display()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -3622,33 +3626,34 @@ impl Drop for ParallelScratchWorktree {
         use std::os::fd::AsRawFd;
 
         match &self.ownership {
-            ParallelScratchOwnership::PrivateStage {
-                stage_root,
-                stage_path,
-            } => {
-                cleanup_private_stage(&self.common_dir, stage_root, stage_path);
-            }
+            ParallelScratchOwnership::PreCreate => {}
             ParallelScratchOwnership::OwnedWorktree {
                 admin,
                 dir_fd,
                 dev,
                 ino,
                 token,
-                current_path,
-                stage_root,
             } => {
                 let admin_fd = match open_dir_nofollow(admin) {
                     Ok(fd) => fd,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        if let Some(root) = stage_root {
-                            let _ = std::fs::remove_dir(root);
-                        }
-                        return;
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
                     Err(error) => {
                         eprintln!(
                             "warning: cannot inspect parallel scratch admin {}: {error:#}",
                             admin.display()
+                        );
+                        return;
+                    }
+                };
+                // Acquire Git's `<admin>/HEAD.lock` exclusively before checking
+                // detached state so no concurrent `git switch -c` can repurpose
+                // the checkout between check and deletion.
+                let mut head_lock = match acquire_admin_head_lock(admin_fd.as_raw_fd()) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        eprintln!(
+                            "warning: refusing to remove {} because parallel scratch HEAD lock could not be acquired ({error:#})",
+                            self.path.display()
                         );
                         return;
                     }
@@ -3658,41 +3663,45 @@ impl Drop for ParallelScratchWorktree {
                         .map(|text| {
                             text == parallel_scratch_owner_marker(
                                 &self.common_dir,
-                                current_path,
+                                &self.path,
                                 token,
                             )
                         })
                         .unwrap_or(false);
                 let detached_and_bound =
-                    verify_admin_detached_and_gitdir(admin_fd.as_raw_fd(), current_path)
+                    verify_admin_detached_and_gitdir(admin_fd.as_raw_fd(), admin, &self.path)
                         .unwrap_or(false);
                 let dot_git_ok =
-                    dot_git_points_to_admin(dir_fd.as_raw_fd(), admin).unwrap_or(false);
-                if !token_ok || !detached_and_bound || !dot_git_ok {
+                    dot_git_points_to_admin(dir_fd.as_raw_fd(), &self.path, admin).unwrap_or(false);
+                let path_ok = path_matches_dir_identity(&self.path, *dev, *ino);
+                if !token_ok || !detached_and_bound || !dot_git_ok || !path_ok {
                     eprintln!(
                         "warning: refusing to remove {} because parallel-scratch ownership or detached state changed",
-                        current_path.display()
+                        self.path.display()
                     );
                     return;
                 }
+                // Sever Git worktree linkage while `HEAD.lock` is held and
+                // before enumerating `dir_fd`, preventing any branch switch
+                // from racing directory removal.
+                let _ = unlink_at_ignore_not_found(dir_fd.as_raw_fd(), ".git");
+                let _ = unlink_at_ignore_not_found(admin_fd.as_raw_fd(), "gitdir");
                 // Remove contents strictly through the pinned `dir_fd` so a
-                // replacement directory swapped in at `current_path` can never
+                // replacement directory swapped in at `self.path` can never
                 // be touched.
-                if let Err(error) = remove_dir_contents_at(dir_fd.as_raw_fd()) {
+                if let Err(error) = remove_dir_contents_at(dir_fd.as_raw_fd(), None) {
                     eprintln!(
                         "warning: could not clear parallel scratch worktree {} ({error:#})",
-                        current_path.display()
+                        self.path.display()
                     );
                 }
+                rmdir_if_same_inode(&self.path, *dev, *ino);
+                head_lock.disarm();
                 if let Err(error) = remove_verified_admin_dir(&self.common_dir, admin, admin_fd) {
                     eprintln!(
                         "warning: could not remove parallel scratch admin {} ({error:#})",
                         admin.display()
                     );
-                }
-                rmdir_if_same_inode(current_path, *dev, *ino);
-                if let Some(root) = stage_root {
-                    let _ = std::fs::remove_dir(root);
                 }
             }
         }
@@ -3742,9 +3751,13 @@ fn verify_all_parallel(
     let mut group_by_dir: BTreeMap<PathBuf, usize> = BTreeMap::new();
     for (index, ((_, gate), scratch)) in required.iter().zip(&scratches).enumerate() {
         crate::interruption::check()?;
+        scratch.verify_live_ownership(Some(revision))?;
         let resolved = {
             let _confinement = crate::confinement::Scope::new(&gate.confine);
-            crate::warm_worktree::resolved_build_directory(&scratch.path)?
+            crate::warm_worktree::resolved_build_directory(
+                &scratch.path,
+                Some(&scratch.storage_key),
+            )?
         };
         match resolved {
             Some(dir) => {
@@ -3777,13 +3790,19 @@ fn verify_all_parallel(
                         for index in indices {
                             crate::interruption::check()?;
                             let (name, gate) = required[index];
-                            let scratch_path = scratches[index].path.as_path();
+                            let scratch = &scratches[index];
+                            let scratch_path = scratch.path.as_path();
+                            scratch.verify_live_ownership(Some(revision))?;
                             let _confinement = crate::confinement::Scope::new(&gate.confine);
                             let preparing = Instant::now();
-                            let prepared = crate::warm_worktree::prepare_isolated(scratch_path)?;
+                            let prepared = crate::warm_worktree::prepare_isolated(
+                                scratch_path,
+                                Some(&scratch.storage_key),
+                            )?;
                             let gate_preparation_ms = preparing.elapsed().as_millis() as u64
                                 + if index == 0 { preparation_ms } else { 0 };
                             crate::interruption::check()?;
+                            scratch.verify_live_ownership(Some(revision))?;
                             let environment_identity = match gate.environment.as_deref() {
                                 Some(probe) => {
                                     let run = gates::environment_probe_with_prepared(
@@ -3804,6 +3823,7 @@ fn verify_all_parallel(
                                 None => None,
                             };
                             crate::interruption::check()?;
+                            scratch.verify_live_ownership(Some(revision))?;
                             let before = gitio::worktree_tree(scratch_path)?;
                             let dirt_before = gitio::dirt(scratch_path)?;
                             let commit_tree = gitio::commit_tree(scratch_path, revision)?;
@@ -3845,6 +3865,7 @@ fn verify_all_parallel(
                                 Some(&prepared),
                             )?;
                             drop(prepared);
+                            scratch.verify_live_ownership(None)?;
                             let after = gitio::worktree_tree(scratch_path)?;
                             let post = gitio::fresh_read(|| gitio::head(scratch_path))?;
                             let dirt_after = gitio::dirt(scratch_path)?;
@@ -8455,5 +8476,158 @@ mod pipe_deadline_tests {
         );
         assert!(run.status.success());
         assert!(!run.timed_out);
+    }
+
+    #[test]
+    fn parallel_scratch_head_lock_excludes_branch_switch_and_drop_respects_lock_and_branches() {
+        use std::os::fd::AsRawFd;
+
+        for use_relative in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let run_git = |cwd: &Path, args: &[&str]| {
+                let output = gitio::git_command()
+                    .args(args)
+                    .current_dir(cwd)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            run_git(&repo, &["init", "-q"]);
+            run_git(&repo, &["config", "user.email", "test@example.invalid"]);
+            run_git(&repo, &["config", "user.name", "Tester"]);
+            if use_relative {
+                run_git(&repo, &["config", "worktree.useRelativePaths", "true"]);
+            }
+            std::fs::write(repo.join("file.txt"), "hello\n").unwrap();
+            run_git(&repo, &["add", "file.txt"]);
+            run_git(&repo, &["commit", "-qm", "init"]);
+            let revision = gitio::head(&repo).unwrap();
+            let common_dir = std::fs::canonicalize(gitio::common_dir(&repo).unwrap()).unwrap();
+
+            // Helper creating an owned ParallelScratchWorktree directly.
+            let make_scratch = |name: &str| {
+                let wt = normalize_scratch_path(&temp.path().join(name));
+                let wt_str = wt.display().to_string();
+                run_git(
+                    &repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        "--no-checkout",
+                        &wt_str,
+                        &revision,
+                    ],
+                );
+                let dir_fd = open_dir_nofollow(&wt).unwrap();
+                let (dev, ino) = fstat_fd(dir_fd.as_raw_fd()).unwrap();
+                let admin = resolve_admin_from_dir_fd(dir_fd.as_raw_fd(), &wt).unwrap();
+                let token = ulid::Ulid::new().to_string();
+                write_file_atomic_exclusive_in_dir(
+                    &admin,
+                    PARALLEL_SCRATCH_OWNER_FILE,
+                    parallel_scratch_owner_marker(&common_dir, &wt, &token).as_bytes(),
+                )
+                .unwrap();
+                let raw_fd = dir_fd.as_raw_fd();
+                let lock =
+                    try_acquire_parallel_slot_lock(&temp.path().join(format!("{name}.lock")))
+                        .unwrap()
+                        .unwrap();
+                let scratch = ParallelScratchWorktree {
+                    common_dir: common_dir.clone(),
+                    path: wt.clone(),
+                    storage_key: wt.clone(),
+                    ownership: ParallelScratchOwnership::OwnedWorktree {
+                        admin: admin.clone(),
+                        dir_fd,
+                        dev,
+                        ino,
+                        token,
+                    },
+                    _lock: lock,
+                };
+                run_interruptible_git_at_fd(raw_fd, &["checkout", "HEAD"]).unwrap();
+                scratch.verify_live_ownership(Some(&revision)).unwrap();
+                (scratch, wt, admin)
+            };
+
+            // 1. Holding `<admin>/HEAD.lock` prevents `git switch -c` from
+            // repurposing the detached scratch onto a branch.
+            {
+                let (scratch, wt, admin) = make_scratch("wt-lock-excludes");
+                let admin_fd = open_dir_nofollow(&admin).unwrap();
+                let lock = acquire_admin_head_lock(admin_fd.as_raw_fd()).unwrap();
+                let switch = gitio::git_command()
+                    .args(["switch", "-c", "raced-branch"])
+                    .current_dir(&wt)
+                    .output()
+                    .unwrap();
+                assert!(
+                    !switch.status.success(),
+                    "git switch -c unexpectedly succeeded while HEAD.lock was held"
+                );
+                assert!(is_detached_oid(
+                    &std::fs::read_to_string(admin.join("HEAD")).unwrap()
+                ));
+                drop(lock);
+                assert!(!admin.join("HEAD.lock").exists());
+                drop(admin_fd);
+                drop(scratch);
+                assert!(!wt.exists(), "normal owned scratch was not cleaned up");
+                assert!(!admin.exists(), "normal owned admin dir was not cleaned up");
+            }
+
+            // 2. If `<admin>/HEAD.lock` is already held externally, Drop
+            // refuses cleanup and leaves the worktree and sentinel intact.
+            {
+                let (scratch, wt, admin) = make_scratch("wt-busy-lock");
+                std::fs::write(wt.join("sentinel.txt"), "keep-locked\n").unwrap();
+                std::fs::write(admin.join("HEAD.lock"), "external-git\n").unwrap();
+                drop(scratch);
+                assert_eq!(
+                    std::fs::read_to_string(wt.join("sentinel.txt")).unwrap(),
+                    "keep-locked\n"
+                );
+                assert!(admin.exists());
+                std::fs::remove_file(admin.join("HEAD.lock")).unwrap();
+                run_git(
+                    &repo,
+                    &["worktree", "remove", "--force", wt.to_str().unwrap()],
+                );
+            }
+
+            // 3. If the checkout was switched onto a branch before Drop, Drop
+            // acquires HEAD.lock, sees `ref:`, releases HEAD.lock without
+            // leaking it, and preserves the branch checkout and sentinel.
+            {
+                let (scratch, wt, admin) = make_scratch("wt-switched-branch");
+                run_git(&wt, &["switch", "-c", "kept-branch"]);
+                std::fs::write(wt.join("sentinel.txt"), "keep-branch\n").unwrap();
+                drop(scratch);
+                assert!(
+                    !admin.join("HEAD.lock").exists(),
+                    "Drop leaked HEAD.lock after refusing branch cleanup"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(wt.join("sentinel.txt")).unwrap(),
+                    "keep-branch\n"
+                );
+                assert!(std::fs::read_to_string(admin.join("HEAD"))
+                    .unwrap()
+                    .starts_with("ref: refs/heads/kept-branch"));
+                run_git(
+                    &repo,
+                    &["worktree", "remove", "--force", wt.to_str().unwrap()],
+                );
+            }
+        }
     }
 }

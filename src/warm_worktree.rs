@@ -456,7 +456,15 @@ impl PreparedStorage {
 
 /// The resolved path-stable build directory `.arc/worktrees.toml` selects for
 /// `path`, or `None` when preparation is absent or source-bound.
-pub(crate) fn resolved_build_directory(path: &Path) -> Result<Option<PathBuf>> {
+///
+/// When `storage_key` is provided and no explicit `prepare.directory` is
+/// configured, default path-stable storage is keyed by `storage_key` rather
+/// than the ephemeral checkout path so unique per-run checkouts reuse warm
+/// build outputs per logical slot.
+pub(crate) fn resolved_build_directory(
+    path: &Path,
+    storage_key: Option<&Path>,
+) -> Result<Option<PathBuf>> {
     let text = match fs::read_to_string(path.join(CONFIG)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -476,7 +484,11 @@ pub(crate) fn resolved_build_directory(path: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
-    Ok(Some(stable::resolved_build_directory(&path, &hook)?))
+    Ok(Some(stable::resolved_build_directory_for(
+        &path,
+        storage_key,
+        &hook,
+    )?))
 }
 
 /// Prepare an isolated checkout and hold its build storage lease until the
@@ -485,7 +497,7 @@ pub(crate) fn resolved_build_directory(path: &Path) -> Result<Option<PathBuf>> {
 /// Waits with interruption checks on cross-process build and preparation-cache
 /// leases so concurrent parallel verification invocations serialize shared
 /// storage cleanly and distinct build directories overlap once cache work ends.
-pub(crate) fn prepare_isolated(path: &Path) -> Result<PreparedStorage> {
+pub(crate) fn prepare_isolated(path: &Path, storage_key: Option<&Path>) -> Result<PreparedStorage> {
     crate::interruption::check()?;
     let text = match fs::read_to_string(path.join(CONFIG)) {
         Ok(text) => text,
@@ -508,7 +520,7 @@ pub(crate) fn prepare_isolated(path: &Path) -> Result<PreparedStorage> {
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
     crate::interruption::check()?;
     if hook.mode == Mode::PathStable {
-        return stable::prepare_and_hold(&path, &(hook, timeout));
+        return stable::prepare_and_hold(&path, storage_key, &(hook, timeout));
     }
     let before = Source::observe(&path)?;
     let outcome = run_with_wait(&path, &before, &(hook, timeout), true);

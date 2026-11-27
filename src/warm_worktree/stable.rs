@@ -28,7 +28,11 @@ struct Storage {
     guard: CommandLease,
 }
 
-pub(super) fn resolved_build_directory(path: &Path, hook: &Hook) -> Result<PathBuf> {
+pub(super) fn resolved_build_directory_for(
+    path: &Path,
+    storage_key: Option<&Path>,
+    hook: &Hook,
+) -> Result<PathBuf> {
     let common = fs::canonicalize(gitio::common_dir(path)?)?;
     let build = if let Some(directory) = &hook.directory {
         let candidate = if directory.is_absolute() {
@@ -46,7 +50,7 @@ pub(super) fn resolved_build_directory(path: &Path, hook: &Hook) -> Result<PathB
         let arc = private_directory(&common, "arc")?;
         let cache = private_directory(&arc, "cache")?;
         let stable = private_directory(&cache, "path-stable-worktrees")?;
-        stable.join(source_path_key(path))
+        stable.join(source_path_key(storage_key.unwrap_or(path)))
     };
     if path.starts_with(&build) || common.starts_with(&build) {
         bail!("path-stable build storage must not contain the source checkout or Git common directory");
@@ -56,12 +60,18 @@ pub(super) fn resolved_build_directory(path: &Path, hook: &Hook) -> Result<PathB
 
 impl Storage {
     fn open(path: &Path, hook: &Hook, timeout: u64) -> Result<Self> {
-        Self::open_with_wait(path, hook, timeout, false)
+        Self::open_with_wait(path, None, hook, timeout, false)
     }
 
-    fn open_with_wait(path: &Path, hook: &Hook, timeout: u64, wait: bool) -> Result<Self> {
+    fn open_with_wait(
+        path: &Path,
+        storage_key: Option<&Path>,
+        hook: &Hook,
+        timeout: u64,
+        wait: bool,
+    ) -> Result<Self> {
         let common = fs::canonicalize(gitio::common_dir(path)?)?;
-        let build = resolved_build_directory(path, hook)?;
+        let build = resolved_build_directory_for(path, storage_key, hook)?;
         fs::DirBuilder::new().recursive(true).mode(0o700).create(
             build
                 .parent()
@@ -256,10 +266,11 @@ pub(super) fn configure(
 /// subsequent probing and gate execution.
 pub(super) fn prepare_and_hold(
     path: &Path,
+    storage_key: Option<&Path>,
     (hook, timeout): &(Hook, u64),
 ) -> Result<PreparedStorage> {
     let source = Source::observe(path)?;
-    let mut storage = Storage::open_with_wait(path, hook, *timeout, true)?;
+    let mut storage = Storage::open_with_wait(path, storage_key, hook, *timeout, true)?;
     if storage.prepare_with_wait(path, &source, hook, *timeout, true)? {
         crate::slots::record_built(path)?;
     }
