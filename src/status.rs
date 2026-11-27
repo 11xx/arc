@@ -796,7 +796,7 @@ fn u0_hunks_from_matches(
     hunks
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedHunk {
     start: usize,
     end: usize,
@@ -814,13 +814,88 @@ enum CommitBlobState {
         oid: String,
         hunks: Vec<TrackedHunk>,
     },
-    /// Opaque (binary or non-regular) intermediate state preserving the last
-    /// usable text blob OID and its tracked spans so text restoration projects
-    /// from the pre-opaque state rather than resetting to `fix_commit`.
+    /// Opaque (binary or non-regular) intermediate state preserving every
+    /// reachable parent's last usable `(oid, hunks)` text snapshot so text
+    /// restoration at a merge or later commit checks all saved text ancestors
+    /// symmetrically regardless of parent ordering.
     Unprojectable {
-        last_oid: String,
-        last_hunks: Vec<TrackedHunk>,
+        saved: Vec<(String, Vec<TrackedHunk>)>,
     },
+}
+
+fn push_unique_saved(
+    dest: &mut Vec<(String, Vec<TrackedHunk>)>,
+    oid: String,
+    hunks: Vec<TrackedHunk>,
+) {
+    if !dest.iter().any(|(o, h)| o == &oid && h == &hunks) {
+        dest.push((oid, hunks));
+    }
+}
+
+fn collect_saved_from_state(state: &CommitBlobState, dest: &mut Vec<(String, Vec<TrackedHunk>)>) {
+    match state {
+        CommitBlobState::Tracked { oid, hunks } => {
+            push_unique_saved(dest, oid.clone(), hunks.clone());
+        }
+        CommitBlobState::Unprojectable { saved } => {
+            for (oid, hunks) in saved {
+                push_unique_saved(dest, oid.clone(), hunks.clone());
+            }
+        }
+    }
+}
+
+/// Select a symmetric `Tracked` result from candidate `(source_oid, hunks)`
+/// projections onto `target_oid`: prefer any exact `source_oid == target_oid`
+/// match first (choosing a non-surviving match if multiple exist), otherwise
+/// project from all candidates and prefer any non-surviving projection so
+/// merge parent ordering cannot mask a rollback.
+fn resolve_text_from_candidates(
+    cwd: &Path,
+    target_oid: &str,
+    candidates: &[(String, Vec<TrackedHunk>)],
+) -> Option<Vec<TrackedHunk>> {
+    let target_bytes = gitio::read_blob(cwd, target_oid).ok()?;
+    if target_bytes.contains(&0) {
+        return None;
+    }
+    let target_lines = split_lines(&target_bytes);
+
+    let mut exact_match: Option<Vec<TrackedHunk>> = None;
+    for (src_oid, src_hunks) in candidates {
+        if src_oid == target_oid {
+            let survives = src_hunks
+                .iter()
+                .all(|tracked| tracked_hunk_survives(tracked, &target_lines));
+            if !survives {
+                return Some(src_hunks.clone());
+            }
+            if exact_match.is_none() {
+                exact_match = Some(src_hunks.clone());
+            }
+        }
+    }
+    if exact_match.is_some() {
+        return exact_match;
+    }
+
+    let mut projected_first: Option<Vec<TrackedHunk>> = None;
+    for (src_oid, src_hunks) in candidates {
+        let mut projected = src_hunks.clone();
+        if project_hunks_between_blobs(cwd, src_oid, target_oid, &mut projected).is_some() {
+            let survives = projected
+                .iter()
+                .all(|tracked| tracked_hunk_survives(tracked, &target_lines));
+            if !survives {
+                return Some(projected);
+            }
+            if projected_first.is_none() {
+                projected_first = Some(projected);
+            }
+        }
+    }
+    projected_first
 }
 
 fn init_tracked_hunks(
@@ -1121,12 +1196,16 @@ fn text_blob_survives_along_history(
 
         // Prefer any reachable parent whose tree entry for this path equals
         // `commit`'s entry AND has usable tracked spans (so `-s ours` merges
-        // discarding a binary side branch inherit the first parent's exact
-        // tracked text state, including rollbacks).
-        let mut inherited_tracked = None;
-        let mut inherited_unprojectable = None;
-        let mut changed_tracked: Option<(&str, String, String)> = None;
-        let mut changed_unprojectable: Option<(&str, String, String)> = None;
+        // discarding a binary or reverted side branch inherit the unchanged
+        // parent's exact tracked text state). When `commit` changes the entry
+        // relative to every reachable parent (including merges of opaque
+        // parents), evaluate all reachable parents' saved text states
+        // symmetrically, preferring exact saved-OID matches before projecting.
+        let mut inherited_tracked: Vec<(&str, &Vec<TrackedHunk>)> = Vec::new();
+        let mut has_inherited_unprojectable = false;
+        let mut changed_entry: Option<(String, String)> = None;
+        let mut tracked_candidates: Vec<(String, Vec<TrackedHunk>)> = Vec::new();
+        let mut all_saved: Vec<(String, Vec<TrackedHunk>)> = Vec::new();
         for &parent in &reachable {
             let key = (parent.to_string(), commit.clone());
             let entries = match edge_diffs.entry(key) {
@@ -1138,96 +1217,75 @@ fn text_blob_survives_along_history(
                     vac.insert(diff)
                 }
             };
+            collect_saved_from_state(&states[parent], &mut all_saved);
             match entries.iter().find(|e| e.path == entry.path) {
                 None => match &states[parent] {
-                    CommitBlobState::Tracked { .. } => {
-                        inherited_tracked = Some(states[parent].clone());
-                        break;
+                    CommitBlobState::Tracked { oid, hunks } => {
+                        inherited_tracked.push((oid.as_str(), hunks));
                     }
                     CommitBlobState::Unprojectable { .. } => {
-                        if inherited_unprojectable.is_none() {
-                            inherited_unprojectable = Some(states[parent].clone());
-                        }
+                        has_inherited_unprojectable = true;
                     }
                 },
-                Some(changed) => match &states[parent] {
-                    CommitBlobState::Tracked { .. } => {
-                        if changed_tracked.is_none() {
-                            changed_tracked =
-                                Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
-                        }
+                Some(changed) => {
+                    if changed_entry.is_none() {
+                        changed_entry = Some((changed.new_mode.clone(), changed.new_oid.clone()));
                     }
-                    CommitBlobState::Unprojectable { .. } => {
-                        if changed_unprojectable.is_none() {
-                            changed_unprojectable =
-                                Some((parent, changed.new_mode.clone(), changed.new_oid.clone()));
-                        }
+                    if let CommitBlobState::Tracked { oid, hunks } = &states[parent] {
+                        push_unique_saved(&mut tracked_candidates, oid.clone(), hunks.clone());
                     }
-                },
+                }
             }
         }
 
-        let next_state = if let Some(state) = inherited_tracked {
-            state
-        } else if let Some(state) = inherited_unprojectable {
-            state
-        } else if let Some((parent, c_mode, c_oid)) = changed_tracked {
-            if let CommitBlobState::Tracked { oid: p_oid, hunks } = &states[parent] {
-                if !is_regular_blob_mode(&c_mode) {
-                    CommitBlobState::Unprojectable {
-                        last_oid: p_oid.clone(),
-                        last_hunks: hunks.clone(),
-                    }
-                } else {
-                    let mut projected = hunks.clone();
-                    if project_hunks_between_blobs(cwd, p_oid, &c_oid, &mut projected).is_some() {
-                        CommitBlobState::Tracked {
-                            oid: c_oid,
-                            hunks: projected,
-                        }
-                    } else {
-                        CommitBlobState::Unprojectable {
-                            last_oid: p_oid.clone(),
-                            last_hunks: hunks.clone(),
-                        }
-                    }
-                }
+        let next_state = if !inherited_tracked.is_empty() {
+            let chosen_oid = inherited_tracked[0].0.to_string();
+            let chosen_hunks = if inherited_tracked.len() == 1 {
+                inherited_tracked[0].1.clone()
+            } else if let Ok(bytes) = gitio::read_blob(cwd, &chosen_oid) {
+                let lines = split_lines(&bytes);
+                inherited_tracked
+                    .iter()
+                    .find(|(_, hunks)| {
+                        !hunks
+                            .iter()
+                            .all(|tracked| tracked_hunk_survives(tracked, &lines))
+                    })
+                    .unwrap_or(&inherited_tracked[0])
+                    .1
+                    .clone()
             } else {
-                continue;
+                inherited_tracked[0].1.clone()
+            };
+            CommitBlobState::Tracked {
+                oid: chosen_oid,
+                hunks: chosen_hunks,
             }
-        } else if let Some((parent, c_mode, c_oid)) = changed_unprojectable {
-            if let CommitBlobState::Unprojectable {
-                last_oid,
-                last_hunks,
-            } = &states[parent]
-            {
-                if !is_regular_blob_mode(&c_mode) {
-                    CommitBlobState::Unprojectable {
-                        last_oid: last_oid.clone(),
-                        last_hunks: last_hunks.clone(),
-                    }
-                } else if c_oid == *last_oid {
-                    CommitBlobState::Tracked {
-                        oid: c_oid,
-                        hunks: last_hunks.clone(),
-                    }
-                } else {
-                    let mut projected = last_hunks.clone();
-                    if project_hunks_between_blobs(cwd, last_oid, &c_oid, &mut projected).is_some()
-                    {
-                        CommitBlobState::Tracked {
-                            oid: c_oid,
-                            hunks: projected,
-                        }
-                    } else {
-                        CommitBlobState::Unprojectable {
-                            last_oid: last_oid.clone(),
-                            last_hunks: last_hunks.clone(),
-                        }
-                    }
-                }
+        } else if has_inherited_unprojectable {
+            CommitBlobState::Unprojectable { saved: all_saved }
+        } else if let Some((c_mode, c_oid)) = changed_entry {
+            if !is_regular_blob_mode(&c_mode) {
+                CommitBlobState::Unprojectable { saved: all_saved }
             } else {
-                continue;
+                // Check exact saved-OID matches across ALL reachable parents
+                // first (including opaque parents), then project symmetrically
+                // from Tracked parents if any exist, else from all saved states.
+                let exact_sources: Vec<(String, Vec<TrackedHunk>)> = all_saved
+                    .iter()
+                    .filter(|(oid, _)| oid == &c_oid)
+                    .cloned()
+                    .collect();
+                let resolved = if !exact_sources.is_empty() {
+                    resolve_text_from_candidates(cwd, &c_oid, &exact_sources)
+                } else if !tracked_candidates.is_empty() {
+                    resolve_text_from_candidates(cwd, &c_oid, &tracked_candidates)
+                } else {
+                    resolve_text_from_candidates(cwd, &c_oid, &all_saved)
+                };
+                match resolved {
+                    Some(hunks) => CommitBlobState::Tracked { oid: c_oid, hunks },
+                    None => CommitBlobState::Unprojectable { saved: all_saved },
+                }
             }
         } else {
             continue;
@@ -1237,18 +1295,10 @@ fn text_blob_survives_along_history(
 
     let final_hunks = match states.get(head) {
         Some(CommitBlobState::Tracked { hunks, .. }) => hunks.clone(),
-        Some(CommitBlobState::Unprojectable {
-            last_oid,
-            last_hunks,
-        }) => {
-            if last_oid == head_oid {
-                last_hunks.clone()
-            } else {
-                let mut projected = last_hunks.clone();
-                if project_hunks_between_blobs(cwd, last_oid, head_oid, &mut projected).is_none() {
-                    return false;
-                }
-                projected
+        Some(CommitBlobState::Unprojectable { saved }) => {
+            match resolve_text_from_candidates(cwd, head_oid, saved) {
+                Some(hunks) => hunks,
+                None => return false,
             }
         }
         None => {

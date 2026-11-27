@@ -2078,3 +2078,97 @@ fn binary_detour_after_adjacent_split_preserves_guard_span_on_restoration() {
         "restoring text with GUARD_V2 must stay resolved: {status_refined}"
     );
 }
+
+#[test]
+fn merge_of_two_opaque_parents_restoring_second_parent_text_is_parent_order_symmetric() {
+    for swap_parents in [false, true] {
+        let repo = Repo::new();
+        let slug = if swap_parents {
+            "opaque-merge-swapped"
+        } else {
+            "opaque-merge-normal"
+        };
+        let begin = stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let change = opened_change_id(&begin);
+        let wt = repo.home.join(format!(".worktrees/repo-{slug}"));
+
+        repo.commit(&wt, "f.txt", "A\nB\nC\n", "feat: initial");
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let fid = stdout(repo.arc(&wt).args([
+            "finding",
+            slug,
+            "--summary",
+            "insert guard before B",
+            "--blocking",
+            "--severity",
+            "major",
+        ]))
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+        repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\n", "fix: insert guard");
+        let fix = repo.head(&wt);
+        stdout(repo.arc(&wt).args([
+            "resolve", slug, &fid, "--status", "resolved", "--commit", &fix,
+        ]));
+
+        // Branch 1: append a tail line, then make the file binary.
+        git(&wt, &["checkout", "-b", "opaque-p1", &fix]);
+        repo.commit(&wt, "f.txt", "A\nGUARD\nB\nC\nTAIL\n", "chore: append tail");
+        fs::write(wt.join("f.txt"), b"A\x00p1\nGUARD\nB\nC\nTAIL\n").unwrap();
+        git(&wt, &["add", "f.txt"]);
+        git(&wt, &["commit", "-m", "chore: p1 binary"]);
+        let p1 = repo.head(&wt);
+
+        // Branch 2: split B while keeping GUARD, delete only GUARD in a separate commit,
+        // then make the file binary.
+        git(&wt, &["checkout", "-b", "opaque-p2", &fix]);
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nGUARD\nB part one\nB part two\nC\n",
+            "refactor: split B keeping guard",
+        );
+        repo.commit(
+            &wt,
+            "f.txt",
+            "A\nB part one\nB part two\nC\n",
+            "chore: delete guard",
+        );
+        let p2_text_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+        fs::write(wt.join("f.txt"), b"A\x00p2\nB part one\nB part two\nC\n").unwrap();
+        git(&wt, &["add", "f.txt"]);
+        git(&wt, &["commit", "-m", "chore: p2 binary"]);
+        let p2 = repo.head(&wt);
+
+        // Create the merge of the two distinct binary parents with the file set
+        // to parent 2's exact pre-binary text (with GUARD deleted).
+        let (first_p, second_p) = if swap_parents { (&p2, &p1) } else { (&p1, &p2) };
+        let merge_commit = git_out(
+            &wt,
+            &[
+                "commit-tree",
+                &p2_text_tree,
+                "-p",
+                first_p,
+                "-p",
+                second_p,
+                "-m",
+                "merge: restore p2 pre-binary text",
+            ],
+        );
+        git(&wt, &["checkout", &format!("arc/{slug}")]);
+        git(&wt, &["reset", "--hard", &merge_commit]);
+        git(&wt, &["branch", "-D", "opaque-p1", "opaque-p2"]);
+
+        stdout(repo.arc(&wt).args(["snapshot", slug]));
+        let status = json_stdout(repo.arc(&wt).args(["status", &change, "--json"]));
+        assert_eq!(
+            status["open_blocking_findings"],
+            serde_json::json!([fid]),
+            "merge of opaque parents restoring p2 text without guard must reopen (swap_parents={swap_parents}): {status}"
+        );
+        repo.arc(&wt).args(["check", &change]).assert().code(2);
+    }
+}
