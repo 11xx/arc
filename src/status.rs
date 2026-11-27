@@ -2894,7 +2894,7 @@ pub(crate) fn role_trailer_advisories(
             ))
         }
     };
-    missing_role_trailers_advisory(state, head, policy, danger, &messages)
+    missing_role_trailers_advisory(state, cwd, head, policy, danger, &messages)
         .into_iter()
         .chain(placeholder_role_trailers_advisory(&messages))
         .collect()
@@ -2906,6 +2906,7 @@ pub(crate) fn role_trailer_advisories(
 /// in `arc trailers`, and no remedy appends a line that names nobody.
 fn missing_role_trailers_advisory(
     state: &ChangeState,
+    cwd: &Path,
     head: &str,
     policy: &PolicyFile,
     danger: &DangerScope,
@@ -2923,22 +2924,37 @@ fn missing_role_trailers_advisory(
     if missing.is_empty() {
         return None;
     }
-    let first_index = messages
+    let first = messages
         .iter()
-        .position(|(commit, _)| missing.iter().any(|(_, commits)| commits.contains(commit)))?;
-    let first = messages[first_index].0.as_str();
+        .find(|(commit, _)| missing.iter().any(|(_, commits)| commits.contains(commit)))
+        .map(|(commit, _)| commit.as_str())?;
     let details = missing
         .iter()
         .map(|(line, commits)| format!("{line} (missing on {})", commits.join(", ")))
         .collect::<Vec<_>>()
         .join("; ");
-    // A bulk `arc rewrite trailers --from <first> --append ...` touches every
-    // commit from `first` through `head`, so offer it only when every missing
-    // line is applicable to every commit in that suffix.
-    let bulk_safe = messages[first_index..].iter().all(|(_, message)| {
-        let applicable = crate::trailers::applicable_for_commit(message, &projected.trailers, &[]);
-        missing.iter().all(|(line, _)| applicable.contains(line))
-    });
+    // A bulk `arc rewrite trailers --from <first> --append ...` rewrites every
+    // commit returned by `gitio::commits_from(cwd, first, head)` — which on a
+    // merge DAG can include sibling commits outside `first`'s ancestry. Offer
+    // that alternative only when the exact rewrite set is readable, stays
+    // inside `target..head`, and accepts every missing line without violating
+    // the single-participant rule.
+    let by_commit: BTreeMap<&str, &[u8]> = messages
+        .iter()
+        .map(|(commit, message)| (commit.as_str(), message.as_slice()))
+        .collect();
+    let bulk_safe = gitio::commits_from(cwd, first, head)
+        .ok()
+        .filter(|range| !range.is_empty())
+        .is_some_and(|range| {
+            range.iter().all(|commit| {
+                by_commit.get(commit.as_str()).is_some_and(|message| {
+                    let applicable =
+                        crate::trailers::applicable_for_commit(message, &projected.trailers, &[]);
+                    missing.iter().all(|(line, _)| applicable.contains(line))
+                })
+            })
+        });
     let remedy = if bulk_safe {
         let append = missing
             .iter()

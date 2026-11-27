@@ -1211,3 +1211,123 @@ fn missing_advisory_omits_unsafe_bulk_append_on_mixed_range() {
         "{after}"
     );
 }
+
+/// On a merge DAG where an older solo sibling is merged with a newer
+/// multi-participant sibling, `commits_from(head, newer_sibling)` also
+/// rewrites the older solo sibling. The advisory must validate the exact
+/// `commits_from` set, omit the unsafe bulk `--from/--append` command, and
+/// leave every commit (including the solo sibling) clean after `--sync`.
+#[test]
+fn missing_advisory_omits_unsafe_bulk_append_on_merged_solo_sibling() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "merged-sibling-safety");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "claude:lead#high",
+        "--orchestrated-by",
+        "claude:lead#high",
+    ]));
+    let base = repo.head(&wt);
+
+    // Older sibling: solo lead commit (Planned-by/Orchestrated-by inapplicable).
+    git(&wt, &["checkout", "-b", "older-sibling", &base]);
+    commit_file(
+        &wt,
+        "older.txt",
+        "feat: older solo sibling\n\nImplemented-by: claude:lead#high",
+    );
+    let older_sibling = repo.head(&wt);
+
+    // Newer sibling on the change branch: multi-participant commit.
+    git(&wt, &["checkout", "arc/merged-sibling-safety"]);
+    commit_file(
+        &wt,
+        "newer.txt",
+        "feat: newer multi-participant sibling\n\nImplemented-by: claude:lead#high\nImplemented-by: codex:worker#medium",
+    );
+    let newer_sibling = repo.head(&wt);
+
+    // Merge the older solo sibling into the change branch with both
+    // participants on the merge commit, then delete the temporary branch ref.
+    git(
+        &wt,
+        &[
+            "merge",
+            "--no-ff",
+            "older-sibling",
+            "-m",
+            "merge: combine siblings\n\nImplemented-by: claude:lead#high\nImplemented-by: codex:worker#medium",
+        ],
+    );
+    git(&wt, &["branch", "-D", "older-sibling"]);
+    stdout(repo.arc(&wt).args(["snapshot", &change]));
+
+    let before = json_stdout_any_status(repo.arc(&wt).args(["check", &change, "--json"]));
+    let detail = advisory(&before, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("expected missing advisory on merged siblings: {before}"));
+    assert!(detail.contains(&newer_sibling), "{detail}");
+    assert!(
+        !detail.contains(&older_sibling),
+        "older solo sibling must not be reported missing Planned-by/Orchestrated-by: {detail}"
+    );
+    assert!(detail.contains("arc rewrite trailers --sync"), "{detail}");
+    assert!(
+        !detail.contains("--from") && !detail.contains("--append"),
+        "advisory must omit bulk --from/--append when commits_from includes a solo merged sibling: {detail}"
+    );
+
+    stdout(
+        repo.arc(&wt)
+            .args(["rewrite", "trailers", "--sync", "--no-sign"]),
+    );
+    let commits = git_out(
+        &wt,
+        &["rev-list", "--topo-order", "--reverse", "master..HEAD"],
+    );
+    let commits: Vec<&str> = commits.lines().collect();
+    assert_eq!(commits.len(), 3, "{commits:?}");
+    let mut saw_solo_untouched = false;
+    let mut saw_multi_stamped = 0usize;
+    for rev in &commits {
+        let msg = git_out(&wt, &["show", "-s", "--format=%B", rev]);
+        if msg.contains("older solo sibling") {
+            assert!(
+                !msg.contains("Planned-by:") && !msg.contains("Orchestrated-by:"),
+                "older solo sibling must not gain Planned-by or Orchestrated-by:\n{msg}"
+            );
+            saw_solo_untouched = true;
+        } else {
+            assert!(
+                msg.contains("Planned-by: claude:lead#high")
+                    && msg.contains("Orchestrated-by: claude:lead#high"),
+                "multi-participant commit must gain Planned-by and Orchestrated-by:\n{msg}"
+            );
+            saw_multi_stamped += 1;
+        }
+        let checked = repo
+            .arc(&wt)
+            .args(["instructions", "git", "--check", "-"])
+            .write_stdin(msg)
+            .output()
+            .unwrap();
+        assert_eq!(checked.status.code(), Some(0));
+        assert!(
+            checked.stdout.is_empty(),
+            "synced commit {rev} must have zero convention issues: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+    }
+    assert!(saw_solo_untouched);
+    assert_eq!(saw_multi_stamped, 2);
+
+    let after = json_stdout_any_status(repo.arc(&wt).args(["check", &change, "--json"]));
+    assert_eq!(
+        advisory(&after, "missing-contribution-trailers"),
+        None,
+        "{after}"
+    );
+}

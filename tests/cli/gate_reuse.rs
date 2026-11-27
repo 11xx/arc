@@ -795,3 +795,77 @@ fn a_commit_bound_carry_rejects_target_rollback_and_against_older_ancestor() {
         "evidence without recorded destination provenance must not carry across rewrites"
     );
 }
+
+/// Claim: direct verification pins its recorded `target_revision` against Git
+/// garbage collection so rolling the target back, pruning unreferenced objects,
+/// exporting the change bundle, and importing into a fresh receiver all succeed.
+#[test]
+fn a_direct_verification_target_revision_survives_gc_and_imports_cleanly() {
+    let repo = Repo::new();
+    declare(
+        &repo,
+        &[(
+            "history",
+            format!(
+                "command = {:?}\nbinds = \"commit\"",
+                counting(&repo, "history", "true")
+            ),
+        )],
+    );
+    let rev_a = repo.head(&repo.root);
+    let (id, worktree, _) = change_with_patchset(&repo, "gc-target-rev");
+
+    // Advance master to a sibling commit B before running the direct gate.
+    repo.commit(&repo.root, "sibling.txt", "sibling\n", "feat: sibling B");
+    let rev_b = repo.head(&repo.root);
+    assert_ne!(rev_a, rev_b);
+
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+
+    // Roll master back to A, expire reflogs, and aggressively prune objects.
+    git(&repo.root, &["reset", "--hard", &rev_a]);
+    git(&repo.root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&repo.root, &["gc", "--prune=now"]);
+    assert_eq!(
+        git_out(&repo.root, &["cat-file", "-t", &rev_b]),
+        "commit",
+        "recorded target_revision must remain pinned against git gc"
+    );
+
+    // Export the bundle, deliver Git objects, and import into a fresh receiver.
+    let bundle = repo.home.join("gc-target-rev.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+
+    // Receiver must also retain target_revision even after delivery refs are
+    // removed and git gc runs.
+    let delivered = git_out(
+        &receiver.root,
+        &["for-each-ref", "--format=%(refname)", "refs/delivered/"],
+    );
+    for refname in delivered.lines().filter(|line| !line.is_empty()) {
+        git(&receiver.root, &["update-ref", "-d", refname]);
+    }
+    git(
+        &receiver.root,
+        &["reflog", "expire", "--expire=now", "--all"],
+    );
+    git(&receiver.root, &["gc", "--prune=now"]);
+    assert_eq!(
+        git_out(&receiver.root, &["cat-file", "-t", &rev_b]),
+        "commit",
+        "receiver import must retain target_revision against git gc"
+    );
+}

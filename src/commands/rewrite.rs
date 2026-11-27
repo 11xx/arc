@@ -284,11 +284,10 @@ pub(crate) fn sync_change_trailers(
             }
         },
     };
-    let mut range = gitio::commits_from(&cwd, &from, &head)?;
-    if options.from.is_none() {
-        let own_set: BTreeSet<&str> = own.iter().map(String::as_str).collect();
-        range.retain(|commit| own_set.contains(commit.as_str()));
-    }
+    let range = match options.from {
+        Some(_) => gitio::commits_from(&cwd, &from, &head)?,
+        None => own,
+    };
     if range.is_empty() {
         bail!("{from} is not an ancestor of {branch}");
     }

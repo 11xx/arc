@@ -552,6 +552,18 @@ fn import_events(
     let mut pinned_observed = BTreeSet::new();
     for event in &validated.events {
         if let Some(typed) = &event.typed {
+            if let Payload::VerificationRecorded {
+                target_revision: Some(target),
+                ..
+            } = &typed.payload
+            {
+                if gitio::held_commit(&ctx.cwd, target)? {
+                    pins.push((
+                        gitio::target_retention_ref(&validated.bundle.change_id, target),
+                        target.clone(),
+                    ));
+                }
+            }
             for commit in crate::forge_round_trip::disclosure_commits(&typed.payload) {
                 if gitio::held_commit(&ctx.cwd, commit)? {
                     pins.push((

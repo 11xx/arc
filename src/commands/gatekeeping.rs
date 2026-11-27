@@ -3428,6 +3428,7 @@ fn record_verifications(
             _ => String::new(),
         };
         let captured_tree = item.tested_tree.clone();
+        let captured_target = item.target_revision.clone();
         if let Some(budget) = item.timing.budget_at_run.as_ref().and_then(|b| b.budget_ms) {
             let mut recent = std::iter::once(item.timing.run_ms)
                 .chain(
@@ -3500,7 +3501,8 @@ fn record_verifications(
             // naming a revision this repository does not have.
             tree: gitio::commit_tree(&ctx.cwd, &revision).ok(),
             against_target: item.against_target,
-            target_revision: item.target_revision,
+            // Set below, once the target commit is pinned.
+            target_revision: None,
             landing: item.landing,
             // Set below, once the tree is pinned.
             tested_tree: None,
@@ -3554,7 +3556,40 @@ fn record_verifications(
                 }
             }
         }
-        store.append_local_event(&mut ev)?;
+        // A recorded `target_revision` becomes a cited target-commit object in
+        // exported bundles, so record it only once a verification pin keeps
+        // the commit reachable across target rewinds and Git garbage
+        // collection.
+        let mut created_target_pin: Option<(String, String)> = None;
+        if let Some(target) = &captured_target {
+            let name = gitio::target_retention_ref(change_id, target);
+            let existed = gitio::ref_value(&ctx.cwd, &name).ok().flatten().is_some();
+            match gitio::update_ref(&ctx.cwd, &name, target) {
+                Ok(()) => {
+                    if !existed {
+                        created_target_pin = Some((name, target.clone()));
+                    }
+                    if let Payload::VerificationRecorded {
+                        target_revision, ..
+                    } = &mut ev.payload
+                    {
+                        *target_revision = Some(target.clone());
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "warning: could not keep verification destination {target} reachable \
+                         ({error:#}); recording this run without destination provenance"
+                    );
+                }
+            }
+        }
+        if let Err(error) = store.append_local_event(&mut ev) {
+            if let Some((name, target)) = created_target_pin {
+                let _ = gitio::git(&ctx.cwd, &["update-ref", "-d", &name, &target]);
+            }
+            return Err(error);
+        }
         *recorded += 1;
         if let Payload::VerificationRecorded {
             tested_tree: Some(tree),

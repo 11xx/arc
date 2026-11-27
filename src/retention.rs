@@ -87,6 +87,13 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
                     &raise.target_revision,
                 );
             }
+            if let Payload::VerificationRecorded {
+                target_revision: Some(target),
+                ..
+            } = &event.payload
+            {
+                add(&event.event_id, "verification destination".into(), target);
+            }
             if let Payload::PatchsetAdded {
                 patchset_id, head, ..
             } = &event.payload

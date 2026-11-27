@@ -2367,6 +2367,15 @@ pub fn landing_retention_ref(change_id: &str, commit: &str) -> String {
     format!("refs/arc/tree/{change_id}/landing-{commit}")
 }
 
+/// The ref that keeps a direct verification's recorded destination commit
+/// reachable across target rewinds and Git garbage collection. Named by the
+/// commit itself so repeated gate runs at one destination share one pin, and
+/// released alongside the change's other verification pins on close when
+/// reachable from the integrated commit.
+pub fn target_retention_ref(change_id: &str, commit: &str) -> String {
+    format!("refs/arc/tree/{change_id}/target-{commit}")
+}
+
 /// Where every commit arc holds as evidence of what was read lives.
 pub const RETAINED_PREFIX: &str = "refs/arc/retained/";
 
