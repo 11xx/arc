@@ -213,6 +213,7 @@ fn candidate_declarations(
     if !errors.is_empty() {
         bail!("invalid candidate budgets: {}", errors.join("; "));
     }
+    declarations.gates.ensure_runnable(None)?;
     Ok(declarations)
 }
 
@@ -275,6 +276,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         let before = gitio::worktree_tree(&scratch.path)?;
         let clean =
             before == tree && gitio::dirt(&scratch.path).is_ok_and(|d| !d.tracked && !d.untracked);
+        let env = crate::gate_trailers::GateCommandEnv::for_gate(gate);
         let mut run = run_gate_budgeted(
             &gate.command,
             gate.timings.as_deref(),
@@ -285,6 +287,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
             crate::exclusive::Request::for_gate(gate)
                 .as_ref()
                 .map(|request| (request, st.change_id.as_str(), name.as_str())),
+            &env,
         )?;
         let duration_ms = started.elapsed().as_millis() as u64;
         run.timing.work_tree = Some(Box::new(crate::gate_work::Tree {

@@ -3960,6 +3960,27 @@ CONTRIBUTION TRAILERS
                        when a role key carries a malformed or placeholder
                        value.
 
+    Gate trailers (`arc-gate-trailers/1`):
+    Commits in a change's `merge-base..head` range (against its target branch,
+    never a stale recorded base) may declare gate inputs in their final trailer
+    block:
+      Witness: <name>             one to three distinct single-token witness
+                                  names, deduplicated in first-seen order
+      Witness: none (<REASON>)    explicit exemption with a non-empty
+                                  parenthesised reason; cannot mix with named
+                                  witnesses
+      Change-size: interface      selects a gate's declared `interface_budget`;
+                                  any other value is refused
+    Invalid, empty, multiline, mixed, or excessive (> 3 distinct) declarations
+    refuse `arc verify`, `arc check`, `arc integrate`, and `arc land`, and
+    report as `gate-trailers-invalid` in `arc doctor`.
+    Valid declarations bind into verification-reuse identity, so changing
+    `Witness:` or `Change-size:` trailers invalidates prior passes even at an
+    unchanged tree. Executed gates receive `ARC_WITNESSES` (newline-separated
+    witness names or `none (<REASON>)`) and `ARC_CHANGE_SIZE` when declared;
+    both are unset when absent. Target-branch invariant list entries from a
+    gate's `invariants` file are passed in `ARC_INVARIANTS` (unset when absent).
+
 HISTORY REWRITES
     arc rewrite sign [--key <id>] [--from <rev>] [--include-shared]
                      [--dry-run] [--retag]
@@ -5844,6 +5865,8 @@ GATES
     events = ["integration"]           omitted: integration and publication
     timeout = "10m"                     s, m, or h; omitted: no declared timeout
     budget = "2.5s"                     command wall limit for acceptance
+    interface_budget = "10s"            limit for Change-size: interface
+    invariants = "<path>"               target-branch list; ARC_INVARIANTS
     timings = "checks.tsv"             optional observations; guide gate-costs
     paths = ["src/", "tests/"]           omitted or empty: every non-inert path
     concurrent = true                   measured batch; arc guide gates-together
@@ -5857,6 +5880,8 @@ GATES
                                         older arc reads it
 
   A `bypass` key has no effect: doctor reports it and check warns to remove it.
+  Unknown `.arc/gates.toml` keys refuse. `interface_budget` requires `>= budget`;
+  `invariants` reads target's list and binds reuse (`arc guide contributions`).
 
   Budget durations accept positive whole milliseconds with ms, s, m or h
   units, including decimal forms such as 2.5s and 0.001s. Overflow and precision
@@ -7333,6 +7358,7 @@ SCHEMAS
     `arc-workspace-watch-request/1`  arc workspace watch, one per stdin line
     `arc-correspondence/1`           arc close --correspondence
     `arc-review-ladder/1`            .arc/review-ladder.toml; review-ladder import|show --json
+    `arc-gate-trailers/1`            Witness: and Change-size: commit trailers (arc guide contributions)
 
   `arc cost evidence` writes `tapes-attribution-evidence/1`, a format tapes
   owns and versions; this rule counts the shapes arc defines, so that file

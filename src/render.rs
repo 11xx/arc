@@ -160,6 +160,9 @@ fn declaration_notes(report: &StatusReport) -> String {
     for error in &report.budget_errors {
         let _ = writeln!(out, "{error}");
     }
+    for error in &report.gate_declaration_errors {
+        let _ = writeln!(out, "{error}");
+    }
     for suspension in &report.budget_suspensions {
         let _ = writeln!(out, "{}", suspension.describe());
     }
@@ -1772,6 +1775,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             }
             Blocker::GatesNotGreen => {
                 for error in &report.budget_errors {
+                    let _ = writeln!(out, "  {error}");
+                }
+                for error in &report.gate_declaration_errors {
                     let _ = writeln!(out, "  {error}");
                 }
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {

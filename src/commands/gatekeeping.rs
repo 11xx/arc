@@ -35,6 +35,8 @@ struct CheckOutput<'a> {
     gates: &'a [crate::status::GateStatus],
     budget_raises: &'a [crate::gate_raise::Applicability],
     budget_errors: &'a [String],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    gate_declaration_errors: &'a [String],
     budget_rules: &'a Option<crate::gate_budget::BudgetRules>,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_context: Option<&'a crate::review_context::ReviewContext>,
@@ -106,6 +108,7 @@ struct VerificationInput {
     declaration: Option<String>,
     budget: Option<crate::gate_budget::Declared>,
     exclusive: Option<crate::exclusive::Request>,
+    env: crate::gate_trailers::GateCommandEnv,
     preparation_ms: u64,
     run_id: Option<String>,
     probe: Option<ProbeEvidenceRef>,
@@ -545,6 +548,7 @@ fn verify_with_landing(
                 declaration: None,
                 budget: None,
                 exclusive: None,
+                env: Default::default(),
                 preparation_ms: 0,
                 run_id: None,
                 probe: Some(ProbeEvidenceRef {
@@ -608,6 +612,8 @@ fn verify_with_landing(
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
         }
+        let selected_names: Vec<&str> = required.iter().map(|(name, _)| name.as_str()).collect();
+        gates.ensure_runnable(Some(&selected_names))?;
         let head = gitio::fresh_read(|| gitio::head(&run_ctx.cwd))?;
         let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
         if parallel {
@@ -749,6 +755,7 @@ fn verify_with_landing(
                     timings: gate.timings.clone(),
                     budget: Some(gate.declared_budget()),
                     exclusive: crate::exclusive::Request::for_gate(gate),
+                    env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
                     preparation_ms: std::mem::take(&mut preparation_ms),
                     run_id: Some(run_id.clone()),
                     probe: None,
@@ -778,6 +785,7 @@ fn verify_with_landing(
         timeout,
         environment: declared_environment,
         exclusive,
+        env,
         declaration,
         budget,
         adopt_budget_format,
@@ -872,6 +880,7 @@ fn verify_with_landing(
             declaration,
             budget,
             exclusive,
+            env,
             preparation_ms,
             run_id,
             probe: None,
@@ -1175,6 +1184,8 @@ fn verify_against(
     if required.is_empty() {
         bail!("no gates declared for profile {}", st.profile);
     }
+    let selected_names: Vec<&str> = required.iter().map(|(name, _)| name.as_str()).collect();
+    declarations.ensure_runnable(Some(&selected_names))?;
     if declarations.has_budgets() {
         store.adopt_budgets()?;
     }
@@ -1339,6 +1350,7 @@ fn verify_against(
                 timings: gate.timings.clone(),
                 budget: Some(gate.declared_budget()),
                 exclusive: crate::exclusive::Request::for_gate(gate),
+                env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
                 preparation_ms: std::mem::take(&mut preparation_ms),
                 run_id: Some(run_id.clone()),
                 probe: None,
@@ -1474,6 +1486,7 @@ pub(crate) fn verify_landing_head(
                 timings: gate.timings.clone(),
                 budget: Some(gate.declared_budget()),
                 exclusive: crate::exclusive::Request::for_gate(gate),
+                env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
                 preparation_ms: 0,
                 run_id: Some(run_id.clone()),
                 probe: None,
@@ -2265,6 +2278,8 @@ fn verify_recorded(
                     .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let selected_names: Vec<&str> = selected.iter().map(|(name, _)| name.as_str()).collect();
+        declarations.ensure_runnable(Some(&selected_names))?;
         if declarations.has_budgets() {
             store.adopt_budgets()?;
         }
@@ -2336,6 +2351,7 @@ fn verify_recorded(
                     timings: gate.timings.clone(),
                     budget: Some(gate.declared_budget()),
                     exclusive: crate::exclusive::Request::for_gate(gate),
+                    env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
                     preparation_ms: 0,
                     run_id: Some(run_id.clone()),
                     probe: None,
@@ -4015,6 +4031,7 @@ fn verify_all_parallel(
                                 timings: gate.timings.clone(),
                                 budget: Some(gate.declared_budget()),
                                 exclusive: crate::exclusive::Request::for_gate(gate),
+                                env: crate::gate_trailers::GateCommandEnv::for_gate(gate),
                                 preparation_ms: gate_preparation_ms,
                                 run_id: Some(run_id.to_owned()),
                                 probe: None,
@@ -4543,6 +4560,7 @@ fn execute_verification(
         declaration,
         budget,
         exclusive,
+        env,
         preparation_ms,
         run_id,
         probe,
@@ -4599,6 +4617,7 @@ fn execute_verification(
                         .map(|request| (request, change_id, gate.as_deref().unwrap_or("command"))),
                     prepared,
                     pinned_cwd,
+                    &env,
                 )?;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 timing = observed.timing;
@@ -5026,6 +5045,7 @@ impl GateRun {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_gate_budgeted(
     cmd: &str,
     timings: Option<&str>,
@@ -5034,6 +5054,7 @@ pub(super) fn run_gate_budgeted(
     output_root: &Path,
     producing_store: &str,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
+    env: &crate::gate_trailers::GateCommandEnv,
 ) -> Result<GateRun> {
     run_gate_budgeted_with_prep(
         cmd,
@@ -5045,6 +5066,7 @@ pub(super) fn run_gate_budgeted(
         admission,
         None,
         None,
+        env,
     )
 }
 
@@ -5059,9 +5081,10 @@ fn run_gate_budgeted_with_prep(
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
     pinned_cwd: Option<std::os::fd::RawFd>,
+    env: &crate::gate_trailers::GateCommandEnv,
 ) -> Result<GateRun> {
     with_check_timings(timings, cwd, || {
-        run_gate_with_capture(cmd, cwd, timeout, admission, prepared, pinned_cwd, || {
+        run_gate_with_capture(cmd, cwd, timeout, admission, prepared, pinned_cwd, env, || {
             crate::verification_output::Capture::new(output_root, producing_store)
         })
     })
@@ -5070,6 +5093,7 @@ fn run_gate_budgeted_with_prep(
 pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result<GateRun> {
     let _confinement = crate::confinement::Scope::new(&gate.confine);
     let request = crate::exclusive::Request::for_gate(gate);
+    let env = crate::gate_trailers::GateCommandEnv::for_gate(gate);
     with_check_timings(gate.timings.as_deref(), cwd, || {
         run_gate_with_capture(
             &gate.command,
@@ -5080,6 +5104,7 @@ pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result
                 .map(|request| (request, "measurement", name)),
             None,
             None,
+            &env,
             crate::verification_output::Capture::transient,
         )
     })
@@ -5111,6 +5136,7 @@ fn with_check_timings(
     Ok(run)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gate_with_capture(
     cmd: &str,
     cwd: &Path,
@@ -5118,6 +5144,7 @@ fn run_gate_with_capture(
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
     pinned_cwd: Option<std::os::fd::RawFd>,
+    env: &crate::gate_trailers::GateCommandEnv,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let (shell, wait_ms) = match admission {
@@ -5132,7 +5159,7 @@ fn run_gate_with_capture(
         None => crate::slots::measured_shell(cwd)?,
     };
     run_gate_in_shell(
-        shell, wait_ms, cmd, cwd, timeout, prepared, pinned_cwd, capture,
+        shell, wait_ms, cmd, cwd, timeout, prepared, pinned_cwd, env, capture,
     )
 }
 
@@ -5145,6 +5172,7 @@ fn run_gate_in_shell(
     timeout: Option<Duration>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
     pinned_cwd: Option<std::os::fd::RawFd>,
+    env: &crate::gate_trailers::GateCommandEnv,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let command = &mut shell.command;
@@ -5169,6 +5197,7 @@ fn run_gate_in_shell(
     } else {
         command.current_dir(cwd);
     }
+    env.apply(command);
     let preparing = Instant::now();
     let _preparation = if let Some(prepared) = prepared {
         prepared.configure(command);
@@ -7414,8 +7443,8 @@ pub(super) fn normalized_declarations(
                     coverage_identity: gates::coverage_identity(gate),
                     paths: gate.paths.clone(),
                     inert: gate.coverage.inert.clone(),
-                    budget_ms: gate.budget,
-                    budget_sources: gate.budget_sources.clone(),
+                    budget_ms: gate.effective_budget(),
+                    budget_sources: gate.effective_budget_sources().to_vec(),
                     command: gate.command.clone(),
                     events: gate.events.clone(),
                     selector: gate.selector.clone(),
@@ -8666,6 +8695,7 @@ fn check(
         let output = CheckOutput {
             gates: &report.gates,
             budget_errors: &report.budget_errors,
+            gate_declaration_errors: &report.gate_declaration_errors,
             budget_raises: &report.budget_raises,
             budget_rules: &report.budget_rules,
             review_context: report.review_context.as_ref(),
@@ -8859,6 +8889,7 @@ struct DeclaredCheck {
     timeout: Option<u64>,
     environment: Option<String>,
     exclusive: Option<crate::exclusive::Request>,
+    env: crate::gate_trailers::GateCommandEnv,
 }
 
 /// The execution contract a `--gate` or `--command` selection names.
@@ -8882,6 +8913,7 @@ fn declared_check(
                 ),
                 None => bail!("gate {name:?} not declared in .arc/gates.toml"),
             };
+            gates.ensure_runnable(Some(&[name]))?;
             Ok(DeclaredCheck {
                 timings: declared.timings.clone(),
                 profiled_gate: declared.coverage.base_passes.then(|| declared.clone()),
@@ -8892,6 +8924,7 @@ fn declared_check(
                 timeout: declared.timeout,
                 environment: declared.environment.clone(),
                 exclusive: crate::exclusive::Request::for_gate(declared),
+                env: crate::gate_trailers::GateCommandEnv::for_gate(declared),
             })
         }
         (None, Some(command)) => Ok(DeclaredCheck {
@@ -8904,6 +8937,7 @@ fn declared_check(
             timeout: None,
             environment: None,
             exclusive: None,
+            env: Default::default(),
         }),
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("{}", missing_selector(ctx, st)),
@@ -9106,6 +9140,7 @@ mod pipe_deadline_tests {
             timeout_seconds.map(Duration::from_secs),
             None,
             None,
+            &crate::gate_trailers::GateCommandEnv::default(),
             || crate::verification_output::Capture::new(output_root, producing_store),
         )
     }

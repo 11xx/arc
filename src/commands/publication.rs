@@ -168,6 +168,7 @@ pub fn publication(
             VerifyResult::Pass
         } else {
             let (limit, origin) = gate.execution_limit()?;
+            let env = crate::gate_trailers::GateCommandEnv::for_gate(gate);
             let run = super::gatekeeping::run_gate_budgeted(
                 &gate.command,
                 gate.timings.as_deref(),
@@ -178,6 +179,7 @@ pub fn publication(
                 crate::exclusive::Request::for_gate(gate)
                     .as_ref()
                     .map(|request| (request, "publication", name.as_str())),
+                &env,
             )?;
             timing = run.timing;
             output_artifact = run.output_artifact;
@@ -466,6 +468,7 @@ fn publication_gates(
     if !errors.is_empty() {
         bail!("invalid publication budgets: {}", errors.join("; "));
     }
+    required.ensure_runnable(None)?;
     Ok((required, authority, states))
 }
 

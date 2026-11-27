@@ -205,6 +205,18 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
                     detail: format!("{}: {detail}", state.change_id),
                 });
             }
+            for detail in &declarations.gates.gate_trailer_errors {
+                problems.push(Finding {
+                    code: "gate-trailers-invalid",
+                    detail: format!("{}: {detail}", state.change_id),
+                });
+            }
+            for detail in declarations.gates.invariant_errors.values() {
+                problems.push(Finding {
+                    code: "gate-invariants-invalid",
+                    detail: format!("{}: {detail}", state.change_id),
+                });
+            }
         }
     }
     let toplevel = crate::git_health::checkout_root(&ctx.cwd)?;
@@ -1199,6 +1211,12 @@ fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>, advice: &mut 
         problems.push(Finding {
             code: "gate-budget-invalid",
             detail,
+        });
+    }
+    for detail in gates.invariant_errors.values() {
+        problems.push(Finding {
+            code: "gate-invariants-invalid",
+            detail: detail.clone(),
         });
     }
     for conflict in gates.conflicts {

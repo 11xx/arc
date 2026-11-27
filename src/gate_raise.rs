@@ -86,7 +86,7 @@ pub fn project(cwd: &Path, revision: &str) -> Result<gates::GatesFile> {
 
 pub fn operator(cwd: &Path) -> Result<gates::GatesFile> {
     match std::fs::read_to_string(crate::policy::operator_path(cwd)?) {
-        Ok(text) => Ok(toml::from_str(&text)?),
+        Ok(text) => gates::parse_operator_text(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
         Err(e) => Err(e.into()),
     }

@@ -58,6 +58,15 @@ pub struct GatesFile {
     /// declarations. Empty judges every budget strictly.
     #[serde(skip)]
     pub budget_suspensions: Vec<crate::gate_suspension::Suspension>,
+    /// Validated `Witness:` and `Change-size:` commit trailers over `merge-base..head`.
+    #[serde(skip)]
+    pub gate_trailers: crate::gate_trailers::GateTrailers,
+    /// Actionable errors from parsing or validating `Witness:` / `Change-size:` trailers.
+    #[serde(skip)]
+    pub gate_trailer_errors: Vec<String>,
+    /// Per-gate errors resolving a declared target-branch invariant list file.
+    #[serde(skip)]
+    pub invariant_errors: BTreeMap<String, String>,
     #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
     #[serde(skip)]
@@ -65,6 +74,7 @@ pub struct GatesFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GateDeclarations {
     confine: Option<crate::confinement::Declaration>,
     #[serde(default)]
@@ -74,20 +84,68 @@ struct GateDeclarations {
     gates: BTreeMap<String, Gate>,
 }
 
+/// Operator policy mixes repository policy tables (`[policy]`, `[danger]`, ...)
+/// beside gate tables, so only the gate subtables reject unknown keys here.
 #[derive(Deserialize)]
+struct OperatorGateDeclarations {
+    confine: Option<crate::confinement::Declaration>,
+    #[serde(default)]
+    selection: PathSelection,
+    budget: Option<BudgetDeclaration>,
+    #[serde(default)]
+    gates: BTreeMap<String, Gate>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BudgetDeclaration {
-    #[serde(flatten)]
-    rules: crate::gate_budget::BudgetRules,
+    #[serde(default, deserialize_with = "crate::gate_raise::percentage")]
+    raise: Option<u64>,
+    #[serde(default, deserialize_with = "crate::gate_raise::positive")]
+    raise_per: Option<u64>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default, deserialize_with = "crate::gate_budget::deserialize_ms")]
+    total: Option<u64>,
     #[serde(default, deserialize_with = "crate::gate_budget::deserialize_ms")]
     landing: Option<u64>,
 }
 
+impl BudgetDeclaration {
+    fn into_parts(self) -> (Option<crate::gate_budget::BudgetRules>, Option<u64>) {
+        let rules = crate::gate_budget::BudgetRules {
+            raise: self.raise,
+            raise_per: self.raise_per,
+            exclude: self.exclude,
+            total: self.total,
+            sources: Vec::new(),
+        };
+        let enforced = self.landing.is_none() || rules != Default::default();
+        (enforced.then_some(rules), self.landing)
+    }
+}
+
 impl From<GateDeclarations> for GatesFile {
     fn from(declared: GateDeclarations) -> Self {
-        let (budget, landing_budget_ms) = declared.budget.map_or((None, None), |b| {
-            let enforced = b.landing.is_none() || b.rules != Default::default();
-            (enforced.then_some(b.rules), b.landing)
-        });
+        let (budget, landing_budget_ms) = declared
+            .budget
+            .map_or((None, None), BudgetDeclaration::into_parts);
+        Self {
+            selection: declared.selection,
+            confine: declared.confine,
+            gates: declared.gates,
+            budget,
+            landing_budget_ms,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<OperatorGateDeclarations> for GatesFile {
+    fn from(declared: OperatorGateDeclarations) -> Self {
+        let (budget, landing_budget_ms) = declared
+            .budget
+            .map_or((None, None), BudgetDeclaration::into_parts);
         Self {
             selection: declared.selection,
             confine: declared.confine,
@@ -100,6 +158,7 @@ impl From<GateDeclarations> for GatesFile {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathSelection {
     #[serde(default)]
     pub base_passes: bool,
@@ -200,6 +259,7 @@ impl Coverage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Gate {
     #[serde(skip)]
     pub confine: Option<crate::confinement::Declaration>,
@@ -214,6 +274,22 @@ pub struct Gate {
     pub budget: Option<u64>,
     #[serde(skip)]
     pub budget_sources: Vec<crate::gate_budget::BudgetSource>,
+    /// Larger command wall-time budget applied when the change declares
+    /// `Change-size: interface`.
+    #[serde(default, deserialize_with = "crate::gate_budget::deserialize_ms")]
+    pub interface_budget: Option<u64>,
+    #[serde(skip)]
+    pub interface_budget_sources: Vec<crate::gate_budget::BudgetSource>,
+    /// Repository-relative invariant list file read from the target branch
+    /// and passed to the gate command via `ARC_INVARIANTS`.
+    #[serde(default, deserialize_with = "deserialize_invariants")]
+    pub invariants: Option<String>,
+    /// Parsed invariant entries resolved from the authorizing tree.
+    #[serde(skip)]
+    pub resolved_invariants: Option<crate::gate_trailers::ResolvedInvariants>,
+    /// Validated `Witness:` and `Change-size:` declarations for the change.
+    #[serde(skip)]
+    pub gate_trailers: crate::gate_trailers::GateTrailers,
     #[serde(skip)]
     pub raise_allowance_ms: Option<u64>,
     #[serde(skip)]
@@ -291,6 +367,7 @@ pub struct GateDeclaration {
     pub inert: Vec<String>,
     pub exclusive: Option<String>,
     pub selector: Option<String>,
+    pub invariants: Option<String>,
     pub command: String,
     pub environment: Option<String>,
     pub source: String,
@@ -322,6 +399,7 @@ impl GateDeclaration {
             inert: gate.coverage.inert.clone(),
             exclusive: gate.exclusive.clone(),
             selector: gate.selector.clone(),
+            invariants: gate.invariants.clone(),
             command: gate.command.clone(),
             environment: gate.environment.clone(),
             source: source.to_string(),
@@ -345,11 +423,24 @@ impl GateDeclaration {
             Some(selector) => format!("{description} with delta selector {selector:?}"),
             None => description,
         };
+        let description = match &self.invariants {
+            Some(path) => format!("{description} with invariants {path:?}"),
+            None => description,
+        };
         format!(
             "{description} with paths {:?} and inert {:?}",
             self.paths, self.inert
         )
     }
+}
+
+fn deserialize_invariants<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| crate::gate_trailers::validate_invariants_path(&raw).map_err(D::Error::custom))
+        .transpose()
 }
 
 fn deserialize_timeout<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
@@ -636,9 +727,18 @@ pub(crate) fn environment_probe_with_prepared(
 const PROJECT_SOURCE: &str = ".arc/gates.toml";
 const OPERATOR_SOURCE: &str = "<git-common-dir>/arc/operator-policy.toml";
 
+/// Parse the gate portion of an operator-policy document, ignoring non-gate
+/// top-level tables (`[policy]`, `[danger]`, etc.) while still rejecting
+/// unknown fields inside `[gates.*]`, `[budget]`, `[selection]`, and `[confine]`.
+pub fn parse_operator_text(text: &str) -> Result<GatesFile> {
+    toml::from_str::<OperatorGateDeclarations>(text)
+        .map(GatesFile::from)
+        .context("malformed operator policy TOML")
+}
+
 /// Validate the gate portion of an operator-policy document.
 pub fn validate_operator_text(text: &str) -> Result<()> {
-    toml::from_str::<GatesFile>(text).context("malformed operator policy TOML")?;
+    parse_operator_text(text)?;
     Ok(())
 }
 
@@ -651,6 +751,7 @@ pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
     gates.set_danger(
         crate::policy::danger_paths(repo_toplevel, None).unwrap_or_else(|_| vec!["**".into()]),
     );
+    gates.resolve_invariants_checkout(repo_toplevel);
     Ok(gates)
 }
 
@@ -663,6 +764,7 @@ pub fn inspect_at(cwd: &Path, revision: &str) -> Result<GatesFile> {
     gates.set_danger(
         crate::policy::danger_paths(cwd, Some(revision)).unwrap_or_else(|_| vec!["**".into()]),
     );
+    gates.resolve_invariants_at(cwd, revision);
     Ok(gates)
 }
 
@@ -692,8 +794,11 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
         let Some((origin, text)) = layer else {
             continue;
         };
-        let mut layer =
-            toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?;
+        let mut layer = if source == OPERATOR_SOURCE {
+            parse_operator_text(&text).with_context(|| format!("malformed {origin}"))?
+        } else {
+            toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?
+        };
         let source = source.to_string();
         layer.name_budget_sources(&origin);
         crate::confinement::combine(&mut merged.confine, layer.confine.take());
@@ -725,6 +830,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                                 inert: current.coverage.inert.clone(),
                                 exclusive: current.exclusive.clone(),
                                 selector: current.selector.clone(),
+                                invariants: current.invariants.clone(),
                                 command: current.command.clone(),
                                 environment: current.environment.clone(),
                                 source: current.declared_by[0].clone(),
@@ -734,6 +840,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                                 inert: gate.coverage.inert.clone(),
                                 exclusive: gate.exclusive,
                                 selector: gate.selector,
+                                invariants: gate.invariants,
                                 command: gate.command,
                                 environment: gate.environment,
                                 source: source.clone(),
@@ -768,6 +875,7 @@ impl Gate {
         self.command == other.command
             && self.environment == other.environment
             && self.selector == other.selector
+            && self.invariants == other.invariants
             && self.paths == other.paths
             && self.coverage.inert == other.coverage.inert
             && (self.exclusive.is_none()
@@ -801,6 +909,11 @@ impl Gate {
         self.absorb_budget(&other);
         self.absorb_admission(&other);
         self.timings = other.timings.clone().or(self.timings.take());
+        // Preserve the target branch's resolved invariant list; only populate
+        // when this side had none yet.
+        if self.resolved_invariants.is_none() {
+            self.resolved_invariants = other.resolved_invariants;
+        }
         self.bypass = self.bypass.take().or(other.bypass);
         if other.binds == Binding::Commit {
             self.binds = Binding::Commit;
@@ -895,6 +1008,124 @@ impl GatesFile {
         }
     }
 
+    pub(crate) fn resolve_invariants_checkout(&mut self, repo_toplevel: &Path) {
+        self.invariant_errors.clear();
+        for (name, gate) in &mut self.gates {
+            let Some(path) = gate.invariants.as_deref() else {
+                gate.resolved_invariants = None;
+                continue;
+            };
+            let full = repo_toplevel.join(path);
+            match read_optional(&full) {
+                Ok(Some(content)) => {
+                    match crate::gate_trailers::parse_invariants_file(path, &content) {
+                        Ok(resolved) => gate.resolved_invariants = Some(resolved),
+                        Err(error) => {
+                            gate.resolved_invariants = None;
+                            self.invariant_errors.insert(
+                                name.clone(),
+                                format!("invariants: gate {name} ({path}): {error:#}"),
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    gate.resolved_invariants = None;
+                    self.invariant_errors.insert(
+                        name.clone(),
+                        format!(
+                            "invariants: gate {name} declares {path:?}, which does not exist in this checkout"
+                        ),
+                    );
+                }
+                Err(error) => {
+                    gate.resolved_invariants = None;
+                    self.invariant_errors.insert(
+                        name.clone(),
+                        format!("invariants: gate {name} ({path}): {error:#}"),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn resolve_invariants_at(&mut self, cwd: &Path, revision: &str) {
+        self.invariant_errors.clear();
+        for (name, gate) in &mut self.gates {
+            let Some(path) = gate.invariants.as_deref() else {
+                gate.resolved_invariants = None;
+                continue;
+            };
+            match crate::gitio::file_at(cwd, revision, path) {
+                Ok(Some(content)) => {
+                    match crate::gate_trailers::parse_invariants_file(path, &content) {
+                        Ok(resolved) => gate.resolved_invariants = Some(resolved),
+                        Err(error) => {
+                            gate.resolved_invariants = None;
+                            self.invariant_errors.insert(
+                                name.clone(),
+                                format!(
+                                    "invariants: gate {name} ({path} at {revision}): {error:#}"
+                                ),
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    gate.resolved_invariants = None;
+                    self.invariant_errors.insert(
+                        name.clone(),
+                        format!(
+                            "invariants: gate {name} declares {path:?}, which is missing at {revision}"
+                        ),
+                    );
+                }
+                Err(error) => {
+                    gate.resolved_invariants = None;
+                    self.invariant_errors.insert(
+                        name.clone(),
+                        format!("invariants: gate {name} ({path} at {revision}): {error:#}"),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn set_gate_trailers(&mut self, trailers: crate::gate_trailers::GateTrailers) {
+        self.gate_trailers = trailers.clone();
+        for gate in self.gates.values_mut() {
+            gate.gate_trailers = trailers.clone();
+        }
+    }
+
+    /// Actionable gate-trailer and target-branch invariant list errors.
+    pub fn declaration_errors(&self) -> Vec<String> {
+        let mut errors = self.gate_trailer_errors.clone();
+        errors.extend(self.invariant_errors.values().cloned());
+        errors
+    }
+
+    /// Refuse gate execution when declared `Witness:` / `Change-size:` trailers
+    /// are invalid or a selected gate's target-branch invariant list cannot be
+    /// resolved.
+    pub fn ensure_runnable(&self, selected_gates: Option<&[&str]>) -> Result<()> {
+        let mut errors = self.gate_trailer_errors.clone();
+        match selected_gates {
+            Some(names) => {
+                for name in names {
+                    if let Some(error) = self.invariant_errors.get(*name) {
+                        errors.push(error.clone());
+                    }
+                }
+            }
+            None => errors.extend(self.invariant_errors.values().cloned()),
+        }
+        if !errors.is_empty() {
+            bail!("{}", errors.join("; "));
+        }
+        Ok(())
+    }
+
     /// Add what a change's own declarations require on top of this set, the
     /// target's. A gate the change adds is owed. A gate the target already
     /// declares stays the target's check: the change can widen its profiles
@@ -903,7 +1134,7 @@ impl GatesFile {
     /// `target_label` and `change_label` name the two sides in that report.
     pub fn owe_also(
         &mut self,
-        own: GatesFile,
+        mut own: GatesFile,
         target_label: &str,
         change_label: &str,
     ) -> Vec<GateDivergence> {
@@ -920,6 +1151,9 @@ impl GatesFile {
         for (name, gate) in own.gates {
             match self.gates.get_mut(&name) {
                 None => {
+                    if let Some(error) = own.invariant_errors.remove(&name) {
+                        self.invariant_errors.insert(name.clone(), error);
+                    }
                     self.gates.insert(name, gate);
                 }
                 Some(current) if current.same_check(&gate) => current.absorb(gate),
@@ -938,6 +1172,8 @@ impl GatesFile {
         self.refresh_coverage();
         self.refresh_concurrency();
         self.refresh_suspensions();
+        let trailers = self.gate_trailers.clone();
+        self.set_gate_trailers(trailers);
         divergences
     }
 
@@ -1029,13 +1265,31 @@ pub(crate) fn declaration_value(gate: &Gate) -> serde_json::Value {
     if gate.binds == Binding::Commit {
         value["binds"] = serde_json::json!("commit");
     }
+    if !gate.gate_trailers.is_empty() {
+        value["gate_trailers"] = serde_json::json!(gate.gate_trailers);
+    }
+    if let Some(invariants) = &gate.resolved_invariants {
+        value["invariants"] = serde_json::json!({
+            "path": invariants.path,
+            "sha256": invariants.sha256,
+        });
+    } else if let Some(path) = &gate.invariants {
+        value["invariants"] = serde_json::json!({ "path": path });
+    }
     value
 }
 
-/// Retain structural identity for coverage and budget-raise execution proofs.
+/// Retain structural identity for coverage, declared gate trailers, target
+/// invariant lists, and budget-raise execution proofs.
 pub fn coverage_identity(gate: &Gate) -> Option<String> {
-    (gate.confine.is_some() || gate.concurrent || gate.coverage.enabled() || gate.budget.is_some())
-        .then(|| declaration_identity(gate))
+    (gate.confine.is_some()
+        || gate.concurrent
+        || gate.coverage.enabled()
+        || gate.budget.is_some()
+        || gate.interface_budget.is_some()
+        || !gate.gate_trailers.is_empty()
+        || gate.invariants.is_some())
+    .then(|| declaration_identity(gate))
 }
 
 /// Read both sides of renames once for each source and destination tree pair.
@@ -1355,6 +1609,80 @@ mod tests {
             toml::from_str::<GatesFile>("[gates.log]\ncommand = \"t\"\nbinds = \"head\"\n")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn unknown_fields_are_refused_in_gates_toml_and_gate_subtables() {
+        for bad in [
+            "unknown_top = true\n",
+            "[selection]\nunknown_sel = true\n",
+            "[budget]\nunknown_budget = '10s'\n",
+            "[gates.unit]\ncommand = 'true'\nunknown_gate = 1\n",
+        ] {
+            assert!(toml::from_str::<GatesFile>(bad).is_err(), "{bad:?}");
+        }
+        // Operator policy may carry non-gate top-level tables such as [policy]
+        // while still rejecting unknown keys inside [gates.*].
+        assert!(parse_operator_text(
+            "[policy]\nforbid_self_approval = true\n[gates.unit]\ncommand = 'true'\n"
+        )
+        .is_ok());
+        assert!(parse_operator_text(
+            "[policy]\nforbid_self_approval = true\n[gates.unit]\ncommand = 'true'\nbogus = 1\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn gate_trailers_and_invariants_bind_declaration_identity_without_shifting_defaults() {
+        let mut base = declared("[gates.unit]\ncommand = 'true'\n");
+        let default_id = declaration_identity(&base.gates["unit"]);
+        assert!(coverage_identity(&base.gates["unit"]).is_none());
+
+        base.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: Some(crate::gate_trailers::WitnessDeclaration::Named {
+                witnesses: vec!["unit:a".into()],
+            }),
+            change_size: None,
+        });
+        let with_a = declaration_identity(&base.gates["unit"]);
+        assert_ne!(default_id, with_a);
+        assert_eq!(coverage_identity(&base.gates["unit"]), Some(with_a.clone()));
+
+        base.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: Some(crate::gate_trailers::WitnessDeclaration::Named {
+                witnesses: vec!["unit:b".into()],
+            }),
+            change_size: None,
+        });
+        let with_b = declaration_identity(&base.gates["unit"]);
+        assert_ne!(with_a, with_b);
+
+        base.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: Some(crate::gate_trailers::WitnessDeclaration::Named {
+                witnesses: vec!["unit:b".into()],
+            }),
+            change_size: Some(crate::gate_trailers::ChangeSize::Interface),
+        });
+        let with_b_interface = declaration_identity(&base.gates["unit"]);
+        assert_ne!(with_b, with_b_interface);
+
+        let mut inv = declared("[gates.unit]\ncommand = 'true'\ninvariants = 'inv.json'\n");
+        inv.gates.get_mut("unit").unwrap().resolved_invariants =
+            Some(crate::gate_trailers::ResolvedInvariants {
+                path: "inv.json".into(),
+                sha256: "sha256:aaa".into(),
+                entries: vec!["unit:one".into()],
+            });
+        let inv_a = declaration_identity(&inv.gates["unit"]);
+        inv.gates.get_mut("unit").unwrap().resolved_invariants =
+            Some(crate::gate_trailers::ResolvedInvariants {
+                path: "inv.json".into(),
+                sha256: "sha256:bbb".into(),
+                entries: vec!["unit:one".into(), "unit:two".into()],
+            });
+        let inv_b = declaration_identity(&inv.gates["unit"]);
+        assert_ne!(inv_a, inv_b);
     }
 }
 

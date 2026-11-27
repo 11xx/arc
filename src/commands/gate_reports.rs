@@ -46,6 +46,8 @@ pub(super) struct GateRow {
     declaration: Declaration,
     concurrent_acceptance: Option<MeasuredAcceptance>,
     budget_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface_budget_ms: Option<u64>,
     budget_sources: Vec<crate::gate_budget::BudgetSource>,
     budget_share_percent: Option<f64>,
     budget_timing: Distribution,
@@ -83,6 +85,8 @@ struct Declaration {
     exclusive: Option<String>,
     admission_ms: Option<u128>,
     selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invariants: Option<String>,
     environment: Option<String>,
 }
 
@@ -234,9 +238,11 @@ fn collect_declarations(
                     exclusive: gate.exclusive,
                     admission_ms,
                     selector: gate.selector,
+                    invariants: gate.invariants,
                     environment: gate.environment,
                 },
                 budget_ms: gate.budget,
+                interface_budget_ms: gate.interface_budget,
                 budget_sources: gate.budget_sources,
                 budget_share_percent: None,
                 budget_timing: Distribution::default(),

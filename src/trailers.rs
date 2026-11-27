@@ -711,6 +711,45 @@ pub(crate) fn contains(message: &[u8], wanted: &str) -> bool {
     block_of(&lines).is_some_and(|block| lines[block].contains(&wanted.as_bytes()))
 }
 
+/// Every trailer entry in the message's final trailer block, in message order,
+/// as `(key, value, has_continuation)`.
+///
+/// The key is the ASCII token before `:`, the value is the trimmed text after
+/// `:` on that line, and `has_continuation` is true when one or more indented
+/// continuation lines immediately follow it in the trailer block.
+pub(crate) fn block_entries(message: &[u8]) -> Vec<(String, String, bool)> {
+    let ends_with_newline = message.ends_with(b"\n");
+    let body = if ends_with_newline {
+        &message[..message.len() - 1]
+    } else {
+        message
+    };
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&[u8]> = body.split(|byte| *byte == b'\n').collect();
+    let Some(block) = block_of(&lines) else {
+        return Vec::new();
+    };
+    let slice = &lines[block];
+    let mut entries = Vec::new();
+    for (index, line) in slice.iter().enumerate() {
+        let Some(key) = trailer_key(line) else {
+            continue;
+        };
+        let value = &line[key.len() + 1..];
+        let has_continuation = slice
+            .get(index + 1)
+            .is_some_and(|next| is_continuation(next));
+        entries.push((
+            String::from_utf8_lossy(&key).into_owned(),
+            String::from_utf8_lossy(trimmed(value)).into_owned(),
+            has_continuation,
+        ));
+    }
+    entries
+}
+
 /// The values of the final trailer block's lines keyed `key`, in the order
 /// they appear, each without the whitespace around it.
 fn block_values(message: &[u8], key: &str) -> Vec<String> {

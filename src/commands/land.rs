@@ -821,7 +821,8 @@ fn plan(
             });
         }
         let declarations = ctx.declarations(&selected)?;
-        let errors = declarations.gates.budget_errors();
+        let mut errors = declarations.gates.budget_errors();
+        errors.extend(declarations.gates.declaration_errors());
         if !errors.is_empty() {
             return refuse(
                 Blocker::GatesNotGreen.exit_code(),

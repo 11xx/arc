@@ -36,6 +36,7 @@ mod gate_concurrency;
 mod gate_diagnostics;
 mod gate_raise;
 mod gate_suspension;
+mod gate_trailers;
 mod gate_work;
 mod gates;
 mod git_health;
@@ -2269,6 +2270,9 @@ enum Cmd {
     /// Budgets judge command run_ms under arc guide gates. An over-budget raw pass
     /// exits 1 unless the busy-host rule accepts it; a refusal needs --rerun.
     /// Untimed evidence is unmeasured.
+    /// Validated `Witness:` and `Change-size:` trailers over `merge-base..head`
+    /// (`arc guide contributions`) bind reuse identity and pass via `ARC_WITNESSES`
+    /// and `ARC_CHANGE_SIZE`; target-branch `invariants` files pass via `ARC_INVARIANTS`.
     /// Declared timeout_seconds and effective execution_limit_ms are recorded apart.
     /// See `arc guide change-gates` for accounting boundaries.
     Verify {

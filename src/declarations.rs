@@ -83,6 +83,21 @@ pub(crate) fn for_change_at(
         let own = gates::inspect_at(cwd, &change_head)?;
         for (name, gate) in &mut required.gates {
             gate.head_removes = !own.gates.contains_key(name);
+            if let Some(path) = gate.invariants.as_deref() {
+                if let Some(own_gate) = own.gates.get(name) {
+                    if own_gate.invariants.as_deref() == Some(path)
+                        && gate.resolved_invariants.as_ref().map(|r| r.sha256.as_str())
+                            != own_gate
+                                .resolved_invariants
+                                .as_ref()
+                                .map(|r| r.sha256.as_str())
+                    {
+                        notes.push(format!(
+                            "gate {name:?}'s invariant list {path:?} differs from {target}'s; {target}'s is evaluated"
+                        ));
+                    }
+                }
+            }
         }
         if required.confine != own.confine {
             notes.push(format!("confinement differs: {target} declares {:?}; {} declares {:?}; destination writable roots apply", required.confine, state.branch, own.confine));
@@ -93,6 +108,10 @@ pub(crate) fn for_change_at(
             &format!("{}'s .arc/gates.toml", state.branch),
         );
         notes.extend(divergences.iter().map(gates::GateDivergence::describe));
+        match crate::gate_trailers::read_range(cwd, &target_head, &change_head) {
+            Ok(trailers) => required.set_gate_trailers(trailers),
+            Err(errors) => required.gate_trailer_errors = errors,
+        }
         if let Err(error) =
             crate::gate_raise::advise(cwd, state, &target_head, &change_head, &mut required)
         {
@@ -148,14 +167,24 @@ fn checkout_notes(
                 Some(_) => {}
             }
         }
-        for name in there
-            .gates
-            .keys()
-            .filter(|name| !here.gates.contains_key(*name))
-        {
-            notes.push(format!(
-                "gate {name:?} is declared by {target} and absent from this checkout; it is still required"
-            ));
+        for (name, gate) in &there.gates {
+            if !here.gates.contains_key(name) {
+                notes.push(format!(
+                    "gate {name:?} is declared by {target} and absent from this checkout; it is still required"
+                ));
+            }
+            if let Some(path) = gate.invariants.as_deref() {
+                let local = match fs::read_to_string(toplevel.join(path)) {
+                    Ok(text) => Some(text),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                if local != gitio::file_at(cwd, target_head, path)? {
+                    notes.push(format!(
+                        "this checkout's {path} differs from {target}'s; readiness answers for {target}'s"
+                    ));
+                }
+            }
         }
     }
     Ok(notes)

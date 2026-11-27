@@ -119,12 +119,41 @@ pub fn merge_rules(into: &mut Option<BudgetRules>, other: Option<BudgetRules>) {
 }
 
 impl Gate {
+    pub fn effective_budget(&self) -> Option<u64> {
+        if self.gate_trailers.change_size == Some(crate::gate_trailers::ChangeSize::Interface) {
+            self.interface_budget.or(self.budget)
+        } else {
+            self.budget
+        }
+    }
+
+    pub fn effective_budget_sources(&self) -> &[BudgetSource] {
+        if self.gate_trailers.change_size == Some(crate::gate_trailers::ChangeSize::Interface)
+            && self.interface_budget.is_some()
+        {
+            &self.interface_budget_sources
+        } else {
+            &self.budget_sources
+        }
+    }
+
     pub fn absorb_budget(&mut self, other: &Gate) {
+        let self_had_budget = self.budget.is_some();
         self.budget = minimum(self.budget, other.budget);
         self.budget_sources.extend(other.budget_sources.clone());
         self.budget_sources
             .sort_by(|a, b| (&a.source, a.milliseconds).cmp(&(&b.source, b.milliseconds)));
         self.budget_sources.dedup();
+        // A layer that already caps a gate with `budget` and declares no
+        // `interface_budget` cannot be loosened by another layer adding one.
+        if !self_had_budget || self.interface_budget.is_some() {
+            self.interface_budget = minimum(self.interface_budget, other.interface_budget);
+            self.interface_budget_sources
+                .extend(other.interface_budget_sources.clone());
+            self.interface_budget_sources
+                .sort_by(|a, b| (&a.source, a.milliseconds).cmp(&(&b.source, b.milliseconds)));
+            self.interface_budget_sources.dedup();
+        }
     }
 
     pub fn budget_judgement(
@@ -132,8 +161,8 @@ impl Gate {
         timing: &crate::verification_timing::VerificationTiming,
     ) -> BudgetJudgement {
         let mut judgement = judge(
-            self.budget,
-            &self.budget_sources,
+            self.effective_budget(),
+            self.effective_budget_sources(),
             crate::gate_suspension::current(self.budget_suspension.as_deref()),
             timing,
         );
@@ -145,8 +174,8 @@ impl Gate {
     /// What a run started now is judged by once it ends.
     pub fn declared_budget(&self) -> Declared {
         Declared {
-            budget_ms: self.budget,
-            sources: self.budget_sources.clone(),
+            budget_ms: self.effective_budget(),
+            sources: self.effective_budget_sources().to_vec(),
             suspension: self.budget_suspension.clone(),
         }
     }
@@ -161,7 +190,7 @@ impl Gate {
                 ),
                 Some("timeout".into()),
             ))
-        } else if let Some(budget) = self.budget {
+        } else if let Some(budget) = self.effective_budget() {
             Ok((
                 Some(
                     budget
@@ -185,6 +214,12 @@ impl GatesFile {
                     source: origin.into(),
                 });
             }
+            if let Some(milliseconds) = gate.interface_budget {
+                gate.interface_budget_sources.push(BudgetSource {
+                    milliseconds,
+                    source: origin.into(),
+                });
+            }
         }
         if let Some(rules) = &mut self.budget {
             rules.sources.clear();
@@ -198,7 +233,11 @@ impl GatesFile {
     }
 
     pub fn has_budgets(&self) -> bool {
-        self.budget.is_some() || self.gates.values().any(|g| g.budget.is_some())
+        self.budget.is_some()
+            || self
+                .gates
+                .values()
+                .any(|g| g.budget.is_some() || g.interface_budget.is_some())
     }
 
     /// Validate the complete effective suite, including profiles other than the active one.
@@ -215,6 +254,21 @@ impl GatesFile {
         if self.raise_snapshot_missing {
             errors
                 .push("budget raise set needs a fresh snapshot and review or recorded debt".into());
+        }
+        for (name, gate) in &self.gates {
+            match (gate.budget, gate.interface_budget) {
+                (None, Some(_)) => errors.push(format!(
+                    "budget: gate {name} declares interface_budget without budget"
+                )),
+                (Some(budget), Some(interface_budget)) if interface_budget < budget => {
+                    errors.push(format!(
+                        "budget: gate {name} interface_budget {} is less than budget {}",
+                        duration(interface_budget),
+                        duration(budget)
+                    ));
+                }
+                _ => {}
+            }
         }
         errors.extend(crate::gate_concurrency::lock_errors(self.gates.iter()));
         let Some(rules) = &self.budget else {
@@ -589,5 +643,43 @@ mod tests {
             .unwrap()
             .contains("possible host contention"));
         assert!(!b.accepted());
+    }
+
+    #[test]
+    fn interface_budget_validation_selection_and_protection() {
+        let mut gates: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\ninterface_budget='30s'\n")
+                .unwrap();
+        assert!(gates.budget_errors().is_empty());
+        assert_eq!(gates.gates["unit"].effective_budget(), Some(10_000));
+        gates.set_gate_trailers(crate::gate_trailers::GateTrailers {
+            witnesses: None,
+            change_size: Some(crate::gate_trailers::ChangeSize::Interface),
+        });
+        assert_eq!(gates.gates["unit"].effective_budget(), Some(30_000));
+
+        let no_base: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\ninterface_budget='30s'\n").unwrap();
+        assert!(no_base
+            .budget_errors()
+            .iter()
+            .any(|e| e.contains("interface_budget without budget")));
+
+        let smaller: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='30s'\ninterface_budget='10s'\n")
+                .unwrap();
+        assert!(smaller
+            .budget_errors()
+            .iter()
+            .any(|e| e.contains("is less than budget")));
+
+        // Target with budget and no interface_budget cannot be widened by change.
+        let mut target: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\n").unwrap();
+        let own: GatesFile =
+            toml::from_str("[gates.unit]\ncommand='true'\nbudget='10s'\ninterface_budget='30s'\n")
+                .unwrap();
+        target.owe_also(own, "target", "change");
+        assert_eq!(target.gates["unit"].interface_budget, None);
     }
 }

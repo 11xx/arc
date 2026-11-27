@@ -1635,6 +1635,10 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub budget_suspensions: Vec<crate::gate_suspension::Suspension>,
     pub budget_errors: Vec<String>,
+    /// Errors from declared `Witness:` / `Change-size:` trailers or target-branch
+    /// invariant list files. Empty when absent or valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_declaration_errors: Vec<String>,
     pub budget_rules: Option<crate::gate_budget::BudgetRules>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_context: Option<crate::review_context::ReviewContext>,
@@ -2990,8 +2994,9 @@ fn build_report(
         .unwrap_or_default();
 
     let budget_errors = gates.budget_errors();
+    let gate_declaration_errors = gates.declaration_errors();
     let blockers = blockers::derive(&BlockerFacts {
-        invalid_gate_budget: !budget_errors.is_empty(),
+        invalid_gate_budget: !budget_errors.is_empty() || !gate_declaration_errors.is_empty(),
         mode_refused: false,
         closed: state.is_closed(),
         branch_missing: current_head.is_none(),
@@ -3100,6 +3105,8 @@ fn build_report(
             format!("release_hold:{}", hold.hold_event_id)
         } else if !budget_errors.is_empty() {
             "repair_gate_budgets".into()
+        } else if !gate_declaration_errors.is_empty() {
+            "repair_gate_declarations".into()
         } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
             // A gate read at a merged tree is not repaired by running it at the
             // head: that records evidence for content the merge discards. The
@@ -3180,6 +3187,7 @@ fn build_report(
         || !open_blocking.is_empty()
         || !state.holds.is_empty()
         || !budget_errors.is_empty()
+        || !gate_declaration_errors.is_empty()
         || gate_statuses.iter().any(|gate| !gate.green_at_head)
         || probe_statuses
             .iter()
@@ -3316,6 +3324,7 @@ fn build_report(
         budget_raises: gates.raises.clone(),
         budget_suspensions: gates.budget_suspensions.clone(),
         budget_errors,
+        gate_declaration_errors,
         budget_rules: gates.budget.clone(),
         declaration_notes: Vec::new(),
         probes: probe_statuses,
@@ -3636,7 +3645,13 @@ pub fn matches_declaration(
     gate: &crate::gates::Gate,
 ) -> bool {
     evidence.declaration.as_ref().map_or_else(
-        || gate.confine.is_none() && !gate.coverage.enabled() && !gate.concurrent,
+        || {
+            gate.confine.is_none()
+                && !gate.coverage.enabled()
+                && !gate.concurrent
+                && gate.gate_trailers.is_empty()
+                && gate.invariants.is_none()
+        },
         |identity| identity == &crate::gates::declaration_identity(gate),
     ) && crate::gate_concurrency::accepted_here(gate, evidence.timing.concurrent_batch.as_ref())
         && evidence.command == gate.command

@@ -105,6 +105,9 @@ paths = [
   # from an execution that does not cover the change.
   "src/gate_budget.rs",
   # Work witnesses and inherited hardware counters can excuse a clock overrun.
+  # Declared Witness and Change-size trailers and target-branch invariant lists
+  # bind verification reuse identity, effective budgets, and gate inputs.
+  "src/gate_trailers.rs",
   "src/gate_work.rs",
   "src/instruction_counter.rs",
   "src/gate_raise.rs",
