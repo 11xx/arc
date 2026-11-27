@@ -460,16 +460,19 @@ impl ProbeFailure {
 /// it. The digest streams, so a probe that prints without bound cannot
 /// exhaust memory; the stderr kept for the failure is a bounded tail.
 pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Result<ProbeRun> {
-    environment_probe_with_prepared(cwd, probe, timeout, None)
+    environment_probe_with_prepared(cwd, probe, timeout, None, None)
 }
 
 /// Run a declared environment probe in `cwd`, reusing an already-held prepared
-/// storage lease when supplied.
+/// storage lease when supplied. When `pinned_cwd` is provided, binds the child
+/// working directory strictly to that open directory descriptor via `fchdir(2)`
+/// instead of reopening `cwd` by pathname.
 pub(crate) fn environment_probe_with_prepared(
     cwd: &Path,
     probe: &str,
     timeout: Option<u64>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
 ) -> Result<ProbeRun> {
     let timeout = timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS);
     let deadline = Instant::now()
@@ -492,10 +495,24 @@ pub(crate) fn environment_probe_with_prepared(
     command
         .arg("-c")
         .arg(probe)
-        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if let Some(fd) = pinned_cwd {
+        command.env_remove("PWD");
+        // SAFETY: `fchdir` is async-signal-safe and `fd` remains open in the
+        // parent across `spawn` (closing automatically on `execve` via CLOEXEC).
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        command.current_dir(cwd);
+    }
     let _preparation = if let Some(prepared) = prepared {
         prepared.configure(command);
         crate::warm_worktree::CommandLease::default()

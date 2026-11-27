@@ -139,13 +139,49 @@ impl Source {
         .join(", ")
     }
     fn observe(path: &Path) -> Result<Self> {
+        Self::observe_with_fd(path, None)
+    }
+
+    fn observe_with_fd(path: &Path, pinned_cwd: Option<std::os::fd::RawFd>) -> Result<Self> {
+        let revision = if pinned_cwd.is_some() {
+            String::from_utf8(source_bytes_with_fd(
+                path,
+                pinned_cwd,
+                &["rev-parse", "HEAD"],
+            )?)
+            .context("git rev-parse HEAD returned non-UTF-8")?
+            .trim()
+            .to_owned()
+        } else {
+            gitio::fresh_read(|| gitio::head(path))?
+        };
+        let tree = if pinned_cwd.is_some() {
+            String::from_utf8(source_bytes_with_fd(
+                path,
+                pinned_cwd,
+                &["rev-parse", "HEAD^{tree}"],
+            )?)
+            .context("git rev-parse HEAD^{tree} returned non-UTF-8")?
+            .trim()
+            .to_owned()
+        } else {
+            gitio::git(path, &["rev-parse", "HEAD^{tree}"])?
+        };
         Ok(Self {
-            revision: gitio::fresh_read(|| gitio::head(path))?,
-            tree: gitio::git(path, &["rev-parse", "HEAD^{tree}"])?,
-            tracked: source_bytes(path, &["diff", "--binary", "HEAD", "--"])?,
-            staged: source_bytes(path, &["diff", "--cached", "--binary", "HEAD", "--"])?,
-            untracked: source_bytes(path, &["ls-files", "--others", "--exclude-standard", "-z"])?,
-            index: index_entries(path)?,
+            revision,
+            tree,
+            tracked: source_bytes_with_fd(path, pinned_cwd, &["diff", "--binary", "HEAD", "--"])?,
+            staged: source_bytes_with_fd(
+                path,
+                pinned_cwd,
+                &["diff", "--cached", "--binary", "HEAD", "--"],
+            )?,
+            untracked: source_bytes_with_fd(
+                path,
+                pinned_cwd,
+                &["ls-files", "--others", "--exclude-standard", "-z"],
+            )?,
+            index: index_entries_with_fd(path, pinned_cwd)?,
         })
     }
 
@@ -166,22 +202,42 @@ impl Source {
     }
 }
 
-fn index_entries(path: &Path) -> Result<Vec<u8>> {
+fn index_entries_with_fd(path: &Path, pinned_cwd: Option<std::os::fd::RawFd>) -> Result<Vec<u8>> {
     let mut entries = Vec::new();
     for flag in ["-v", "-f"] {
-        let observed = source_bytes(path, &["ls-files", "--stage", flag, "-z"])?;
+        let observed =
+            source_bytes_with_fd(path, pinned_cwd, &["ls-files", "--stage", flag, "-z"])?;
         entries.extend_from_slice(&(observed.len() as u64).to_le_bytes());
         entries.extend_from_slice(&observed);
     }
     Ok(entries)
 }
 
-fn source_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = gitio::git_command()
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .current_dir(path)
-        .counted_output()?;
+fn source_bytes_with_fd(
+    path: &Path,
+    pinned_cwd: Option<std::os::fd::RawFd>,
+    args: &[&str],
+) -> Result<Vec<u8>> {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = gitio::git_command();
+    command.args(args).env("GIT_OPTIONAL_LOCKS", "0");
+    if let Some(fd) = pinned_cwd {
+        command.env_remove("PWD");
+        // SAFETY: `fchdir` is async-signal-safe and `fd` remains open in the
+        // parent for the duration of `counted_output` (closing on exec via CLOEXEC).
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        command.current_dir(path);
+    }
+    let output = command.counted_output()?;
     if !output.status.success() {
         bail!(
             "cannot observe worktree preparation source: {}",
@@ -189,6 +245,56 @@ fn source_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(output.stdout)
+}
+
+fn read_config_text(
+    path: &Path,
+    pinned_cwd: Option<std::os::fd::RawFd>,
+) -> std::io::Result<String> {
+    let Some(dir_fd) = pinned_cwd else {
+        return fs::read_to_string(path.join(CONFIG));
+    };
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let arc_name = CString::new(".arc").expect("static name has no NUL");
+    // SAFETY: `dir_fd` is a valid open directory fd.
+    let arc_fd = unsafe {
+        libc::openat(
+            dir_fd,
+            arc_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if arc_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `arc_fd` is freshly opened and owned exclusively here.
+    let arc_dir = unsafe { OwnedFd::from_raw_fd(arc_fd) };
+    let file_name = CString::new("worktrees.toml").expect("static name has no NUL");
+    // SAFETY: `arc_dir` is a valid open directory fd.
+    let fd = unsafe {
+        libc::openat(
+            arc_dir.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is freshly opened and owned exclusively here.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            ".arc/worktrees.toml is not a regular file",
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
 }
 
 /// Prepare a checkout. Source-bound cache failures continue cold; persistent
@@ -464,8 +570,9 @@ impl PreparedStorage {
 pub(crate) fn resolved_build_directory(
     path: &Path,
     storage_key: Option<&Path>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
 ) -> Result<Option<PathBuf>> {
-    let text = match fs::read_to_string(path.join(CONFIG)) {
+    let text = match read_config_text(path, pinned_cwd) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
@@ -497,9 +604,13 @@ pub(crate) fn resolved_build_directory(
 /// Waits with interruption checks on cross-process build and preparation-cache
 /// leases so concurrent parallel verification invocations serialize shared
 /// storage cleanly and distinct build directories overlap once cache work ends.
-pub(crate) fn prepare_isolated(path: &Path, storage_key: Option<&Path>) -> Result<PreparedStorage> {
+pub(crate) fn prepare_isolated(
+    path: &Path,
+    storage_key: Option<&Path>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
+) -> Result<PreparedStorage> {
     crate::interruption::check()?;
-    let text = match fs::read_to_string(path.join(CONFIG)) {
+    let text = match read_config_text(path, pinned_cwd) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(PreparedStorage::default());
@@ -520,16 +631,16 @@ pub(crate) fn prepare_isolated(path: &Path, storage_key: Option<&Path>) -> Resul
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
     crate::interruption::check()?;
     if hook.mode == Mode::PathStable {
-        return stable::prepare_and_hold(&path, storage_key, &(hook, timeout));
+        return stable::prepare_and_hold(&path, storage_key, pinned_cwd, &(hook, timeout));
     }
-    let before = Source::observe(&path)?;
+    let before = Source::observe_with_fd(&path, pinned_cwd)?;
     let outcome = run_with_wait(&path, &before, &(hook, timeout), true);
     if let Err(error) = &outcome {
         if error.is::<crate::interruption::Interrupted>() {
             return Err(outcome.unwrap_err());
         }
     }
-    if Source::observe(&path)? != before {
+    if Source::observe_with_fd(&path, pinned_cwd)? != before {
         return Err(SourceMutation(String::new()).into());
     }
     let (hook, timeout) = configuration(&text)?.context("preparation configuration disappeared")?;
@@ -542,7 +653,7 @@ pub(crate) fn prepare_isolated(path: &Path, storage_key: Option<&Path>) -> Resul
     }
     let (hook, timeout) = configuration(&text)?.context("preparation configuration disappeared")?;
     let key = cache_key(&hook, timeout);
-    let source = Source::observe(&path)?;
+    let source = Source::observe_with_fd(&path, pinned_cwd)?;
     let cache = gitio::common_dir(&path)?
         .join("arc/cache/worktrees")
         .join(&key);

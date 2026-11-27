@@ -1513,6 +1513,323 @@ fn verify_all_parallel_sigkill_orphan_and_corrupt_admin_never_strand_next_run() 
 }
 
 #[test]
+fn verify_all_parallel_add_replacement_detached_checkout_is_never_adopted_or_deleted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let markers = repo.home.join("detached-replace-markers");
+    fs::create_dir_all(&markers).unwrap();
+    let moved = repo.home.join("moved-after-add");
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[gates.alpha]\ncommand = \"touch '{}/gate-ran'\"\n",
+            markers.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: detached replacement gate"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-detach-swap", "--no-worktree"]),
+    );
+
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let bin = repo.home.join("detach-swap-git-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let captured = markers.join("target.pwd");
+    // Let real `git worktree add --detach --no-checkout <target> <rev>` succeed,
+    // then immediately move `<target>` away and swap in an unrelated detached
+    // checkout at the exact same commit with an untracked sentinel before
+    // returning exit 0 to arc.
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "--detach" ] && [ "$4" = "--no-checkout" ]; then
+    target="$5"
+    rev="$6"
+    printf '%s' "$target" > '{captured}'
+    '{real_git}' "$@" || exit $?
+    '{real_git}' -C '{root}' worktree move "$target" '{moved}' >/dev/null 2>&1
+    '{real_git}' -C '{root}' worktree add --detach "$target" "$rev" >/dev/null 2>&1
+    printf 'precious-detached\n' > "$target/sentinel.txt"
+    exit 0
+fi
+exec '{real_git}' "$@"
+"#,
+        captured = captured.display(),
+        real_git = real_git,
+        root = repo.root.display(),
+        moved = moved.display(),
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    repo.arc(&repo.root)
+        .env("PATH", &path_env)
+        .args([
+            "verify",
+            "parallel-detach-swap",
+            "--all",
+            "--parallel",
+            "--rerun",
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !markers.join("gate-ran").exists(),
+        "gate unexpectedly ran after detached checkout swap"
+    );
+    let target = PathBuf::from(fs::read_to_string(&captured).unwrap());
+    assert_eq!(
+        fs::read_to_string(target.join("sentinel.txt")).unwrap(),
+        "precious-detached\n",
+        "same-commit detached replacement sentinel was deleted"
+    );
+    let replacement_admin = PathBuf::from(git_out(&target, &["rev-parse", "--absolute-git-dir"]));
+    assert!(
+        !replacement_admin
+            .join("arc-parallel-scratch-owner")
+            .exists(),
+        "arc stamped its ownership marker onto a replacement detached checkout"
+    );
+    let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    assert!(
+        list.contains(target.to_str().unwrap()),
+        "same-commit detached replacement was unregistered: {list}"
+    );
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", target.to_str().unwrap()],
+    );
+    if moved.exists() {
+        git(
+            &repo.root,
+            &["worktree", "remove", "--force", moved.to_str().unwrap()],
+        );
+    }
+}
+
+#[test]
+fn verify_all_parallel_gate_runs_in_pinned_dir_fd_when_path_is_swapped_before_launch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let markers = repo.home.join("gate-fd-markers");
+    fs::create_dir_all(&markers).unwrap();
+    let moved = repo.home.join("moved-before-gate-launch");
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.alpha]\ncommand = \"printf 'gate-side-effect\\n' > gate-wrote.txt\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: pinned fd gate"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-gate-fd", "--no-worktree"]),
+    );
+
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let bin = repo.home.join("gate-fd-git-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let captured = markers.join("swapped.pwd");
+    let once = markers.join("swapped.once");
+    // Intercept `git rev-parse <rev>^{tree}` (invoked immediately after
+    // `verify_live_ownership` and immediately before `execute_verification`),
+    // moving the scratch away and placing a replacement branch checkout at the
+    // old path. Because the gate launches via `fchdir(dir_fd)`, its side
+    // effects stay inside `<moved>` and never touch the replacement checkout.
+    let script = format!(
+        r#"#!/bin/sh
+case "$PWD:$1:$2" in
+    */.arc-parallel/*:rev-parse:*^\{{tree\}})
+        if [ ! -e '{once}' ]; then
+            touch '{once}'
+            old="$PWD"
+            printf '%s' "$old" > '{captured}'
+            '{real_git}' -C '{root}' worktree move "$old" '{moved}' >/dev/null 2>&1
+            '{real_git}' -C '{root}' worktree add "$old" -b swapped-before-gate >/dev/null 2>&1
+            printf 'keep-me\n' > "$old/sentinel.txt"
+        fi
+        ;;
+esac
+exec '{real_git}' "$@"
+"#,
+        once = once.display(),
+        captured = captured.display(),
+        real_git = real_git,
+        root = repo.root.display(),
+        moved = moved.display(),
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    repo.arc(&repo.root)
+        .env("PATH", &path_env)
+        .args([
+            "verify",
+            "parallel-gate-fd",
+            "--all",
+            "--parallel",
+            "--rerun",
+        ])
+        .assert()
+        .failure();
+    let old_path = PathBuf::from(fs::read_to_string(&captured).unwrap());
+    assert!(
+        !old_path.join("gate-wrote.txt").exists(),
+        "gate executed in the replacement checkout instead of the pinned dir_fd"
+    );
+    assert_eq!(
+        fs::read_to_string(moved.join("gate-wrote.txt")).unwrap(),
+        "gate-side-effect\n",
+        "gate did not execute inside the original pinned directory descriptor"
+    );
+    assert_eq!(
+        fs::read_to_string(old_path.join("sentinel.txt")).unwrap(),
+        "keep-me\n",
+        "replacement branch checkout sentinel was touched or deleted"
+    );
+    let list = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    assert!(
+        list.contains(old_path.to_str().unwrap())
+            && list.contains("branch refs/heads/swapped-before-gate"),
+        "replacement branch checkout was unregistered: {list}"
+    );
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-gate-fd",
+        "--type",
+        "verification-recorded",
+    ]));
+    assert!(
+        events.trim().is_empty(),
+        "unexpected evidence recorded after checkout swap: {events}"
+    );
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", old_path.to_str().unwrap()],
+    );
+    if moved.exists() {
+        git(
+            &repo.root,
+            &["worktree", "remove", "--force", moved.to_str().unwrap()],
+        );
+    }
+}
+
+#[test]
+fn verify_all_parallel_sigterm_right_after_worktree_add_cleans_up_registration() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.alpha]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: sigterm after add gate"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-term-after-add", "--no-worktree"]),
+    );
+    let worktrees_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let bin = repo.home.join("term-after-add-git-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let captured = repo.home.join("term-after-add-target");
+    // Let real `git worktree add --detach --no-checkout` register the worktree
+    // and succeed, then immediately deliver SIGTERM to arc and exit 0 so arc
+    // must still adopt and clean up the newly registered checkout on exit.
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "--detach" ] && [ "$4" = "--no-checkout" ]; then
+    printf '%s' "$5" > '{captured}'
+    '{real_git}' "$@" || exit $?
+    kill -TERM "$PPID"
+    exit 0
+fi
+exec '{real_git}' "$@"
+"#,
+        captured = captured.display(),
+        real_git = real_git,
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = repo
+        .arc(&repo.root)
+        .env("PATH", &path_env)
+        .args([
+            "verify",
+            "parallel-term-after-add",
+            "--all",
+            "--parallel",
+            "--rerun",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGTERM),
+        "expected SIGTERM exit, got {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let target = PathBuf::from(fs::read_to_string(&captured).unwrap());
+    assert!(
+        !target.exists(),
+        "worktree created right before SIGTERM was leaked on disk"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        worktrees_before,
+        "worktree registration created right before SIGTERM was leaked"
+    );
+}
+
+#[test]
 fn verify_all_parallel_overlapping_invocations_wait_on_shared_build_and_cache_leases() {
     // Part A: explicit shared `prepare.directory` across two overlapping
     // `arc verify --all --parallel --rerun` processes.

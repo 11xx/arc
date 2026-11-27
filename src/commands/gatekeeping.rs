@@ -632,8 +632,11 @@ fn verify_with_landing(
         let mut preparation_ms = if need_reuse_environments {
             let preparing = Instant::now();
             if parallel {
-                parallel_reuse_prep =
-                    Some(crate::warm_worktree::prepare_isolated(&run_ctx.cwd, None)?);
+                parallel_reuse_prep = Some(crate::warm_worktree::prepare_isolated(
+                    &run_ctx.cwd,
+                    None,
+                    None,
+                )?);
             } else {
                 crate::warm_worktree::prepare(&run_ctx.cwd)?;
             }
@@ -2813,8 +2816,13 @@ fn path_matches_dir_identity(path: &Path, dev: u64, ino: u64) -> bool {
 }
 
 /// Run a Git command in its own process group so SIGINT/SIGTERM/SIGHUP stops
-/// and reaps Git and any blocked hook descendants immediately.
-fn run_interruptible_git(cwd: &Path, args: &[&str]) -> Result<()> {
+/// and reaps Git and any blocked hook descendants immediately. Returns the
+/// reaped status and stderr tail before checking interruption so callers can
+/// adopt and clean up resources that Git already created before cancellation.
+fn run_interruptible_git_status(
+    cwd: &Path,
+    args: &[&str],
+) -> Result<(std::process::ExitStatus, String)> {
     run_interruptible_git_inner(Some(cwd), None, args)
 }
 
@@ -2822,14 +2830,19 @@ fn run_interruptible_git(cwd: &Path, args: &[&str]) -> Result<()> {
 /// `fchdir(2)` in `pre_exec`, so path replacement at the worktree pathname
 /// cannot redirect Git onto a different checkout.
 fn run_interruptible_git_at_fd(dir_fd: std::os::fd::RawFd, args: &[&str]) -> Result<()> {
-    run_interruptible_git_inner(None, Some(dir_fd), args)
+    let (status, stderr_tail) = run_interruptible_git_inner(None, Some(dir_fd), args)?;
+    crate::interruption::check()?;
+    if !status.success() {
+        bail!("git {} failed: {}", args.join(" "), stderr_tail.trim());
+    }
+    Ok(())
 }
 
 fn run_interruptible_git_inner(
     cwd: Option<&Path>,
     dir_fd: Option<std::os::fd::RawFd>,
     args: &[&str],
-) -> Result<()> {
+) -> Result<(std::process::ExitStatus, String)> {
     use std::os::unix::process::CommandExt;
 
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
@@ -2845,6 +2858,7 @@ fn run_interruptible_git_inner(
         command.current_dir(cwd);
     }
     if let Some(fd) = dir_fd {
+        command.env_remove("PWD");
         // SAFETY: `fchdir` is async-signal-safe and `fd` remains open in the
         // parent across `spawn` (closing automatically on `execve` via CLOEXEC).
         unsafe {
@@ -2897,11 +2911,87 @@ fn run_interruptible_git_inner(
         crate::process_group::join_before_deadline(err, Some(deadline), "git stderr reader")?
             .transpose()?
             .unwrap_or_default();
-    crate::interruption::check()?;
-    if !status.success() {
-        bail!("git {} failed: {}", args.join(" "), stderr_tail.trim());
+    Ok((status, stderr_tail))
+}
+
+fn git_at_fd(
+    dir_fd: std::os::fd::RawFd,
+    extra_env: Option<(&str, &str)>,
+    args: &[&str],
+) -> Result<String> {
+    use crate::perf::Counted;
+    use std::os::unix::process::CommandExt;
+
+    let mut command = gitio::git_command();
+    command.args(args).env_remove("PWD");
+    if let Some((key, value)) = extra_env {
+        command.env(key, value);
     }
-    Ok(())
+    // SAFETY: `fchdir` is async-signal-safe and `dir_fd` remains open in the
+    // parent across `counted_output` (closing automatically on `execve` via CLOEXEC).
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(dir_fd) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command
+        .counted_output()
+        .with_context(|| format!("cannot run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn worktree_tree_at_fd(dir_fd: std::os::fd::RawFd, admin: &Path) -> Result<String> {
+    let index_path = admin.join(format!(
+        "arc-scratch-index.{}",
+        crate::ids::new_identifier()
+    ));
+    let index = index_path.display().to_string();
+    let result = (|| {
+        let _ = git_at_fd(
+            dir_fd,
+            Some(("GIT_INDEX_FILE", &index)),
+            &["read-tree", "HEAD"],
+        );
+        git_at_fd(dir_fd, Some(("GIT_INDEX_FILE", &index)), &["add", "-A"])?;
+        git_at_fd(dir_fd, Some(("GIT_INDEX_FILE", &index)), &["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    result
+}
+
+fn dirt_at_fd(dir_fd: std::os::fd::RawFd) -> Result<gitio::Dirt> {
+    let status = git_at_fd(dir_fd, None, &["status", "--porcelain"])?;
+    let mut dirt = gitio::Dirt::default();
+    for line in status.lines().filter(|line| !line.trim().is_empty()) {
+        if line.starts_with("??") {
+            dirt.untracked = true;
+        } else {
+            dirt.tracked = true;
+        }
+    }
+    Ok(dirt)
+}
+
+fn head_at_fd(dir_fd: std::os::fd::RawFd) -> Result<String> {
+    git_at_fd(dir_fd, None, &["rev-parse", "HEAD"])
+}
+
+fn commit_tree_at_fd(dir_fd: std::os::fd::RawFd, revision: &str) -> Result<String> {
+    git_at_fd(
+        dir_fd,
+        None,
+        &["rev-parse", &format!("{revision}^{{tree}}")],
+    )
 }
 
 fn open_dir_nofollow(path: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
@@ -3368,9 +3458,15 @@ fn try_acquire_parallel_slot_lock(path: &Path) -> Result<Option<std::fs::File>> 
 }
 
 enum ParallelScratchOwnership {
-    /// Before `git worktree add --detach --no-checkout` finishes and ownership
-    /// is verified and stamped. Drop never deletes anything in this state.
-    PreCreate,
+    /// Exclusively created empty directory pinned by `(dir_fd, dev, ino)`
+    /// before `git worktree add --detach --no-checkout` runs. Drop only removes
+    /// the empty directory via non-recursive `rmdir` on matching `(dev, ino)`
+    /// and never touches populated checkouts or admin registrations.
+    ReservedEmptyDir {
+        dir_fd: std::os::fd::OwnedFd,
+        dev: u64,
+        ino: u64,
+    },
     /// Proven detached parallel scratch worktree pinned by an open directory
     /// descriptor (`dir_fd`), inode identity `(dev, ino)`, and per-allocation
     /// ownership token in `<admin>/arc-parallel-scratch-owner`.
@@ -3385,9 +3481,10 @@ enum ParallelScratchOwnership {
 
 /// An isolated detached checkout owned exclusively by one parallel gate run.
 ///
-/// Each allocation creates a fresh unique per-run checkout directory directly
-/// inside `<worktrees_dir>/.arc-parallel` (avoiding path reuse and relocation
-/// so relative Git worktree links work natively and crashed runs never strand
+/// Each allocation exclusively creates and pins a fresh unique per-run
+/// directory directly inside `<worktrees_dir>/.arc-parallel` before invoking
+/// Git (avoiding path reuse, relocation, and post-add replacement adoption, so
+/// relative Git worktree links work natively and crashed runs never strand
 /// future invocations), while holding a per-slot flock strictly to key warm
 /// default `path-stable` build storage. Cleanup acquires `<admin>/HEAD.lock`
 /// before verifying detached state, severs `.git`/`gitdir`, and clears contents
@@ -3475,15 +3572,29 @@ impl ParallelScratchWorktree {
             }
             crate::interruption::check()?;
 
+            // Exclusively reserve and pin the empty target directory BEFORE
+            // invoking Git so we never reopen the pathname to adopt a
+            // same-commit detached replacement swapped in after Git returns.
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .with_context(|| format!("cannot reserve parallel scratch {}", path.display()))?;
+            let reserved_fd = open_dir_nofollow(&path)
+                .with_context(|| format!("cannot open reserved scratch {}", path.display()))?;
+            let (dev, ino) = fstat_fd(reserved_fd.as_raw_fd())?;
             let mut guard = Self {
                 common_dir: common_dir.clone(),
                 path: path.clone(),
                 storage_key,
-                ownership: ParallelScratchOwnership::PreCreate,
+                ownership: ParallelScratchOwnership::ReservedEmptyDir {
+                    dir_fd: reserved_fd,
+                    dev,
+                    ino,
+                },
                 _lock: lock,
             };
             let path_display = path.display().to_string();
-            run_interruptible_git(
+            let (add_status, add_stderr) = run_interruptible_git_status(
                 &ctx.cwd,
                 &[
                     "worktree",
@@ -3494,10 +3605,31 @@ impl ParallelScratchWorktree {
                     revision,
                 ],
             )?;
-            let dir_fd = open_dir_nofollow(&path)
-                .with_context(|| format!("cannot open {}", path.display()))?;
-            let (dev, ino) = fstat_fd(dir_fd.as_raw_fd())?;
-            let admin = resolve_admin_from_dir_fd(dir_fd.as_raw_fd(), &path)?;
+            if !add_status.success() {
+                // Propagate interruption first if Git was stopped before
+                // completing; `guard` stays in `ReservedEmptyDir`, so any
+                // external checkout placed at `path` is left untouched.
+                crate::interruption::check()?;
+                bail!(
+                    "git worktree add --detach --no-checkout {path_display} {revision} failed: {}",
+                    add_stderr.trim()
+                );
+            }
+            // Git completed `worktree add` into our pre-pinned directory. Claim
+            // ownership BEFORE checking for a signal that arrived right after
+            // Git registered the worktree, so Drop cleanly removes the
+            // registration if we exit due to interruption.
+            if !path_matches_dir_identity(&path, dev, ino) {
+                bail!(
+                    "refusing to claim parallel scratch {} because its reserved directory identity changed",
+                    path.display()
+                );
+            }
+            let reserved_raw_fd = match &guard.ownership {
+                ParallelScratchOwnership::ReservedEmptyDir { dir_fd, .. } => dir_fd.as_raw_fd(),
+                ParallelScratchOwnership::OwnedWorktree { .. } => unreachable!(),
+            };
+            let admin = resolve_admin_from_dir_fd(reserved_raw_fd, &path)?;
             let worktrees_admin = std::fs::canonicalize(common_dir.join("worktrees"))?;
             if !admin.starts_with(&worktrees_admin) {
                 bail!(
@@ -3529,10 +3661,22 @@ impl ParallelScratchWorktree {
                 PARALLEL_SCRATCH_OWNER_FILE,
                 parallel_scratch_owner_marker(&common_dir, &path, &token).as_bytes(),
             )?;
-            let raw_dir_fd = dir_fd.as_raw_fd();
+            let placeholder_fd = open_dir_nofollow(&common_dir)?;
+            let owned_dir_fd = match std::mem::replace(
+                &mut guard.ownership,
+                ParallelScratchOwnership::ReservedEmptyDir {
+                    dir_fd: placeholder_fd,
+                    dev,
+                    ino,
+                },
+            ) {
+                ParallelScratchOwnership::ReservedEmptyDir { dir_fd, .. } => dir_fd,
+                ParallelScratchOwnership::OwnedWorktree { .. } => unreachable!(),
+            };
+            let raw_dir_fd = owned_dir_fd.as_raw_fd();
             guard.ownership = ParallelScratchOwnership::OwnedWorktree {
                 admin,
-                dir_fd,
+                dir_fd: owned_dir_fd,
                 dev,
                 ino,
                 token,
@@ -3552,6 +3696,19 @@ impl ParallelScratchWorktree {
         bail!(
             "all {MAX_PARALLEL_SCRATCH_SLOTS} parallel scratch slots for gate {gate:?} are in use"
         );
+    }
+
+    fn pinned_handle(&self) -> Result<(std::os::fd::RawFd, &Path)> {
+        use std::os::fd::AsRawFd;
+
+        match &self.ownership {
+            ParallelScratchOwnership::OwnedWorktree { dir_fd, admin, .. } => {
+                Ok((dir_fd.as_raw_fd(), admin.as_path()))
+            }
+            ParallelScratchOwnership::ReservedEmptyDir { .. } => {
+                bail!("parallel scratch {} is not owned", self.path.display())
+            }
+        }
     }
 
     /// Confirm that `self.path` still resolves to the exact pinned directory
@@ -3626,7 +3783,12 @@ impl Drop for ParallelScratchWorktree {
         use std::os::fd::AsRawFd;
 
         match &self.ownership {
-            ParallelScratchOwnership::PreCreate => {}
+            ParallelScratchOwnership::ReservedEmptyDir { dev, ino, .. } => {
+                // Non-recursive `rmdir(2)` on matching `(dev, ino)` removes an
+                // unused empty reservation while leaving any populated external
+                // checkout or swapped path completely untouched.
+                rmdir_if_same_inode(&self.path, *dev, *ino);
+            }
             ParallelScratchOwnership::OwnedWorktree {
                 admin,
                 dir_fd,
@@ -3752,11 +3914,13 @@ fn verify_all_parallel(
     for (index, ((_, gate), scratch)) in required.iter().zip(&scratches).enumerate() {
         crate::interruption::check()?;
         scratch.verify_live_ownership(Some(revision))?;
+        let (dir_fd, _) = scratch.pinned_handle()?;
         let resolved = {
             let _confinement = crate::confinement::Scope::new(&gate.confine);
             crate::warm_worktree::resolved_build_directory(
                 &scratch.path,
                 Some(&scratch.storage_key),
+                Some(dir_fd),
             )?
         };
         match resolved {
@@ -3792,12 +3956,14 @@ fn verify_all_parallel(
                             let (name, gate) = required[index];
                             let scratch = &scratches[index];
                             let scratch_path = scratch.path.as_path();
+                            let (dir_fd, admin_path) = scratch.pinned_handle()?;
                             scratch.verify_live_ownership(Some(revision))?;
                             let _confinement = crate::confinement::Scope::new(&gate.confine);
                             let preparing = Instant::now();
                             let prepared = crate::warm_worktree::prepare_isolated(
                                 scratch_path,
                                 Some(&scratch.storage_key),
+                                Some(dir_fd),
                             )?;
                             let gate_preparation_ms = preparing.elapsed().as_millis() as u64
                                 + if index == 0 { preparation_ms } else { 0 };
@@ -3810,6 +3976,7 @@ fn verify_all_parallel(
                                         probe,
                                         gate.timeout,
                                         Some(&prepared),
+                                        Some(dir_fd),
                                     )?;
                                     if let Some(failure) = &run.failure {
                                         eprintln!(
@@ -3824,9 +3991,9 @@ fn verify_all_parallel(
                             };
                             crate::interruption::check()?;
                             scratch.verify_live_ownership(Some(revision))?;
-                            let before = gitio::worktree_tree(scratch_path)?;
-                            let dirt_before = gitio::dirt(scratch_path)?;
-                            let commit_tree = gitio::commit_tree(scratch_path, revision)?;
+                            let before = worktree_tree_at_fd(dir_fd, admin_path)?;
+                            let dirt_before = dirt_at_fd(dir_fd)?;
+                            let commit_tree = commit_tree_at_fd(dir_fd, revision)?;
                             let dirty_before = dirt_before.tracked
                                 || dirt_before.untracked
                                 || before != commit_tree;
@@ -3863,12 +4030,13 @@ fn verify_all_parallel(
                                 store.repository_id.as_str(),
                                 change_id,
                                 Some(&prepared),
+                                Some(dir_fd),
                             )?;
                             drop(prepared);
                             scratch.verify_live_ownership(None)?;
-                            let after = gitio::worktree_tree(scratch_path)?;
-                            let post = gitio::fresh_read(|| gitio::head(scratch_path))?;
-                            let dirt_after = gitio::dirt(scratch_path)?;
+                            let after = worktree_tree_at_fd(dir_fd, admin_path)?;
+                            let post = head_at_fd(dir_fd)?;
+                            let dirt_after = dirt_at_fd(dir_fd)?;
                             let head_moved = post != revision;
                             let tree_moved = after != before
                                 || head_moved
@@ -4055,7 +4223,7 @@ fn gate_environments_with_prepared<'a>(
         if identities.contains_key(&key) {
             continue;
         }
-        let run = gates::environment_probe_with_prepared(cwd, probe, gate.timeout, prepared)?;
+        let run = gates::environment_probe_with_prepared(cwd, probe, gate.timeout, prepared, None)?;
         if let Some(failure) = &run.failure {
             eprintln!(
                 "warning: environment probe {probe:?} for gate {name:?} yielded no identity: {}",
@@ -4279,6 +4447,7 @@ fn record_verification_at(
         &store.repository_id,
         change_id,
         None,
+        None,
     )?;
     if !completed.attested {
         let post = gitio::fresh_read(|| gitio::head(command_cwd))?;
@@ -4352,6 +4521,7 @@ fn execute_verification(
     producing_store: &str,
     change_id: &str,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
         work_declaration,
@@ -4415,6 +4585,7 @@ fn execute_verification(
                         .as_ref()
                         .map(|request| (request, change_id, gate.as_deref().unwrap_or("command"))),
                     prepared,
+                    pinned_cwd,
                 )?;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 timing = observed.timing;
@@ -4860,6 +5031,7 @@ pub(super) fn run_gate_budgeted(
         producing_store,
         admission,
         None,
+        None,
     )
 }
 
@@ -4873,9 +5045,10 @@ fn run_gate_budgeted_with_prep(
     producing_store: &str,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
 ) -> Result<GateRun> {
     with_check_timings(timings, cwd, || {
-        run_gate_with_capture(cmd, cwd, timeout, admission, prepared, || {
+        run_gate_with_capture(cmd, cwd, timeout, admission, prepared, pinned_cwd, || {
             crate::verification_output::Capture::new(output_root, producing_store)
         })
     })
@@ -4892,6 +5065,7 @@ pub(super) fn measure_gate(gate: &gates::Gate, name: &str, cwd: &Path) -> Result
             request
                 .as_ref()
                 .map(|request| (request, "measurement", name)),
+            None,
             None,
             crate::verification_output::Capture::transient,
         )
@@ -4930,6 +5104,7 @@ fn run_gate_with_capture(
     timeout: Option<Duration>,
     admission: Option<(&crate::exclusive::Request, &str, &str)>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let (shell, wait_ms) = match admission {
@@ -4943,9 +5118,12 @@ fn run_gate_with_capture(
         }
         None => crate::slots::measured_shell(cwd)?,
     };
-    run_gate_in_shell(shell, wait_ms, cmd, cwd, timeout, prepared, capture)
+    run_gate_in_shell(
+        shell, wait_ms, cmd, cwd, timeout, prepared, pinned_cwd, capture,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gate_in_shell(
     mut shell: crate::slots::Shell,
     wait_ms: u64,
@@ -4953,16 +5131,31 @@ fn run_gate_in_shell(
     cwd: &Path,
     timeout: Option<Duration>,
     prepared: Option<&crate::warm_worktree::PreparedStorage>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
     capture: impl FnOnce() -> crate::verification_output::Capture,
 ) -> Result<GateRun> {
     let command = &mut shell.command;
     command
         .arg("-c")
         .arg(format!("exec 2>&1\n{cmd}"))
-        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
+    if let Some(fd) = pinned_cwd {
+        command.env_remove("PWD");
+        // SAFETY: `fchdir` is async-signal-safe and `fd` remains open in the
+        // parent across `spawn` (closing automatically on `execve` via CLOEXEC).
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        command.current_dir(cwd);
+    }
     let preparing = Instant::now();
     let _preparation = if let Some(prepared) = prepared {
         prepared.configure(command);
@@ -8388,6 +8581,7 @@ mod pipe_deadline_tests {
             cmd,
             cwd,
             timeout_seconds.map(Duration::from_secs),
+            None,
             None,
             || crate::verification_output::Capture::new(output_root, producing_store),
         )

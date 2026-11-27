@@ -137,12 +137,13 @@ impl Storage {
     /// Run the preparation command, if one is declared, reporting whether
     /// it ran and succeeded.
     fn prepare(&mut self, path: &Path, source: &Source, hook: &Hook, timeout: u64) -> Result<bool> {
-        self.prepare_with_wait(path, source, hook, timeout, false)
+        self.prepare_with_wait(path, None, source, hook, timeout, false)
     }
 
     fn prepare_with_wait(
         &mut self,
         path: &Path,
+        pinned_cwd: Option<std::os::fd::RawFd>,
         source: &Source,
         hook: &Hook,
         timeout: u64,
@@ -181,7 +182,7 @@ impl Storage {
                 return Err(outcome.unwrap_err());
             }
         }
-        let after = Source::observe(path)?;
+        let after = Source::observe_with_fd(path, pinned_cwd)?;
         if after != *source {
             return Err(SourceMutation(source.changed_fields(&after)).into());
         }
@@ -267,11 +268,12 @@ pub(super) fn configure(
 pub(super) fn prepare_and_hold(
     path: &Path,
     storage_key: Option<&Path>,
+    pinned_cwd: Option<std::os::fd::RawFd>,
     (hook, timeout): &(Hook, u64),
 ) -> Result<PreparedStorage> {
-    let source = Source::observe(path)?;
+    let source = Source::observe_with_fd(path, pinned_cwd)?;
     let mut storage = Storage::open_with_wait(path, storage_key, hook, *timeout, true)?;
-    if storage.prepare_with_wait(path, &source, hook, *timeout, true)? {
+    if storage.prepare_with_wait(path, pinned_cwd, &source, hook, *timeout, true)? {
         crate::slots::record_built(path)?;
     }
     eprintln!(

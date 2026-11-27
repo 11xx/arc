@@ -106,6 +106,7 @@ fn batch(
                         &store.repository_id,
                         change_id,
                         None,
+                        None,
                     )
                 })
             })
