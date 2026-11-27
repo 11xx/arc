@@ -4007,22 +4007,37 @@ fn integrate_queue_dry_run_refuses_stacked_shared_commits_matching_live_queue() 
     assert_eq!(history_rewrite_count(&repo), 0);
 }
 
-fn read_all_jsonl_bytes(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+/// Snapshot every per-event and intent file under `.git/arc/` (`changes/`,
+/// `repository/`, `provisional/`, `provisional-abandoned/`, `landing-intents/`).
+fn read_arc_ledger_bytes(repo: &Repo) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let arc_root = repo.root.join(".git/arc");
     let mut out = std::collections::BTreeMap::new();
-    if !dir.exists() {
-        return out;
-    }
-    let mut stack = vec![dir.to_path_buf()];
+    let mut stack: Vec<PathBuf> = [
+        "changes",
+        "repository",
+        "provisional",
+        "provisional-abandoned",
+        "landing-intents",
+    ]
+    .into_iter()
+    .map(|sub| arc_root.join(sub))
+    .filter(|dir| dir.exists())
+    .collect();
     while let Some(cur) = stack.pop() {
         for entry in fs::read_dir(&cur).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            } else {
                 out.insert(path.clone(), fs::read(&path).unwrap());
             }
         }
     }
+    assert!(
+        !out.is_empty(),
+        "expected per-event ledger files under {}",
+        arc_root.display()
+    );
     out
 }
 
@@ -4081,8 +4096,7 @@ fn integrate_ff_auto_stamp_rolls_back_refs_and_preserves_competing_edits_on_chec
             "refs/arc/",
         ],
     );
-    let ledger_root = repo.home.join(".local/share/arc");
-    let ledger_before = read_all_jsonl_bytes(&ledger_root);
+    let ledger_before = read_arc_ledger_bytes(&repo);
     let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
         .unwrap()
         .trim()
@@ -4119,6 +4133,7 @@ exec '{real_git}' "$@"
     assert_eq!(repo.head(&repo.root), master_before);
     assert_eq!(repo.head(&wt), orig_head);
     assert!(!repo.root.join("work.txt").exists());
+    assert!(!repo.root.join(".git/HEAD.lock").exists());
     assert_eq!(
         git_out(
             &repo.root,
@@ -4130,7 +4145,7 @@ exec '{real_git}' "$@"
         ),
         arc_refs_before
     );
-    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
     assert_eq!(history_rewrite_count(&repo), 0);
 
     // Case 2: competing tracked edit to untouched `README.md` arriving right
@@ -4173,6 +4188,7 @@ exec '{real_git}' "$@"
         ));
     assert_eq!(repo.head(&repo.root), master_before);
     assert_eq!(repo.head(&wt), orig_head);
+    assert!(!repo.root.join(".git/HEAD.lock").exists());
     assert!(
         !repo.root.join("work.txt").exists(),
         "unmodified change-added file must be rolled back"
@@ -4193,7 +4209,7 @@ exec '{real_git}' "$@"
         ),
         arc_refs_before
     );
-    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
     assert_eq!(history_rewrite_count(&repo), 0);
 
     // Clean up README.md before testing Case 3.
@@ -4238,6 +4254,7 @@ exec '{real_git}' "$@"
         ));
     assert_eq!(repo.head(&repo.root), master_before);
     assert_eq!(repo.head(&wt), orig_head);
+    assert!(!repo.root.join(".git/HEAD.lock").exists());
     assert_eq!(
         fs::read_to_string(repo.root.join("work.txt")).unwrap(),
         "work.txtcompeting work edit\n",
@@ -4254,7 +4271,7 @@ exec '{real_git}' "$@"
         ),
         arc_refs_before
     );
-    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
     assert_eq!(history_rewrite_count(&repo), 0);
 
     // Reconcile the checkout cleanly back to `master_before` and confirm that
@@ -4326,8 +4343,7 @@ fn integrate_ff_auto_stamp_reports_incomplete_ref_rollback_on_competing_ref_move
             "competing move",
         ],
     );
-    let ledger_root = repo.home.join(".local/share/arc");
-    let ledger_before = read_all_jsonl_bytes(&ledger_root);
+    let ledger_before = read_arc_ledger_bytes(&repo);
     let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
         .unwrap()
         .trim()
@@ -4365,6 +4381,325 @@ exec '{real_git}' "$@"
     assert_eq!(repo.head(&repo.root), competitor);
     assert_eq!(git_out(&repo.root, &["write-tree"]), index_before);
     assert!(!repo.root.join("work.txt").exists());
-    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert!(!repo.root.join(".git/HEAD.lock").exists());
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+}
+
+/// Checkout rollback holds `<git_dir>/HEAD.lock` across the ownership check
+/// and reverse `read-tree -u -m`, so a competing `git switch` cannot hijack
+/// the checkout mid-rollback and have its tracked files deleted:
+/// - a `git switch` attempted at `update-index --refresh` (after `HEAD.lock`
+///   is acquired) is blocked by `HEAD.lock` and leaves `master` restored;
+/// - a `git switch` completed before `HEAD.lock` is acquired causes rollback
+///   to observe the new branch under `HEAD.lock`, skip reverse `read-tree`,
+///   and leave the switched branch's index and working tree completely clean;
+/// - an already-held `HEAD.lock` causes rollback to skip reverse `read-tree`
+///   without removing the competing lock file.
+///
+/// In all cases, refs are restored and per-event files under `.git/arc/` stay
+/// byte-for-byte unchanged.
+#[test]
+fn integrate_ff_auto_stamp_rollback_protects_competing_switch_with_head_lock() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "head-lock-switch-race");
+    commit_file(&wt, "work.txt", "feat: head lock switch race");
+    let orig_head = repo.head(&wt);
+    let orig_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+    // Create an independent `side` branch with the same tree as the stamped
+    // commit (not sharing `orig_head`, so auto-stamping proceeds).
+    let side_commit = git_out(
+        &repo.root,
+        &[
+            "commit-tree",
+            &orig_tree,
+            "-p",
+            &master_before,
+            "-m",
+            "side work",
+        ],
+    );
+    git(&repo.root, &["branch", "side", &side_commit]);
+
+    let repo_events_dir = repo.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&repo_events_dir).unwrap();
+    let arc_refs_before = git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/arc/",
+        ],
+    );
+    let ledger_before = read_arc_ledger_bytes(&repo);
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let base_path = std::env::var("PATH").unwrap();
+
+    // Case A: competing `git switch side` attempted at the start of
+    // `update-index --refresh` (while `HEAD.lock` is held) is rejected by
+    // Git's `HEAD.lock`, and `master` is cleanly rolled back.
+    let mid_bin = repo.home.join("mid-switch-bin");
+    fs::create_dir_all(&mid_bin).unwrap();
+    let mid_read_tree_once = repo.home.join("mid-read-tree.once");
+    let mid_switch_status = repo.home.join("mid-switch.status");
+    let mid_wrapper = mid_bin.join("git");
+    fs::write(
+        &mid_wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ] && [ ! -f '{rt_once}' ]; then
+    touch '{rt_once}'
+    '{real_git}' "$@" || exit $?
+    chmod 500 '{events_dir}' || exit 1
+    exit 0
+fi
+if [ "$1" = update-index ]; then
+    if '{real_git}' switch side >/dev/null 2>&1; then
+        echo switched > '{sw_status}'
+    else
+        echo blocked > '{sw_status}'
+    fi
+fi
+exec '{real_git}' "$@"
+"#,
+            rt_once = mid_read_tree_once.display(),
+            events_dir = repo_events_dir.display(),
+            sw_status = mid_switch_status.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&mid_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", mid_bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "auto-stamp rewrite publication failed",
+        ))
+        .stderr(predicates::str::contains(
+            "refs and checkout restored to pre-integration state",
+        ));
+    fs::set_permissions(&repo_events_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&mid_switch_status).unwrap().trim(),
+        "blocked",
+        "competing `git switch side` must be blocked by HEAD.lock"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["symbolic-ref", "--short", "HEAD"]),
+        "master"
+    );
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert!(!repo.root.join("work.txt").exists());
+    assert!(git_out(&repo.root, &["status", "--porcelain"]).is_empty());
+    assert!(!repo.root.join(".git/HEAD.lock").exists());
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+        arc_refs_before
+    );
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Case B: competing `git switch side` completes right after ref rollback
+    // (`update-ref --stdin`) and before `HEAD.lock` is acquired. Under
+    // `HEAD.lock`, rollback sees `HEAD` moved to `side`, skips reverse
+    // `read-tree`, and leaves `side` completely clean with `work.txt` intact.
+    let pre_bin = repo.home.join("pre-switch-bin");
+    fs::create_dir_all(&pre_bin).unwrap();
+    let pre_read_tree_once = repo.home.join("pre-read-tree.once");
+    let pre_switch_once = repo.home.join("pre-switch.once");
+    let pre_wrapper = pre_bin.join("git");
+    fs::write(
+        &pre_wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ] && [ ! -f '{rt_once}' ]; then
+    touch '{rt_once}'
+    '{real_git}' "$@" || exit $?
+    chmod 500 '{events_dir}' || exit 1
+    exit 0
+fi
+if [ "$1" = update-ref ] && [ "$2" = --stdin ] && [ -f '{rt_once}' ] && [ ! -f '{sw_once}' ]; then
+    touch '{sw_once}'
+    '{real_git}' "$@" || exit $?
+    '{real_git}' switch side >/dev/null 2>&1 || exit 1
+    exit 0
+fi
+exec '{real_git}' "$@"
+"#,
+            rt_once = pre_read_tree_once.display(),
+            events_dir = repo_events_dir.display(),
+            sw_once = pre_switch_once.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&pre_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", pre_bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "auto-stamp rewrite publication failed",
+        ))
+        .stderr(predicates::str::contains(
+            "guarded checkout rollback was skipped because checkout moved away from master",
+        ));
+    fs::set_permissions(&repo_events_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(
+        git_out(&repo.root, &["symbolic-ref", "--short", "HEAD"]),
+        "side"
+    );
+    assert_eq!(repo.head(&repo.root), side_commit);
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "refs/heads/master"]),
+        master_before
+    );
+    assert_eq!(repo.head(&wt), orig_head);
+    assert_eq!(
+        fs::read_to_string(repo.root.join("work.txt")).unwrap(),
+        "work.txt",
+        "switched `side` checkout must keep work.txt intact"
+    );
+    assert!(
+        git_out(&repo.root, &["status", "--porcelain"]).is_empty(),
+        "switched `side` index and working tree must stay completely clean: {}",
+        git_out(&repo.root, &["status", "--porcelain"])
+    );
+    assert!(!repo.root.join(".git/HEAD.lock").exists());
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+        arc_refs_before
+    );
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Return to `master` before Case C.
+    git(&repo.root, &["switch", "master"]);
+    assert!(!repo.root.join("work.txt").exists());
+
+    // Case C: an already-held `<git_dir>/HEAD.lock` when checkout rollback
+    // begins skips reverse `read-tree`, leaves the competing `HEAD.lock` and
+    // checkout untouched, restores refs, and leaves `.git/arc/` untouched.
+    let busy_bin = repo.home.join("busy-head-lock-bin");
+    fs::create_dir_all(&busy_bin).unwrap();
+    let busy_read_tree_once = repo.home.join("busy-read-tree.once");
+    let busy_lock_once = repo.home.join("busy-lock.once");
+    let head_lock = repo.root.join(".git/HEAD.lock");
+    let busy_wrapper = busy_bin.join("git");
+    fs::write(
+        &busy_wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ] && [ ! -f '{rt_once}' ]; then
+    touch '{rt_once}'
+    '{real_git}' "$@" || exit $?
+    chmod 500 '{events_dir}' || exit 1
+    exit 0
+fi
+if [ "$1" = update-ref ] && [ "$2" = --stdin ] && [ -f '{rt_once}' ] && [ ! -f '{lk_once}' ]; then
+    touch '{lk_once}'
+    '{real_git}' "$@" || exit $?
+    : > '{head_lock}'
+    exit 0
+fi
+exec '{real_git}' "$@"
+"#,
+            rt_once = busy_read_tree_once.display(),
+            events_dir = repo_events_dir.display(),
+            lk_once = busy_lock_once.display(),
+            head_lock = head_lock.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&busy_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", busy_bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "auto-stamp rewrite publication failed",
+        ))
+        .stderr(predicates::str::contains(
+            "guarded checkout rollback was skipped because HEAD.lock could not be acquired",
+        ));
+    fs::set_permissions(&repo_events_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        head_lock.exists(),
+        "rollback must never remove a competing HEAD.lock it did not create"
+    );
+    fs::remove_file(&head_lock).unwrap();
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert!(
+        repo.root.join("work.txt").exists(),
+        "checkout must remain untouched when HEAD.lock is busy"
+    );
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+        arc_refs_before
+    );
+    assert_eq!(read_arc_ledger_bytes(&repo), ledger_before);
     assert_eq!(history_rewrite_count(&repo), 0);
 }

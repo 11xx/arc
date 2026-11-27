@@ -7649,15 +7649,50 @@ fn refuse_initialized_gitlink_changes(checkout: &Path, old: &str, approved: &str
     Ok(())
 }
 
+/// Exclusive lock on a worktree's `<git_dir>/HEAD.lock` created with
+/// `O_CREAT | O_EXCL | O_NOFOLLOW` so concurrent `git switch` / `git checkout`
+/// cannot move `HEAD` while guarded checkout rollback verifies ownership and
+/// runs `git read-tree`. Removes only the lock file this guard created.
+struct HeadLockGuard {
+    path: PathBuf,
+}
+
+impl HeadLockGuard {
+    fn acquire(wt: &Path) -> Result<Self> {
+        let admin_dir = gitio::worktree_admin_dir(wt)?;
+        let path = admin_dir.join("HEAD.lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        options
+            .open(&path)
+            .with_context(|| format!("cannot acquire {}", path.display()))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for HeadLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Recover from an unpublished failure after the atomic auto-stamp ref
 /// transaction has moved target, source, and Arc bookkeeping refs.
 ///
 /// Rolls back refs first with the guarded atomic transaction so any competing
 /// ref move fails rollback without overwriting it and leaves the checkout
 /// untouched. When refs roll back cleanly and `checkout_updated` is true,
-/// attempts a guarded two-tree `read-tree -u -m` back to `old_target` only if
-/// the checkout still holds `target` at `old_target`, preserving competing edits
-/// and explicitly reporting any incomplete ref or checkout rollback.
+/// acquires `<git_dir>/HEAD.lock` before verifying that `HEAD` still resolves
+/// to `target` at `old_target` and holds the lock across `read-tree -u -m`,
+/// preventing a competing branch switch from taking over the checkout between
+/// the ownership check and rollback. If `HEAD.lock` cannot be acquired or
+/// `HEAD` no longer points to `target` at `old_target`, checkout rollback is
+/// skipped and reported as incomplete without touching the checkout.
 fn recover_unpublished_stamp_failure(
     wt: &Path,
     target: &str,
@@ -7677,6 +7712,14 @@ fn recover_unpublished_stamp_failure(
     if !checkout_updated {
         return anyhow::anyhow!("{cause:#}; refs restored to pre-integration state");
     }
+    let _head_lock = match HeadLockGuard::acquire(wt) {
+        Ok(guard) => guard,
+        Err(lock_err) => {
+            return anyhow::anyhow!(
+                "{cause:#}; refs restored to pre-integration state, but guarded checkout rollback was skipped because HEAD.lock could not be acquired (incomplete rollback; checkout left untouched): {lock_err:#}"
+            );
+        }
+    };
     let on_target = gitio::fresh_read(|| gitio::current_branch(wt))
         .ok()
         .flatten()
@@ -7689,7 +7732,9 @@ fn recover_unpublished_stamp_failure(
         );
     }
     let _ = gitio::git(wt, &["update-index", "-q", "--refresh"]);
-    match gitio::git(wt, &["read-tree", "-u", "-m", &stamp.new_head, old_target]) {
+    let rollback = gitio::git(wt, &["read-tree", "-u", "-m", &stamp.new_head, old_target]);
+    drop(_head_lock);
+    match rollback {
         Ok(_) => {
             gitio::forget_mutable_answers();
             let old_tree = gitio::commit_tree(wt, old_target).ok();
