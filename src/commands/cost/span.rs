@@ -331,10 +331,12 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
     facts.attribution_uncertain = parts
         .iter()
         .any(|(part, requests)| *requests > 0 && part.attribution_uncertain);
-    // Where the parts name several models, or a part is priced share by
-    // share, a part one model served whole is that model's share.
-    let by_shares =
-        facts.served_model.is_none() || parts.iter().any(|(part, _)| !part.by_model.is_empty());
+    // Where the parts name several models or efforts, or a part is priced
+    // share by share, a part one coordinate served whole is that coordinate's
+    // share.
+    let by_shares = facts.served_model.is_none()
+        || served.len() > 1
+        || parts.iter().any(|(part, _)| !part.by_model.is_empty());
     let shares: Vec<Vec<(String, &CostDisjoint)>> = parts
         .iter()
         .map(|(part, _)| {
@@ -346,9 +348,8 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
                     .collect();
             }
             part.served_model
-                .as_deref()
+                .clone()
                 .filter(|_| by_shares)
-                .and_then(super::model_of)
                 .zip(part.disjoint.as_ref())
                 .into_iter()
                 .collect()

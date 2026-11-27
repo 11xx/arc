@@ -1733,3 +1733,209 @@ fn historical_hyphenated_antigravity_coordinates_remain_readable_and_valid() {
         "{stats:#?}"
     );
 }
+
+#[test]
+fn antigravity_cost_show_prices_effort_specific_base_and_mixed_effort_recordings() {
+    let repo = Repo::new();
+    let single_session = "44444444-2222-4333-8444-000000000001";
+    let mixed_session = "44444444-2222-4333-8444-000000000002";
+    let (t3_home, path) = setup_antigravity_store(
+        &repo,
+        &[
+            (single_session, "gemini-4-neon-xhigh"),
+            (mixed_session, "gemini-4-neon-xhigh"),
+        ],
+    );
+    // Overwrite `mixed_session` with two distinct effort steps: `high` and `xhigh`.
+    let profile = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mixed_log = t3_home
+        .join("userdata/providers/antigravity")
+        .join(profile)
+        .join("antigravity-acp/brain")
+        .join(mixed_session)
+        .join(".system_generated/logs/transcript_full.jsonl");
+    fs::write(
+        &mixed_log,
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-11-26T10:00:00Z",
+                "content": "Work across efforts."
+            }),
+            serde_json::json!({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-11-26T10:00:01Z",
+                "model": "gemini-4-neon-high",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "output_tokens": 0,
+                "content": "High step."
+            }),
+            serde_json::json!({
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-11-26T10:00:02Z",
+                "model": "gemini-4-neon-xhigh",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "output_tokens": 0,
+                "content": "Xhigh step."
+            }),
+        ),
+    )
+    .unwrap();
+
+    let open_as_agy = |slug: &str, session: &str| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["begin", slug, "--no-worktree", "--target", "master"])
+            .env_remove("ARC_ACTOR")
+            .env("ARC_HARNESS", "antigravity")
+            .env("ARC_SESSION", session)
+            .env("T3CODE_HOME", &t3_home)
+            .env("PATH", &path);
+        let change = opened_change_id(&stdout(&mut cmd));
+        let dispatch_out = stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "run",
+                    "dispatch",
+                    "--route",
+                    "fixture-route",
+                    "--worktree",
+                    "/work/run",
+                    "--change",
+                    &change,
+                ])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        let dispatch = dispatch_out
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .unwrap()
+            .to_string();
+        stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "run",
+                    "bind",
+                    &dispatch,
+                    "--executor-harness",
+                    "antigravity",
+                    "--executor-session",
+                    session,
+                ])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["run", "end", &dispatch, "--outcome", "completed"])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        change
+    };
+    let single_change = open_as_agy("agy-price-single", single_session);
+    let mixed_change = open_as_agy("agy-price-mixed", mixed_session);
+
+    let list_price_of = |change: &str, session: &str, table: &str, name: &str| {
+        let prices = repo.home.join(name);
+        fs::write(&prices, table).unwrap();
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args([
+            "cost",
+            "show",
+            change,
+            "--json",
+            "--prices",
+            prices.to_str().unwrap(),
+        ])
+        .env("T3CODE_HOME", &t3_home)
+        .env("PATH", &path);
+        let view = json_stdout(&mut cmd);
+        let row = view["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == format!("antigravity:{session}"))
+            .unwrap_or_else(|| panic!("missing session {session}: {view:#}"));
+        row["totals"]["quantities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q.get("partition").is_none() && q["kind"] == "list-price-estimate")
+            .unwrap_or_else(|| panic!("missing list price: {row:#}"))
+            .clone()
+    };
+
+    // Single `gemini-4-neon-xhigh` recording (120 uncached input, 40 cache read, 30 output):
+    // at 1.0 / 0.1 / 2.0 per million -> 0.000120 + 0.000004 + 0.000060 = 0.000184 USD.
+    let hyphen_only = r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon-xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 2.0 }
+"#;
+    let base_only = r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.625, output = 1.0 }
+"#;
+    let both_rows = r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.625, output = 1.0 }
+
+[[models]]
+id = "gemini-4-neon-xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 4.0 }
+"#;
+
+    let amount_of = |q: &serde_json::Value| {
+        q["amount"]
+            .as_f64()
+            .or_else(|| q["known_subtotal"].as_f64())
+            .unwrap_or_else(|| panic!("expected priced figure, got {q:#}"))
+    };
+
+    let q_hyphen = list_price_of(&single_change, single_session, hyphen_only, "hyphen.toml");
+    assert!(
+        (amount_of(&q_hyphen) - 0.000184).abs() < 1e-12,
+        "{q_hyphen:#}"
+    );
+
+    let q_base = list_price_of(&single_change, single_session, base_only, "base.toml");
+    assert!((amount_of(&q_base) - 0.000092).abs() < 1e-12, "{q_base:#}");
+
+    // Effort-specific row takes precedence over base row.
+    let q_both = list_price_of(&single_change, single_session, both_rows, "both.toml");
+    assert!((amount_of(&q_both) - 0.000368).abs() < 1e-12, "{q_both:#}");
+
+    // Mixed-effort session (1M `high` + 1M `xhigh`): `high` falls back to base ($0.50),
+    // `xhigh` uses effort-specific row ($2.00) -> total $2.50.
+    let q_mixed = list_price_of(&mixed_change, mixed_session, both_rows, "mixed.toml");
+    assert!((amount_of(&q_mixed) - 2.5).abs() < 1e-9, "{q_mixed:#}");
+}
