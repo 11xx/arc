@@ -103,21 +103,20 @@ macro_rules! budget {
     };
 }
 
-budget!(begin, 15);
-budget!(status, 11);
-budget!(check, 12);
-budget!(snapshot, 12);
-budget!(verify, 65);
-budget!(review, 27);
-budget!(integrate, 86);
-budget!(rebase, 11);
+budget!(begin, 11);
+budget!(status, 9);
+budget!(check, 10);
+budget!(snapshot, 9);
+budget!(verify, 37);
+budget!(review, 13);
+budget!(integrate, 64);
+budget!(rebase, 9);
 budget!(journal, 2);
-budget!(catchup, 23);
+budget!(catchup, 14);
 
 /// Claim: status, verification and integration launch no extra Git processes
 /// for unrelated changes, refs and worktrees at an already observed revision.
-/// Rejects per-item Git questions when their answers are identical. Distinct
-/// immutable revisions may require their own object reads.
+/// Rejects per-item Git questions when their answers are identical.
 #[test]
 fn unrelated_changes_refs_and_worktrees_do_not_add_git_launches() {
     let mut regressions = Vec::new();
@@ -132,5 +131,105 @@ fn unrelated_changes_refs_and_worktrees_do_not_add_git_launches() {
     assert!(
         regressions.is_empty(),
         "unrelated changes, refs and worktrees add Git launches: {regressions:?}"
+    );
+}
+
+fn launches_with_history(command: &str, historical: usize) -> u64 {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[budget]\ntotal = '2s'\n[gates.alpha]\ncommand = 'true'\nbudget = '2s'\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(&repo.root, &["commit", "-m", "test: declare gate"]);
+    for index in 0..historical {
+        let slug = format!("history-{index}");
+        repo.arc(&repo.root)
+            .args(["begin", &slug, "--no-worktree"])
+            .assert()
+            .success();
+        repo.commit(
+            &repo.root,
+            &format!("history-{index}.txt"),
+            &format!("history {index}\n"),
+            &format!("test: historical commit {index}"),
+        );
+        repo.arc(&repo.root)
+            .args(["snapshot", &slug])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["verify", &slug, "--all"])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["review", &slug, "--verdict", "approved"])
+            .assert()
+            .success();
+        git(&repo.root, &["checkout", "master"]);
+        repo.arc(&repo.root)
+            .args(["integrate", &slug])
+            .assert()
+            .success();
+    }
+    let run = |args: &[&str]| counted(&repo, args);
+    let count = run(&["begin", "probe", "--no-worktree"]);
+    if command == "begin" {
+        return count;
+    }
+    repo.commit(&repo.root, "probe.txt", "probe\n", "test: add probe");
+    run(&["snapshot", "probe"]);
+    if command == "status" {
+        return run(&["status", "probe"]);
+    }
+    let count = run(&["verify", "probe", "--all"]);
+    if command == "verify" {
+        return count;
+    }
+    let count = run(&["review", "probe", "--verdict", "approved"]);
+    if command == "review" {
+        return count;
+    }
+    if command == "catchup" {
+        return run(&["catchup", "--json"]);
+    }
+    git(&repo.root, &["checkout", "master"]);
+    run(&["integrate", "probe"])
+}
+
+/// Claim: closed changes integrated at distinct historical commits add no
+/// extra Git process launches to `begin`, `status`, `review`, `verify`,
+/// `integrate`, or `catchup`. Rejects per-commit `rev-parse` loops during
+/// ledger replay and review-context loading.
+#[test]
+fn distinct_historical_revisions_do_not_add_git_launches() {
+    let mut regressions = Vec::new();
+    for (command, base_history) in [
+        ("begin", 0),
+        ("status", 0),
+        ("review", 0),
+        ("verify", 0),
+        ("integrate", 0),
+        // `catchup` runs one batched `for-each-ref` divergence check once any
+        // non-open branch exists; compare 1 vs 6 historical changes to verify
+        // launches stay O(1) across distinct historical revisions.
+        ("catchup", 1),
+    ] {
+        let baseline = launches_with_history(command, base_history);
+        let with_history = launches_with_history(command, 6);
+        eprintln!("{command}: history{base_history}={baseline}, history6={with_history}");
+        if with_history > baseline {
+            regressions.push(format!(
+                "{command}: {} extra launches across {} added historical commits",
+                with_history - baseline,
+                6 - base_history
+            ));
+        }
+    }
+    assert!(
+        regressions.is_empty(),
+        "distinct historical revisions add Git launches: {regressions:?}"
     );
 }

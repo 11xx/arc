@@ -404,6 +404,11 @@ pub fn delivered(
     let present = gitio::commits_among(cwd, candidates.iter().map(|cited| cited.commit.as_str()))?;
     let present: Vec<&str> = present.iter().map(String::as_str).collect();
     let unreachable = gitio::unreachable_from_refs(cwd, &present)?;
+    let existing: BTreeSet<String> =
+        gitio::fresh_read(|| gitio::list_refs(cwd, gitio::RETAINED_PREFIX))?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
     let mut held = BTreeSet::new();
     let mut retain = BTreeMap::new();
     for cited in candidates {
@@ -411,7 +416,7 @@ pub fn delivered(
             continue;
         }
         let name = cited.retained_ref();
-        if gitio::fresh_read(|| gitio::ref_value(cwd, &name))?.is_none() {
+        if !existing.contains(&name) {
             held.insert(cited.commit.clone());
             retain.insert(name, cited.commit);
         }
@@ -458,8 +463,17 @@ pub fn creations(
         gitio::commits_among(cwd, retained.values().map(String::as_str))?
             .into_iter()
             .collect();
+    let existing: BTreeMap<String, String> =
+        gitio::fresh_read(|| gitio::list_refs(cwd, gitio::RETAINED_PREFIX))?
+            .into_iter()
+            .collect();
     for (name, commit) in retained {
-        match gitio::fresh_read(|| gitio::ref_value(cwd, name))?.as_deref() {
+        let held = if name.starts_with(gitio::RETAINED_PREFIX) {
+            existing.get(name).cloned()
+        } else {
+            gitio::fresh_read(|| gitio::ref_value(cwd, name))?
+        };
+        match held.as_deref() {
             Some(value) if value == commit => {}
             Some(value) => bail!(
                 "{name} holds {value}, and a retention ref holds only the commit it is named for; \

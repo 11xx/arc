@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(super) struct Repository {
     pub directory: PathBuf,
-    admin: PathBuf,
+    pub admin: PathBuf,
 }
 
 pub(super) fn repository(cwd: &Path) -> Option<Repository> {
@@ -41,11 +41,12 @@ type Slot = Arc<Mutex<Option<Option<Vec<u8>>>>>;
 
 #[derive(Default)]
 struct Answers {
-    /// Repository locations and successful full-OID resolutions, blobs and
-    /// trees remain valid through Arc's own Git writes. Absences expire at
-    /// writes because the named object may not exist yet. Project commands,
-    /// lock acquisitions and explicit refreshes discard them, since any may
-    /// replace a repository.
+    /// Repository locations, successful full-OID resolutions, blobs, trees, and
+    /// absent paths proven inside an existing commit's tree remain valid
+    /// through Arc's own Git writes. An absent full OID is never stored here
+    /// because another process or a later write may create it. Project
+    /// commands, lock acquisitions and explicit refreshes discard every entry,
+    /// since any may replace a repository or install replacement refs.
     immutable: HashMap<Key, Slot>,
     /// Branch, HEAD and ref answers last until any Git write. Both sides of
     /// that write discard them; none are retained while a write is running.
@@ -71,14 +72,26 @@ pub(super) fn optional_bytes(
     immutable: bool,
     read: impl FnOnce() -> Result<Option<Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>> {
+    maybe_cached_bytes(cwd, question, immutable, || Ok((read()?, true)))
+}
+
+/// Answer `question`, retaining the result only when `read` marks it cacheable.
+/// Callers use this when a negative answer is only safe to retain after
+/// confirming the parent object already exists in the object store.
+pub(super) fn maybe_cached_bytes(
+    cwd: &Path,
+    question: &[&str],
+    immutable: bool,
+    read: impl FnOnce() -> Result<(Option<Vec<u8>>, bool)>,
+) -> Result<Option<Vec<u8>>> {
     let Some(repository) = repository(cwd) else {
-        return read();
+        return Ok(read()?.0);
     };
     let slot = {
         let mut held = answers();
         if held.projects != 0 || (!immutable && held.writers != 0) {
             drop(held);
-            return read();
+            return Ok(read()?.0);
         }
         let key = (
             repository,
@@ -95,8 +108,10 @@ pub(super) fn optional_bytes(
     if let Some(answer) = &*held {
         return Ok(answer.clone());
     }
-    let answer = read()?;
-    *held = Some(answer.clone());
+    let (answer, cache) = read()?;
+    if cache {
+        *held = Some(answer.clone());
+    }
     Ok(answer)
 }
 
@@ -120,8 +135,18 @@ pub(super) fn optional_text(
     immutable: bool,
     read: impl FnOnce() -> Result<Option<String>>,
 ) -> Result<Option<String>> {
-    optional_bytes(cwd, question, immutable, || {
-        read().map(|answer| answer.map(String::into_bytes))
+    maybe_cached_text(cwd, question, immutable, || Ok((read()?, true)))
+}
+
+pub(super) fn maybe_cached_text(
+    cwd: &Path,
+    question: &[&str],
+    immutable: bool,
+    read: impl FnOnce() -> Result<(Option<String>, bool)>,
+) -> Result<Option<String>> {
+    maybe_cached_bytes(cwd, question, immutable, || {
+        let (answer, cache) = read()?;
+        Ok((answer.map(String::into_bytes), cache))
     })?
     .map(String::from_utf8)
     .transpose()
@@ -167,10 +192,10 @@ impl WriteScope {
             let mut held = answers();
             held.writers += 1;
             held.mutable.clear();
-            held.immutable.retain(|_, slot| {
-                slot.try_lock()
-                    .is_ok_and(|answer| answer.as_ref().is_some_and(Option::is_some))
-            });
+            // Retain populated immutable entries (including absent paths proven
+            // inside an existing commit's tree) and prune unpopulated slots.
+            held.immutable
+                .retain(|_, slot| slot.try_lock().is_ok_and(|answer| answer.is_some()));
             if matches!(effect, Effect::Project) {
                 held.projects += 1;
                 held.immutable.clear();
@@ -190,10 +215,8 @@ impl Drop for WriteScope {
             let mut held = answers();
             held.writers -= 1;
             held.mutable.clear();
-            held.immutable.retain(|_, slot| {
-                slot.try_lock()
-                    .is_ok_and(|answer| answer.as_ref().is_some_and(Option::is_some))
-            });
+            held.immutable
+                .retain(|_, slot| slot.try_lock().is_ok_and(|answer| answer.is_some()));
             if matches!(self.0, Effect::Project) {
                 held.projects -= 1;
                 held.immutable.clear();
@@ -693,5 +716,121 @@ mod tests {
             "the previous holder moved HEAD before this uncontended acquisition"
         );
         assert_eq!(gitio::branch_head(&root, "master").unwrap(), first);
+    }
+
+    /// Claim: an absent path at an existing full commit ID is cached across
+    /// repeated probes, Git writes and fresh mutable observations, while a
+    /// mutable ref like HEAD never returns a stale negative answer.
+    #[test]
+    fn absent_path_at_existing_full_commit_is_cached_without_staling_mutable_refs() {
+        const CHILD: &str = "ARC_TEST_ABSENT_PATH_CACHED_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::child_command::command(std::env::current_exe().unwrap())
+                .env(CHILD, "1")
+                .args([
+                    "--exact",
+                    "gitio::answers::tests::absent_path_at_existing_full_commit_is_cached_without_staling_mutable_refs",
+                    "--nocapture",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (_directory, root) = fixture();
+        let first = head(&root).unwrap();
+        assert_eq!(file_at(&root, &first, "absent.txt").unwrap(), None);
+        let after_first = gitio::processes();
+        assert_eq!(file_at(&root, &first, "absent.txt").unwrap(), None);
+        assert_eq!(
+            gitio::processes(),
+            after_first,
+            "repeated probe of absent path at existing full commit must not spawn Git"
+        );
+        assert_eq!(file_at(&root, "HEAD", "absent.txt").unwrap(), None);
+
+        std::fs::write(root.join("absent.txt"), "present now\n").unwrap();
+        gitio::git(&root, &["add", "absent.txt"]).unwrap();
+        commit(&root, "add absent.txt");
+
+        assert_eq!(
+            file_at(&root, "HEAD", "absent.txt").unwrap().as_deref(),
+            Some("present now\n"),
+            "mutable ref HEAD must observe newly committed path"
+        );
+        let after_head = gitio::processes();
+        assert_eq!(
+            gitio::fresh_read(|| file_at(&root, &first, "absent.txt")).unwrap(),
+            None
+        );
+        assert_eq!(
+            gitio::processes(),
+            after_head,
+            "proven absent path at existing full commit survives Git writes and fresh_read"
+        );
+        gitio::close_object_readers();
+    }
+
+    /// Claim: an absent path at a nonexistent full commit ID is never cached as
+    /// immutable, so a commit created by another process within one lock span
+    /// (whether loose or packed) is observed immediately without invalidation.
+    #[test]
+    fn absent_path_at_nonexistent_full_commit_observes_external_creation() {
+        let (_directory, root) = fixture();
+        let base_raw = gitio::git_bytes(&root, &["cat-file", "commit", "HEAD"]).unwrap();
+        for (suffix, repack) in [
+            (b"external loose\n".as_slice(), false),
+            (b"external packed\n", true),
+        ] {
+            let mut raw = base_raw.clone();
+            raw.extend_from_slice(suffix);
+            let id = String::from_utf8(
+                gitio::git_piped(&root, &["hash-object", "-t", "commit", "--stdin"], &raw).unwrap(),
+            )
+            .unwrap();
+            let id = id.trim().to_string();
+            assert_eq!(file_at(&root, &id, "file").unwrap(), None);
+
+            // Write the commit through raw std::process::Command so no Arc
+            // WriteScope, lock acquisition or fresh_read fires in this process.
+            let mut writer = std::process::Command::new("git")
+                .args(["hash-object", "-w", "-t", "commit", "--stdin"])
+                .current_dir(&root)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            {
+                use std::io::Write;
+                writer.stdin.take().unwrap().write_all(&raw).unwrap();
+            }
+            assert!(writer.wait_with_output().unwrap().status.success());
+            if repack {
+                assert!(std::process::Command::new("git")
+                    .args(["update-ref", "refs/temp/external-pack", &id])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success());
+                assert!(std::process::Command::new("git")
+                    .args(["repack", "-ad", "-q"])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+
+            assert_eq!(
+                file_at(&root, &id, "file").unwrap().as_deref(),
+                Some("first"),
+                "externally created commit (repack={repack}) must not be hidden by a cached absence"
+            );
+            assert_eq!(rev_parse(&root, &id).unwrap(), id);
+        }
     }
 }

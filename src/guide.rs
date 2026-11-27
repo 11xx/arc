@@ -7532,10 +7532,14 @@ TRACING
 
   `children.git_by_site` counts Git launches by source file and line, without
   runtime paths or argument values. Git answers are held per canonical checkout
-  and resolved administrative directory. Repository locations and immutable
-  object reads survive Git writes; branch, HEAD and ref reads expire on writes.
-  Project commands discard every held Git answer before and after execution.
-  Every lock acquisition discards held answers, including an uncontended lock.
+  and resolved administrative directory, and object and revision probes batch
+  through one `cat-file --batch-command` reader per administrative directory
+  while reads are stable. Repository locations, existing full-OID resolutions,
+  blobs, trees, and absent paths proven inside an existing commit's tree
+  survive Git writes; absent full OIDs are never cached, and branch, HEAD and
+  ref reads expire on writes. Git writes, project commands, lock acquisitions
+  and fresh observations close open batch readers. Project commands and every
+  lock acquisition, including an uncontended lock, discard every held answer.
   Authorization boundaries start fresh mutable observations. Movement guards
   take independent observations. Integration's agreement between readiness
   and the decision's own target observation is in `arc guide

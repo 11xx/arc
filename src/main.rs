@@ -7025,6 +7025,7 @@ fn main() {
         }
     };
     let result = run(cli, reads_only);
+    gitio::close_object_readers();
     store::write_read_counts();
     // A command may have reported an interrupted child as one failure among
     // others and gone on; the signal still ends arc.

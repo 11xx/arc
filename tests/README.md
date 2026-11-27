@@ -132,15 +132,16 @@ Arc history and are measured separately from acceptance tests.
 | journal write | 3 | 0.5 |
 | catchup | 60 | 15 |
 
-Retained-history launch targets are 650 for `begin` and `review`, and 700 for
-`integrate`; the other commands use the same ceilings. Distinct immutable
-revisions still need individual file queries until object reads are batched.
+Retained-history launch counts stay flat as distinct historical revisions grow:
+revision, object, and committed-file probes batch through a write-invalidated
+`cat-file --batch-command` reader per administrative directory rather than
+spawning a subprocess per historical commit.
 
 Launch guards pin the measured counts below the command ceilings. Lock
 acquisition discards all held answers; authorization observations and deliberate
-movement checks read mutable state afresh. The scaling fixture adds four unrelated
-changes, refs and worktrees at the same revision: `status`, `verify` and
-`integrate` launch the same number of Git processes with or without them.
+movement checks read mutable state afresh. The scaling fixtures add both
+unrelated open changes, refs and worktrees at the same revision and closed
+changes integrated at distinct historical commits without adding Git launches.
 
 Arc declares project-command write confinement in `.arc/gates.toml`: `target`
 and Cargo's registry, Git caches and cache lock files. The declaration does not

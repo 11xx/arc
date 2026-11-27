@@ -2986,8 +2986,9 @@ fn execution_json_reports_a_debt_that_was_never_published() {
         .join("events");
     let real_git =
         String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
-    // The change is read before the debt is appended, and the target branch
-    // is resolved once before that read and once after it.
+    // The change is read after transition locks clear held Git answers, and the
+    // target policy read then resolves the common Git directory right before
+    // the debt event is appended.
     let bin = worker.home.join("publication-bin");
     let count = worker.home.join("target-resolutions");
     fs::create_dir_all(&bin).unwrap();
@@ -2996,9 +2997,9 @@ fn execution_json_reports_a_debt_that_was_never_published() {
         &wrapper,
         format!(
             r#"#!/bin/sh
-if [ "$*" = "rev-parse --verify refs/heads/master^{{commit}}" ]; then
+if [ "$*" = "rev-parse --git-common-dir" ]; then
     echo x >> '{count}'
-    if [ "$(wc -l < '{count}')" = 2 ]; then
+    if [ "$(wc -l < '{count}')" = 3 ]; then
         chmod 500 '{dir}' || exit 1
     fi
 fi
