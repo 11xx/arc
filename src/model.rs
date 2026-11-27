@@ -3742,6 +3742,18 @@ pub struct CostFacts {
     pub request_terms: CostRequestTerms,
 }
 
+/// One raw `(model, variant)` share exactly as the tapes reader recorded it,
+/// keeping the recording's own request identity (including raw casing) separate
+/// from the normalized display coordinate.
+#[derive(Debug, Clone)]
+pub struct RawPriceShare {
+    pub request_id: String,
+    pub request_variant: Option<String>,
+    pub model: String,
+    pub variant: Option<String>,
+    pub disjoint: CostDisjoint,
+}
+
 /// The requests a figure counted, one by one, and the billing its
 /// recording establishes, which a price table's terms set by the request
 /// read. It describes how the figure is priced, not what it measures, so
@@ -3755,6 +3767,13 @@ pub struct CostRequestTerms {
     /// validity windows its requests could fall in.
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    /// Per-`(request_id, request_variant)` shares exactly as tapes recorded
+    /// them, used so live pricing matches `requests` and legacy case-exact
+    /// price rows without coupling price row IDs to request identities.
+    pub raw_shares: Vec<RawPriceShare>,
+    /// When `raw_shares` is empty, the single recording's raw `(id, variant)`
+    /// for exact request and legacy-row lookup.
+    pub sole_raw: Option<(String, Option<String>)>,
 }
 
 impl PartialEq for CostRequestTerms {

@@ -1693,15 +1693,7 @@ fn historical_hyphenated_antigravity_coordinates_remain_readable_and_valid() {
     );
     stdout(
         repo.arc(&wt)
-            .args([
-                "snapshot",
-                &change,
-                "--solo",
-                "--model",
-                "seed-model",
-                "--on-behalf-of",
-                "antigravity:gemini-4-neon-high",
-            ])
+            .args(["snapshot", &change, "--solo", "--model", "seed-model"])
             .env("ARC_ACTOR", format!("antigravity:{RECORDER}"))
             .env("ARC_HARNESS", "antigravity")
             .env("ARC_SESSION", RECORDER),
@@ -1725,11 +1717,10 @@ fn historical_hyphenated_antigravity_coordinates_remain_readable_and_valid() {
 
     let stats = json_stdout(repo.arc(&repo.root).args(["stats", "--by-model", "--json"]));
     assert!(
-        stats["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["identity"] == "antigravity:gemini-4-neon-high"),
+        stats["models"].as_array().unwrap().iter().any(|row| {
+            row["identity"] == "antigravity:gemini-4-neon-high"
+                && row["identity_kind"] == "coordinate"
+        }),
         "{stats:#?}"
     );
 }
@@ -1938,4 +1929,328 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, ou
     // `xhigh` uses effort-specific row ($2.00) -> total $2.50.
     let q_mixed = list_price_of(&mixed_change, mixed_session, both_rows, "mixed.toml");
     assert!((amount_of(&q_mixed) - 2.5).abs() < 1e-9, "{q_mixed:#}");
+}
+
+#[test]
+fn cost_show_preserves_timed_requests_for_antigravity_and_pi_and_legacy_uppercase_rows() {
+    let repo = Repo::new();
+    let agy_timed = "55555555-2222-4333-8444-000000000001";
+    let agy_upper = "55555555-2222-4333-8444-000000000002";
+    let pi_timed = "019a0000-0000-7000-8000-0000000000c9";
+    let (t3_home, path) = setup_antigravity_store(
+        &repo,
+        &[
+            (agy_timed, "gemini-4-neon-xhigh"),
+            (agy_upper, "gemini-4-neon-XHIGH"),
+        ],
+    );
+    let profile = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let acp = t3_home
+        .join("userdata/providers/antigravity")
+        .join(profile)
+        .join("antigravity-acp/brain");
+    fs::write(
+        acp.join(agy_timed)
+            .join(".system_generated/logs/transcript_full.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-01-01T09:59:00Z",
+                "content": "Timed work."
+            }),
+            serde_json::json!({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:00:00Z",
+                "model": "gemini-4-neon-high",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "Peak high."
+            }),
+            serde_json::json!({
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T17:00:00Z",
+                "model": "gemini-4-neon-xhigh",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "Off-peak xhigh."
+            }),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        acp.join(agy_upper)
+            .join(".system_generated/logs/transcript_full.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:00:00Z",
+                "content": "Uppercase work."
+            }),
+            serde_json::json!({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-01-01T10:01:00Z",
+                "model": "gemini-4-neon-XHIGH",
+                "input_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "content": "Done."
+            }),
+        ),
+    )
+    .unwrap();
+
+    // Pi session with 1M `high` at 10:00 UTC and 1M `max` at 17:00 UTC.
+    let pi_path = repo
+        .home
+        .join(".pi/agent/sessions/--fixture-project--")
+        .join(format!("2026-01-01T09-30-00-000Z_{pi_timed}.jsonl"));
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    let pi_lines = [
+        serde_json::json!({"type": "session", "version": 3, "id": pi_timed, "timestamp": "2026-01-01T09:30:00Z", "cwd": "/fixture/project"}),
+        serde_json::json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-01-01T09:30:00Z", "provider": "fixture", "modelId": "fixture-model"}),
+        serde_json::json!({"type": "thinking_level_change", "id": "l0", "parentId": "m0", "timestamp": "2026-01-01T09:30:00Z", "thinkingLevel": "high"}),
+        serde_json::json!({"type": "message", "id": "u0", "parentId": "l0", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "user", "timestamp": 1767261600000u64, "content": [{"type": "text", "text": "Peak"}]}}),
+        serde_json::json!({"type": "message", "id": "a0", "parentId": "u0", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "assistant", "timestamp": 1767261600000u64, "provider": "fixture", "model": "fixture-model", "stopReason": "stop", "usage": {"input": 1_000_000, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 1_000_000, "cost": {"total": 1.0}}, "content": [{"type": "text", "text": "Done."}]}}),
+        serde_json::json!({"type": "thinking_level_change", "id": "l1", "parentId": "a0", "timestamp": "2026-01-01T16:59:00Z", "thinkingLevel": "max"}),
+        serde_json::json!({"type": "message", "id": "u1", "parentId": "l1", "timestamp": "2026-01-01T17:00:00Z", "message": {"role": "user", "timestamp": 1767286800000u64, "content": [{"type": "text", "text": "Off-peak"}]}}),
+        serde_json::json!({"type": "message", "id": "a1", "parentId": "u1", "timestamp": "2026-01-01T17:00:00Z", "message": {"role": "assistant", "timestamp": 1767286800000u64, "provider": "fixture", "model": "fixture-model", "stopReason": "stop", "usage": {"input": 1_000_000, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 1_000_000, "cost": {"total": 1.0}}, "content": [{"type": "text", "text": "Done."}]}}),
+    ];
+    fs::write(
+        &pi_path,
+        pi_lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+
+    let bind_change = |slug: &str, harness: &str, session: &str| {
+        let change = opened_change_id(&stdout(
+            repo.arc(&repo.root)
+                .args(["begin", slug, "--no-worktree", "--target", "master"])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        ));
+        let dispatch_out = stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "run",
+                    "dispatch",
+                    "--route",
+                    "fixture-route",
+                    "--worktree",
+                    "/work/run",
+                    "--change",
+                    &change,
+                ])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        let dispatch = dispatch_out
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .unwrap()
+            .to_string();
+        stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "run",
+                    "bind",
+                    &dispatch,
+                    "--executor-harness",
+                    harness,
+                    "--executor-session",
+                    session,
+                ])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["run", "end", &dispatch, "--outcome", "completed"])
+                .env_remove("ARC_HARNESS")
+                .env_remove("ARC_SESSION"),
+        );
+        change
+    };
+
+    let c_agy_timed = bind_change("agy-timed", "antigravity", agy_timed);
+    let c_agy_upper = bind_change("agy-upper", "antigravity", agy_upper);
+    let c_pi_timed = bind_change("pi-timed", "pi", pi_timed);
+
+    let session_list_price = |change: &str, key: &str, table: &str, file: &str| {
+        let prices = repo.home.join(file);
+        fs::write(&prices, table).unwrap();
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args([
+            "cost",
+            "show",
+            change,
+            "--json",
+            "--prices",
+            prices.to_str().unwrap(),
+        ])
+        .env("T3CODE_HOME", &t3_home)
+        .env("PATH", &path);
+        let view = json_stdout(&mut cmd);
+        let row = view["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .unwrap_or_else(|| panic!("missing session {key}: {view:#}"))
+            .clone();
+        let list = row["totals"]["quantities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q.get("partition").is_none() && q["kind"] == "list-price-estimate")
+            .unwrap_or_else(|| panic!("missing list price: {row:#}"))
+            .clone();
+        (row, list)
+    };
+
+    let timed_base_table = r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models.time_of_day]]
+from = "16:30"
+until = "00:30"
+per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.625, output = 2.0 }
+"#;
+    let (_, q_agy_base) = session_list_price(
+        &c_agy_timed,
+        &format!("antigravity:{agy_timed}"),
+        timed_base_table,
+        "timed-base.toml",
+    );
+    assert_eq!(q_agy_base["status"], "complete", "{q_agy_base:#}");
+    assert!(
+        (q_agy_base["amount"].as_f64().unwrap() - 1.5).abs() < 1e-9,
+        "{q_agy_base:#}"
+    );
+
+    let timed_hash_table = r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models]]
+id = "gemini-4-neon#xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, output = 16.0 }
+
+[[models.time_of_day]]
+from = "16:30"
+until = "00:30"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+"#;
+    let (_, q_agy_hash) = session_list_price(
+        &c_agy_timed,
+        &format!("antigravity:{agy_timed}"),
+        timed_hash_table,
+        "timed-hash.toml",
+    );
+    assert_eq!(q_agy_hash["status"], "complete", "{q_agy_hash:#}");
+    assert!(
+        (q_agy_hash["amount"].as_f64().unwrap() - 3.0).abs() < 1e-9,
+        "{q_agy_hash:#}"
+    );
+
+    let timed_pi_table = r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "fixture-model"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models]]
+id = "fixture-model-max"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, output = 16.0 }
+
+[[models.time_of_day]]
+from = "16:30"
+until = "00:30"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+"#;
+    let (_, q_pi) = session_list_price(
+        &c_pi_timed,
+        &format!("pi:{pi_timed}"),
+        timed_pi_table,
+        "timed-pi.toml",
+    );
+    assert_eq!(q_pi["status"], "complete", "{q_pi:#}");
+    assert!(
+        (q_pi["amount"].as_f64().unwrap() - 3.0).abs() < 1e-9,
+        "{q_pi:#}"
+    );
+
+    let uppercase_table = r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon-XHIGH"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+"#;
+    let (_, q_upper) = session_list_price(
+        &c_agy_upper,
+        &format!("antigravity:{agy_upper}"),
+        uppercase_table,
+        "upper.toml",
+    );
+    assert_eq!(q_upper["status"], "complete", "{q_upper:#}");
+    assert!(
+        (q_upper["amount"].as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "{q_upper:#}"
+    );
+    let upper_env = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("ANTIGRAVITY_CONVERSATION_ID", agy_upper)
+            .env("T3CODE_HOME", &t3_home)
+            .env("PATH", &path),
+    );
+    assert!(
+        upper_env.contains("# model: gemini-4-neon#xhigh\n"),
+        "{upper_env}"
+    );
 }

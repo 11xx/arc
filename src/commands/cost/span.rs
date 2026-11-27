@@ -504,11 +504,75 @@ fn request_terms(session: &CostFacts, parts: &[Part<'_>]) -> CostRequestTerms {
             Some(latest.into_iter().chain(Some(to?)).max())
         })
         .flatten();
+    struct RawGroup<'a> {
+        model: String,
+        variant: Option<String>,
+        held: Vec<(Option<&'a CostDisjoint>, u64)>,
+    }
+    let mut raw_grouped: BTreeMap<(String, Option<String>), RawGroup<'_>> = BTreeMap::new();
+    for (part, requests) in parts.iter().filter(|(_, requests)| *requests > 0) {
+        if !part.request_terms.raw_shares.is_empty() {
+            for share in &part.request_terms.raw_shares {
+                raw_grouped
+                    .entry((share.request_id.clone(), share.request_variant.clone()))
+                    .or_insert_with(|| RawGroup {
+                        model: share.model.clone(),
+                        variant: share.variant.clone(),
+                        held: Vec::new(),
+                    })
+                    .held
+                    .push((Some(&share.disjoint), *requests));
+            }
+        } else if let (Some((raw_id, raw_variant)), Some(disjoint), Some(served)) = (
+            part.request_terms.sole_raw.as_ref(),
+            part.disjoint.as_ref(),
+            part.served_model.as_deref(),
+        ) {
+            let (model, variant) = match served.split_once('#') {
+                Some((model, variant)) => (model.to_string(), Some(variant.to_string())),
+                None => (served.to_string(), None),
+            };
+            raw_grouped
+                .entry((raw_id.clone(), raw_variant.clone()))
+                .or_insert_with(|| RawGroup {
+                    model,
+                    variant,
+                    held: Vec::new(),
+                })
+                .held
+                .push((Some(disjoint), *requests));
+        }
+    }
+    let raw_shares: Vec<crate::model::RawPriceShare> = raw_grouped
+        .into_iter()
+        .filter_map(|((request_id, request_variant), group)| {
+            let convention = group
+                .held
+                .iter()
+                .find_map(|(disjoint, _)| disjoint.map(|d| d.convention.clone()))?;
+            Some(crate::model::RawPriceShare {
+                request_id,
+                request_variant,
+                model: group.model,
+                variant: group.variant,
+                disjoint: sum_disjoint(convention, &group.held),
+            })
+        })
+        .collect();
+    let sole_raw = {
+        let mut raws = held
+            .iter()
+            .filter_map(|terms| terms.sole_raw.clone())
+            .collect::<BTreeSet<_>>();
+        (raws.len() == 1).then(|| raws.pop_first().unwrap())
+    };
     CostRequestTerms {
         requests,
         billing: session.request_terms.billing.clone(),
         from,
         to,
+        raw_shares,
+        sole_raw,
     }
 }
 
@@ -547,6 +611,11 @@ pub(super) fn even_share(facts: &CostFacts, shares: usize, index: usize) -> Cost
         .by_model
         .iter_mut()
         .for_each(|model| scale(&mut model.disjoint));
+    share
+        .request_terms
+        .raw_shares
+        .iter_mut()
+        .for_each(|raw| scale(&mut raw.disjoint));
     share
 }
 

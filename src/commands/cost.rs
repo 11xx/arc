@@ -3275,16 +3275,27 @@ fn normalize(
         residual: None,
         spans: None,
         list_price: None,
-        // Consumption keeps its own requests, those on other branches too,
-        // never the active branch's alone.
-        request_terms: CostRequestTerms {
-            requests: match consumption {
-                Some(consumption) => consumption.request_uses.clone(),
-                None => view.request_uses.clone(),
-            },
-            billing: view.billing.clone(),
-            from: view.session.started_at,
-            to: view.session.last_activity_at,
+        // Consumption on other branches carries every branch's requests; on a
+        // single active branch, prefer `view.request_uses` when present so
+        // per-effort variants recorded on active-branch requests stay intact.
+        request_terms: {
+            let other_branches =
+                consumption.is_some_and(|consumption| consumption.events.other_branches > 0);
+            let requests = if other_branches {
+                consumption.and_then(|consumption| consumption.request_uses.clone())
+            } else {
+                view.request_uses.clone().or_else(|| {
+                    consumption.and_then(|consumption| consumption.request_uses.clone())
+                })
+            };
+            CostRequestTerms {
+                requests,
+                billing: view.billing.clone(),
+                from: view.session.started_at,
+                to: view.session.last_activity_at,
+                raw_shares: raw_price_shares(view, harness),
+                sole_raw: sole_raw_model(view),
+            }
         },
     };
     let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -3725,6 +3736,111 @@ fn tapes_disjoint(disjoint: &CostDisjoint) -> Option<agent_tapes_core::model::Di
     })
 }
 
+/// Raw per-`(model, variant)` shares exactly as the tapes reader recorded them,
+/// preserving original request identifiers and casing beside normalized
+/// coordinates for live list-price lookup and request-level term matching.
+fn raw_price_shares(
+    view: &agent_tapes_core::usage::UsageView,
+    harness: &str,
+) -> Vec<crate::model::RawPriceShare> {
+    let Some(convention) = agent_tapes_core::model::TokenConvention::of(harness) else {
+        return Vec::new();
+    };
+    let (models, extra_completeness) = if let Some(consumption) = view
+        .consumption
+        .as_ref()
+        .filter(|consumption| consumption.events.other_branches > 0)
+    {
+        (
+            consumption.served.as_slice(),
+            &consumption.measurement_completeness,
+        )
+    } else {
+        (
+            view.by_model.as_deref().unwrap_or_default(),
+            &MeasurementCompleteness::default(),
+        )
+    };
+    struct RawShareGroup {
+        model: String,
+        variant: Option<String>,
+        parts: Vec<CostDisjoint>,
+    }
+    let mut grouped: BTreeMap<(String, Option<String>), RawShareGroup> = BTreeMap::new();
+    for model in models {
+        let (norm_id, norm_variant) = crate::session_store::normalize_model_for_harness(
+            harness,
+            &model.model,
+            model.variant.as_deref(),
+        );
+        let coordinate = coordinate_of(&norm_id, norm_variant.as_deref());
+        if !portable_coordinate(&coordinate) {
+            continue;
+        }
+        let Some(tokens) = model.tokens.as_ref() else {
+            continue;
+        };
+        let mut qualified = model.measurement_completeness.clone();
+        qualified.merge(extra_completeness);
+        let disjoint = agent_tapes_core::model::DisjointTokens::from_native(
+            tokens,
+            convention,
+            model.cache_write_by_ttl.as_ref(),
+        )
+        .with_completeness(&qualified);
+        if let Some(disjoint) = cost_disjoint(&disjoint) {
+            let entry = grouped
+                .entry((model.model.clone(), model.variant.clone()))
+                .or_insert_with(|| RawShareGroup {
+                    model: norm_id,
+                    variant: norm_variant,
+                    parts: Vec::new(),
+                });
+            entry.parts.push(disjoint);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|((request_id, request_variant), group)| {
+            let held: Vec<(Option<&CostDisjoint>, u64)> =
+                group.parts.iter().map(|part| (Some(part), 1)).collect();
+            crate::model::RawPriceShare {
+                request_id,
+                request_variant,
+                model: group.model,
+                variant: group.variant,
+                disjoint: span::sum_disjoint(group.parts[0].convention.clone(), &held),
+            }
+        })
+        .collect()
+}
+
+/// The single raw `(id, variant)` recorded on the session when no per-model
+/// split was provided.
+fn sole_raw_model(view: &agent_tapes_core::usage::UsageView) -> Option<(String, Option<String>)> {
+    let session = &view.session;
+    if !session.model_selections.is_empty() {
+        let raw: BTreeSet<(&str, Option<&str>)> = session
+            .model_selections
+            .iter()
+            .map(|span| (span.model.id.as_str(), span.model.variant.as_deref()))
+            .collect();
+        let [(id, variant)] = &raw.into_iter().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        return Some(((*id).to_string(), variant.map(str::to_string)));
+    }
+    if session
+        .model_observation
+        .as_ref()
+        .is_none_or(|status| !status.mixed)
+    {
+        let model = session.model.as_ref()?;
+        return Some((model.id.clone(), model.variant.clone()));
+    }
+    None
+}
+
 /// Split a `model[#effort]` coordinate into its base model id and optional
 /// non-empty effort variant.
 fn split_model_effort(coordinate: &str) -> Option<(&str, Option<&str>)> {
@@ -3738,28 +3854,51 @@ fn split_model_effort(coordinate: &str) -> Option<(&str, Option<&str>)> {
     (!model.is_empty()).then_some((model, variant))
 }
 
-/// Resolve the price-table row id and request-share variant for a
-/// `(model, variant)` coordinate.
+/// Select the rows in `table` that price a share whose raw recording identity
+/// is `(request_id, request_variant)` and whose normalized coordinate is
+/// `(model, variant)`.
 ///
-/// Precedence checks `<model>-<variant>`, then `<model>#<variant>`, before
-/// falling back to the base `<model>` row (preserving `variant` for
-/// request-level share matching on the base row).
-fn resolve_price_target<'a>(
-    table: &agent_tapes_core::pricing::PriceTable,
-    model: &'a str,
-    variant: Option<&'a str>,
-) -> (String, Option<&'a str>) {
-    if let Some(variant) = variant.filter(|variant| !variant.is_empty()) {
-        let hyphen = format!("{model}-{variant}");
-        if table.price(&hyphen).is_some() {
-            return (hyphen, None);
-        }
-        let hash = format!("{model}#{variant}");
-        if table.price(&hash).is_some() {
-            return (hash, None);
+/// Precedence:
+/// 1. Exact raw recording id when `request_variant` is absent (preserves
+///    legacy case-exact rows such as `gemini-4-neon-XHIGH`, as well as
+///    lowercase `<model>-<variant>` rows).
+/// 2. `<model>-<variant>` then `<model>#<variant>` when a normalized variant
+///    is present (also checking raw variant casing when different).
+/// 3. Base `<model>` fallback.
+fn select_price_rows<'a>(
+    table: &'a agent_tapes_core::pricing::PriceTable,
+    request_id: &str,
+    request_variant: Option<&str>,
+    model: &str,
+    variant: Option<&str>,
+) -> Vec<&'a agent_tapes_core::pricing::ModelPrice> {
+    if request_variant.is_none() && !request_id.is_empty() {
+        let rows: Vec<_> = table.rows(request_id).collect();
+        if !rows.is_empty() {
+            return rows;
         }
     }
-    (model.to_string(), variant)
+    if let Some(variant) = variant.filter(|variant| !variant.is_empty()) {
+        for candidate in [format!("{model}-{variant}"), format!("{model}#{variant}")] {
+            let rows: Vec<_> = table.rows(&candidate).collect();
+            if !rows.is_empty() {
+                return rows;
+            }
+        }
+        if let Some(raw_variant) = request_variant.filter(|raw| !raw.is_empty() && *raw != variant)
+        {
+            for candidate in [
+                format!("{model}-{raw_variant}"),
+                format!("{model}#{raw_variant}"),
+            ] {
+                let rows: Vec<_> = table.rows(&candidate).collect();
+                if !rows.is_empty() {
+                    return rows;
+                }
+            }
+        }
+    }
+    table.rows(model).collect()
 }
 
 /// Whether `table` carries a variant-specific row for `(model, variant)` under
@@ -3772,6 +3911,93 @@ fn has_variant_price_row(
     !variant.is_empty()
         && (table.price(&format!("{model}-{variant}")).is_some()
             || table.price(&format!("{model}#{variant}")).is_some())
+}
+
+/// Build a single-model `PriceTable` holding `rows` aliased to `alias` while
+/// preserving each row's canonical `id`, schema, currency, and plan rules so
+/// `PricedShare::estimate` matches `RequestUses` by `alias` without altering
+/// which price row is applied or reported.
+fn aliased_price_table(
+    table: &agent_tapes_core::pricing::PriceTable,
+    rows: &[&agent_tapes_core::pricing::ModelPrice],
+    alias: &str,
+) -> Option<agent_tapes_core::pricing::PriceTable> {
+    if alias.is_empty() || rows.is_empty() {
+        return None;
+    }
+    let mut models: Vec<agent_tapes_core::pricing::ModelPrice> =
+        rows.iter().map(|row| (*row).clone()).collect();
+    for row in &mut models {
+        if row.id != alias && !row.aliases.iter().any(|existing| existing == alias) {
+            row.aliases.push(alias.to_string());
+        }
+    }
+    let mut toml = agent_tapes_core::pricing::PriceTable::to_toml(&table.currency, &models).ok()?;
+    if !table.plans.is_empty() {
+        toml = toml.replacen(
+            &format!(
+                "schema = \"{}\"",
+                agent_tapes_core::pricing::PRICE_TABLE_SCHEMA_V2
+            ),
+            &format!(
+                "schema = \"{}\"",
+                agent_tapes_core::pricing::PRICE_TABLE_SCHEMA_V3
+            ),
+            1,
+        );
+        for plan in &table.plans {
+            let billing = match plan.billing {
+                agent_tapes_core::pricing::BillingKind::Api => "api",
+                agent_tapes_core::pricing::BillingKind::Subscription => "subscription",
+            };
+            toml.push_str(&format!(
+                "\n[[plans]]\nid = {:?}\nbilling = {:?}\n",
+                plan.id, billing
+            ));
+        }
+    }
+    let mut parsed = agent_tapes_core::pricing::PriceTable::parse(&toml).ok()?;
+    parsed.schema = table.schema;
+    Some(parsed)
+}
+
+/// Price `disjoint` against `rows` while matching request-level terms in
+/// `terms.requests` by the recording's own `(request_id, request_variant)`.
+fn price_rows_for_request(
+    disjoint: &agent_tapes_core::model::DisjointTokens,
+    request_id: &str,
+    request_variant: Option<&str>,
+    sole: bool,
+    rows: &[&agent_tapes_core::pricing::ModelPrice],
+    table: &agent_tapes_core::pricing::PriceTable,
+    terms: &CostRequestTerms,
+) -> agent_tapes_core::pricing::EstimateSum {
+    let is_plain = |row: &&agent_tapes_core::pricing::ModelPrice| {
+        row.effective_from.is_none()
+            && row.effective_until.is_none()
+            && row.long_context.is_none()
+            && row.time_of_day.is_empty()
+    };
+    match rows {
+        [] => agent_tapes_core::pricing::price_share(disjoint, None, table),
+        [row] if is_plain(row) => {
+            agent_tapes_core::pricing::price_share(disjoint, Some(row), table)
+        }
+        rows => {
+            let direct_matches = !request_id.is_empty()
+                && table
+                    .rows(request_id)
+                    .map(|row| row as *const _)
+                    .eq(rows.iter().map(|row| *row as *const _));
+            if direct_matches {
+                return price_model(disjoint, request_id, request_variant, sole, table, terms);
+            }
+            if let Some(aliased) = aliased_price_table(table, rows, request_id) {
+                return price_model(disjoint, request_id, request_variant, sole, &aliased, terms);
+            }
+            price_model(disjoint, &rows[0].id, request_variant, sole, table, terms)
+        }
+    }
 }
 
 /// One model's part of a figure priced through tapes' share pricing: by its
@@ -3831,24 +4057,24 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         .collect();
     let mut sum = EstimateSum::default();
     let mut unlisted = false;
-    let mut price =
-        |coordinate: &str, disjoint: &agent_tapes_core::model::DisjointTokens, sole: bool| {
-            let Some((model, variant)) = split_model_effort(coordinate) else {
-                unlisted = true;
-                return;
-            };
-            let (price_id, resolved_variant) = resolve_price_target(table, model, variant);
-            let share_variant = (!sole).then_some(resolved_variant).flatten();
-            unlisted |= table.price(&price_id).is_none();
-            sum.merge(price_model(
-                disjoint,
-                &price_id,
-                share_variant,
-                sole,
-                table,
-                &facts.request_terms,
-            ));
-        };
+    let mut price_selected = |disjoint: &agent_tapes_core::model::DisjointTokens,
+                              request_id: &str,
+                              request_variant: Option<&str>,
+                              model: &str,
+                              variant: Option<&str>,
+                              sole: bool| {
+        let rows = select_price_rows(table, request_id, request_variant, model, variant);
+        unlisted |= rows.is_empty();
+        sum.merge(price_rows_for_request(
+            disjoint,
+            request_id,
+            request_variant,
+            sole,
+            &rows,
+            table,
+            &facts.request_terms,
+        ));
+    };
     // Events on other branches than the active one are priced by the model
     // each names, never by the one model the session's evidence names.
     let other_branches = facts
@@ -3861,47 +4087,145 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
                 && !other_branches
                 && split_model_effort(served).is_some() =>
         {
-            price(served, &whole, true);
+            let (model, variant) = split_model_effort(served).expect("checked above");
+            match facts.request_terms.raw_shares.as_slice() {
+                [raw] => {
+                    price_selected(
+                        &whole,
+                        &raw.request_id,
+                        raw.request_variant.as_deref(),
+                        &raw.model,
+                        raw.variant.as_deref(),
+                        true,
+                    );
+                }
+                _ => {
+                    if let Some((raw_id, raw_variant)) = facts.request_terms.sole_raw.as_ref() {
+                        price_selected(
+                            &whole,
+                            raw_id,
+                            raw_variant.as_deref(),
+                            model,
+                            variant,
+                            true,
+                        );
+                    } else {
+                        price_selected(&whole, model, variant, model, variant, true);
+                    }
+                }
+            }
             if facts.attribution_uncertain {
                 gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
             }
         }
         _ if !facts.by_model.is_empty() => {
-            // Keep per-effort shares separate whenever the price table carries
-            // a variant-specific row for that base model. When no variant row
-            // exists for a base model, merge its effort shares so all efforts
-            // price together against that base model's requests.
-            let mut has_variant_row: BTreeMap<&str, bool> = BTreeMap::new();
-            for share in &facts.by_model {
-                if let Some((base, variant)) = split_model_effort(&share.model) {
-                    let entry = has_variant_row.entry(base).or_default();
-                    if let Some(variant) = variant {
-                        *entry |= has_variant_price_row(table, base, variant);
+            if !facts.request_terms.raw_shares.is_empty() {
+                // If a single raw `request_id` appears with both a bare
+                // (`None`) share and variant shares and all of them select the
+                // exact same price rows, merge them into one bare share so
+                // pinned `RequestUses::of_share(id, None, false)` matches the
+                // combined tokens without exceeding the bare subtotal.
+                let mut per_request_id: BTreeMap<&str, (bool, bool, Vec<Vec<usize>>)> =
+                    BTreeMap::new();
+                for share in &facts.request_terms.raw_shares {
+                    let rows: Vec<usize> = select_price_rows(
+                        table,
+                        &share.request_id,
+                        share.request_variant.as_deref(),
+                        &share.model,
+                        share.variant.as_deref(),
+                    )
+                    .into_iter()
+                    .map(|row| row as *const _ as usize)
+                    .collect();
+                    let entry = per_request_id.entry(share.request_id.as_str()).or_default();
+                    if share.request_variant.is_none() {
+                        entry.0 = true;
+                    } else {
+                        entry.1 = true;
                     }
+                    entry.2.push(rows);
                 }
-            }
-            let merge_base: BTreeSet<&str> = has_variant_row
-                .into_iter()
-                .filter_map(|(base, variant_priced)| (!variant_priced).then_some(base))
-                .collect();
-            let mut merged: BTreeMap<&str, Vec<&CostDisjoint>> = BTreeMap::new();
-            for share in &facts.by_model {
-                if let Some((base, _)) = split_model_effort(&share.model) {
-                    if merge_base.contains(base) {
-                        merged.entry(base).or_default().push(&share.disjoint);
+                let merge_raw_id: BTreeSet<&str> = per_request_id
+                    .into_iter()
+                    .filter_map(|(id, (has_bare, has_variant, row_sets))| {
+                        let same_rows = row_sets
+                            .first()
+                            .is_some_and(|first| row_sets.iter().all(|rows| rows == first));
+                        (has_bare && has_variant && same_rows).then_some(id)
+                    })
+                    .collect();
+                let mut merged_raw: BTreeMap<
+                    &str,
+                    (&crate::model::RawPriceShare, Vec<&CostDisjoint>),
+                > = BTreeMap::new();
+                for share in &facts.request_terms.raw_shares {
+                    if merge_raw_id.contains(share.request_id.as_str()) {
+                        merged_raw
+                            .entry(share.request_id.as_str())
+                            .or_insert_with(|| (share, Vec::new()))
+                            .1
+                            .push(&share.disjoint);
                         continue;
                     }
+                    if let Some(disjoint) = tapes_disjoint(&share.disjoint) {
+                        price_selected(
+                            &disjoint,
+                            &share.request_id,
+                            share.request_variant.as_deref(),
+                            &share.model,
+                            share.variant.as_deref(),
+                            false,
+                        );
+                    }
                 }
-                if let Some(disjoint) = tapes_disjoint(&share.disjoint) {
-                    price(&share.model, &disjoint, false);
+                for (raw_id, (rep, parts)) in merged_raw {
+                    let held: Vec<(Option<&CostDisjoint>, u64)> =
+                        parts.iter().map(|part| (Some(*part), 1)).collect();
+                    let combined = span::sum_disjoint(parts[0].convention.clone(), &held);
+                    if let Some(disjoint) = tapes_disjoint(&combined) {
+                        price_selected(&disjoint, raw_id, None, &rep.model, None, false);
+                    }
                 }
-            }
-            for (base, parts) in merged {
-                let held: Vec<(Option<&CostDisjoint>, u64)> =
-                    parts.iter().map(|part| (Some(*part), 1)).collect();
-                let combined = span::sum_disjoint(parts[0].convention.clone(), &held);
-                if let Some(disjoint) = tapes_disjoint(&combined) {
-                    price(base, &disjoint, false);
+            } else {
+                // Retained facts hold no live `raw_shares` or `requests`;
+                // price each normalized share directly from `facts.by_model`.
+                let mut has_variant_row: BTreeMap<&str, bool> = BTreeMap::new();
+                for share in &facts.by_model {
+                    if let Some((base, variant)) = split_model_effort(&share.model) {
+                        let entry = has_variant_row.entry(base).or_default();
+                        if let Some(variant) = variant {
+                            *entry |= has_variant_price_row(table, base, variant);
+                        }
+                    }
+                }
+                let merge_base: BTreeSet<&str> = has_variant_row
+                    .into_iter()
+                    .filter_map(|(base, variant_priced)| (!variant_priced).then_some(base))
+                    .collect();
+                let mut merged: BTreeMap<&str, Vec<&CostDisjoint>> = BTreeMap::new();
+                for share in &facts.by_model {
+                    if let Some((base, _)) = split_model_effort(&share.model) {
+                        if merge_base.contains(base) {
+                            merged.entry(base).or_default().push(&share.disjoint);
+                            continue;
+                        }
+                    }
+                    if let Some(disjoint) = tapes_disjoint(&share.disjoint) {
+                        if let Some((model, variant)) = split_model_effort(&share.model) {
+                            price_selected(&disjoint, model, variant, model, variant, false);
+                        } else {
+                            price_selected(&disjoint, "", None, "", None, false);
+                        }
+                    }
+                }
+                for (base, parts) in merged {
+                    let held: Vec<(Option<&CostDisjoint>, u64)> =
+                        parts.iter().map(|part| (Some(*part), 1)).collect();
+                    let combined = span::sum_disjoint(parts[0].convention.clone(), &held);
+                    if let Some(disjoint) = tapes_disjoint(&combined) {
+                        price_selected(&disjoint, base, None, base, None, false);
+                    }
                 }
             }
             for category in PRICED_CATEGORIES {
@@ -7469,5 +7793,249 @@ per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, ou
             (mixed_base.amount.unwrap() - 1.0).abs() < 1e-9,
             "{mixed_base:?}"
         );
+
+        // Legacy uppercase Antigravity recording (`gemini-4-neon-XHIGH`) keeps
+        // normalized `#xhigh` display while matching a legacy uppercase row.
+        let uppercase = make_facts(
+            vec![make_usage("gemini-4-neon-XHIGH", None, 1_000_000, 0)],
+            Some(Model {
+                id: "gemini-4-neon-XHIGH".to_string(),
+                variant: None,
+            }),
+        );
+        assert_eq!(
+            uppercase.served_model.as_deref(),
+            Some("gemini-4-neon#xhigh")
+        );
+        let table_uppercase_only = PriceTable::parse(
+            r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon-XHIGH"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+"#,
+        )
+        .unwrap();
+        let upper_est = list_price(&uppercase, &table_uppercase_only);
+        assert!(
+            (upper_est.amount.unwrap() - 2.0).abs() < 1e-9,
+            "{upper_est:?}"
+        );
+        assert_eq!(upper_est.models, vec!["gemini-4-neon-XHIGH"]);
+        // Falls back cleanly to lowercase/base rows when no uppercase row exists.
+        let upper_base = list_price(&uppercase, &table_base_only);
+        assert!(
+            (upper_base.amount.unwrap() - 0.5).abs() < 1e-9,
+            "{upper_base:?}"
+        );
+    }
+
+    #[test]
+    fn timed_request_pricing_matches_antigravity_base_hash_and_pi_effort_rows() {
+        use agent_tapes_core::model::{
+            Accounting, AccountingBasis, AccountingCoverage, DisjointTokens, Model, Session,
+            SourceDescriptor, TokenConvention, Tokens, Transcript, Truncation,
+        };
+        use agent_tapes_core::pricing::{PriceTable, RequestUses};
+        use agent_tapes_core::usage::{self, ModelUsage, UsageDetail};
+        use chrono::{DateTime, Utc};
+
+        let ts = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let one_m = Tokens {
+            input: Some(1_000_000),
+            output: Some(0),
+            reasoning: None,
+            cache_read: Some(0),
+            cache_write: Some(0),
+        };
+        let make_usage = |model: &str, variant: Option<&str>| ModelUsage {
+            model: model.to_string(),
+            variant: variant.map(str::to_string),
+            tokens: Some(one_m.clone()),
+            cost: None,
+            cost_coverage: None,
+            request_count: Some(1),
+            measurement_coverage: BTreeMap::new(),
+            measurement_incomplete: Vec::new(),
+            measurement_completeness: MeasurementCompleteness::default(),
+            list_price_estimate: None,
+            cache_write_by_ttl: None,
+        };
+        let make_timed_facts = |harness: &str, entries: &[(&str, Option<&str>, &str)]| {
+            let convention = TokenConvention::of(harness).unwrap();
+            let mut uses = RequestUses::default();
+            let mut by_model = Vec::new();
+            for (id, variant, at_str) in entries {
+                let model = Model {
+                    id: (*id).to_string(),
+                    variant: variant.map(str::to_string),
+                };
+                let disjoint = DisjointTokens::from_native(&one_m, convention, None);
+                uses.push(Some(ts(at_str)), Some(&model), &disjoint);
+                by_model.push(make_usage(id, *variant));
+            }
+            let total = Tokens {
+                input: Some(1_000_000 * entries.len() as u64),
+                output: Some(0),
+                reasoning: None,
+                cache_read: Some(0),
+                cache_write: Some(0),
+            };
+            let session = Session {
+                id: "11111111-2222-4333-8444-000000000001".to_string(),
+                source: SourceDescriptor::installed(harness, "/dev/null"),
+                metadata: None,
+                model: None,
+                model_observation: None,
+                model_selections: Vec::new(),
+                launch: None,
+                title: None,
+                derived_title: None,
+                derived_title_truncated: None,
+                directory: None,
+                started_at: Some(ts("2026-01-01T09:00:00Z")),
+                last_activity_at: Some(ts("2026-01-01T18:00:00Z")),
+                live: None,
+                cost: None,
+                tokens: Some(total),
+                accounting: Some(Accounting {
+                    basis: AccountingBasis::SummedRequests,
+                    coverage: AccountingCoverage::Session,
+                    selection: None,
+                }),
+                start_uncertain: false,
+                occurrence: None,
+                usage_detail: Some(UsageDetail {
+                    by_model: Some(by_model),
+                    request_uses: Some(uses),
+                    ..UsageDetail::default()
+                }),
+                list_price_estimate: None,
+                t3: None,
+            };
+            let view = usage::usage(&Transcript {
+                session,
+                turns: Vec::new(),
+                truncated: false,
+                truncation: Truncation::default(),
+                read: None,
+                terminal: None,
+                text_tail: None,
+                artifacts: Vec::new(),
+                graph: None,
+                trailing_record: None,
+                notes: Vec::new(),
+                projection: None,
+                kinds: None,
+                locations: None,
+            });
+            normalize(&view, 0, harness)
+        };
+
+        // 1. Timed Antigravity base row: 1M high @ 10:00 ($1) + 1M xhigh @ 17:00 ($0.50) = $1.50.
+        let agy_facts = make_timed_facts(
+            "antigravity",
+            &[
+                ("gemini-4-neon-high", None, "2026-01-01T10:00:00Z"),
+                ("gemini-4-neon-xhigh", None, "2026-01-01T17:00:00Z"),
+            ],
+        );
+        let timed_base = PriceTable::parse(
+            r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models.time_of_day]]
+from = "16:30"
+until = "00:30"
+per_million = { uncached_input = 0.5, cache_read = 0.05, cache_write_5m = 0.625, output = 2.0 }
+"#,
+        )
+        .unwrap();
+        let est_base = list_price(&agy_facts, &timed_base);
+        assert!(est_base.at_most.is_none(), "{est_base:?}");
+        assert!(
+            (est_base.amount.unwrap() - 1.5).abs() < 1e-9,
+            "{est_base:?}"
+        );
+
+        // 2. Timed Antigravity hash row: 1M high @ base ($1) + 1M xhigh @ 17:00 off-peak ($2) = $3.00.
+        let timed_hash = PriceTable::parse(
+            r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "gemini-4-neon"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models]]
+id = "gemini-4-neon#xhigh"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, output = 16.0 }
+
+[[models.time_of_day]]
+from = "16:30"
+until = "00:30"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+"#,
+        )
+        .unwrap();
+        let est_hash = list_price(&agy_facts, &timed_hash);
+        assert!(est_hash.at_most.is_none(), "{est_hash:?}");
+        assert!(
+            (est_hash.amount.unwrap() - 3.0).abs() < 1e-9,
+            "{est_hash:?}"
+        );
+        assert_eq!(
+            est_hash.models,
+            vec!["gemini-4-neon", "gemini-4-neon#xhigh"]
+        );
+
+        // 3. Timed Pi hyphen effort row: 1M high @ base ($1) + 1M max @ 17:00 off-peak ($2) = $3.00.
+        let pi_facts = make_timed_facts(
+            "pi",
+            &[
+                ("fixture-model", Some("high"), "2026-01-01T10:00:00Z"),
+                ("fixture-model", Some("max"), "2026-01-01T17:00:00Z"),
+            ],
+        );
+        let timed_pi = PriceTable::parse(
+            r#"schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "fixture-model"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+
+[[models]]
+id = "fixture-model-max"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.4, cache_write_5m = 5.0, output = 16.0 }
+
+[[models.time_of_day]]
+from = "16:30"
+until = "00:30"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 8.0 }
+"#,
+        )
+        .unwrap();
+        let est_pi = list_price(&pi_facts, &timed_pi);
+        assert!(est_pi.at_most.is_none(), "{est_pi:?}");
+        assert!((est_pi.amount.unwrap() - 3.0).abs() < 1e-9, "{est_pi:?}");
+        assert_eq!(est_pi.models, vec!["fixture-model", "fixture-model-max"]);
     }
 }
