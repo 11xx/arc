@@ -4006,3 +4006,365 @@ fn integrate_queue_dry_run_refuses_stacked_shared_commits_matching_live_queue() 
     assert_eq!(repo.head(&repo.root), upper_head);
     assert_eq!(history_rewrite_count(&repo), 0);
 }
+
+fn read_all_jsonl_bytes(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    if !dir.exists() {
+        return out;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        for entry in fs::read_dir(&cur).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                out.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// Guarded recovery on unpublished auto-stamp fast-forward failures:
+/// - a direct `read-tree` failure before checkout mutation restores target,
+///   source branch, and Arc bookkeeping/retention refs with ledgers untouched;
+/// - a competing tracked edit arriving after `read-tree` succeeds on an
+///   untouched file (`README.md`) rolls back all refs and change-added files
+///   while preserving the competing edit and leaving ledgers byte-for-byte
+///   unchanged;
+/// - a competing tracked edit on a conflicting file (`work.txt`) rolls back
+///   all refs, preserves the competing edit without clobbering it, reports
+///   incomplete checkout rollback explicitly, and leaves ledgers unchanged;
+/// - a competing ref move during a `read-tree` failure leaves the competing
+///   ref untouched and reports incomplete ref rollback.
+#[test]
+fn integrate_ff_auto_stamp_rolls_back_refs_and_preserves_competing_edits_on_checkout_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "post-read-tree-recovery");
+    commit_file(&wt, "work.txt", "feat: checkout recovery work");
+    let orig_head = repo.head(&wt);
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+    let readme_before = fs::read_to_string(repo.root.join("README.md")).unwrap();
+    let arc_refs_before = git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/arc/",
+        ],
+    );
+    let ledger_root = repo.home.join(".local/share/arc");
+    let ledger_before = read_all_jsonl_bytes(&ledger_root);
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let base_path = std::env::var("PATH").unwrap();
+
+    // Case 1: direct `read-tree` failure before checkout mutation restores all refs.
+    let direct_bin = repo.home.join("direct-read-tree-fail-bin");
+    fs::create_dir_all(&direct_bin).unwrap();
+    let direct_wrapper = direct_bin.join("git");
+    fs::write(
+        &direct_wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ]; then
+    echo "injected read-tree failure" >&2
+    exit 1
+fi
+exec '{real_git}' "$@"
+"#
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&direct_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", direct_bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("checkout update failed"))
+        .stderr(predicates::str::contains(
+            "refs restored to pre-integration state",
+        ));
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert!(!repo.root.join("work.txt").exists());
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+        arc_refs_before
+    );
+    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Case 2: competing tracked edit to untouched `README.md` arriving right
+    // after `read-tree -u -m` succeeds.
+    let edit_bin = repo.home.join("post-read-tree-readme-bin");
+    fs::create_dir_all(&edit_bin).unwrap();
+    let edit_marker = repo.home.join("post-read-tree-readme.once");
+    let edit_wrapper = edit_bin.join("git");
+    fs::write(
+        &edit_wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ] && [ ! -f '{marker}' ]; then
+    touch '{marker}'
+    '{real_git}' "$@" || exit $?
+    printf 'competing edit\n' >> '{readme}'
+    exit 0
+fi
+exec '{real_git}' "$@"
+"#,
+            marker = edit_marker.display(),
+            readme = repo.root.join("README.md").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&edit_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", edit_bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "fast-forward target or checkout moved during integration",
+        ))
+        .stderr(predicates::str::contains(
+            "refs restored to pre-integration state",
+        ))
+        .stderr(predicates::str::contains(
+            "checkout rollback preserved local or competing changes",
+        ));
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert!(
+        !repo.root.join("work.txt").exists(),
+        "unmodified change-added file must be rolled back"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root.join("README.md")).unwrap(),
+        format!("{readme_before}competing edit\n"),
+        "competing edit on README.md must be preserved"
+    );
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+        arc_refs_before
+    );
+    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Clean up README.md before testing Case 3.
+    fs::write(repo.root.join("README.md"), &readme_before).unwrap();
+
+    // Case 3: competing tracked edit to conflicting `work.txt` (added by the
+    // change) arriving right after `read-tree -u -m` succeeds. Guarded reverse
+    // `read-tree` refuses without clobbering `work.txt` and reports incomplete
+    // checkout rollback explicitly while restoring all refs.
+    let conflict_bin = repo.home.join("post-read-tree-conflict-bin");
+    fs::create_dir_all(&conflict_bin).unwrap();
+    let conflict_marker = repo.home.join("post-read-tree-conflict.once");
+    let conflict_wrapper = conflict_bin.join("git");
+    fs::write(
+        &conflict_wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ] && [ ! -f '{marker}' ]; then
+    touch '{marker}'
+    '{real_git}' "$@" || exit $?
+    printf 'competing work edit\n' >> '{work}'
+    exit 0
+fi
+exec '{real_git}' "$@"
+"#,
+            marker = conflict_marker.display(),
+            work = repo.root.join("work.txt").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&conflict_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", conflict_bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "fast-forward target or checkout moved during integration",
+        ))
+        .stderr(predicates::str::contains(
+            "refs restored to pre-integration state, but guarded checkout rollback failed (incomplete rollback; competing edits preserved)",
+        ));
+    assert_eq!(repo.head(&repo.root), master_before);
+    assert_eq!(repo.head(&wt), orig_head);
+    assert_eq!(
+        fs::read_to_string(repo.root.join("work.txt")).unwrap(),
+        "work.txtcompeting work edit\n",
+        "competing edit on conflicting file must never be clobbered"
+    );
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+        arc_refs_before
+    );
+    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+
+    // Reconcile the checkout cleanly back to `master_before` and confirm that
+    // normal auto-stamped integration now succeeds cleanly.
+    git(&repo.root, &["read-tree", "--reset", "-u", &master_before]);
+    assert!(!repo.root.join("work.txt").exists());
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&repo.root), orig_head);
+    assert_eq!(repo.head(&wt), repo.head(&repo.root));
+    assert_eq!(history_rewrite_count(&repo), 1);
+    let msg = git_out(&repo.root, &["show", "-s", "--format=%B", "master"]);
+    assert!(
+        msg.contains("Implemented-by: codex:worker#medium")
+            && msg.contains("Reviewed-by: claude:rev#high"),
+        "{msg}"
+    );
+    check_clean_trailers(&repo, &repo.root, &msg);
+}
+
+/// When a competing process moves the target ref while `read-tree` fails during
+/// auto-stamped fast-forward integration, guarded ref rollback refuses to
+/// overwrite the competing ref, leaves the checkout untouched, reports the
+/// incomplete rollback, and records no ledger events.
+#[test]
+fn integrate_ff_auto_stamp_reports_incomplete_ref_rollback_on_competing_ref_move() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+
+    let (change, wt) = open(&repo, "competing-ref-move");
+    commit_file(&wt, "work.txt", "feat: competing ref move test");
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", &change, "--solo", "--model", "worker#medium"])
+            .env("ARC_HARNESS", "codex"),
+    );
+    repo.arc(&wt)
+        .args(["verify", &change, "--all"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            &change,
+            "--verdict",
+            "approved",
+            "--model",
+            "rev#high",
+        ])
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_HARNESS", "claude")
+        .assert()
+        .success();
+
+    let master_before = repo.head(&repo.root);
+    let index_before = git_out(&repo.root, &["write-tree"]);
+    let competitor = git_out(
+        &repo.root,
+        &[
+            "commit-tree",
+            &index_before,
+            "-p",
+            &master_before,
+            "-m",
+            "competing move",
+        ],
+    );
+    let ledger_root = repo.home.join(".local/share/arc");
+    let ledger_before = read_all_jsonl_bytes(&ledger_root);
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let base_path = std::env::var("PATH").unwrap();
+
+    let bin = repo.home.join("competing-ref-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ]; then
+    '{real_git}' update-ref refs/heads/master '{competitor}' || exit 1
+    exit 1
+fi
+exec '{real_git}' "$@"
+"#
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change, "--no-cleanup"])
+        .env("PATH", format!("{}:{base_path}", bin.display()))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("guarded ref rollback failed"))
+        .stderr(predicates::str::contains("incomplete rollback"))
+        .stderr(predicates::str::contains(format!(
+            "refs/heads/master={competitor}"
+        )));
+    assert_eq!(repo.head(&repo.root), competitor);
+    assert_eq!(git_out(&repo.root, &["write-tree"]), index_before);
+    assert!(!repo.root.join("work.txt").exists());
+    assert_eq!(read_all_jsonl_bytes(&ledger_root), ledger_before);
+    assert_eq!(history_rewrite_count(&repo), 0);
+}

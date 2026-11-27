@@ -6562,6 +6562,7 @@ fn integrate_one(
         },
     )?;
     let stamped_used = prepared_stamp.is_some();
+    let mut stamp_published = false;
     let merged = (|| -> Result<String> {
         report_untouched(&checkout, &untouched);
         if checkout.switch_from.is_some() {
@@ -6583,29 +6584,26 @@ fn integrate_one(
         {
             bail!("target moved during integration before merge; nothing recorded");
         }
-        let mut repo_events_lock = None;
-        let merged = if already_contained {
-            old_target.clone()
-        } else if actual_shape == crate::model::IntegrationShape::FastForward {
-            if let Some(stamp) = &prepared_stamp {
-                let lock = store.lock_repository_events()?;
-                store.ensure_repository_event_allowed(&stamp.event)?;
-                repo_events_lock = Some(lock);
-                gitio::update_refs(&wt, &stamp.ref_updates)?;
-                if let Err(error) =
-                    gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &stamp.new_head])
-                {
-                    let rollback = gitio::update_refs(&wt, &stamp.rollback_updates);
-                    let cause = match rollback {
-                        Ok(()) => anyhow::anyhow!(
-                            "checkout update failed: {error}; refs restored to pre-integration state"
-                        ),
-                        Err(rollback) => anyhow::anyhow!(
-                            "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
-                        ),
-                    };
-                    return Err(cause);
-                }
+        if let Some(stamp) = &mut prepared_stamp {
+            let lock = store.lock_repository_events()?;
+            store.ensure_repository_event_allowed(&stamp.event)?;
+            gitio::update_refs(&wt, &stamp.ref_updates)?;
+            // Refs have moved while `stamp.event` is unpublished. Every
+            // subsequent failure before event publication routes through
+            // guarded recovery so refs and ledger never diverge.
+            if let Err(error) =
+                gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &stamp.new_head])
+            {
+                return Err(recover_unpublished_stamp_failure(
+                    &wt,
+                    &target,
+                    &old_target,
+                    stamp,
+                    false,
+                    anyhow::anyhow!("checkout update failed: {error}"),
+                ));
+            }
+            let verified = (|| -> Result<String> {
                 let head = gitio::fresh_read(|| gitio::head(&wt))?;
                 if head != stamp.new_head
                     || gitio::fresh_read(|| gitio::branch_head(&wt, &target))
@@ -6617,51 +6615,145 @@ fn integrate_one(
                         "fast-forward target moved during integration"
                     ));
                 }
-                head
-            } else {
-                let target_ref = format!("refs/heads/{target}");
-                let reflog = format!("arc integrate {}: fast-forward", st.slug);
-                gitio::git(
-                    &wt,
-                    &[
-                        "update-ref",
-                        "-m",
-                        &reflog,
-                        &target_ref,
-                        &approved_head,
-                        &old_target,
-                    ],
-                )?;
-                if let Err(error) =
-                    gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
-                {
-                    let rollback = gitio::git(
-                        &wt,
-                        &["update-ref", &target_ref, &old_target, &approved_head],
-                    );
-                    let cause = match rollback {
-                        Ok(_) => anyhow::anyhow!(
-                            "checkout update failed: {error}; target ref restored to {old_target}"
-                        ),
-                        Err(rollback) => anyhow::anyhow!(
-                            "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
-                        ),
-                    };
-                    return Err(cause);
+                if let Some(expected) = &evaluated_tree {
+                    let shipped = gitio::commit_tree(&wt, &head)?;
+                    if &shipped != expected {
+                        return Err(anyhow::anyhow!(
+                            "fast-forward {head} carries tree {shipped}, not the evaluated tree {expected}"
+                        ));
+                    }
                 }
-                let head = gitio::fresh_read(|| gitio::head(&wt))?;
-                if head != approved_head
+                let index_tree = gitio::git(&wt, &["write-tree"])?;
+                let approved_tree = gitio::commit_tree(&wt, &stamp.new_head)?;
+                if gitio::fresh_read(|| gitio::head(&wt)).ok().as_deref()
+                    != Some(stamp.new_head.as_str())
                     || gitio::fresh_read(|| gitio::branch_head(&wt, &target))
                         .ok()
                         .as_deref()
-                        != Some(approved_head.as_str())
+                        != Some(stamp.new_head.as_str())
+                    || gitio::fresh_read(|| gitio::current_branch(&wt))
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        != Some(target.as_str())
+                    || index_tree != approved_tree
+                    || gitio::dirt(&wt).map(|dirt| dirt.tracked).unwrap_or(true)
                 {
                     return Err(anyhow::anyhow!(
-                        "fast-forward target moved during integration"
+                        "fast-forward target or checkout moved during integration"
                     ));
                 }
-                head
+                if gitio::fresh_read(|| gitio::head(&wt))? != head
+                    || gitio::fresh_read(|| gitio::branch_head(&wt, &target))? != head
+                    || gitio::fresh_read(|| gitio::current_branch(&wt))?.as_deref()
+                        != Some(target.as_str())
+                {
+                    bail!("target or checkout moved during integration verification");
+                }
+                Ok(head)
+            })();
+            let merged = match verified {
+                Ok(head) => head,
+                Err(error) => {
+                    return Err(recover_unpublished_stamp_failure(
+                        &wt,
+                        &target,
+                        &old_target,
+                        stamp,
+                        true,
+                        error,
+                    ));
+                }
+            };
+            if let Err(error) = store.append_local_repository_event(&mut stamp.event) {
+                match store.repository_event_is_published(&stamp.event) {
+                    Ok(false) => {
+                        return Err(recover_unpublished_stamp_failure(
+                            &wt,
+                            &target,
+                            &old_target,
+                            stamp,
+                            true,
+                            error.context("auto-stamp rewrite publication failed"),
+                        ));
+                    }
+                    Ok(true) => {
+                        stamp_published = true;
+                        return Err(error.context(format!(
+                            "auto-stamp rewrite event {} is published and refs moved; inspect \
+                             before retrying",
+                            stamp.event.event_id
+                        )));
+                    }
+                    Err(inspection) => {
+                        return Err(error.context(format!(
+                            "auto-stamp rewrite publication is uncertain ({inspection:#}); \
+                             refs moved"
+                        )));
+                    }
+                }
             }
+            stamp_published = true;
+            println!(
+                "auto-stamped trailers on {}: {} -> {} ({}, rewrite {})",
+                st.branch,
+                render::short_sha(&approved_head),
+                render::short_sha(&stamp.new_head),
+                if stamp.rewritten_commits == 1 {
+                    "1 commit".to_string()
+                } else {
+                    format!("{} commits", stamp.rewritten_commits)
+                },
+                stamp.event.event_id,
+            );
+            drop(lock);
+            return Ok(merged);
+        }
+        let merged = if already_contained {
+            old_target.clone()
+        } else if actual_shape == crate::model::IntegrationShape::FastForward {
+            let target_ref = format!("refs/heads/{target}");
+            let reflog = format!("arc integrate {}: fast-forward", st.slug);
+            gitio::git(
+                &wt,
+                &[
+                    "update-ref",
+                    "-m",
+                    &reflog,
+                    &target_ref,
+                    &approved_head,
+                    &old_target,
+                ],
+            )?;
+            if let Err(error) =
+                gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
+            {
+                let rollback = gitio::git(
+                    &wt,
+                    &["update-ref", &target_ref, &old_target, &approved_head],
+                );
+                let cause = match rollback {
+                    Ok(_) => anyhow::anyhow!(
+                        "checkout update failed: {error}; target ref restored to {old_target}"
+                    ),
+                    Err(rollback) => anyhow::anyhow!(
+                        "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
+                    ),
+                };
+                return Err(cause);
+            }
+            let head = gitio::fresh_read(|| gitio::head(&wt))?;
+            if head != approved_head
+                || gitio::fresh_read(|| gitio::branch_head(&wt, &target))
+                    .ok()
+                    .as_deref()
+                    != Some(approved_head.as_str())
+            {
+                return Err(anyhow::anyhow!(
+                    "fast-forward target moved during integration"
+                ));
+            }
+            head
         } else {
             if let Err(e) = gitio::git(
                 &wt,
@@ -6736,58 +6828,16 @@ fn integrate_one(
         {
             bail!("target or checkout moved during integration verification");
         }
-        if let Some(stamp) = &mut prepared_stamp {
-            if let Err(error) = store.append_local_repository_event(&mut stamp.event) {
-                match store.repository_event_is_published(&stamp.event) {
-                    Ok(false) => {
-                        let _ = gitio::git(
-                            &wt,
-                            &["read-tree", "-u", "-m", &stamp.new_head, &old_target],
-                        );
-                        let rollback = gitio::update_refs(&wt, &stamp.rollback_updates);
-                        return match rollback {
-                            Ok(()) => Err(error.context(
-                                "auto-stamp rewrite publication failed; target, source branch, \
-                                 and checkout were restored and nothing was recorded",
-                            )),
-                            Err(rollback) => Err(error.context(format!(
-                                "auto-stamp rewrite publication failed and ref rollback failed \
-                                 ({rollback:#})"
-                            ))),
-                        };
-                    }
-                    Ok(true) => {
-                        return Err(error.context(format!(
-                            "auto-stamp rewrite event {} is published and refs moved; inspect \
-                             before retrying",
-                            stamp.event.event_id
-                        )));
-                    }
-                    Err(inspection) => {
-                        return Err(error.context(format!(
-                            "auto-stamp rewrite publication is uncertain ({inspection:#}); \
-                             refs moved"
-                        )));
-                    }
-                }
-            }
-            println!(
-                "auto-stamped trailers on {}: {} -> {} ({}, rewrite {})",
-                st.branch,
-                render::short_sha(&approved_head),
-                render::short_sha(&stamp.new_head),
-                if stamp.rewritten_commits == 1 {
-                    "1 commit".to_string()
-                } else {
-                    format!("{} commits", stamp.rewritten_commits)
-                },
-                stamp.event.event_id,
-            );
-        }
-        drop(repo_events_lock);
         Ok(merged)
     })()
-    .map_err(|error| transition_failure(&wt, &target, &shipping_head, error))?;
+    .map_err(|error| {
+        let recovery_head = if stamp_published {
+            &shipping_head
+        } else {
+            &approved_head
+        };
+        transition_failure(&wt, &target, recovery_head, error)
+    })?;
     if stamped_used {
         gitio::forget_mutable_answers();
         st = store.state(&change_id)?;
@@ -7597,6 +7647,68 @@ fn refuse_initialized_gitlink_changes(checkout: &Path, old: &str, approved: &str
         bail!("fast-forward changes initialized submodules: {}; use --shape no-ff or integrate manually with submodule updates", initialized.join(", "));
     }
     Ok(())
+}
+
+/// Recover from an unpublished failure after the atomic auto-stamp ref
+/// transaction has moved target, source, and Arc bookkeeping refs.
+///
+/// Rolls back refs first with the guarded atomic transaction so any competing
+/// ref move fails rollback without overwriting it and leaves the checkout
+/// untouched. When refs roll back cleanly and `checkout_updated` is true,
+/// attempts a guarded two-tree `read-tree -u -m` back to `old_target` only if
+/// the checkout still holds `target` at `old_target`, preserving competing edits
+/// and explicitly reporting any incomplete ref or checkout rollback.
+fn recover_unpublished_stamp_failure(
+    wt: &Path,
+    target: &str,
+    old_target: &str,
+    stamp: &super::rewrite::PreparedAutoStamp,
+    checkout_updated: bool,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    gitio::forget_mutable_answers();
+    if let Err(rollback) = gitio::update_refs(wt, &stamp.rollback_updates) {
+        gitio::forget_mutable_answers();
+        return anyhow::anyhow!(
+            "{cause:#}; guarded ref rollback failed (incomplete rollback — refs and checkout left untouched to preserve competing changes): {rollback:#}"
+        );
+    }
+    gitio::forget_mutable_answers();
+    if !checkout_updated {
+        return anyhow::anyhow!("{cause:#}; refs restored to pre-integration state");
+    }
+    let on_target = gitio::fresh_read(|| gitio::current_branch(wt))
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(target)
+        && gitio::fresh_read(|| gitio::head(wt)).ok().as_deref() == Some(old_target);
+    if !on_target {
+        return anyhow::anyhow!(
+            "{cause:#}; refs restored to pre-integration state, but guarded checkout rollback was skipped because checkout moved away from {target} at {old_target} (incomplete rollback)"
+        );
+    }
+    let _ = gitio::git(wt, &["update-index", "-q", "--refresh"]);
+    match gitio::git(wt, &["read-tree", "-u", "-m", &stamp.new_head, old_target]) {
+        Ok(_) => {
+            gitio::forget_mutable_answers();
+            let old_tree = gitio::commit_tree(wt, old_target).ok();
+            let index_tree = gitio::git(wt, &["write-tree"]).ok();
+            let clean = old_tree.is_some()
+                && old_tree == index_tree
+                && !gitio::dirt(wt).map(|dirt| dirt.tracked).unwrap_or(true);
+            if clean {
+                anyhow::anyhow!("{cause:#}; refs and checkout restored to pre-integration state")
+            } else {
+                anyhow::anyhow!(
+                    "{cause:#}; refs restored to pre-integration state; checkout rollback preserved local or competing changes (incomplete checkout restoration)"
+                )
+            }
+        }
+        Err(checkout_rollback) => anyhow::anyhow!(
+            "{cause:#}; refs restored to pre-integration state, but guarded checkout rollback failed (incomplete rollback; competing edits preserved): {checkout_rollback:#}"
+        ),
+    }
 }
 
 fn transition_failure(
