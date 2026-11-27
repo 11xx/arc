@@ -144,6 +144,65 @@ const VALID_WEBP: &[u8] = &[
     80, 138, 42, 212, 163, 255, 129, 136, 232, 127, 0, 0,
 ];
 
+/// Genuine decoder-valid 2-frame animated WebP (Pillow-verified).
+const VALID_WEBP_ANIM: &[u8] = &[
+    82, 73, 70, 70, 168, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 65, 78, 73, 77, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65, 78, 77, 70, 58, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 2, 86, 80, 56, 32, 34, 0, 0, 0, 48, 1, 0, 157, 1, 42, 1, 0,
+    1, 0, 1, 64, 38, 37, 148, 0, 3, 112, 0, 254, 252, 55, 139, 219, 101, 162, 80, 62, 228, 253, 17,
+    128, 0, 0, 65, 78, 77, 70, 58, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 86,
+    80, 56, 32, 34, 0, 0, 0, 52, 1, 0, 157, 1, 42, 1, 0, 1, 0, 0, 0, 38, 37, 148, 0, 3, 112, 0,
+    254, 249, 79, 63, 182, 203, 68, 160, 125, 201, 250, 35, 0, 0, 0,
+];
+
+fn utf16_bytes(text: &str, big_endian: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&if big_endian {
+            unit.to_be_bytes()
+        } else {
+            unit.to_le_bytes()
+        });
+    }
+    out
+}
+
+fn exif_utf16_payload(text: &str, big_endian: bool) -> Vec<u8> {
+    let mut exif = b"Exif\0\0MM\x00*\x00\x00\x00\x08UNICODE\0".to_vec();
+    exif.extend_from_slice(&utf16_bytes(text, big_endian));
+    exif
+}
+
+fn jpeg_with_exif(exif_payload: &[u8]) -> Vec<u8> {
+    let mut out = VALID_JPEG[..2].to_vec();
+    out.push(0xFF);
+    out.push(0xE1);
+    out.extend_from_slice(&((exif_payload.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(exif_payload);
+    out.extend_from_slice(&VALID_JPEG[2..]);
+    out
+}
+
+fn webp_with_exif(exif_payload: &[u8]) -> Vec<u8> {
+    let mut chunks = Vec::new();
+    chunks.extend_from_slice(b"VP8X");
+    chunks.extend_from_slice(&10u32.to_le_bytes());
+    chunks.extend_from_slice(&[0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    chunks.extend_from_slice(&VALID_WEBP[12..]);
+    chunks.extend_from_slice(b"EXIF");
+    chunks.extend_from_slice(&(exif_payload.len() as u32).to_le_bytes());
+    chunks.extend_from_slice(exif_payload);
+    if exif_payload.len() % 2 == 1 {
+        chunks.push(0);
+    }
+    let mut out = Vec::with_capacity(12 + chunks.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((4 + chunks.len()) as u32).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&chunks);
+    out
+}
+
 /// Genuine decoder-valid 1x1 GIF87a (Pillow-verified).
 const VALID_GIF: &[u8] = &[
     71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 0, 0,
@@ -361,6 +420,27 @@ fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
     .unwrap();
     let sig_only_webp = dir.join("sig-only.webp");
     fs::write(&sig_only_webp, b"RIFF\x10\x00\x00\x00WEBPVP8 ").unwrap();
+    let header_only_vp8l = dir.join("header-only-vp8l.webp");
+    fs::write(
+        &header_only_vp8l,
+        b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2f\x00\x00\x00\x00\x00",
+    )
+    .unwrap();
+    let payloadless_anmf = dir.join("payloadless-anmf.webp");
+    let mut bad_anim = Vec::new();
+    bad_anim.extend_from_slice(b"RIFF");
+    bad_anim.extend_from_slice(&(4u32 + 18 + 14 + 24).to_le_bytes());
+    bad_anim.extend_from_slice(b"WEBP");
+    bad_anim.extend_from_slice(b"VP8X");
+    bad_anim.extend_from_slice(&10u32.to_le_bytes());
+    bad_anim.extend_from_slice(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    bad_anim.extend_from_slice(b"ANIM");
+    bad_anim.extend_from_slice(&6u32.to_le_bytes());
+    bad_anim.extend_from_slice(&[0u8; 6]);
+    bad_anim.extend_from_slice(b"ANMF");
+    bad_anim.extend_from_slice(&16u32.to_le_bytes());
+    bad_anim.extend_from_slice(&[0u8; 16]);
+    fs::write(&payloadless_anmf, &bad_anim).unwrap();
     let sig_only_gif = dir.join("sig-only.gif");
     fs::write(&sig_only_gif, b"GIF89a\x01\x00\x01\x00\x00\x00\x00;").unwrap();
     let huge = dir.join("huge.png");
@@ -378,6 +458,8 @@ fn rejects_svg_html_non_image_magic_only_empty_and_oversized_attachments() {
         &truncated_png,
         &sig_only_jpg,
         &sig_only_webp,
+        &header_only_vp8l,
+        &payloadless_anmf,
         &sig_only_gif,
         &huge,
         &dir,
@@ -416,9 +498,11 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
     fs::create_dir_all(&dir).unwrap();
     let png_path = dir.join("shot.png");
     let webp_path = dir.join("shot.webp");
+    let anim_webp_path = dir.join("anim.webp");
     let gif_path = dir.join("shot.gif");
     fs::write(&png_path, sample_png(2)).unwrap();
     fs::write(&webp_path, sample_webp()).unwrap();
+    fs::write(&anim_webp_path, VALID_WEBP_ANIM).unwrap();
     fs::write(&gif_path, sample_gif()).unwrap();
 
     let out = stdout(
@@ -433,6 +517,8 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
                 png_path.to_str().unwrap(),
                 "--attach",
                 webp_path.to_str().unwrap(),
+                "--attach",
+                anim_webp_path.to_str().unwrap(),
                 "--attach",
                 gif_path.to_str().unwrap(),
             ])
@@ -461,9 +547,13 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
     assert!(!html.contains("secret.png"), "{html}");
     assert!(!html.to_ascii_lowercase().contains("<script"), "{html}");
 
-    // Metadata privacy: PNG tEXt, zTXt, compressed iTXt, and post-scan progressive JPEG COM
-    // carrying private paths/addresses must refuse by default and be fully stripped under --strip-private.
-    let cases: [(&str, Vec<u8>, &str); 4] = [
+    // Metadata privacy: PNG tEXt/zTXt/iTXt/eXIf, JPEG post-scan COM & EXIF, and WebP EXIF
+    // carrying ASCII or UTF-16LE/BE private paths must refuse by default and strip cleanly.
+    let utf16_be_exif = exif_utf16_payload("/home/alice/private.png", true);
+    let utf16_le_exif = exif_utf16_payload("/home/alice/private.png", false);
+    let utf16_be_needle = utf16_bytes("/home/alice/", true);
+    let utf16_le_needle = utf16_bytes("/home/alice/", false);
+    let cases: [(&str, Vec<u8>, &str); 10] = [
         (
             "leaky-text.png",
             png_with_text_chunk("saved from /home/alice/notes.png via 192.168.1.44"),
@@ -483,6 +573,36 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
             "leaky-prog.jpg",
             progressive_jpeg_with_post_scan_comment(b"tail /home/alice/private.png"),
             "data:image/jpeg;base64,",
+        ),
+        (
+            "leaky-exif-be.jpg",
+            jpeg_with_exif(&utf16_be_exif),
+            "data:image/jpeg;base64,",
+        ),
+        (
+            "leaky-exif-le.jpg",
+            jpeg_with_exif(&utf16_le_exif),
+            "data:image/jpeg;base64,",
+        ),
+        (
+            "leaky-exif-be.png",
+            png_with_extra_chunk(10, b"eXIf", &utf16_be_exif),
+            "data:image/png;base64,",
+        ),
+        (
+            "leaky-exif-le.png",
+            png_with_extra_chunk(11, b"eXIf", &utf16_le_exif),
+            "data:image/png;base64,",
+        ),
+        (
+            "leaky-exif-be.webp",
+            webp_with_exif(&utf16_be_exif),
+            "data:image/webp;base64,",
+        ),
+        (
+            "leaky-exif-le.webp",
+            webp_with_exif(&utf16_le_exif),
+            "data:image/webp;base64,",
         ),
     ];
 
@@ -530,14 +650,22 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
         assert!(
             !decoded
                 .windows(b"/home/alice/".len())
-                .any(|w| w == b"/home/alice/"),
+                .any(|w| w == b"/home/alice/")
+                && !decoded
+                    .windows(utf16_be_needle.len())
+                    .any(|w| w == utf16_be_needle.as_slice())
+                && !decoded
+                    .windows(utf16_le_needle.len())
+                    .any(|w| w == utf16_le_needle.as_slice()),
             "{filename}: stripped data URI still contains private path bytes"
         );
         assert!(
             !decoded.windows(b"zTXt".len()).any(|w| w == b"zTXt")
                 && !decoded.windows(b"iTXt".len()).any(|w| w == b"iTXt")
-                && !decoded.windows(b"tEXt".len()).any(|w| w == b"tEXt"),
-            "{filename}: stripped PNG still contains text metadata chunk"
+                && !decoded.windows(b"tEXt".len()).any(|w| w == b"tEXt")
+                && !decoded.windows(b"eXIf".len()).any(|w| w == b"eXIf")
+                && !decoded.windows(b"EXIF".len()).any(|w| w == b"EXIF"),
+            "{filename}: stripped image still contains metadata chunk"
         );
 
         let kept_doc = json_stdout(repo.arc(&repo.root).args([
@@ -553,40 +681,60 @@ fn render_embeds_data_uris_under_csp_and_enforces_metadata_privacy() {
         );
     }
 
-    // Corrupt compressed zTXt chunk cannot be inspected -> default render refuses, --strip-private succeeds.
-    let bad_ztxt_path = dir.join("bad-ztxt.png");
-    fs::write(
-        &bad_ztxt_path,
-        png_with_extra_chunk(8, b"zTXt", b"Comment\0\x00not-valid-zlib"),
-    )
-    .unwrap();
-    let bad_ztxt_file = Path::new(
-        stdout(repo.arc(&repo.root).args([
-            "journal",
-            "note",
-            "bad-ztxt",
-            "--title",
-            "Unreadable zTXt",
-            "--attach",
-            bad_ztxt_path.to_str().unwrap(),
-        ]))
-        .trim(),
-    )
-    .file_name()
-    .unwrap()
-    .to_string_lossy()
-    .to_string();
-    repo.arc(&repo.root)
-        .args(["journal", "render", &bad_ztxt_file])
-        .assert()
-        .failure();
-    assert!(stdout(repo.arc(&repo.root).args([
-        "journal",
-        "render",
-        &bad_ztxt_file,
-        "--strip-private",
-    ]))
-    .contains("data:image/png;base64,"));
+    // Unreadable PNG text metadata (corrupt zTXt, extra pre-Adler-32 bytes in zTXt,
+    // and invalid UTF-8 in uncompressed iTXt) must refuse default render and succeed with --strip-private.
+    let good_zlib = zlib_stored(b"harmless");
+    let mut extra_pre_adler = good_zlib[..good_zlib.len() - 4].to_vec();
+    extra_pre_adler.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+    extra_pre_adler.extend_from_slice(&good_zlib[good_zlib.len() - 4..]);
+    let mut padded_ztxt_chunk = b"Comment\0\x00".to_vec();
+    padded_ztxt_chunk.extend_from_slice(&extra_pre_adler);
+
+    let unreadable_cases: [(&str, Vec<u8>); 3] = [
+        (
+            "bad-ztxt.png",
+            png_with_extra_chunk(8, b"zTXt", b"Comment\0\x00not-valid-zlib"),
+        ),
+        (
+            "padded-ztxt.png",
+            png_with_extra_chunk(12, b"zTXt", &padded_ztxt_chunk),
+        ),
+        (
+            "invalid-utf8-itxt.png",
+            png_with_extra_chunk(13, b"iTXt", b"Comment\0\x00\x00\0\0\xffhello"),
+        ),
+    ];
+
+    for (idx, (filename, bytes)) in unreadable_cases.iter().enumerate() {
+        let path = dir.join(filename);
+        fs::write(&path, bytes).unwrap();
+        let topic = format!("unreadable-{idx}");
+        let file = Path::new(
+            stdout(repo.arc(&repo.root).args([
+                "journal",
+                "note",
+                &topic,
+                "--title",
+                "Unreadable metadata",
+                "--attach",
+                path.to_str().unwrap(),
+            ]))
+            .trim(),
+        )
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+        repo.arc(&repo.root)
+            .args(["journal", "render", &file])
+            .assert()
+            .failure();
+        assert!(stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "render", &file, "--strip-private",])
+        )
+        .contains("data:image/png;base64,"));
+    }
 }
 
 #[test]

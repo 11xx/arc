@@ -732,6 +732,180 @@ fn validate_jpeg(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn validate_webp_vp8(data: &[u8]) -> Result<()> {
+    if data.len() < 11 {
+        bail!("truncated WebP VP8 bitstream");
+    }
+    let frame_tag = u32::from(data[0]) | (u32::from(data[1]) << 8) | (u32::from(data[2]) << 16);
+    let is_keyframe = (frame_tag & 0x01) == 0;
+    let version = (frame_tag >> 1) & 0x07;
+    let first_part_size = (frame_tag >> 5) as usize;
+    if !is_keyframe || version > 3 || &data[3..6] != b"\x9d\x01\x2a" {
+        bail!("invalid WebP VP8 keyframe header");
+    }
+    if first_part_size == 0
+        || 10usize
+            .checked_add(first_part_size)
+            .is_none_or(|end| end > data.len())
+    {
+        bail!("invalid WebP VP8 first partition length");
+    }
+    let width = u16::from_le_bytes([data[6], data[7]]) & 0x3FFF;
+    let height = u16::from_le_bytes([data[8], data[9]]) & 0x3FFF;
+    if width == 0 || height == 0 {
+        bail!("WebP VP8 dimensions must be non-zero");
+    }
+    Ok(())
+}
+
+fn validate_webp_vp8l(data: &[u8]) -> Result<()> {
+    if data.len() < 8 || data[0] != 0x2F {
+        bail!("invalid or truncated WebP VP8L bitstream");
+    }
+    let header = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    let version = (header >> 29) & 0x07;
+    if version != 0 {
+        bail!("unsupported WebP VP8L version");
+    }
+    let mut reader = BitReader::new(&data[5..]);
+    let mut seen_transforms = [false; 4];
+    let mut saw_subimage_transform = false;
+    while reader.read_bits(1)? == 1 {
+        let transform = reader.read_bits(2)? as usize;
+        if seen_transforms[transform] {
+            bail!("duplicate WebP VP8L transform");
+        }
+        seen_transforms[transform] = true;
+        match transform {
+            0 | 1 => {
+                // Predictor or Color transform: 3-bit size_bits followed by a
+                // recursively encoded sub-image and the main image bitstream.
+                let _size_bits = reader.read_bits(3)?;
+                if reader.remaining_bits() < 24 {
+                    bail!("truncated WebP VP8L transform payload");
+                }
+                saw_subimage_transform = true;
+                break;
+            }
+            2 => {
+                // SubtractGreen transform has no payload bits.
+            }
+            3 => {
+                // ColorIndexing transform: 8-bit color_table_size_minus_1
+                // followed by a palette sub-image and the main image bitstream.
+                let _table_size = reader.read_bits(8)?;
+                if reader.remaining_bits() < 24 {
+                    bail!("truncated WebP VP8L color-index payload");
+                }
+                saw_subimage_transform = true;
+                break;
+            }
+            _ => unreachable!(),
+        }
+    }
+    if !saw_subimage_transform {
+        let use_color_cache = reader.read_bits(1)?;
+        if use_color_cache == 1 {
+            let color_cache_bits = reader.read_bits(4)?;
+            if !(1..=11).contains(&color_cache_bits) {
+                bail!("invalid WebP VP8L color cache size");
+            }
+        }
+        let use_meta_prefix = reader.read_bits(1)?;
+        if use_meta_prefix == 1 {
+            let _prefix_bits = reader.read_bits(3)?;
+            if reader.remaining_bits() < 24 {
+                bail!("truncated WebP VP8L meta-prefix image");
+            }
+        } else {
+            // Validate the 5 prefix code headers (green/length/cache, red,
+            // blue, alpha, distance) up to the first non-simple Huffman code.
+            for _ in 0..5 {
+                let is_simple = reader.read_bits(1)?;
+                if is_simple == 1 {
+                    let num_symbols_minus_1 = reader.read_bits(1)?;
+                    let is_first_8bits = reader.read_bits(1)?;
+                    let _sym0 = reader.read_bits(if is_first_8bits == 1 { 8 } else { 1 })?;
+                    if num_symbols_minus_1 == 1 {
+                        let _sym1 = reader.read_bits(8)?;
+                    }
+                } else {
+                    let num_code_lengths = usize::from(reader.read_bits(4)?) + 4;
+                    let mut any_nonzero = false;
+                    for _ in 0..num_code_lengths {
+                        if reader.read_bits(3)? != 0 {
+                            any_nonzero = true;
+                        }
+                    }
+                    if !any_nonzero || reader.remaining_bits() < 8 {
+                        bail!("invalid or truncated WebP VP8L prefix code");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_webp_alph(data: &[u8]) -> Result<()> {
+    if data.len() < 2 {
+        bail!("truncated WebP ALPH chunk");
+    }
+    let compression = data[0] & 0x03;
+    if compression > 1 {
+        bail!("invalid WebP ALPH compression method");
+    }
+    Ok(())
+}
+
+fn validate_webp_anmf(data: &[u8]) -> Result<()> {
+    if data.len() < 24 {
+        bail!("truncated WebP ANMF frame");
+    }
+    let mut pos = 16usize;
+    let mut saw_frame_image = false;
+    while pos < data.len() {
+        if pos + 8 > data.len() {
+            bail!("truncated WebP ANMF sub-chunk header");
+        }
+        let fourcc = &data[pos..pos + 4];
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
+        let data_start = pos + 8;
+        let Some(data_end) = data_start.checked_add(size) else {
+            bail!("WebP ANMF sub-chunk size overflow");
+        };
+        if data_end > data.len() {
+            bail!("truncated WebP ANMF sub-chunk payload");
+        }
+        let padded_end = data_end
+            .checked_add(size & 1)
+            .ok_or_else(|| anyhow::anyhow!("WebP ANMF sub-chunk size overflow"))?;
+        if padded_end > data.len() {
+            bail!("truncated WebP ANMF sub-chunk padding byte");
+        }
+        let sub_data = &data[data_start..data_end];
+        match fourcc {
+            b"ALPH" => validate_webp_alph(sub_data)?,
+            b"VP8 " => {
+                validate_webp_vp8(sub_data)?;
+                saw_frame_image = true;
+            }
+            b"VP8L" => {
+                validate_webp_vp8l(sub_data)?;
+                saw_frame_image = true;
+            }
+            _ => bail!("unexpected sub-chunk inside WebP ANMF frame"),
+        }
+        pos = padded_end;
+    }
+    if !saw_frame_image {
+        bail!("WebP ANMF frame carries no VP8/VP8L image bitstream");
+    }
+    Ok(())
+}
+
 fn validate_webp(bytes: &[u8]) -> Result<()> {
     if bytes.len() < 20 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
         bail!("truncated WebP container");
@@ -743,6 +917,7 @@ fn validate_webp(bytes: &[u8]) -> Result<()> {
     let mut pos = 12usize;
     let mut saw_image = false;
     let mut saw_vp8x = false;
+    let mut vp8x_flags = 0u8;
     let mut saw_anim = false;
     let mut saw_anmf = false;
 
@@ -773,30 +948,19 @@ fn validate_webp(bytes: &[u8]) -> Result<()> {
         let data = &bytes[data_start..data_end];
         match fourcc {
             b"VP8 " => {
-                if data.len() < 10 {
-                    bail!("truncated WebP VP8 bitstream");
-                }
-                let is_keyframe = (data[0] & 0x01) == 0;
-                if !is_keyframe || &data[3..6] != b"\x9d\x01\x2a" {
-                    bail!("invalid WebP VP8 keyframe header");
-                }
-                let width = u16::from_le_bytes([data[6], data[7]]) & 0x3FFF;
-                let height = u16::from_le_bytes([data[8], data[9]]) & 0x3FFF;
-                if width == 0 || height == 0 {
-                    bail!("WebP VP8 dimensions must be non-zero");
-                }
+                validate_webp_vp8(data)?;
                 saw_image = true;
             }
             b"VP8L" => {
-                if data.len() < 5 || data[0] != 0x2F {
-                    bail!("invalid WebP VP8L bitstream header");
-                }
+                validate_webp_vp8l(data)?;
                 saw_image = true;
             }
+            b"ALPH" => validate_webp_alph(data)?,
             b"VP8X" => {
                 if data.len() != 10 {
                     bail!("invalid WebP VP8X header length");
                 }
+                vp8x_flags = data[0];
                 saw_vp8x = true;
             }
             b"ANIM" => {
@@ -806,9 +970,7 @@ fn validate_webp(bytes: &[u8]) -> Result<()> {
                 saw_anim = true;
             }
             b"ANMF" => {
-                if data.len() < 16 {
-                    bail!("truncated WebP ANMF frame");
-                }
+                validate_webp_anmf(data)?;
                 saw_anmf = true;
             }
             _ => {}
@@ -816,6 +978,12 @@ fn validate_webp(bytes: &[u8]) -> Result<()> {
         pos = padded_end;
     }
 
+    if saw_anmf && (!saw_vp8x || !saw_anim) {
+        bail!("WebP ANMF frame requires VP8X and ANIM headers");
+    }
+    if saw_vp8x && (vp8x_flags & 0x02) != 0 && (!saw_anim || !saw_anmf) {
+        bail!("animated WebP container missing ANIM or ANMF frames");
+    }
     if !saw_image && !(saw_vp8x && saw_anim && saw_anmf) {
         bail!("WebP container carries no VP8/VP8L/ANMF image bitstream");
     }
@@ -1861,6 +2029,61 @@ fn printable_runs(data: &[u8]) -> Vec<String> {
     out
 }
 
+/// Extract printable UTF-16LE and UTF-16BE ASCII runs at both even and odd byte
+/// offsets so EXIF `UserComment` (`UNICODE\0`) and Windows `XP*` tags are
+/// scanned alongside single-byte metadata text.
+fn utf16_printable_runs(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for offset in [0usize, 1usize] {
+        if data.len() < offset + 8 {
+            continue;
+        }
+        let slice = &data[offset..];
+        for big_endian in [false, true] {
+            let mut cur = Vec::new();
+            for pair in slice.chunks_exact(2) {
+                let unit = if big_endian {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                };
+                if matches!(unit, 0x0020..=0x007E | 0x0009 | 0x000A | 0x000D) {
+                    cur.push(unit as u8);
+                } else if cur.len() >= 4 {
+                    if let Ok(s) = String::from_utf8(std::mem::take(&mut cur)) {
+                        out.push(s);
+                    }
+                } else {
+                    cur.clear();
+                }
+            }
+            if cur.len() >= 4 {
+                if let Ok(s) = String::from_utf8(cur) {
+                    out.push(s);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn metadata_text_views(data: &[u8]) -> Vec<String> {
+    let mut out = printable_runs(data);
+    out.extend(utf16_printable_runs(data));
+    out
+}
+
+fn push_utf8_metadata_field(out: &mut Vec<String>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if text.contains('\0') {
+        out.push(text.replace('\0', "\n"));
+    } else {
+        out.push(text.to_string());
+    }
+}
+
 fn extract_png_metadata(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
     let mut out = Vec::new();
     let mut unreadable = Vec::new();
@@ -1878,14 +2101,14 @@ fn extract_png_metadata(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
         }
         let data = &bytes[data_start..data_start + len];
         match kind {
-            b"tEXt" | b"eXIf" => out.extend(printable_runs(data)),
+            b"tEXt" | b"eXIf" => out.extend(metadata_text_views(data)),
             b"zTXt" => {
                 if let Some(nul) = data.iter().position(|&b| b == 0) {
-                    out.extend(printable_runs(&data[..nul]));
+                    out.extend(metadata_text_views(&data[..nul]));
                     if nul + 2 <= data.len() && data[nul + 1] == 0 {
                         match inflate_zlib_bounded(&data[nul + 2..], MAX_METADATA_DECOMPRESS_BYTES)
                         {
-                            Ok(decompressed) => out.extend(printable_runs(&decompressed)),
+                            Ok(decompressed) => out.extend(metadata_text_views(&decompressed)),
                             Err(err) => {
                                 unreadable.push(format!("unreadable PNG zTXt chunk: {err}"))
                             }
@@ -1903,26 +2126,54 @@ fn extract_png_metadata(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
             b"iTXt" => {
                 // <keyword>\0<compression_flag><compression_method><lang>\0<translated>\0<text>
                 if let Some(k_nul) = data.iter().position(|&b| b == 0) {
-                    out.extend(printable_runs(&data[..k_nul]));
+                    out.extend(metadata_text_views(&data[..k_nul]));
                     if k_nul + 3 <= data.len() {
                         let comp_flag = data[k_nul + 1];
                         let comp_method = data[k_nul + 2];
                         let rest = &data[k_nul + 3..];
                         if let Some(l_nul) = rest.iter().position(|&b| b == 0) {
-                            out.extend(printable_runs(&rest[..l_nul]));
+                            let lang_bytes = &rest[..l_nul];
+                            match std::str::from_utf8(lang_bytes) {
+                                Ok(lang) => push_utf8_metadata_field(&mut out, lang),
+                                Err(_) => unreadable.push(
+                                    "unreadable PNG iTXt chunk: invalid UTF-8 language tag"
+                                        .to_string(),
+                                ),
+                            }
                             let after_lang = &rest[l_nul + 1..];
                             if let Some(t_nul) = after_lang.iter().position(|&b| b == 0) {
-                                out.extend(printable_runs(&after_lang[..t_nul]));
+                                let trans_bytes = &after_lang[..t_nul];
+                                match std::str::from_utf8(trans_bytes) {
+                                    Ok(trans) => push_utf8_metadata_field(&mut out, trans),
+                                    Err(_) => unreadable.push(
+                                        "unreadable PNG iTXt chunk: invalid UTF-8 translated keyword"
+                                            .to_string(),
+                                    ),
+                                }
                                 let text_bytes = &after_lang[t_nul + 1..];
-                                match comp_flag {
-                                    0 => out.extend(printable_runs(text_bytes)),
-                                    1 if comp_method == 0 => {
+                                match (comp_flag, comp_method) {
+                                    (0, 0) => match std::str::from_utf8(text_bytes) {
+                                        Ok(text) => push_utf8_metadata_field(&mut out, text),
+                                        Err(_) => unreadable.push(
+                                            "unreadable PNG iTXt chunk: invalid UTF-8 text"
+                                                .to_string(),
+                                        ),
+                                    },
+                                    (1, 0) => {
                                         match inflate_zlib_bounded(
                                             text_bytes,
                                             MAX_METADATA_DECOMPRESS_BYTES,
                                         ) {
                                             Ok(decompressed) => {
-                                                out.extend(printable_runs(&decompressed))
+                                                match std::str::from_utf8(&decompressed) {
+                                                    Ok(text) => {
+                                                        push_utf8_metadata_field(&mut out, text)
+                                                    }
+                                                    Err(_) => unreadable.push(
+                                                        "unreadable compressed PNG iTXt chunk: invalid UTF-8 text"
+                                                            .to_string(),
+                                                    ),
+                                                }
                                             }
                                             Err(err) => unreadable.push(format!(
                                                 "unreadable compressed PNG iTXt chunk: {err}"
@@ -1997,11 +2248,13 @@ fn extract_jpeg_metadata(bytes: &[u8]) -> Vec<String> {
     };
     for seg in segments {
         if is_jpeg_metadata_marker(seg.marker) {
-            out.extend(printable_runs(&bytes[seg.payload_start..seg.header_end]));
+            out.extend(metadata_text_views(
+                &bytes[seg.payload_start..seg.header_end],
+            ));
         } else if seg.marker == 0xE0 {
             let payload = &bytes[seg.payload_start..seg.header_end];
             if !payload.starts_with(b"JFIF\0") || payload.len() > 14 {
-                out.extend(printable_runs(payload));
+                out.extend(metadata_text_views(payload));
             }
         }
     }
@@ -2044,7 +2297,7 @@ fn extract_webp_metadata(bytes: &[u8]) -> Vec<String> {
             break;
         }
         if matches!(fourcc, b"EXIF" | b"XMP ") {
-            out.extend(printable_runs(&bytes[data_start..data_start + size]));
+            out.extend(metadata_text_views(&bytes[data_start..data_start + size]));
         }
         pos = chunk_end.min(bytes.len());
     }
@@ -2141,7 +2394,7 @@ fn extract_gif_metadata(bytes: &[u8]) -> Vec<String> {
                     sub += len;
                 }
                 if label == 0xFE || (label == 0xFF && payload.starts_with(b"XMP DataXMP")) {
-                    out.extend(printable_runs(&payload));
+                    out.extend(metadata_text_views(&payload));
                 }
                 pos = sub;
             }
@@ -2304,6 +2557,15 @@ impl<'a> BitReader<'a> {
         let drop_bits = self.bits % 8;
         self.buf >>= drop_bits;
         self.bits -= drop_bits;
+    }
+
+    fn remaining_bits(&self) -> usize {
+        (self.data.len() - self.pos) * 8 + self.bits as usize
+    }
+
+    fn remaining_aligned_bytes(&self) -> usize {
+        debug_assert_eq!(self.bits % 8, 0);
+        (self.data.len() - self.pos) + (self.bits as usize / 8)
     }
 
     fn read_u16_le(&mut self) -> Result<u16> {
@@ -2551,6 +2813,10 @@ fn inflate_zlib_bounded(data: &[u8], max_bytes: usize) -> Result<Vec<u8>> {
             break;
         }
     }
+    reader.align_byte();
+    if reader.remaining_aligned_bytes() != 0 {
+        bail!("unexpected trailing bytes before zlib Adler-32 checksum");
+    }
     if adler32(&out) != expected_adler {
         bail!("zlib Adler-32 checksum mismatch");
     }
@@ -2688,6 +2954,32 @@ mod tests {
         7, 80, 138, 42, 212, 163, 255, 129, 136, 232, 127, 0, 0,
     ];
 
+    /// Decoder-valid 1x1 lossy WebP (Pillow-verified).
+    const VALID_WEBP_LOSSY: &[u8] = &[
+        82, 73, 70, 70, 46, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 32, 34, 0, 0, 0, 112, 1, 0, 157,
+        1, 42, 1, 0, 1, 0, 1, 64, 38, 37, 148, 2, 116, 1, 64, 0, 0, 254, 252, 55, 129, 87, 247,
+        212, 232, 62, 43, 224, 0, 0,
+    ];
+
+    /// Decoder-valid 2x2 lossy RGBA WebP with VP8X + ALPH + VP8 (Pillow-verified).
+    const VALID_WEBP_LOSSY_RGBA: &[u8] = &[
+        82, 73, 70, 70, 78, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 16, 0, 0, 0, 1,
+        0, 0, 1, 0, 0, 65, 76, 80, 72, 5, 0, 0, 0, 0, 128, 128, 128, 128, 0, 86, 80, 56, 32, 34, 0,
+        0, 0, 112, 1, 0, 157, 1, 42, 2, 0, 2, 0, 1, 64, 38, 37, 148, 2, 116, 1, 64, 0, 0, 254, 252,
+        55, 129, 87, 247, 212, 232, 62, 43, 224, 0, 0,
+    ];
+
+    /// Decoder-valid 2-frame animated WebP with VP8X + ANIM + ANMF (Pillow-verified).
+    const VALID_WEBP_ANIM: &[u8] = &[
+        82, 73, 70, 70, 168, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 2, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 65, 78, 73, 77, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65, 78, 77, 70, 58, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 2, 86, 80, 56, 32, 34, 0, 0, 0, 48, 1, 0,
+        157, 1, 42, 1, 0, 1, 0, 1, 64, 38, 37, 148, 0, 3, 112, 0, 254, 252, 55, 139, 219, 101, 162,
+        80, 62, 228, 253, 17, 128, 0, 0, 65, 78, 77, 70, 58, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 100, 0, 0, 0, 86, 80, 56, 32, 34, 0, 0, 0, 52, 1, 0, 157, 1, 42, 1, 0, 1, 0, 0, 0,
+        38, 37, 148, 0, 3, 112, 0, 254, 249, 79, 63, 182, 203, 68, 160, 125, 201, 250, 35, 0, 0, 0,
+    ];
+
     /// Decoder-valid 1x1 GIF87a (Pillow-verified).
     const VALID_GIF: &[u8] = &[
         71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44,
@@ -2736,6 +3028,50 @@ mod tests {
         out
     }
 
+    fn utf16_encoded(text: &str, big_endian: bool) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len() * 2);
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&if big_endian {
+                unit.to_be_bytes()
+            } else {
+                unit.to_le_bytes()
+            });
+        }
+        out
+    }
+
+    fn webp_with_chunk(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut chunks = Vec::new();
+        // VP8X (10 bytes): EXIF flag 0x08, 1x1 canvas.
+        chunks.extend_from_slice(b"VP8X");
+        chunks.extend_from_slice(&10u32.to_le_bytes());
+        chunks.extend_from_slice(&[0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // Copy the valid VP8L chunk from VALID_WEBP (bytes 12..).
+        chunks.extend_from_slice(&VALID_WEBP[12..]);
+        chunks.extend_from_slice(fourcc);
+        chunks.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        chunks.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            chunks.push(0);
+        }
+        let mut out = Vec::with_capacity(12 + chunks.len());
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&((4 + chunks.len()) as u32).to_le_bytes());
+        out.extend_from_slice(b"WEBP");
+        out.extend_from_slice(&chunks);
+        out
+    }
+
+    fn jpeg_with_app1_exif(exif_payload: &[u8]) -> Vec<u8> {
+        let mut out = VALID_PROGRESSIVE_JPEG[..2].to_vec();
+        out.push(0xFF);
+        out.push(0xE1);
+        out.extend_from_slice(&((exif_payload.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(exif_payload);
+        out.extend_from_slice(&VALID_PROGRESSIVE_JPEG[2..]);
+        out
+    }
+
     #[test]
     fn validates_genuine_containers_and_rejects_magic_only_svg_and_truncated() {
         assert_eq!(validate_image_bytes(VALID_PNG).unwrap(), ImageFormat::Png);
@@ -2744,7 +3080,40 @@ mod tests {
             ImageFormat::Jpeg
         );
         assert_eq!(validate_image_bytes(VALID_WEBP).unwrap(), ImageFormat::Webp);
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_LOSSY).unwrap(),
+            ImageFormat::Webp
+        );
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_LOSSY_RGBA).unwrap(),
+            ImageFormat::Webp
+        );
+        assert_eq!(
+            validate_image_bytes(VALID_WEBP_ANIM).unwrap(),
+            ImageFormat::Webp
+        );
         assert_eq!(validate_image_bytes(VALID_GIF).unwrap(), ImageFormat::Gif);
+
+        // Header-only VP8L (5-byte chunk payload `2f 00 00 00 00` + RIFF pad byte).
+        let header_only_vp8l =
+            b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2f\x00\x00\x00\x00\x00";
+        // Zero-padded 8-byte VP8L with empty normal prefix code table.
+        let zero_vp8l =
+            b"RIFF\x14\x00\x00\x00WEBPVP8L\x08\x00\x00\x00\x2f\x00\x00\x00\x00\x00\x00\x00";
+        // Animated WebP whose ANMF chunk carries only the 16-byte frame header and no image data.
+        let mut empty_anmf = Vec::new();
+        empty_anmf.extend_from_slice(b"RIFF");
+        empty_anmf.extend_from_slice(&(4u32 + 18 + 14 + 24).to_le_bytes());
+        empty_anmf.extend_from_slice(b"WEBP");
+        empty_anmf.extend_from_slice(b"VP8X");
+        empty_anmf.extend_from_slice(&10u32.to_le_bytes());
+        empty_anmf.extend_from_slice(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        empty_anmf.extend_from_slice(b"ANIM");
+        empty_anmf.extend_from_slice(&6u32.to_le_bytes());
+        empty_anmf.extend_from_slice(&[0u8; 6]);
+        empty_anmf.extend_from_slice(b"ANMF");
+        empty_anmf.extend_from_slice(&16u32.to_le_bytes());
+        empty_anmf.extend_from_slice(&[0u8; 16]);
 
         for bad in [
             // Magic-only and truncated payloads for each format.
@@ -2753,6 +3122,9 @@ mod tests {
             &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xD9],
             &VALID_PROGRESSIVE_JPEG[..VALID_PROGRESSIVE_JPEG.len() - 2],
             b"RIFF\x10\x00\x00\x00WEBPVP8 ".as_slice(),
+            header_only_vp8l.as_slice(),
+            zero_vp8l.as_slice(),
+            empty_anmf.as_slice(),
             b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".as_slice(),
             // Active / non-image payloads.
             b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>".as_slice(),
@@ -2824,6 +3196,65 @@ mod tests {
         let corrupt_ztxt = png_with_chunk(b"zTXt", b"Comment\0\x00not-zlib");
         let scan = scan_metadata(ImageFormat::Png, &corrupt_ztxt, &scanner);
         assert!(!scan.unreadable.is_empty(), "{scan:?}");
+
+        // Extra bytes inserted between the final DEFLATE block and the Adler-32 checksum must fail.
+        let good_zlib = zlib_stored(b"harmless");
+        let mut padded_zlib = good_zlib[..good_zlib.len() - 4].to_vec();
+        padded_zlib.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        padded_zlib.extend_from_slice(&good_zlib[good_zlib.len() - 4..]);
+        let mut extra_ztxt = b"Comment\0\x00".to_vec();
+        extra_ztxt.extend_from_slice(&padded_zlib);
+        let extra_ztxt_png = png_with_chunk(b"zTXt", &extra_ztxt);
+        let scan = scan_metadata(ImageFormat::Png, &extra_ztxt_png, &scanner);
+        assert!(!scan.unreadable.is_empty(), "{scan:?}");
+
+        // Invalid UTF-8 in uncompressed and compressed iTXt must be reported as unreadable.
+        let bad_utf8_itxt = png_with_chunk(b"iTXt", b"Comment\0\x00\x00\0\0\xffhello");
+        let scan = scan_metadata(ImageFormat::Png, &bad_utf8_itxt, &scanner);
+        assert!(!scan.unreadable.is_empty(), "{scan:?}");
+
+        let mut bad_comp_itxt = b"Comment\0\x01\x00\0\0".to_vec();
+        bad_comp_itxt.extend_from_slice(&zlib_stored(b"\xffhello"));
+        let bad_comp_itxt_png = png_with_chunk(b"iTXt", &bad_comp_itxt);
+        let scan = scan_metadata(ImageFormat::Png, &bad_comp_itxt_png, &scanner);
+        assert!(!scan.unreadable.is_empty(), "{scan:?}");
+    }
+
+    #[test]
+    fn utf16_exif_comments_are_scanned_and_stripped_across_jpeg_png_and_webp() {
+        let scanner = Scanner::new(Vec::<PathBuf>::new());
+        for (big_endian, odd_pad) in [(true, false), (false, false), (true, true), (false, true)] {
+            let mut exif = b"Exif\0\0MM\x00*\x00\x00\x00\x08UNICODE\0".to_vec();
+            if odd_pad {
+                exif.push(0x01);
+            }
+            let encoded_path = utf16_encoded("/home/alice/private.png", big_endian);
+            exif.extend_from_slice(&encoded_path);
+
+            let cases = [
+                (ImageFormat::Jpeg, jpeg_with_app1_exif(&exif)),
+                (ImageFormat::Png, png_with_chunk(b"eXIf", &exif)),
+                (ImageFormat::Webp, webp_with_chunk(b"EXIF", &exif)),
+            ];
+            for (fmt, bytes) in cases {
+                assert_eq!(validate_image_bytes(&bytes).unwrap(), fmt);
+                let scan = scan_metadata(fmt, &bytes, &scanner);
+                assert!(
+                    scan.findings
+                        .iter()
+                        .any(|f| f.text == "/home/alice/private.png"),
+                    "{fmt:?} be={big_endian} odd={odd_pad}: {scan:?}"
+                );
+                let stripped = strip_metadata(fmt, &bytes).unwrap();
+                assert!(
+                    !stripped
+                        .windows(encoded_path.len())
+                        .any(|w| w == encoded_path.as_slice()),
+                    "{fmt:?} stripped output retained UTF-16 path bytes"
+                );
+                assert!(scan_metadata(fmt, &stripped, &scanner).findings.is_empty());
+            }
+        }
     }
 
     #[test]
