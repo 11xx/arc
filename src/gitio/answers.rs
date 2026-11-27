@@ -833,4 +833,106 @@ mod tests {
             assert_eq!(rev_parse(&root, &id).unwrap(), id);
         }
     }
+
+    /// Claim: a missing loose blob or missing subtree object for a tracked path
+    /// is never cached as an absent file; restoring the missing object without
+    /// triggering invalidation makes `file_at` immediately succeed, and a
+    /// symlink intermediate component is proven absent.
+    #[test]
+    fn missing_blob_or_subtree_never_caches_tracked_file_as_absent() {
+        let (_directory, root) = fixture();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/policy.toml"), "rules = true\n").unwrap();
+        std::os::unix::fs::symlink("nested", root.join("link")).unwrap();
+        gitio::git(&root, &["add", "nested/policy.toml", "link"]).unwrap();
+        gitio::git(
+            &root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@arc-fixture.dev",
+                "commit",
+                "-m",
+                "add nested policy and symlink",
+            ],
+        )
+        .unwrap();
+        let commit = head(&root).unwrap();
+        let blob_id =
+            gitio::git(&root, &["rev-parse", "--verify", "HEAD:nested/policy.toml"]).unwrap();
+        let subtree_id = gitio::git(&root, &["rev-parse", "--verify", "HEAD:nested"]).unwrap();
+
+        // Symlink intermediate component is proven absent, matching Git.
+        assert_eq!(file_at(&root, &commit, "link/policy.toml").unwrap(), None);
+
+        // Missing loose blob must error (not return Ok(None) or cache absence),
+        // and restoring the loose file directly must immediately succeed.
+        let loose_blob = root
+            .join(".git/objects")
+            .join(&blob_id[..2])
+            .join(&blob_id[2..]);
+        let saved_blob = std::fs::read(&loose_blob).unwrap();
+        std::fs::remove_file(&loose_blob).unwrap();
+        gitio::close_object_readers();
+        assert!(
+            file_at(&root, &commit, "nested/policy.toml").is_err(),
+            "missing loose blob must fail rather than report absent"
+        );
+        std::fs::write(&loose_blob, &saved_blob).unwrap();
+        assert_eq!(
+            file_at(&root, &commit, "nested/policy.toml")
+                .unwrap()
+                .as_deref(),
+            Some("rules = true\n")
+        );
+
+        // Missing loose subtree must not cache `None` as immutable; restoring
+        // the subtree object directly must immediately return the file.
+        forget();
+        let loose_tree = root
+            .join(".git/objects")
+            .join(&subtree_id[..2])
+            .join(&subtree_id[2..]);
+        let saved_tree = std::fs::read(&loose_tree).unwrap();
+        std::fs::remove_file(&loose_tree).unwrap();
+        gitio::close_object_readers();
+        assert_eq!(file_at(&root, &commit, "nested/policy.toml").unwrap(), None);
+        std::fs::write(&loose_tree, &saved_tree).unwrap();
+        assert_eq!(
+            file_at(&root, &commit, "nested/policy.toml")
+                .unwrap()
+                .as_deref(),
+            Some("rules = true\n")
+        );
+        gitio::close_object_readers();
+    }
+
+    /// Claim: a Git ref write in one worktree invalidates mutable branch and
+    /// ref answers held for sibling linked worktrees of the same repository.
+    #[test]
+    fn cross_worktree_ref_write_invalidates_sibling_worktree_reads() {
+        let (directory, root) = fixture();
+        let first = head(&root).unwrap();
+        let sibling = directory.path().join("sibling");
+        gitio::add_worktree_new_branch(&root, &sibling, "side", &first).unwrap();
+
+        assert_eq!(gitio::branch_head(&sibling, "master").unwrap(), first);
+        assert!(gitio::branch_exists(&sibling, "side"));
+        assert!(!gitio::branch_exists(&sibling, "created-elsewhere"));
+
+        commit(&root, "second");
+        let second = head(&root).unwrap();
+        gitio::create_branch(&root, "created-elsewhere", &second).unwrap();
+
+        assert_eq!(gitio::branch_head(&sibling, "master").unwrap(), second);
+        assert!(gitio::branch_exists(&sibling, "created-elsewhere"));
+        assert_eq!(
+            gitio::branch_head(&sibling, "created-elsewhere").unwrap(),
+            second
+        );
+        gitio::close_object_readers();
+    }
 }

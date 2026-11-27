@@ -395,8 +395,11 @@ pub fn git_path(cwd: &Path, name: &str) -> Result<PathBuf> {
 }
 
 pub fn rev_parse(cwd: &Path, rev: &str) -> Result<String> {
+    let spec = format!("{rev}^{{commit}}");
+    if is_cwd_sensitive_spec(rev.as_bytes()) {
+        return git(cwd, &["rev-parse", "--verify", &spec]);
+    }
     answers::text(cwd, &["rev_parse", rev], is_object_id(rev), || {
-        let spec = format!("{rev}^{{commit}}");
         if let Some(info) = batch_info(cwd, spec.as_bytes()) {
             match info {
                 ObjectInfo::Found { id, kind } if kind == "commit" => return Ok(id),
@@ -433,13 +436,11 @@ pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
 /// normal probe condition, while other Git failures remain errors.
 pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
     answers::optional_text(cwd, &["head_if_present"], false, || {
-        if let Some(info) = batch_info(cwd, b"HEAD") {
-            match info {
-                ObjectInfo::Found { id, .. } => return Ok(Some(id)),
-                ObjectInfo::Missing => return Ok(None),
-                ObjectInfo::Ambiguous => {}
-            }
+        if let Some(ObjectInfo::Found { id, .. }) = batch_info(cwd, b"HEAD") {
+            return Ok(Some(id));
         }
+        // Unborn and dangling HEAD both report `missing` from `cat-file`, so
+        // fall back to `rev-parse --verify -q HEAD` to preserve dangling OIDs.
         let out = git_command()
             .args(["rev-parse", "--verify", "-q", "HEAD"])
             .current_dir(cwd)
@@ -460,8 +461,123 @@ pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
     })
 }
 
+/// Exact local branches under `refs/heads/` and their raw target OIDs, read
+/// once per mutable observation span via `for-each-ref`.
+///
+/// Strictly listing `refs/heads/` prevents DWIM ref lookup from resolving a
+/// tag such as `refs/tags/refs/heads/<name>` as a local branch.
+fn local_branches(cwd: &Path) -> Result<BTreeMap<String, String>> {
+    let admin = answers::repository(cwd).map(|repo| repo.admin);
+    let scope = admin.as_deref().unwrap_or(cwd);
+    let out = answers::text(scope, &["local_branches"], false, || {
+        git(
+            cwd,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)",
+                "refs/heads/",
+            ],
+        )
+    })?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let (name, oid) = line.split_once('\0')?;
+            Some((name.to_string(), oid.to_string()))
+        })
+        .collect())
+}
+
+/// Whether `branch` is a plain branch name that cannot trigger Git revision
+/// operators or `<describeOutput>` parsing when queried as `refs/heads/<branch>`.
+fn is_plain_branch_name(branch: &str) -> bool {
+    if branch.is_empty()
+        || branch.starts_with('/')
+        || branch.ends_with('/')
+        || branch.contains("//")
+        || branch.contains("..")
+        || branch.contains("@{")
+        || branch.bytes().any(|b| {
+            b <= 0x20
+                || b == 0x7f
+                || matches!(b, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\' | b'@')
+        })
+    {
+        return false;
+    }
+    if branch
+        .split('/')
+        .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+    {
+        return false;
+    }
+    if let Some((_, tail)) = branch.rsplit_once("-g") {
+        if tail.len() >= 4 && tail.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Result of probing exact `refs/heads/<branch>` through the open `cat-file`
+/// reader while ruling out `gitrevisions(7)` DWIM shadows outside `refs/heads/`.
+enum LocalBranchProbe {
+    Commit(String),
+    MissingObject,
+    NeedsListing,
+}
+
+fn probe_local_branch(cwd: &Path, branch: &str, refname: &str) -> LocalBranchProbe {
+    if !is_plain_branch_name(branch) {
+        return LocalBranchProbe::NeedsListing;
+    }
+    let probed = with_object_reader(cwd, |reader| match reader.info(refname.as_bytes())? {
+        ObjectInfo::Found { id, kind } if kind == "commit" => {
+            // Confirm none of gitrevisions(7)'s DWIM ref search rules
+            // could have resolved a ref outside `refs/heads/`.
+            let shadows = [
+                format!("refs/{refname}"),
+                format!("refs/tags/{refname}"),
+                format!("refs/heads/{refname}"),
+                format!("refs/remotes/{refname}"),
+                format!("refs/remotes/{refname}/HEAD"),
+            ];
+            for shadow in &shadows {
+                match reader.info(shadow.as_bytes())? {
+                    ObjectInfo::Missing => {}
+                    ObjectInfo::Found { .. } | ObjectInfo::Ambiguous => {
+                        return Some(LocalBranchProbe::NeedsListing);
+                    }
+                }
+            }
+            Some(LocalBranchProbe::Commit(id))
+        }
+        ObjectInfo::Missing => Some(LocalBranchProbe::MissingObject),
+        ObjectInfo::Found { .. } | ObjectInfo::Ambiguous => Some(LocalBranchProbe::NeedsListing),
+    });
+    probed.unwrap_or(LocalBranchProbe::NeedsListing)
+}
+
 pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
-    rev_parse(cwd, &format!("refs/heads/{branch}"))
+    answers::text(cwd, &["branch_head", branch], false, || {
+        let refname = format!("refs/heads/{branch}");
+        match probe_local_branch(cwd, branch, &refname) {
+            LocalBranchProbe::Commit(id) => return Ok(id),
+            LocalBranchProbe::MissingObject => {
+                bail!(
+                    "git rev-parse --verify {refname}^{{commit}} failed: local branch {branch:?} does not exist"
+                );
+            }
+            LocalBranchProbe::NeedsListing => {}
+        }
+        let branches = local_branches(cwd)?;
+        let Some(oid) = branches.get(&refname) else {
+            bail!(
+                "git rev-parse --verify {refname}^{{commit}} failed: local branch {branch:?} does not exist"
+            );
+        };
+        rev_parse(cwd, oid)
+    })
 }
 
 /// Read an independent observation of mutable Git state. Deliberate movement
@@ -1519,38 +1635,136 @@ fn piped_output_with(
     Ok(out.stdout)
 }
 
-/// Whether a full object ID names an existing commit or tree whose paths
-/// cannot change through Git writes. Only positive answers are cached; a
-/// missing object is never cached so an externally created commit is seen
-/// without waiting for an invalidation boundary.
-fn tree_ish_exists(cwd: &Path, oid: &str) -> Result<bool> {
-    let answer = answers::maybe_cached_text(cwd, &["tree_ish_exists", oid], true, || {
-        let spec = format!("{oid}^{{tree}}");
-        if let Some(info) = batch_info(cwd, spec.as_bytes()) {
-            return Ok(match info {
-                ObjectInfo::Found { kind, .. } if kind == "tree" => (Some("1".to_string()), true),
-                ObjectInfo::Found { .. } | ObjectInfo::Missing | ObjectInfo::Ambiguous => {
-                    (None, false)
-                }
-            });
+/// Outcome of walking raw Git tree objects for `path` at a full commit/tree OID.
+enum TreeEntry {
+    /// Entry exists in its parent tree (its blob object need not be present).
+    Present { mode: String, oid: String },
+    /// Every ancestor tree object was present and parsed cleanly, and `path` is
+    /// absent (or an intermediate component is not a directory).
+    Absent,
+    /// The commit, root tree, or an intermediate subtree is missing/unreadable,
+    /// or `path` is not a plain repo-relative path; absence is not proven.
+    Unavailable,
+}
+
+/// Locate one direct child entry named `wanted` in a raw Git tree object.
+/// Returns `None` if the tree bytes are malformed, `Some(None)` if every entry
+/// parsed cleanly and `wanted` is absent, or `Some(Some((mode, oid_hex)))`.
+fn find_tree_entry<'a>(
+    mut bytes: &'a [u8],
+    oid_bytes: usize,
+    wanted: &[u8],
+) -> Option<Option<(&'a str, String)>> {
+    let mut found = None;
+    while !bytes.is_empty() {
+        let space = bytes.iter().position(|b| *b == b' ')?;
+        let mode = std::str::from_utf8(&bytes[..space]).ok()?;
+        if mode.is_empty() || !mode.bytes().all(|b| matches!(b, b'0'..=b'7')) {
+            return None;
         }
-        let out = git_command()
-            .args(["cat-file", "-e", "--", &spec])
-            .current_dir(cwd)
-            .counted_output()
-            .with_context(|| format!("failed to run git in {}", cwd.display()))?;
-        Ok(if out.status.success() {
-            (Some("1".to_string()), true)
-        } else {
-            (None, false)
-        })
-    })?;
-    Ok(answer.is_some())
+        bytes = &bytes[space + 1..];
+        let nul = bytes.iter().position(|b| *b == 0)?;
+        let name = &bytes[..nul];
+        bytes = &bytes[nul + 1..];
+        if bytes.len() < oid_bytes {
+            return None;
+        }
+        let oid = &bytes[..oid_bytes];
+        bytes = &bytes[oid_bytes..];
+        if name == wanted {
+            found = Some((mode, hex::encode(oid)));
+        }
+    }
+    Some(found)
+}
+
+/// Walk `path` through the present tree objects of full OID `rev` using the
+/// open `cat-file --batch-command -Z` reader. Distinguishes proven tree-entry
+/// absence from missing blobs, missing subtrees, and nonexistent commits.
+fn lookup_tree_entry(cwd: &Path, rev: &str, path: &str) -> TreeEntry {
+    if !is_object_id(rev) || path.is_empty() || path.contains('\0') {
+        return TreeEntry::Unavailable;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return TreeEntry::Unavailable;
+    }
+    let oid_bytes = rev.len() / 2;
+    let root_spec = format!("{rev}^{{tree}}");
+    let mut current_tree = match batch_contents(cwd, root_spec.as_bytes()) {
+        Some(Object::Found { kind, bytes }) if kind == "tree" => bytes,
+        _ => return TreeEntry::Unavailable,
+    };
+    let (dirs, leaf) = segments.split_at(segments.len() - 1);
+    for dir in dirs {
+        match find_tree_entry(&current_tree, oid_bytes, dir.as_bytes()) {
+            None => return TreeEntry::Unavailable,
+            Some(None) => return TreeEntry::Absent,
+            Some(Some((mode, oid))) => {
+                if mode != "40000" && mode != "040000" {
+                    return TreeEntry::Absent;
+                }
+                match batch_contents(cwd, oid.as_bytes()) {
+                    Some(Object::Found { kind, bytes }) if kind == "tree" => current_tree = bytes,
+                    _ => return TreeEntry::Unavailable,
+                }
+            }
+        }
+    }
+    match find_tree_entry(&current_tree, oid_bytes, leaf[0].as_bytes()) {
+        None => TreeEntry::Unavailable,
+        Some(None) => TreeEntry::Absent,
+        Some(Some((mode, oid))) => TreeEntry::Present {
+            mode: mode.to_string(),
+            oid,
+        },
+    }
+}
+
+/// Whether a path argument in `<rev>:<path>` is relative to the caller's
+/// working subdirectory (`./...`, `../...`, `.`, or `..`).
+fn is_cwd_sensitive_path(path: &str) -> bool {
+    is_cwd_sensitive_path_bytes(path.as_bytes())
+}
+
+fn is_cwd_sensitive_path_bytes(path: &[u8]) -> bool {
+    matches!(path, b"." | b"..")
+        || path.starts_with(b"./")
+        || path.starts_with(b"../")
+        || path.starts_with(b".^")
+        || path.starts_with(b"..^")
+}
+
+fn file_at_uncached(cwd: &Path, object: &str) -> Result<Option<String>> {
+    let out = git_command()
+        .args(["rev-parse", "--verify", "-q", object])
+        .current_dir(cwd)
+        .counted_output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if out.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !out.status.success() {
+        bail!(
+            "git rev-parse --verify -q {object} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bytes = blob_bytes(cwd, &blob)?;
+    let text = String::from_utf8(bytes).with_context(|| format!("{object} is not UTF-8"))?;
+    Ok(Some(text))
 }
 
 /// A tracked file's text as committed at `rev`, or `None` when that revision
 /// holds no such path.
 pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
+    if is_cwd_sensitive_spec(rev.as_bytes()) || is_cwd_sensitive_path(path) {
+        return file_at_uncached(cwd, &format!("{rev}:{path}"));
+    }
     let resolved = if is_object_id(rev) {
         rev.to_owned()
     } else {
@@ -1566,14 +1780,27 @@ pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
         if let Some(answer) = batch_contents(cwd, object.as_bytes()) {
             match answer {
                 Object::Missing => {
-                    // Cache an absent path at a full commit ID only after
-                    // confirming the commit or tree itself exists in the object
-                    // store. A commit that does not yet exist may be created by
-                    // another process within the same lock span.
-                    let cache = immutable && tree_ish_exists(cwd, rev)?;
-                    return Ok((None, cache));
+                    // Prove absence from the actual tree entries rather than
+                    // assuming a `missing` response means the path is absent:
+                    // missing loose blobs, missing subtrees, or a commit
+                    // arriving concurrently all report `missing` here.
+                    match lookup_tree_entry(cwd, rev, path) {
+                        TreeEntry::Absent => return Ok((None, immutable)),
+                        TreeEntry::Present { mode, oid }
+                            if mode != "40000" && mode != "040000" && mode != "160000" =>
+                        {
+                            // Entry exists in the tree: either the commit
+                            // arrived concurrently or its blob is unavailable
+                            // (which errors rather than hiding the file).
+                            let bytes = blob_bytes(cwd, &oid)?;
+                            let text = String::from_utf8(bytes)
+                                .with_context(|| format!("{object} is not UTF-8"))?;
+                            return Ok((Some(text), immutable));
+                        }
+                        TreeEntry::Present { .. } | TreeEntry::Unavailable => {}
+                    }
                 }
-                Object::Found { kind, bytes, .. } if kind == "blob" => {
+                Object::Found { kind, bytes } if kind == "blob" => {
                     let text = String::from_utf8(bytes)
                         .with_context(|| format!("{object} is not UTF-8"))?;
                     return Ok((Some(text), true));
@@ -1581,30 +1808,18 @@ pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
                 Object::Found { .. } | Object::Submodule => {}
             }
         }
-        let out = git_command()
-            .args(["rev-parse", "--verify", "-q", &object])
-            .current_dir(cwd)
-            .counted_output()
-            .with_context(|| format!("failed to run git in {}", cwd.display()))?;
-        if out.status.code() == Some(1) {
-            let cache = immutable && tree_ish_exists(cwd, rev)?;
-            return Ok((None, cache));
-        }
-        if !out.status.success() {
-            bail!(
-                "git rev-parse --verify -q {object} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let bytes = blob_bytes(cwd, &blob)?;
-        let text = String::from_utf8(bytes).with_context(|| format!("{object} is not UTF-8"))?;
-        Ok((Some(text), true))
+        let found = file_at_uncached(cwd, &object)?;
+        // Never cache a negative fallback without tree-entry proof.
+        let cache = found.is_some();
+        Ok((found, cache))
     })
 }
 
 /// A blob's bytes, exactly as the object store holds them.
 pub fn blob_bytes(cwd: &Path, blob: &str) -> Result<Vec<u8>> {
+    if is_cwd_sensitive_spec(blob.as_bytes()) {
+        return git_bytes(cwd, &["cat-file", "blob", blob]);
+    }
     let resolved = if is_object_id(blob) {
         blob.to_owned()
     } else {
@@ -1615,9 +1830,7 @@ pub fn blob_bytes(cwd: &Path, blob: &str) -> Result<Vec<u8>> {
         &["blob_bytes", &resolved],
         is_object_id(&resolved),
         || {
-            if let Some(Object::Found { kind, bytes, .. }) =
-                batch_contents(cwd, resolved.as_bytes())
-            {
+            if let Some(Object::Found { kind, bytes }) = batch_contents(cwd, resolved.as_bytes()) {
                 if kind == "blob" {
                     return Ok(Some(bytes));
                 }
@@ -1737,6 +1950,9 @@ pub fn local_refs(cwd: &Path) -> Result<Vec<LocalRef>> {
 }
 
 pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
+    if is_cwd_sensitive_spec(rev.as_bytes()) || is_cwd_sensitive_path(path) {
+        return git(cwd, &["rev-parse", "--verify", &format!("{rev}:{path}")]).ok();
+    }
     let resolved = if is_object_id(rev) {
         rev.to_owned()
     } else {
@@ -1746,7 +1962,11 @@ pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
     if let Some(info) = batch_info(cwd, object.as_bytes()) {
         match info {
             ObjectInfo::Found { id, .. } => return Some(id),
-            ObjectInfo::Missing => return None,
+            ObjectInfo::Missing => match lookup_tree_entry(cwd, &resolved, path) {
+                TreeEntry::Present { oid, .. } => return Some(oid),
+                TreeEntry::Absent => return None,
+                TreeEntry::Unavailable => {}
+            },
             ObjectInfo::Ambiguous => {}
         }
     }
@@ -1756,6 +1976,9 @@ pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
 /// The tree a commit points at, for comparing what was committed with what was
 /// actually there.
 pub fn commit_tree(cwd: &Path, rev: &str) -> Result<String> {
+    if is_cwd_sensitive_spec(rev.as_bytes()) {
+        return git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")]);
+    }
     let resolved = if is_object_id(rev) {
         rev.to_owned()
     } else {
@@ -1860,23 +2083,14 @@ pub fn dirt(cwd: &Path) -> Result<Dirt> {
 }
 
 pub fn branch_exists(cwd: &Path, branch: &str) -> bool {
-    answers::optional_text(cwd, &["branch_exists", branch], false, || {
-        let refname = format!("refs/heads/{branch}");
-        if !branch.is_empty()
-            && !branch.contains(['^', '~', ':', '@', ' ', '\t', '\n', '\r', '\0'])
-            && !branch.contains("..")
-        {
-            if let Some(ObjectInfo::Found { .. }) = batch_info(cwd, refname.as_bytes()) {
-                return Ok(Some("1".to_string()));
-            }
-        }
-        Ok(git(cwd, &["show-ref", "--verify", "--quiet", &refname])
-            .is_ok()
-            .then(|| "1".to_string()))
-    })
-    .ok()
-    .flatten()
-    .is_some()
+    let refname = format!("refs/heads/{branch}");
+    if matches!(
+        probe_local_branch(cwd, branch, &refname),
+        LocalBranchProbe::Commit(_)
+    ) {
+        return true;
+    }
+    local_branches(cwd).is_ok_and(|branches| branches.contains_key(&refname))
 }
 
 pub fn create_branch(cwd: &Path, branch: &str, base: &str) -> Result<()> {
@@ -2365,32 +2579,36 @@ pub fn update_refs(cwd: &Path, updates: &[RefUpdate]) -> Result<()> {
     Ok(())
 }
 
+fn ref_value_uncached(cwd: &Path, name: &str) -> Result<Option<String>> {
+    let mut command = git_command();
+    command
+        .args(["rev-parse", "--verify", "--quiet", name])
+        .current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to read {name} in {}", cwd.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
+}
+
 /// What a ref holds, or nothing where the repository has no such ref. An
 /// annotated tag answers with its tag object, which is what its ref holds.
 pub fn ref_value(cwd: &Path, name: &str) -> Result<Option<String>> {
+    if is_cwd_sensitive_spec(name.as_bytes()) {
+        return ref_value_uncached(cwd, name);
+    }
     let oid = is_object_id(name);
     answers::maybe_cached_text(cwd, &["ref_value", name], oid, || {
-        if let Some(info) = batch_info(cwd, name.as_bytes()) {
-            match info {
-                ObjectInfo::Found { id, .. } => return Ok((Some(id), true)),
-                // `git rev-parse --verify --quiet <full-oid>` succeeds even when
-                // the object is absent, so only non-OID names answer `None` here.
-                ObjectInfo::Missing if !oid => return Ok((None, true)),
-                ObjectInfo::Missing | ObjectInfo::Ambiguous => {}
-            }
+        if let Some(ObjectInfo::Found { id, .. }) = batch_info(cwd, name.as_bytes()) {
+            return Ok((Some(id), true));
         }
-        let mut command = git_command();
-        command
-            .args(["rev-parse", "--verify", "--quiet", name])
-            .current_dir(cwd);
-        let out = command_output(&mut command)
-            .with_context(|| format!("failed to read {name} in {}", cwd.display()))?;
-        if !out.status.success() {
-            return Ok((None, !oid));
-        }
-        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let found = (!value.is_empty()).then_some(value);
-        Ok((found, true))
+        // Dangling refs and nonexistent full OIDs report `missing` from
+        // `cat-file` while `rev-parse --verify --quiet` still resolves them.
+        let found = ref_value_uncached(cwd, name)?;
+        let cache = found.is_some() || !oid;
+        Ok((found, cache))
     })
 }
 
@@ -3402,11 +3620,35 @@ pub fn resolve_tree(cwd: &Path, rev: &str) -> Result<Option<String>> {
     if rev.is_empty() || rev.starts_with('-') {
         return Ok(None);
     }
-    ref_value(cwd, &format!("{rev}^{{tree}}"))
+    let spec = format!("{rev}^{{tree}}");
+    if is_cwd_sensitive_spec(rev.as_bytes()) {
+        return ref_value_uncached(cwd, &spec);
+    }
+    answers::maybe_cached_text(cwd, &["resolve_tree", rev], is_object_id(rev), || {
+        if let Some(info) = batch_info(cwd, spec.as_bytes()) {
+            match info {
+                ObjectInfo::Found { id, kind } if kind == "tree" => return Ok((Some(id), true)),
+                ObjectInfo::Found { .. } | ObjectInfo::Missing => return Ok((None, false)),
+                ObjectInfo::Ambiguous => {}
+            }
+        }
+        let found = ref_value_uncached(cwd, &spec)?;
+        let cache = found.is_some();
+        Ok((found, cache))
+    })
 }
 
 /// The raw type of a held object; missing objects remain absent claims.
 pub fn object_type(cwd: &Path, oid: &str) -> Result<Option<String>> {
+    if is_cwd_sensitive_spec(oid.as_bytes()) {
+        let answers = batch_check(cwd, std::iter::once(oid))?;
+        let answer = &answers.first().context("invalid object query")?.1;
+        let kind = answer
+            .rsplit_once(' ')
+            .context("git returned no object type")?
+            .1;
+        return Ok((kind != "missing" && kind != "ambiguous").then(|| kind.to_string()));
+    }
     answers::maybe_cached_text(cwd, &["object_type", oid], is_object_id(oid), || {
         if let Some(info) = batch_info(cwd, oid.as_bytes()) {
             return Ok(match info {
@@ -3443,6 +3685,15 @@ pub fn held_commit(cwd: &Path, oid: &str) -> Result<bool> {
 }
 
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
+    if is_cwd_sensitive_spec(oid.as_bytes()) {
+        let object = format!("{oid}^{{commit}}");
+        let out = git_command()
+            .args(["cat-file", "-e", "--", &object])
+            .current_dir(cwd)
+            .counted_output()
+            .context("failed to spawn git cat-file")?;
+        return Ok(out.status.success());
+    }
     let answer =
         answers::maybe_cached_text(cwd, &["commit_exists", oid], is_object_id(oid), || {
             let object = format!("{oid}^{{commit}}");
@@ -3509,26 +3760,23 @@ enum Object {
 /// One `cat-file --batch-command -Z` kept open per resolved administrative Git
 /// directory, serving metadata (`info`) and content (`contents`) queries over
 /// NUL-delimited framing so paths with whitespace, newlines, or non-UTF-8 bytes
-/// stay unambiguous.
+/// stay unambiguous. Dropping the reader always closes its pipes and reaps the
+/// child process.
 struct ObjectReader {
-    _child: std::process::Child,
-    stdin: std::process::ChildStdin,
-    stdout: std::io::BufReader<std::process::ChildStdout>,
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
+}
+
+impl Drop for ObjectReader {
+    fn drop(&mut self) {
+        self.stdin.take();
+        self.stdout.take();
+        let _ = self.child.wait();
+    }
 }
 
 impl ObjectReader {
-    /// Closing its input ends `cat-file`, which is then reaped.
-    fn close(self) {
-        let ObjectReader {
-            _child: mut child,
-            stdin,
-            stdout,
-        } = self;
-        drop(stdin);
-        drop(stdout);
-        let _ = child.wait();
-    }
-
     fn spawn(cwd: &Path) -> Option<Self> {
         let mut child = git_command()
             .args(["cat-file", "--batch-command", "-Z"])
@@ -3541,9 +3789,9 @@ impl ObjectReader {
         let stdin = child.stdin.take()?;
         let stdout = std::io::BufReader::new(child.stdout.take()?);
         Some(Self {
-            _child: child,
-            stdin,
-            stdout,
+            child,
+            stdin: Some(stdin),
+            stdout: Some(stdout),
         })
     }
 
@@ -3556,13 +3804,13 @@ impl ObjectReader {
         command.push(b' ');
         command.extend_from_slice(name);
         command.push(b'\0');
-        crate::process_group::write_input(&mut self.stdin, &command).ok()
+        crate::process_group::write_input(self.stdin.as_mut()?, &command).ok()
     }
 
     fn read_header(&mut self) -> Option<Vec<u8>> {
         use std::io::BufRead;
         let mut header = Vec::new();
-        let read = self.stdout.read_until(b'\0', &mut header).ok()?;
+        let read = self.stdout.as_mut()?.read_until(b'\0', &mut header).ok()?;
         if read == 0 || header.pop() != Some(b'\0') {
             return None;
         }
@@ -3612,7 +3860,7 @@ impl ObjectReader {
             (Some(_id), Some(kind), Some(size), None) => {
                 let size: usize = size.parse().ok()?;
                 let mut bytes = vec![0; size + 1];
-                self.stdout.read_exact(&mut bytes).ok()?;
+                self.stdout.as_mut()?.read_exact(&mut bytes).ok()?;
                 bytes.pop().filter(|end| *end == b'\0')?;
                 Some(Object::Found {
                     kind: kind.to_string(),
@@ -3625,41 +3873,46 @@ impl ObjectReader {
 }
 
 /// One object stream for a bounded tree comparison.
-pub(crate) struct BlobReader(Option<ObjectReader>);
+pub(crate) struct BlobReader(ObjectReader);
 
 impl BlobReader {
     pub fn new(cwd: &Path) -> Result<Self> {
-        Ok(Self(Some(
+        Ok(Self(
             ObjectReader::spawn(cwd).context("cannot start budget blob reader")?,
-        )))
+        ))
     }
 
     pub fn read(&mut self, oid: &str) -> Result<Vec<u8>> {
-        match self
-            .0
-            .as_mut()
-            .context("closed blob reader")?
-            .contents(oid.as_bytes())
-        {
-            Some(Object::Found { kind, bytes, .. }) if kind == "blob" => Ok(bytes),
+        match self.0.contents(oid.as_bytes()) {
+            Some(Object::Found { kind, bytes }) if kind == "blob" => Ok(bytes),
             _ => bail!("budget blob unavailable: {oid}"),
         }
     }
 }
 
-impl Drop for BlobReader {
-    fn drop(&mut self) {
-        if let Some(reader) = self.0.take() {
-            reader.close();
-        }
-    }
+/// Whether a Git revision/path specification depends on the caller's working
+/// subdirectory (`<rev>:./...`, `<rev>:../...`, `:./...`, `:../...`, `<rev>:.`,
+/// `<rev>:..`). Such specs cannot share a repository-wide cache or an
+/// admin-keyed batch reader started in another directory.
+fn is_cwd_sensitive_spec(spec: &[u8]) -> bool {
+    spec.iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b':' && is_cwd_sensitive_path_bytes(&spec[index + 1..]))
+}
+
+/// Per-admin reader slot state. Marking a slot `retired` under its lock when
+/// `close_object_readers` drains the map prevents a concurrent caller that
+/// cloned the slot earlier from spawning a detached reader after invalidation.
+#[derive(Default)]
+struct ReaderSlotState {
+    reader: Option<ObjectReader>,
+    retired: bool,
 }
 
 /// Each administrative Git directory's reader behind its own lock: primary
 /// checkouts and their `.git` directory share one reader while linked worktrees
-/// and nested repositories stay isolated. An empty slot is a reader not yet
-/// spawned, or one that failed.
-type ObjectReaderSlot = std::sync::Arc<std::sync::Mutex<Option<ObjectReader>>>;
+/// and nested repositories stay isolated.
+type ObjectReaderSlot = std::sync::Arc<std::sync::Mutex<ReaderSlotState>>;
 static OBJECT_READERS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, ObjectReaderSlot>>,
 > = std::sync::OnceLock::new();
@@ -3683,29 +3936,33 @@ fn with_object_reader<T>(
             None => std::sync::Arc::clone(readers.entry(repository.admin).or_default()),
         }
     };
-    let mut reader = slot
+    let mut state = slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !answers::reads_are_stable() {
+    if state.retired || !answers::reads_are_stable() {
         return None;
     }
-    if reader.is_none() {
-        *reader = Some(ObjectReader::spawn(cwd)?);
+    if state.reader.is_none() {
+        state.reader = Some(ObjectReader::spawn(cwd)?);
     }
-    let answer = query(reader.as_mut()?);
+    let answer = query(state.reader.as_mut()?);
     if answer.is_none() {
-        if let Some(dead) = reader.take() {
-            dead.close();
-        }
+        state.reader.take();
     }
     answer
 }
 
 fn batch_info(cwd: &Path, name: &[u8]) -> Option<ObjectInfo> {
+    if is_cwd_sensitive_spec(name) {
+        return None;
+    }
     with_object_reader(cwd, |reader| reader.info(name))
 }
 
 fn batch_contents(cwd: &Path, name: &[u8]) -> Option<Object> {
+    if is_cwd_sensitive_spec(name) {
+        return None;
+    }
     with_object_reader(cwd, |reader| reader.contents(name))
 }
 
@@ -3807,13 +4064,11 @@ pub(crate) fn close_object_readers() {
         .map(|(_, slot)| slot)
         .collect();
     for slot in slots {
-        let reader = slot
+        let mut state = slot
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(reader) = reader {
-            reader.close();
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retired = true;
+        state.reader.take();
     }
 }
 
@@ -4726,7 +4981,10 @@ mod tests {
         );
         assert_eq!(file_at(&root, &commit, "no-such-file.txt").unwrap(), None);
         assert_eq!(blob_oid(&root, &commit, "no-such-file.txt"), None);
-        assert_eq!(ref_value(&root, "refs/heads/no-such-branch").unwrap(), None);
+        assert_eq!(
+            ref_value(&root, "refs/tags/v-batch").unwrap().as_deref(),
+            Some(tag_oid.as_str())
+        );
 
         let mut raw_spec = commit.as_bytes().to_vec();
         raw_spec.push(b':');
@@ -4744,11 +5002,250 @@ mod tests {
             "batched metadata and content queries must reuse the open reader"
         );
 
+        // Missing refs fall back to `rev-parse --verify --quiet` to preserve
+        // dangling-ref semantics.
+        assert_eq!(ref_value(&root, "refs/heads/no-such-branch").unwrap(), None);
         // Directory path still errors rather than returning tree bytes as text.
         assert!(file_at(&root, &commit, "subdir").is_err());
         // Missing full OID still echoes under `ref_value` as `rev-parse --verify` does.
         let missing_oid = "f".repeat(40);
         assert_eq!(ref_value(&root, &missing_oid).unwrap(), Some(missing_oid));
+        close_object_readers();
+    }
+
+    /// Claim: `branch_exists` and `branch_head` match exact `refs/heads/<name>`
+    /// entries only, rejecting DWIM matches from tags, remotes, or synthetic
+    /// describe names while still resolving a real branch shadowed by a tag.
+    #[test]
+    fn branch_lookup_rejects_dwim_matches_outside_refs_heads() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let initial = head(&root).unwrap();
+
+        // A tag whose short name is `refs/heads/ghost` creates `refs/tags/refs/heads/ghost`.
+        git(&root, &["tag", "refs/heads/ghost"]).unwrap();
+        assert!(!branch_exists(&root, "ghost"));
+        assert!(branch_head(&root, "ghost").is_err());
+
+        // Synthetic `<describeOutput>` name must not match as a local branch.
+        let synthetic = format!("arc/fix-0-g{}", &initial[..7]);
+        assert!(!branch_exists(&root, &synthetic));
+        assert!(branch_head(&root, &synthetic).is_err());
+
+        // Creating a real branch `ghost` at a newer commit resolves the branch,
+        // not the tag shadowing its refname.
+        std::fs::write(root.join("ghost.txt"), "branch\n").unwrap();
+        git(&root, &["add", "ghost.txt"]).unwrap();
+        git(&root, &["commit", "-m", "feat: ghost commit"]).unwrap();
+        let newer = head(&root).unwrap();
+        assert_ne!(newer, initial);
+        create_branch(&root, "ghost", &newer).unwrap();
+        assert!(branch_exists(&root, "ghost"));
+        assert_eq!(branch_head(&root, "ghost").unwrap(), newer);
+        close_object_readers();
+    }
+
+    /// Claim: `head_if_present`, `ref_value`, and `blob_oid` preserve
+    /// `rev-parse --verify` OID resolution for dangling refs and tree entries
+    /// whose blob object is missing from the object database.
+    #[test]
+    fn metadata_lookups_preserve_dangling_refs_and_missing_blob_oids() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/tracked.txt"), "tracked-content\n").unwrap();
+        git(&root, &["add", "sub/tracked.txt"]).unwrap();
+        git(&root, &["commit", "-m", "feat: tracked"]).unwrap();
+        let commit = head(&root).unwrap();
+        let expected_blob = git(&root, &["rev-parse", "--verify", "HEAD:sub/tracked.txt"]).unwrap();
+
+        // Remove the loose blob object while keeping the commit and trees intact.
+        let loose_blob = root
+            .join(".git/objects")
+            .join(&expected_blob[..2])
+            .join(&expected_blob[2..]);
+        std::fs::remove_file(&loose_blob).unwrap();
+        close_object_readers();
+        assert_eq!(
+            blob_oid(&root, &commit, "sub/tracked.txt").as_deref(),
+            Some(expected_blob.as_str())
+        );
+        assert_eq!(
+            blob_oid(&root, "HEAD", "sub/tracked.txt").as_deref(),
+            Some(expected_blob.as_str())
+        );
+
+        // Create a dangling loose branch ref and point HEAD at it.
+        let dead_oid = "a".repeat(40);
+        std::fs::write(
+            root.join(".git/refs/heads/dangling"),
+            format!("{dead_oid}\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/dangling\n").unwrap();
+        forget_answers();
+        assert_eq!(
+            ref_value(&root, "refs/heads/dangling").unwrap().as_deref(),
+            Some(dead_oid.as_str())
+        );
+        assert_eq!(
+            head_if_present(&root).unwrap().as_deref(),
+            Some(dead_oid.as_str())
+        );
+        close_object_readers();
+    }
+
+    /// Claim: cwd-relative revision paths (`./`, `../`, `.`, `..`) resolve
+    /// relative to the caller's working directory regardless of where an
+    /// admin-keyed batch reader was warmed up.
+    #[test]
+    fn cwd_relative_revision_paths_follow_caller_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(root.join("a.txt"), "root-file\n").unwrap();
+        std::fs::write(sub.join("a.txt"), "sub-file\n").unwrap();
+        git(&root, &["add", "."]).unwrap();
+        git(&root, &["commit", "-m", "feat: root and sub"]).unwrap();
+
+        let root_oid = git(&root, &["rev-parse", "--verify", "HEAD:a.txt"]).unwrap();
+        let sub_oid = git(&root, &["rev-parse", "--verify", "HEAD:sub/a.txt"]).unwrap();
+        let sub_tree = git(&root, &["rev-parse", "--verify", "HEAD:sub"]).unwrap();
+        let root_tree = git(&root, &["rev-parse", "--verify", "HEAD^{tree}"]).unwrap();
+
+        // Warm the shared admin-keyed reader from `root`, then query from `sub`
+        // and vice versa.
+        for warm_in in [&root, &sub] {
+            forget_answers();
+            assert_eq!(head(warm_in).unwrap(), head(&root).unwrap());
+            assert_eq!(
+                file_at(&root, "HEAD", "./a.txt").unwrap().as_deref(),
+                Some("root-file\n")
+            );
+            assert_eq!(
+                file_at(&sub, "HEAD", "./a.txt").unwrap().as_deref(),
+                Some("sub-file\n")
+            );
+            assert_eq!(
+                file_at(&sub, "HEAD", "../a.txt").unwrap().as_deref(),
+                Some("root-file\n")
+            );
+            assert_eq!(
+                blob_oid(&root, "HEAD", "./a.txt").as_deref(),
+                Some(root_oid.as_str())
+            );
+            assert_eq!(
+                blob_oid(&sub, "HEAD", "./a.txt").as_deref(),
+                Some(sub_oid.as_str())
+            );
+            assert_eq!(
+                blob_oid(&sub, "HEAD", "../a.txt").as_deref(),
+                Some(root_oid.as_str())
+            );
+            assert_eq!(
+                ref_value(&sub, "HEAD:./a.txt").unwrap().as_deref(),
+                Some(sub_oid.as_str())
+            );
+            assert_eq!(
+                ref_value(&sub, "HEAD:../a.txt").unwrap().as_deref(),
+                Some(root_oid.as_str())
+            );
+            assert_eq!(blob_bytes(&sub, "HEAD:./a.txt").unwrap(), b"sub-file\n");
+            assert_eq!(blob_bytes(&sub, "HEAD:../a.txt").unwrap(), b"root-file\n");
+            assert_eq!(
+                ref_value(&sub, "HEAD:./").unwrap().as_deref(),
+                Some(sub_tree.as_str())
+            );
+            assert_eq!(
+                ref_value(&sub, "HEAD:../").unwrap().as_deref(),
+                Some(root_tree.as_str())
+            );
+            assert_eq!(
+                object_type(&sub, "HEAD:./").unwrap().as_deref(),
+                Some("tree")
+            );
+        }
+        close_object_readers();
+    }
+
+    /// Claim: retiring a reader slot during `close_object_readers` prevents
+    /// spawning into detached slots and dropping `ObjectReader` reaps its child.
+    #[test]
+    fn closing_object_readers_retires_slots_and_reaps_children() {
+        const CHILD: &str = "ARC_TEST_RETIRE_READER_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::child_command::command(std::env::current_exe().unwrap())
+                .env(CHILD, "1")
+                .args([
+                    "--exact",
+                    "gitio::tests::closing_object_readers_retires_slots_and_reaps_children",
+                    "--nocapture",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let commit = head(&root).unwrap();
+
+        // Dropping an ObjectReader directly reaps its child process without
+        // leaving a zombie.
+        let pid = {
+            let mut reader = ObjectReader::spawn(&root).unwrap();
+            assert_eq!(
+                reader.info(commit.as_bytes()),
+                Some(ObjectInfo::Found {
+                    id: commit.clone(),
+                    kind: "commit".to_string(),
+                })
+            );
+            reader.child.id()
+        };
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "ObjectReader::drop must reap child pid {pid}"
+        );
+
+        // Grab the live slot before closing, then verify close marks it retired
+        // and concurrent queries + invalidations neither panic nor leak readers.
+        let _ = batch_info(&root, commit.as_bytes());
+        let repo = answers::repository(&root).unwrap();
+        let detached = OBJECT_READERS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&repo.admin)
+            .cloned()
+            .unwrap();
+        close_object_readers();
+        {
+            let state = detached
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(state.retired);
+            assert!(state.reader.is_none());
+        }
+
+        let root_a = root.clone();
+        let commit_a = commit.clone();
+        let reader_thread = thread::spawn(move || {
+            for _ in 0..40 {
+                let _ = batch_info(&root_a, commit_a.as_bytes());
+            }
+        });
+        for _ in 0..40 {
+            close_object_readers();
+        }
+        reader_thread.join().unwrap();
         close_object_readers();
     }
 }

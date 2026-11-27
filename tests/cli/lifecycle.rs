@@ -3757,3 +3757,35 @@ fn show_names_the_patchset_the_head_matches_without_claiming_approval() {
     assert!(shown.contains("matches newest patchset ps-01"), "{shown}");
     assert!(!shown.contains("approved/snapshotted"), "{shown}");
 }
+
+/// Claim: a tag named `refs/heads/<name>` outside `refs/heads/` does not count
+/// as an existing local branch: `arc begin --adopt <name>` refuses it and
+/// `arc begin --branch <name>` creates the real local branch.
+#[test]
+fn begin_ignores_dwim_tag_shadowing_refs_heads_namespace() {
+    let repo = Repo::new();
+    git(&repo.root, &["tag", "refs/heads/ghost"]);
+
+    let adopt = repo
+        .arc(&repo.root)
+        .args(["begin", "ghost-adopt", "--adopt", "ghost", "--no-worktree"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let adopt_err = String::from_utf8(adopt).unwrap();
+    assert!(
+        adopt_err.contains("ghost") && adopt_err.contains("does not exist"),
+        "{adopt_err}"
+    );
+
+    repo.arc(&repo.root)
+        .args(["begin", "ghost-new", "--branch", "ghost", "--no-worktree"])
+        .assert()
+        .success();
+    git(
+        &repo.root,
+        &["show-ref", "--verify", "--quiet", "refs/heads/ghost"],
+    );
+}
