@@ -1728,26 +1728,29 @@ pub enum JournalCmd {
     },
     /// Reverse a recorded consumption without rewriting the event log.
     ///
-    /// Appends a typed `reopened` event under the event lock bound to the
-    /// exact standing consumption selected under the transition lock, so each
-    /// named artifact returns to the state it held before the consumption
-    /// without clearing a distinct, later consumption during replica exchange;
-    /// history keeps both the `consumed` and `reopened` events. Structural
-    /// handoff consumptions (`journal transition`, `begin --from-journal`, and
-    /// `journal promote --global`) are protected in both selectors. Pass one
-    /// or more artifact filenames, or select every currently consumed artifact
-    /// whose latest consumption was recorded by `--session` inside a `--since`
-    /// (and optional `--until`) time window. `--dry-run` names each matched
-    /// artifact without writing anything. `--global` targets the operator
-    /// journal.
+    /// Appends typed `reopened` events under the event lock bound (`reopens`)
+    /// to each active unreversed consumption selected under the transition
+    /// lock, so each named artifact returns to the state it held before the
+    /// consumption without clearing a distinct, later consumption during
+    /// replica exchange; history keeps both `consumed` and `reopened` events.
+    /// Structural handoff consumptions (`journal transition`,
+    /// `begin --from-journal`, and `journal promote --global`) are protected
+    /// in both selectors. Explicit filenames bind a reversal to every active
+    /// unreversed consumption on each named artifact; the `--session` /
+    /// `--since` (and optional `--until`) batch form selects only currently
+    /// consumed non-handoff artifacts whose standing (and every active)
+    /// consumption belongs to that session and window, skipping artifacts
+    /// carrying another active consumption outside the window. `--dry-run`
+    /// names each matched artifact without writing anything. `--global`
+    /// targets the operator journal.
     Reopen {
         /// Artifact filenames inside the journal dir (names, not paths).
         /// Required unless reopening by `--session` and `--since`.
         files: Vec<String>,
-        /// Reopen every currently consumed artifact whose latest consumption
-        /// was recorded by this session inside the `--since`/`--until` window.
-        /// Pass an explicit acting session before `reopen` (or via
-        /// `ARC_SESSION`).
+        /// Reopen every currently consumed artifact whose standing (and every
+        /// active) consumption was recorded by this session inside the
+        /// `--since`/`--until` window. Pass an explicit acting session before
+        /// `reopen` (or via `ARC_SESSION`).
         #[arg(long, value_name = "ID")]
         session: Option<String>,
         /// Inclusive start of the consumption window: RFC 3339 or journal
@@ -9496,6 +9499,13 @@ pub(crate) struct JournalEvent {
     /// holds no record of a change opened elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     promotion: Option<ForeignPromotion>,
+    /// The global operator journal memory filename created by `journal promote
+    /// --global` when this `consumed` event retired a project memory. Carries
+    /// only the bare artifact filename (never a local path) so replica
+    /// exchange preserves global-promotion handoff protection across
+    /// independent operator homes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    promoted_to_global: Option<String>,
     /// The workbench a `workbench-*` event acts on: the name of its directory
     /// under `workbench/`. These events name no `file`, so no artifact view
     /// reads them as activity on an artifact.
@@ -9847,6 +9857,7 @@ impl JournalEvent {
             supersedes_checkpoints: None,
             digest: None,
             promotion: None,
+            promoted_to_global: None,
             workbench: None,
             purpose: None,
             changes: Vec::new(),
@@ -10047,6 +10058,12 @@ impl JournalEvent {
                         .outcome
                         .as_deref()
                         .is_some_and(|value| ["done", "superseded", "discarded"].contains(&value))
+                    && self.promoted_to_global.as_deref().is_none_or(|file| {
+                        self.outcome.as_deref() == Some(ConsumeOutcome::Superseded.as_str())
+                            && !file.contains(['/', '\\'])
+                            && parse_artifact_name(file)
+                                .is_some_and(|(_, _, kind)| kind == JournalKind::Memory.as_str())
+                    })
             }
             "reopened" => {
                 self.artifact_file()
@@ -13654,6 +13671,7 @@ fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
         consumed.file = Some(filename.to_string());
         consumed.outcome = Some("superseded".to_string());
         consumed.note = Some(format!("promoted to global::{successor}"));
+        consumed.promoted_to_global = Some(successor.clone());
         let pending = MemoryPromotion {
             global: global.clone(),
             body,
@@ -13679,6 +13697,11 @@ fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
         || pending.consumed.file.as_deref() != Some(filename)
         || pending.consumed.outcome.as_deref() != Some("superseded")
         || pending.consumed.note.as_deref() != Some(&format!("promoted to global::{successor}"))
+        || pending
+            .consumed
+            .promoted_to_global
+            .as_deref()
+            .is_some_and(|dest| dest != successor)
     {
         bail!("pending memory promotion does not match this source and global journal; recovery refuses");
     }
@@ -18417,7 +18440,8 @@ fn handoff_evidence(
     }
 
     // 3. Typed promotion records (`promoted` or `consumed` carrying a typed
-    //    `promotion` payload) anywhere in the artifact's log.
+    //    `promotion` or `promoted_to_global` payload) anywhere in the
+    //    artifact's log.
     if let Some(promotion) = events.iter().rev().find_map(|event| {
         (event.known()
             && event.file.as_deref() == Some(filename)
@@ -18429,6 +18453,16 @@ fn handoff_evidence(
             "promoted to change {} (repository {})",
             promotion.change_id, promotion.repository_id
         ));
+    }
+    if let Some(global_file) = events.iter().rev().find_map(|event| {
+        (event.known()
+            && event.event == "consumed"
+            && event.file.as_deref() == Some(filename)
+            && event.outcome.as_deref() == Some(ConsumeOutcome::Superseded.as_str()))
+        .then_some(event.promoted_to_global.as_deref())
+        .flatten()
+    }) {
+        return Some(format!("promoted to global::{global_file}"));
     }
 
     // 4. Corroborated legacy/global handoff consumptions in the artifact's log.
@@ -18568,6 +18602,7 @@ fn reopen(
 
     let mut plans: Vec<ReopenPlan> = Vec::new();
     let mut skipped_handoffs: Vec<(String, String)> = Vec::new();
+    let mut skipped_concurrent: Vec<(String, usize)> = Vec::new();
     if let Some((target_session, since_ts, until_ts)) = &window {
         let mut active_by_file: HashMap<&str, Vec<ActiveConsumption<'_>>> = HashMap::new();
         for (index, event) in events.iter().enumerate() {
@@ -18607,30 +18642,39 @@ fn reopen(
                 _ => {}
             }
         }
+        let matches_window = |entry: &ActiveConsumption<'_>| {
+            entry.event.session() == Some(target_session.as_str())
+                && entry
+                    .event
+                    .timestamp()
+                    .is_some_and(|ts| ts >= *since_ts && until_ts.is_none_or(|until| ts <= until))
+        };
         let mut candidates: Vec<(usize, &str, Vec<ActiveConsumption<'_>>)> = active_by_file
             .into_iter()
             .filter_map(|(file, active)| {
                 if active.is_empty() || relocation(&events, file).is_some() {
                     return None;
                 }
-                let matched: Vec<ActiveConsumption<'_>> = active
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.event.session() == Some(target_session.as_str())
-                            && entry.event.timestamp().is_some_and(|ts| {
-                                ts >= *since_ts && until_ts.is_none_or(|until| ts <= until)
-                            })
-                    })
-                    .collect();
-                let first_index = matched.iter().map(|entry| entry.index).min()?;
-                Some((first_index, file, matched))
+                // Only artifacts whose standing consumption belongs to the
+                // requested session and window are eligible.
+                let standing = select_standing_consumption(&active)?;
+                if !matches_window(standing) {
+                    return None;
+                }
+                let standing_index = standing.index;
+                Some((standing_index, file, active))
             })
             .collect();
         candidates.sort_by_key(|(index, _, _)| *index);
-        for (_, file, matched) in candidates {
+        for (_, file, active) in candidates {
             if let Some(handoff) = handoff_evidence(&dir, &events, promoted_changes.as_ref(), file)
             {
                 skipped_handoffs.push((file.to_string(), handoff));
+                continue;
+            }
+            let outside = active.iter().filter(|entry| !matches_window(entry)).count();
+            if outside > 0 {
+                skipped_concurrent.push((file.to_string(), outside));
                 continue;
             }
             let (topic, _) = check_artifact_name(ctx, file)?;
@@ -18638,14 +18682,14 @@ fn reopen(
             let Some(path) = artifact_body_path(&dir, file) else {
                 return Err(missing_write_target(&dir, file));
             };
-            let standing_outcome = select_standing_consumption(&matched)
+            let standing_outcome = select_standing_consumption(&active)
                 .and_then(|entry| entry.event.outcome.clone())
                 .unwrap_or_default();
             plans.push(ReopenPlan {
                 file: file.to_string(),
                 topic,
                 outcome: standing_outcome,
-                consumption_ids: matched.into_iter().map(|entry| entry.id).collect(),
+                consumption_ids: active.into_iter().map(|entry| entry.id).collect(),
                 archived: !dir.join(file).is_file() && path.is_file(),
             });
         }
@@ -18686,6 +18730,11 @@ fn reopen(
 
     for (file, handoff) in &skipped_handoffs {
         eprintln!("skipped handoff: {file} ({handoff})");
+    }
+    for (file, outside) in &skipped_concurrent {
+        eprintln!(
+            "skipped concurrent: {file} ({outside} active consumption(s) outside the requested session/window would keep it consumed; reopen explicitly by filename to clear all)"
+        );
     }
 
     if plans.is_empty() {

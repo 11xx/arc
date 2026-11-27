@@ -436,21 +436,25 @@ ORIENT INSIDE A PROJECT (start here, in this order)
     arc journal reopen --session ID --since TIME [--until TIME]
         --reason TEXT [--dry-run]
                          Reverse recorded consumptions without editing the
-                         event log: appends a typed `reopened` event under the
-                         event lock bound (`reopens`) to the exact standing
+                         event log: appends typed `reopened` events under the
+                         event lock bound (`reopens`) to each active unreversed
                          consumption so each artifact returns to its prior live
                          state without clearing a distinct, later consumption
                          imported from another replica, while history keeps
                          both events. Structural handoff consumptions
                          (`journal transition`, `begin --from-journal`,
                          `journal promote --global`) are protected in both
-                         selectors. Explicit files refuse any artifact not
-                         currently consumed; the session-window form selects
-                         currently consumed non-handoff artifacts whose
-                         standing consumption was recorded by that session
-                         inside `[since, until]` (RFC 3339 or journal stamp).
-                         `--dry-run` names each matched artifact without
-                         writing, and `--global` targets the operator journal.
+                         selectors. Explicit files bind a reversal to every
+                         active unreversed consumption on each named artifact
+                         and refuse any artifact not currently consumed; the
+                         session-window form selects only currently consumed
+                         non-handoff artifacts whose standing (and every
+                         active) consumption was recorded by that session
+                         inside `[since, until]` (RFC 3339 or journal stamp),
+                         skipping artifacts with another active consumption
+                         outside the window. `--dry-run` names each matched
+                         artifact without writing, and `--global` targets the
+                         operator journal.
   Pending
   storage moves appear in journal doctor and must be retried before other
   writes; the retry validates the operation's paths and body digest.
@@ -7262,8 +7266,11 @@ SCHEMAS
   `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
 
-  A `pinned` event may carry an optional `guide` topic name. This additive
-  input field keeps `journal-events/2`; pins without it remain valid.
+  A `pinned` event may carry an optional `guide` topic name, a `consumed`
+  event may carry an optional `promoted_to_global` memory filename, and a
+  `reopened` event may carry an optional `reopens` consumption digest. These
+  additive input fields keep `journal-events/2`; events without them remain
+  valid.
 
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;

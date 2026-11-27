@@ -1923,3 +1923,501 @@ fn reopen_allows_ordinary_superseded_notes_under_both_selectors() {
         .iter()
         .any(|item| item["file"] == fake_global));
 }
+
+/// Claim: promoting a project memory to the operator global journal records a
+/// typed `promoted_to_global` bare filename (without leaking any local path)
+/// that survives replica export/import and keeps structural handoff protection
+/// intact on paired peers with independent operator homes.
+#[test]
+fn reopen_protects_imported_global_memory_promotions_across_operator_homes() {
+    let alpha = Repo::new();
+    let beta = Repo::new();
+    super::journal_exchange::pair(&alpha, &beta, "alpha", "beta");
+
+    let mem1 = write_artifact(&alpha, "global-promo-one", "memory", "# Memory one\n");
+    let mem2 = write_artifact(&alpha, "global-promo-two", "memory", "# Memory two\n");
+    let plain_mem = write_artifact(&alpha, "plain-superseded", "memory", "# Plain memory\n");
+
+    let promo_sess = "promo-global-sess";
+    for file in [&mem1, &mem2] {
+        alpha
+            .arc(&alpha.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", promo_sess)
+            .args(["journal", "promote", file, "--global"])
+            .assert()
+            .success();
+    }
+    alpha
+        .arc(&alpha.root)
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", promo_sess)
+        .args([
+            "journal",
+            "consume",
+            &plain_mem,
+            "--outcome",
+            "superseded",
+            "--note",
+            "change of plans",
+        ])
+        .assert()
+        .success();
+
+    // Alpha's own explicit reopen refuses promoted memory.
+    let alpha_err = alpha
+        .arc(&alpha.root)
+        .args(["journal", "reopen", &mem1, "--reason", "probe"])
+        .output()
+        .unwrap();
+    assert!(!alpha_err.status.success());
+    let alpha_msg = output_text(&alpha_err);
+    assert!(
+        alpha_msg.contains("structural handoff") && alpha_msg.contains("promoted to global::"),
+        "{alpha_msg}"
+    );
+
+    // Export all three from alpha and verify the bundle carries bare
+    // `promoted_to_global` filenames with no local path leakage.
+    let bundle = alpha.home.join("global-promo-bundle.json");
+    alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "export",
+            &mem1,
+            &mem2,
+            &plain_mem,
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bundle_raw = fs::read_to_string(&bundle).unwrap();
+    let alpha_home_str = alpha.home.to_string_lossy();
+    assert!(
+        !bundle_raw.contains(alpha_home_str.as_ref()),
+        "bundle must not leak local operator home path"
+    );
+    assert!(
+        bundle_raw.contains("\"promoted_to_global\""),
+        "bundle must carry typed promoted_to_global field"
+    );
+
+    // Import into beta (which has a completely independent operator home with
+    // no copy of alpha's global memory files).
+    beta.arc(&beta.root)
+        .args(["journal", "import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let beta_global_memories = json_stdout(
+        beta.arc(&beta.root)
+            .args(["journal", "--global", "memories", "--json"]),
+    );
+    assert!(
+        beta_global_memories["memories"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "beta must not hold alpha's global memories: {beta_global_memories}"
+    );
+
+    // Explicit reopen on beta MUST refuse `mem1` as a structural handoff and
+    // leave beta's event log untouched.
+    let beta_log_path = journal_dir(&beta).join("events.jsonl");
+    let beta_log_before = fs::read_to_string(&beta_log_path).unwrap();
+    let beta_err = beta
+        .arc(&beta.root)
+        .args(["journal", "reopen", &mem1, "--reason", "probe"])
+        .output()
+        .unwrap();
+    assert!(!beta_err.status.success());
+    let beta_msg = output_text(&beta_err);
+    assert!(
+        beta_msg.contains("structural handoff") && beta_msg.contains("promoted to global::"),
+        "{beta_msg}"
+    );
+    assert_eq!(fs::read_to_string(&beta_log_path).unwrap(), beta_log_before);
+
+    // Session-window reopen on beta (dry-run and real) MUST skip both promoted
+    // memories while reopening `plain_mem`.
+    let dry = beta
+        .arc(&beta.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            promo_sess,
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo session batch",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry.status.success(), "{}", output_text(&dry));
+    let dry_out = String::from_utf8_lossy(&dry.stdout);
+    let dry_err = String::from_utf8_lossy(&dry.stderr);
+    assert!(
+        dry_out.contains(&format!("would reopen: {plain_mem}")),
+        "{dry_out}"
+    );
+    assert!(dry_out.contains("would reopen 1 artifact(s)"), "{dry_out}");
+    for promoted in [&mem1, &mem2] {
+        assert!(!dry_out.contains(promoted), "{dry_out}");
+        assert!(
+            dry_err.contains(&format!("skipped handoff: {promoted}")),
+            "{dry_err}"
+        );
+    }
+    assert_eq!(fs::read_to_string(&beta_log_path).unwrap(), beta_log_before);
+
+    let batch = beta
+        .arc(&beta.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            promo_sess,
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo session batch",
+        ])
+        .output()
+        .unwrap();
+    assert!(batch.status.success(), "{}", output_text(&batch));
+    let batch_out = String::from_utf8_lossy(&batch.stdout);
+    let batch_err = String::from_utf8_lossy(&batch.stderr);
+    assert!(
+        batch_out.contains(&format!("reopened: {plain_mem}")),
+        "{batch_out}"
+    );
+    for promoted in [&mem1, &mem2] {
+        assert!(!batch_out.contains(promoted), "{batch_out}");
+        assert!(
+            batch_err.contains(&format!("skipped handoff: {promoted}")),
+            "{batch_err}"
+        );
+    }
+
+    let beta_memories = json_stdout(beta.arc(&beta.root).args(["journal", "memories", "--json"]));
+    let live_files: Vec<&str> = beta_memories["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert!(live_files.contains(&plain_mem.as_str()), "{live_files:?}");
+    assert!(!live_files.contains(&mem1.as_str()), "{live_files:?}");
+    assert!(!live_files.contains(&mem2.as_str()), "{live_files:?}");
+
+    let beta_doctor = doctor_json(&beta);
+    assert!(
+        beta_doctor["problems"].as_array().unwrap().is_empty(),
+        "{beta_doctor}"
+    );
+
+    // Legacy compatibility on originating host: even if `promoted_to_global`
+    // is absent from an older event, corroboration against alpha's local global
+    // journal still protects `mem1`.
+    let alpha_log_path = journal_dir(&alpha).join("events.jsonl");
+    let stripped: Vec<String> = fs::read_to_string(&alpha_log_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["file"] == mem1 {
+                value.as_object_mut().unwrap().remove("promoted_to_global");
+            }
+            serde_json::to_string(&value).unwrap()
+        })
+        .collect();
+    fs::write(&alpha_log_path, format!("{}\n", stripped.join("\n"))).unwrap();
+
+    let legacy_err = alpha
+        .arc(&alpha.root)
+        .args(["journal", "reopen", &mem1, "--reason", "legacy probe"])
+        .output()
+        .unwrap();
+    assert!(!legacy_err.status.success());
+    let legacy_msg = output_text(&legacy_err);
+    assert!(
+        legacy_msg.contains("structural handoff") && legacy_msg.contains("promoted to global::"),
+        "{legacy_msg}"
+    );
+}
+
+/// Claim: session-window reopen never touches or misreports artifacts whose
+/// standing consumption is outside the requested session/window, skips
+/// artifacts with another active consumption outside the window instead of
+/// writing a partial reversal, and reopens artifacts when every active
+/// consumption belongs to the requested session/window.
+#[test]
+fn reopen_session_window_respects_standing_and_concurrent_consumptions() {
+    let alpha = Repo::new();
+    let beta = Repo::new();
+    super::journal_exchange::pair(&alpha, &beta, "alpha", "beta");
+
+    let item_a = write_artifact(&alpha, "window-older-matched", "todo", "# Item A\n");
+    let item_b = write_artifact(&alpha, "window-both-matched", "todo", "# Item B\n");
+    let item_c = write_artifact(&alpha, "window-newer-matched", "todo", "# Item C\n");
+
+    let b1 = alpha.home.join("window-b1.json");
+    alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "export",
+            &item_a,
+            &item_b,
+            &item_c,
+            "--output",
+            b1.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    beta.arc(&beta.root)
+        .args(["journal", "import", b1.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let consume_as = |repo: &Repo, file: &str, outcome: &str, session: &str| {
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", session)
+            .args(["journal", "consume", file, "--outcome", outcome])
+            .assert()
+            .success();
+    };
+
+    // First timestamp wave:
+    // - item_a: older `matched` (discarded) on alpha
+    // - item_b: older `matched` (discarded) on alpha
+    // - item_c: older `unmatched` (discarded) on beta
+    consume_as(&alpha, &item_a, "discarded", "matched");
+    consume_as(&alpha, &item_b, "discarded", "matched");
+    consume_as(&beta, &item_c, "discarded", "unmatched");
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    // Second timestamp wave:
+    // - item_a: newer `unmatched` (done) on beta -> standing is `unmatched`
+    // - item_b: newer `matched` (done) on beta -> BOTH active consumptions are `matched`
+    // - item_c: newer `matched` (done) on alpha -> standing is `matched`, older active is `unmatched`
+    consume_as(&beta, &item_a, "done", "unmatched");
+    consume_as(&beta, &item_b, "done", "matched");
+    consume_as(&alpha, &item_c, "done", "matched");
+
+    // Import beta's concurrent consumptions into alpha.
+    let b2 = beta.home.join("window-b2.json");
+    beta.arc(&beta.root)
+        .args([
+            "journal",
+            "export",
+            &item_a,
+            &item_b,
+            &item_c,
+            "--output",
+            b2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    alpha
+        .arc(&alpha.root)
+        .args(["journal", "import", b2.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Sanity check: standing state of all three is `done` on alpha.
+    let list_before = json_stdout(alpha.arc(&alpha.root).args(["journal", "list", "--json"]));
+    for file in [&item_a, &item_b, &item_c] {
+        let row = list_before["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["file"] == file.as_str())
+            .unwrap();
+        assert_eq!(row["consumed"], "done", "{row}");
+    }
+
+    // Dry-run for session `matched`:
+    // - item_a MUST NOT appear anywhere (standing consumption is `unmatched`).
+    // - item_b MUST appear as `would reopen: <item_b> [was done; 2 concurrent consumptions]`.
+    // - item_c MUST be skipped on stderr with `skipped concurrent:` and absent from stdout.
+    let log_path = journal_dir(&alpha).join("events.jsonl");
+    let log_before = fs::read_to_string(&log_path).unwrap();
+    let dry = alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            "matched",
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo matched session",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry.status.success(), "{}", output_text(&dry));
+    let dry_out = String::from_utf8_lossy(&dry.stdout);
+    let dry_err = String::from_utf8_lossy(&dry.stderr);
+    assert!(!dry_out.contains(&item_a), "{dry_out}");
+    assert!(!dry_err.contains(&item_a), "{dry_err}");
+    assert!(
+        dry_out.contains(&format!(
+            "would reopen: {item_b} [was done; 2 concurrent consumptions]"
+        )),
+        "{dry_out}"
+    );
+    assert!(dry_out.contains("would reopen 1 artifact(s)"), "{dry_out}");
+    assert!(!dry_out.contains(&item_c), "{dry_out}");
+    assert!(
+        dry_err.contains(&format!("skipped concurrent: {item_c}")),
+        "{dry_err}"
+    );
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), log_before);
+
+    // Real session-window run for `matched`:
+    // - Reopens ONLY `item_b` (appending 2 reversals so it genuinely reopens).
+    // - Leaves `item_a` and `item_c` with zero `reopened` events.
+    let run = alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            "matched",
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "undo matched session",
+        ])
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", output_text(&run));
+    let run_out = String::from_utf8_lossy(&run.stdout);
+    let run_err = String::from_utf8_lossy(&run.stderr);
+    assert!(!run_out.contains(&item_a), "{run_out}");
+    assert!(!run_err.contains(&item_a), "{run_err}");
+    assert!(
+        run_out.contains(&format!(
+            "reopened: {item_b} [was done; 2 concurrent consumptions]"
+        )),
+        "{run_out}"
+    );
+    assert!(!run_out.contains(&item_c), "{run_out}");
+    assert!(
+        run_err.contains(&format!("skipped concurrent: {item_c}")),
+        "{run_err}"
+    );
+
+    // Verify journal state after session-window run.
+    let alpha_events = events_in(&journal_dir(&alpha));
+    let reopen_count = |file: &str| {
+        alpha_events
+            .iter()
+            .filter(|e| e["event"] == "reopened" && e["file"] == file)
+            .count()
+    };
+    assert_eq!(
+        reopen_count(&item_a),
+        0,
+        "item_a must have no reopen events"
+    );
+    assert_eq!(
+        reopen_count(&item_b),
+        2,
+        "item_b must reverse both concurrent matched consumptions"
+    );
+    assert_eq!(
+        reopen_count(&item_c),
+        0,
+        "item_c must not get a partial reopen"
+    );
+
+    let list_after = json_stdout(alpha.arc(&alpha.root).args(["journal", "list", "--json"]));
+    let consumed_of = |file: &str| -> serde_json::Value {
+        list_after["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["file"] == file)
+            .unwrap()["consumed"]
+            .clone()
+    };
+    assert_eq!(consumed_of(&item_a), "done");
+    assert!(consumed_of(&item_b).is_null());
+    assert_eq!(consumed_of(&item_c), "done");
+
+    let open_after = json_stdout(alpha.arc(&alpha.root).args(["journal", "open", "--json"]));
+    let open_files: Vec<&str> = open_after["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(open_files, vec![item_b.as_str()]);
+
+    // Re-running session-window for `matched` now finds zero reopenable items
+    // (item_a still excluded, item_b already open, item_c still skipped).
+    let log_mid = fs::read_to_string(&log_path).unwrap();
+    let rerun = alpha
+        .arc(&alpha.root)
+        .args([
+            "journal",
+            "reopen",
+            "--session",
+            "matched",
+            "--since",
+            "2020-01-01T00:00:00Z",
+            "--reason",
+            "second pass",
+        ])
+        .output()
+        .unwrap();
+    assert!(rerun.status.success(), "{}", output_text(&rerun));
+    assert!(
+        String::from_utf8_lossy(&rerun.stderr).contains(&format!("skipped concurrent: {item_c}")),
+        "{}",
+        output_text(&rerun)
+    );
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), log_mid);
+
+    // Explicit reopen by filename clears BOTH concurrent consumptions on
+    // `item_c` (regardless of session) and genuinely reopens it.
+    let explicit_c = stdout(alpha.arc(&alpha.root).args([
+        "journal",
+        "reopen",
+        &item_c,
+        "--reason",
+        "explicitly clear mixed sessions",
+    ]));
+    assert!(
+        explicit_c.contains(&format!(
+            "reopened: {item_c} [was done; 2 concurrent consumptions]"
+        )),
+        "{explicit_c}"
+    );
+    let open_final = json_stdout(alpha.arc(&alpha.root).args(["journal", "open", "--json"]));
+    let open_final_files: Vec<&str> = open_final["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert!(open_final_files.contains(&item_b.as_str()));
+    assert!(open_final_files.contains(&item_c.as_str()));
+    assert!(!open_final_files.contains(&item_a.as_str()));
+
+    let doctor = doctor_json(&alpha);
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+}
