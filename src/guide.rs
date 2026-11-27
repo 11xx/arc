@@ -8381,6 +8381,7 @@ mod route_tests {
                             "notes",
                             "abort",
                             "ff-only",
+                            "batch-command",
                         ]
                         .contains(&flag.as_str())
                     {
