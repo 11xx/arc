@@ -2433,3 +2433,282 @@ fn feedback_repairs_unterminated_checkout_index_and_surfaces_index_write_failure
         "expected index write failure warning on stderr, got: {log_stderr}"
     );
 }
+
+#[test]
+fn feedback_truncated_scan_refuses_exact_slug_colliding_with_hidden_checkout() {
+    let repo = Repo::new();
+    let scope = repo.home.join("slug-collision-scope");
+    let hyphen_checkout = scope.join("zzz-nested");
+    let nested_checkout = scope.join("zzz").join("nested");
+    for checkout in [&hyphen_checkout, &nested_checkout] {
+        fs::create_dir_all(checkout).unwrap();
+        git(checkout, &["init", "-b", "master"]);
+        git(checkout, &["config", "user.name", "Fixture"]);
+        git(
+            checkout,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
+        fs::write(checkout.join("README.md"), "# colliding\n").unwrap();
+        git(checkout, &["add", "."]);
+        git(checkout, &["commit", "-m", "initial"]);
+    }
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let hyphen_canon = fs::canonicalize(&hyphen_checkout).unwrap();
+    let nested_canon = fs::canonicalize(&nested_checkout).unwrap();
+    let shared_slug = journal_slug(&hyphen_canon);
+    assert_eq!(shared_slug, journal_slug(&nested_canon));
+
+    let hyphen_journal = hyphen_canon.join("relative-journal");
+    let nested_journal = nested_canon.join("relative-journal");
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Seed both checkouts with legacy prefix-bound journals.
+    for journal in [&hyphen_journal, &nested_journal] {
+        fs::create_dir_all(journal).unwrap();
+        fs::write(
+            journal.join("bindings.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-binding/1",
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "bound",
+                    "anchor": scope_canon.display().to_string(),
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            journal.join("events.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-event/1",
+                    "ts": "2026-01-01T00:00:01Z",
+                    "event": "logged",
+                    "topic": "legacy-seed",
+                    "summary": "pre-upgrade",
+                })
+            ),
+        )
+        .unwrap();
+    }
+
+    let scratch = repo.home.join("outside-slug-collision");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Complete scan refuses the shared full slug as ambiguous.
+    repo.arc(&scratch)
+        .args(["feedback", &shared_slug, "--list"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "matched multiple registered projects",
+        ));
+
+    // Index only `zzz-nested` and add 4,096 shallow siblings so `zzz/nested` is
+    // omitted from the bounded BFS scan.
+    repo.arc(&hyphen_checkout)
+        .args(["journal", "log", "index-hyphen", "index only zzz-nested"])
+        .assert()
+        .success();
+    for i in 0..4096 {
+        fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
+    }
+
+    // A keyed write targeting the shared full slug MUST still refuse as ambiguous
+    // rather than silently writing into `zzz-nested`.
+    repo.arc(&scratch)
+        .args([
+            "feedback",
+            &shared_slug,
+            "--key",
+            "colliding-slug-bug",
+            "--title",
+            "Should refuse colliding slug",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must refuse when hidden checkout shares full slug.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "matched multiple registered projects",
+        ));
+
+    let hyphen_open = json_stdout(
+        repo.arc(&hyphen_checkout)
+            .args(["journal", "open", "--json"]),
+    );
+    assert!(hyphen_open["feedback"].as_array().unwrap().is_empty());
+    let nested_open = json_stdout(
+        repo.arc(&nested_checkout)
+            .args(["journal", "open", "--json"]),
+    );
+    assert!(nested_open["feedback"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn feedback_truncated_slug_fallback_rejects_ordinary_git_subdir_and_keeps_non_git_owner() {
+    let repo = Repo::new();
+    let scope = repo.home.join("subdir-fallback-scope");
+    let checkout = scope.join("zzz").join("checkout");
+    let ordinary_subdir = checkout.join("ordinary-subdir");
+    fs::create_dir_all(&ordinary_subdir).unwrap();
+    git(&checkout, &["init", "-b", "master"]);
+    git(&checkout, &["config", "user.name", "Fixture"]);
+    git(
+        &checkout,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(checkout.join("README.md"), "# checkout\n").unwrap();
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-m", "initial"]);
+
+    // Also create a genuine configured non-Git owner beneath the same scope.
+    let non_git_owner = scope.join("zzz").join("non-git-owner");
+    fs::create_dir_all(&non_git_owner).unwrap();
+
+    let scope_canon = fs::canonicalize(&scope).unwrap();
+    let checkout_canon = fs::canonicalize(&checkout).unwrap();
+    let subdir_canon = fs::canonicalize(&ordinary_subdir).unwrap();
+    let non_git_canon = fs::canonicalize(&non_git_owner).unwrap();
+
+    let checkout_journal = checkout_canon.join("relative-journal");
+    let non_git_journal = non_git_canon.join("relative-journal");
+    let subdir_slug = journal_slug(&subdir_canon);
+    let non_git_slug = journal_slug(&non_git_canon);
+
+    let config_path = repo.home.join(".local/ai/arc/config.toml");
+    let mut cfg = fs::read_to_string(&config_path).unwrap();
+    cfg.push_str(&format!(
+        "\n[journals.dirs]\n{} = \"relative-journal\"\n",
+        serde_json::to_string(&scope_canon.display().to_string()).unwrap(),
+    ));
+    fs::write(&config_path, cfg).unwrap();
+
+    // Seed legacy prefix-bound journals for both `checkout` and `non-git-owner`.
+    for journal in [&checkout_journal, &non_git_journal] {
+        fs::create_dir_all(journal).unwrap();
+        fs::write(
+            journal.join("bindings.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-binding/1",
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "bound",
+                    "anchor": scope_canon.display().to_string(),
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            journal.join("events.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema": "journal-event/1",
+                    "ts": "2026-01-01T00:00:01Z",
+                    "event": "logged",
+                    "topic": "legacy-seed",
+                    "summary": "pre-upgrade",
+                })
+            ),
+        )
+        .unwrap();
+    }
+
+    let scratch = repo.home.join("outside-subdir-fallback");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // Before truncation, the full slug of `ordinary-subdir` refuses as unknown.
+    repo.arc(&scratch)
+        .args([
+            "feedback",
+            &subdir_slug,
+            "--key",
+            "subdir-must-fail-before",
+            "--title",
+            "Subdir refusal",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must refuse ordinary Git subdirectory.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown project"));
+
+    // Add 4,096 shallow `aaa-NNNN` siblings to trigger truncated discovery.
+    for i in 0..4096 {
+        fs::create_dir(scope.join(format!("aaa-{i:04}"))).unwrap();
+    }
+
+    // After truncation, the full slug of `ordinary-subdir` MUST STILL refuse as unknown,
+    // must not write to `checkout/relative-journal`, and must not record `ordinary-subdir`
+    // in `relative-checkouts.jsonl`.
+    repo.arc(&scratch)
+        .args([
+            "feedback",
+            &subdir_slug,
+            "--key",
+            "subdir-must-fail-after",
+            "--title",
+            "Subdir refusal after truncation",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Must still refuse ordinary Git subdirectory after truncation.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown project"));
+
+    let checkout_open = json_stdout(repo.arc(&checkout).args(["journal", "open", "--json"]));
+    assert!(checkout_open["feedback"].as_array().unwrap().is_empty());
+
+    let index_path = repo.home.join(".local/ai/arc/relative-checkouts.jsonl");
+    if index_path.is_file() {
+        let index_text = fs::read_to_string(&index_path).unwrap();
+        assert!(
+            !index_text.contains(&subdir_canon.display().to_string()),
+            "ordinary-subdir must never be indexed: {index_text}"
+        );
+    }
+
+    // Genuine configured non-Git owner remains addressable by its full slug under truncation.
+    let non_git_created = json_stdout(
+        repo.arc(&scratch)
+            .args([
+                "feedback",
+                &non_git_slug,
+                "--key",
+                "non-git-owner-report",
+                "--title",
+                "Non-Git owner report",
+                "--body-file",
+                "-",
+                "--json",
+            ])
+            .write_stdin("Genuine non-Git owner stays addressable.\n"),
+    );
+    assert_eq!(
+        PathBuf::from(non_git_created["path"].as_str().unwrap())
+            .parent()
+            .unwrap(),
+        non_git_journal.as_path()
+    );
+    let non_git_open = json_stdout(repo.arc(&non_git_owner).args(["journal", "open", "--json"]));
+    assert_eq!(non_git_open["feedback"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        non_git_open["feedback"][0]["feedback_key"],
+        "non-git-owner-report"
+    );
+}

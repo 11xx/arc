@@ -353,7 +353,8 @@ fn discover_relative_configured_journals(
                     .relative_config_prefix
                     .as_deref()
                     .map(canonical_or_normalized);
-                if canonical_or_normalized(&resolved.directory) == candidate
+                if canonical_or_normalized(&resolved.anchor) == owner
+                    && canonical_or_normalized(&resolved.directory) == candidate
                     && winning_prefix.as_deref() == Some(canonical_anchor.as_path())
                     && found_owners.insert(owner.clone())
                 {
@@ -384,7 +385,8 @@ fn discover_relative_configured_journals(
                         .relative_config_prefix
                         .as_deref()
                         .map(canonical_or_normalized);
-                    if canonical_or_normalized(&resolved.directory) == candidate
+                    if canonical_or_normalized(&resolved.anchor) == dir
+                        && canonical_or_normalized(&resolved.directory) == candidate
                         && winning_prefix.as_deref() == Some(canonical_anchor.as_path())
                         && found_owners.insert(dir.clone())
                     {
@@ -393,7 +395,10 @@ fn discover_relative_configured_journals(
                         if dir != canonical_anchor {
                             has_nested_owner = true;
                         }
-                    } else if dir != canonical_anchor && resolved.relative_config_prefix.is_some() {
+                    } else if dir != canonical_anchor
+                        && canonical_or_normalized(&resolved.anchor) == dir
+                        && resolved.relative_config_prefix.is_some()
+                    {
                         has_nested_owner = true;
                     }
                 }
@@ -401,8 +406,9 @@ fn discover_relative_configured_journals(
             if dir != canonical_anchor && !has_nested_owner && dir.join(".git").exists() {
                 if let Ok(resolved) = crate::journal::resolve_project_journal_without_env(cfg, &dir)
                 {
-                    if canonical_or_normalized(&resolved.directory) == candidate
-                        || resolved.relative_config_prefix.is_some()
+                    if canonical_or_normalized(&resolved.anchor) == dir
+                        && (canonical_or_normalized(&resolved.directory) == candidate
+                            || resolved.relative_config_prefix.is_some())
                     {
                         has_nested_owner = true;
                     }
@@ -433,7 +439,8 @@ fn discover_relative_configured_journals(
         let resolves_directly =
             crate::journal::resolve_project_journal_without_env(cfg, &canonical_anchor)
                 .map(|resolved| {
-                    canonical_or_normalized(&resolved.directory) == direct_target
+                    canonical_or_normalized(&resolved.anchor) == canonical_anchor
+                        && canonical_or_normalized(&resolved.directory) == direct_target
                         && resolved
                             .relative_config_prefix
                             .as_deref()
@@ -696,56 +703,143 @@ pub(crate) fn journal_projects_with_diagnostics(cfg: &Config) -> Result<Registry
     })
 }
 
-/// Directly resolve an unindexed populated relative-configured checkout by its
-/// full path slug when a broad `[journals.dirs]` prefix scan was truncated.
+/// Outcome of checking truncated relative `[journals.dirs]` prefixes for every
+/// populated project whose full path slug equals a requested slug.
+pub(crate) enum TruncatedSlugLookup {
+    /// Every directory beneath `truncated_prefixes` matching the requested slug
+    /// was enumerated without exhausting the walk budget.
+    Complete(Vec<Project>),
+    /// Enumerating slug-matching directories beneath a truncated prefix hit its
+    /// walk budget, so uniqueness of the slug cannot be proved.
+    Incomplete,
+}
+
+fn descend_all(at: &Path, rest: &str, walk: &mut Walk, truncated: &mut bool) {
+    if walk.budget == 0 {
+        *truncated = true;
+        return;
+    }
+    walk.budget -= 1;
+    let Ok(entries) = std::fs::read_dir(at) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name == ".git" {
+            continue;
+        }
+        let slugged: String = name
+            .chars()
+            .map(|c| if c == '.' { '-' } else { c })
+            .collect();
+        let Some(tail) = rest.strip_prefix(slugged.as_str()) else {
+            continue;
+        };
+        let next = at.join(&name);
+        if tail.is_empty() {
+            walk.found.push(next);
+        } else if let Some(deeper) = tail.strip_prefix('-') {
+            descend_all(&next, deeper, walk, truncated);
+        }
+    }
+}
+
+/// Enumerate every populated, active relative-configured project beneath
+/// `truncated_prefixes` whose full path slug equals `slug`.
 ///
-/// Only accepts a slug that uniquely resolves on disk to an existing checkout
-/// beneath one of `truncated_prefixes` whose normal journal resolution selects
-/// a populated relative journal directory, preserving legacy prefix-binding
-/// recognition without scanning unrelated sibling directories.
-pub(crate) fn resolve_truncated_relative_project_by_slug(
+/// Unlike single-match `unslug`, this collects every existing directory sharing
+/// `slug` (such as `scope/zzz-nested` and `scope/zzz/nested`) and validates
+/// each candidate with the same effective-anchor and populated-journal rules as
+/// registry discovery, rejecting ordinary Git subdirectories while keeping
+/// genuine configured non-Git owners addressable.
+pub(crate) fn find_truncated_relative_projects_by_slug(
     cfg: &Config,
     slug: &str,
     truncated_prefixes: &[PathBuf],
-) -> Result<Option<Project>> {
-    let Some(owner) = unslug(slug) else {
-        return Ok(None);
-    };
-    let owner = canonical_or_normalized(&owner);
-    if !owner.is_dir() {
-        return Ok(None);
+) -> Result<TruncatedSlugLookup> {
+    if !slug.starts_with('-') {
+        return Ok(TruncatedSlugLookup::Complete(Vec::new()));
     }
-    if !truncated_prefixes
-        .iter()
-        .any(|prefix| owner.starts_with(canonical_or_normalized(prefix)))
-    {
-        return Ok(None);
+    let mut candidate_owners: BTreeSet<PathBuf> = BTreeSet::new();
+    for prefix in truncated_prefixes {
+        let canonical_prefix = canonical_or_normalized(prefix);
+        if !canonical_prefix.is_dir() {
+            continue;
+        }
+        let prefix_slug = crate::config::path_slug(&canonical_prefix);
+        if slug == prefix_slug {
+            candidate_owners.insert(canonical_prefix);
+            continue;
+        }
+        let Some(rest) = slug
+            .strip_prefix(prefix_slug.as_str())
+            .and_then(|tail| tail.strip_prefix('-'))
+        else {
+            continue;
+        };
+        let mut walk = Walk {
+            found: Vec::new(),
+            budget: MAX_DIRS_READ,
+        };
+        let mut walk_truncated = false;
+        descend_all(&canonical_prefix, rest, &mut walk, &mut walk_truncated);
+        if walk_truncated {
+            return Ok(TruncatedSlugLookup::Incomplete);
+        }
+        for path in walk.found {
+            candidate_owners.insert(canonical_or_normalized(&path));
+        }
     }
-    let Ok(resolved) = crate::journal::resolve_project_journal_without_env(cfg, &owner) else {
-        return Ok(None);
-    };
-    let Some(winning_prefix) = resolved.relative_config_prefix else {
-        return Ok(None);
-    };
-    let journal_dir = canonical_or_normalized(&resolved.directory);
-    if !journal_dir.is_dir() || !crate::journal::is_journal_directory(&journal_dir).unwrap_or(false)
-    {
-        return Ok(None);
+
+    let mut projects = Vec::new();
+    let mut seen_journals: HashSet<PathBuf> = HashSet::new();
+    for owner in candidate_owners {
+        if !owner.is_dir() {
+            continue;
+        }
+        let derived_slug = crate::config::path_slug(&owner);
+        if derived_slug != slug {
+            continue;
+        }
+        let Ok(resolved) = crate::journal::resolve_project_journal_without_env(cfg, &owner) else {
+            continue;
+        };
+        // Normal resolution from a Git subdirectory returns the enclosing
+        // repository root as its effective anchor; only the effective anchor
+        // itself owns the checkout journal.
+        if canonical_or_normalized(&resolved.anchor) != owner {
+            continue;
+        }
+        let Some(winning_prefix) = resolved.relative_config_prefix else {
+            continue;
+        };
+        let journal_dir = canonical_or_normalized(&resolved.directory);
+        if !journal_dir.is_dir()
+            || !crate::journal::is_journal_directory(&journal_dir).unwrap_or(false)
+        {
+            continue;
+        }
+        if !seen_journals.insert(journal_dir.clone()) {
+            continue;
+        }
+        let project = project_from_entry(KnownJournal {
+            slug: derived_slug,
+            journal_dir,
+            configured_anchor: Some(owner),
+            relative_prefix: Some(canonical_or_normalized(&winning_prefix)),
+        })?;
+        if project.retired.is_some() {
+            continue;
+        }
+        projects.push(project);
     }
-    let derived_slug = crate::config::path_slug(&owner);
-    if derived_slug != slug {
-        return Ok(None);
-    }
-    let project = project_from_entry(KnownJournal {
-        slug: derived_slug,
-        journal_dir,
-        configured_anchor: Some(owner),
-        relative_prefix: Some(canonical_or_normalized(&winning_prefix)),
-    })?;
-    if project.retired.is_some() {
-        return Ok(None);
-    }
-    Ok(Some(project))
+
+    Ok(TruncatedSlugLookup::Complete(projects))
 }
 
 /// Whether `name` is another journal's cold archive rather than a project of

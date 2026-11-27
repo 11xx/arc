@@ -108,13 +108,49 @@ fn resolve_project(cfg: &config::Config, name: &str) -> Result<Project> {
         .into_iter()
         .filter(|project| project.retired.is_none())
         .collect();
-    let matches: Vec<&Project> = active
+    let mut matches: Vec<Project> = active
         .iter()
         .filter(|project| project.slug == name || project.label() == name)
+        .cloned()
         .collect();
+
+    if !discovery.truncated_relative_prefixes.is_empty() && name.starts_with('-') {
+        match registry::find_truncated_relative_projects_by_slug(
+            cfg,
+            name,
+            &discovery.truncated_relative_prefixes,
+        )? {
+            registry::TruncatedSlugLookup::Complete(hidden) => {
+                for project in hidden {
+                    let norm = canonical_or_normalized(&project.journal_dir);
+                    if !matches
+                        .iter()
+                        .any(|existing| canonical_or_normalized(&existing.journal_dir) == norm)
+                    {
+                        matches.push(project);
+                    }
+                }
+            }
+            registry::TruncatedSlugLookup::Incomplete => {
+                let prefixes = discovery
+                    .truncated_relative_prefixes
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "project slug {name:?} cannot be proven unique while relative [journals.dirs] \
+                     discovery under {prefixes} is incomplete (reached the {} directory scan limit); \
+                     configure a narrower [journals.dirs] prefix",
+                    registry::RELATIVE_DISCOVERY_LIMIT
+                );
+            }
+        }
+    }
+
     match matches.len() {
         1 => {
-            let matched = matches[0];
+            let matched = &matches[0];
             if !discovery.truncated_relative_prefixes.is_empty() && matched.slug != name {
                 let prefixes = discovery
                     .truncated_relative_prefixes
@@ -141,22 +177,6 @@ fn resolve_project(cfg: &config::Config, name: &str) -> Result<Project> {
             Ok(matched.clone())
         }
         0 => {
-            if !discovery.truncated_relative_prefixes.is_empty() {
-                if let Some(project) = registry::resolve_truncated_relative_project_by_slug(
-                    cfg,
-                    name,
-                    &discovery.truncated_relative_prefixes,
-                )? {
-                    for prefix in &discovery.truncated_relative_prefixes {
-                        eprintln!(
-                            "warning: relative [journals.dirs] discovery under {} reached the {} directory scan limit; unindexed checkouts beneath it may be omitted",
-                            prefix.display(),
-                            registry::RELATIVE_DISCOVERY_LIMIT
-                        );
-                    }
-                    return Ok(project);
-                }
-            }
             let truncation_note = if discovery.truncated_relative_prefixes.is_empty() {
                 String::new()
             } else {

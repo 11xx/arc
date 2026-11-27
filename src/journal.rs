@@ -5792,11 +5792,12 @@ pub(crate) fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Resu
     Ok(base.join(directory))
 }
 
-/// Effective journal directory resolved for an existing project path without
-/// honoring `ARC_JOURNAL_DIR`, together with the winning `[journals.dirs]`
-/// prefix when a relative configured rule matched.
+/// Effective journal directory and owning project anchor resolved for an
+/// existing project path without honoring `ARC_JOURNAL_DIR`, together with the
+/// winning `[journals.dirs]` prefix when a relative configured rule matched.
 pub(crate) struct ResolvedProjectJournal {
     pub directory: PathBuf,
+    pub anchor: PathBuf,
     pub relative_config_prefix: Option<PathBuf>,
 }
 
@@ -5806,9 +5807,9 @@ pub(crate) fn resolve_project_dir_without_env(cfg: &config::Config, cwd: &Path) 
     Ok(resolve_project_journal_without_env(cfg, cwd)?.directory)
 }
 
-/// Resolve the effective journal directory and winning relative prefix for an
-/// existing project path under `cfg`, matching `resolve` without honoring
-/// `ARC_JOURNAL_DIR`.
+/// Resolve the effective journal directory, effective project anchor, and
+/// winning relative prefix for an existing project path under `cfg`, matching
+/// `resolve` without honoring `ARC_JOURNAL_DIR`.
 pub(crate) fn resolve_project_journal_without_env(
     cfg: &config::Config,
     cwd: &Path,
@@ -5841,18 +5842,21 @@ pub(crate) fn resolve_project_journal_without_env(
         let relative_config_prefix = (!directory.is_absolute()).then_some(anchor);
         return Ok(ResolvedProjectJournal {
             directory: anchor_journal_destination(&canonical_cwd, directory)?,
+            anchor: prefix_path.to_path_buf(),
             relative_config_prefix,
         });
     }
     if let Some(root) = repository {
         return Ok(ResolvedProjectJournal {
             directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
+            anchor: root,
             relative_config_prefix: None,
         });
     }
     if let Some((directory, _)) = rootless_journal(cfg, &canonical_cwd)? {
         return Ok(ResolvedProjectJournal {
             directory,
+            anchor: canonical_cwd,
             relative_config_prefix: None,
         });
     }
